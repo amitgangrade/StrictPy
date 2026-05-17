@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      # Both platforms matter: M8's Cranelift integration uncovered a real
+      # Windows-x86_64 calling-convention bug (SystemV is wrong; needs
+      # WindowsFastcall for Rust extern "C" compat). Keep both in the matrix.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo build (debug, full workspace)
+        run: cargo build --workspace --verbose
+
+      - name: cargo test (debug, full workspace)
+        run: cargo test --workspace --verbose
+
+      # Verify the interpreter-only build path still compiles. M8's JIT lives
+      # behind `feature = "jit"` (default on); --no-default-features should
+      # produce a working VM without Cranelift in the dependency tree.
+      - name: cargo build (vm, no JIT)
+        run: cargo build -p strictpy-vm --no-default-features --verbose
