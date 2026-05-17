@@ -352,6 +352,19 @@ impl Resolver {
                 base: TypeCtor::Range, args: vec![] }) }),
             // assert(cond) / assert(cond, msg) -> None
             ("assert",  Ty::Function { params: vec![], ret: Box::new(Ty::Primitive(PrimTy::Unit)) }),
+            // real-world: csv_aggregate — str→number parsers. Numeric
+            // conversion functions (`f64(x)`, `i64(x)`) only convert between
+            // numeric types per §9; the first real program (csv aggregator)
+            // needed a way to turn "12.50" into 12.5, so we added these
+            // dedicated parsers rather than overload `f64()`.
+            ("parse_f64", Ty::Function {
+                params: vec![Ty::Primitive(PrimTy::Str)],
+                ret: Box::new(Ty::Primitive(PrimTy::F64)),
+            }),
+            ("parse_i64", Ty::Function {
+                params: vec![Ty::Primitive(PrimTy::Str)],
+                ret: Box::new(Ty::Primitive(PrimTy::I64)),
+            }),
         ];
         for (name, ty) in builtins {
             self.make_symbol(scope, name, SymbolKind::Function, Span::DUMMY, Some(ty.clone()));

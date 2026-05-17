@@ -37,6 +37,12 @@ pub enum NativeFn {
     CharFromI32   = 23,
     StrSlice      = 24,
     StrAppendChar = 25,
+    // real-world: csv_aggregate — parse a decimal string into f64 / i64.
+    // Spec §9 lists the numeric primitive constructors (`f64(x)`) but those
+    // convert *between* numeric types, not from str; csv_aggregate.spy is the
+    // first program that needs str→number parsing.
+    F64FromStr    = 26,
+    I64FromStr    = 27,
 
     // ── 30–49: io ───────────────────────────────────────────────────────
     IoOpen     = 30,
@@ -127,6 +133,9 @@ impl NativeFn {
             23 => Some(Self::CharFromI32),
             24 => Some(Self::StrSlice),
             25 => Some(Self::StrAppendChar),
+            // real-world: csv_aggregate
+            26 => Some(Self::F64FromStr),
+            27 => Some(Self::I64FromStr),
             30 => Some(Self::IoOpen),
             31 => Some(Self::FileRead),
             32 => Some(Self::FileWrite),
@@ -218,6 +227,10 @@ impl NativeFn {
             "keys"        => Some(Self::DictKeys),
             "values"      => Some(Self::DictValues),
             "slice"       => Some(Self::StrSlice),
+
+            // real-world: csv_aggregate — str→number parsing.
+            "parse_f64"   => Some(Self::F64FromStr),
+            "parse_i64"   => Some(Self::I64FromStr),
 
             _ => None,
         }

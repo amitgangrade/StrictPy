@@ -115,6 +115,35 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             Ok(p as u64)
         }
 
+        // real-world: csv_aggregate — parse a decimal string.
+        // Rust's `str::parse::<f64>()` accepts the standard "[+-]?digits.digits"
+        // form plus exponent notation and "inf"/"nan". We trim surrounding
+        // whitespace because CSV cells often have stray spaces. On parse
+        // failure we raise a ValueError so a real program can `try/except` it
+        // rather than the trap we initially considered.
+        NativeFn::F64FromStr => {
+            let s = arg_str(args, 0);
+            let trimmed = s.trim();
+            match trimmed.parse::<f64>() {
+                Ok(v) => Ok(v.to_bits()),
+                Err(_) => Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("parse_f64: invalid float literal {:?}", s),
+                }),
+            }
+        }
+        NativeFn::I64FromStr => {
+            let s = arg_str(args, 0);
+            let trimmed = s.trim();
+            match trimmed.parse::<i64>() {
+                Ok(v) => Ok(v as u64),
+                Err(_) => Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("parse_i64: invalid integer literal {:?}", s),
+                }),
+            }
+        }
+
         // ── Numeric conversion ──────────────────────────────────────────
         NativeFn::I32FromI64 => Ok((arg_i64(args, 0) as i32) as i64 as u64),
         NativeFn::I64FromI32 => Ok((arg_i64(args, 0) as i32) as i64 as u64),
@@ -1417,5 +1446,42 @@ mod tests {
         let r = dispatch(&mut i, NativeFn::StrSlice as u32, &[s, 6, 11]).unwrap();
         let got = unsafe { read_str(r as *const StringRepr) };
         assert_eq!(got, "world");
+    }
+
+    // ── Numeric parsers (real-world: csv_aggregate) ────────────────────
+
+    #[test]
+    fn parse_f64_round_trips_decimal() {
+        let mut i = empty_interp();
+        let s = alloc_s(&mut i, "12.50");
+        let r = dispatch(&mut i, NativeFn::F64FromStr as u32, &[s]).unwrap();
+        assert_eq!(f64::from_bits(r), 12.5);
+    }
+
+    #[test]
+    fn parse_f64_trims_whitespace() {
+        let mut i = empty_interp();
+        let s = alloc_s(&mut i, "  3.14\n");
+        let r = dispatch(&mut i, NativeFn::F64FromStr as u32, &[s]).unwrap();
+        assert!((f64::from_bits(r) - 3.14).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_f64_rejects_garbage_with_value_error() {
+        let mut i = empty_interp();
+        let s = alloc_s(&mut i, "not-a-number");
+        let err = dispatch(&mut i, NativeFn::F64FromStr as u32, &[s]).unwrap_err();
+        match err {
+            VmError::UncaughtException { type_name, .. } => assert_eq!(type_name, "ValueError"),
+            other => panic!("expected ValueError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_i64_round_trips_negative() {
+        let mut i = empty_interp();
+        let s = alloc_s(&mut i, "-42");
+        let r = dispatch(&mut i, NativeFn::I64FromStr as u32, &[s]).unwrap();
+        assert_eq!(r as i64, -42);
     }
 }

@@ -1,0 +1,143 @@
+"""CSV aggregator. Reads a two-column CSV (`category,amount`) with a header
+row, groups rows by category, sums amounts per group, and prints the
+aggregated table sorted alphabetically.
+
+This is the first "real" StrictPy program — see BLOG_POST / commit history.
+It exposed gaps in the stdlib: no `str.split()` (we hand-roll splitters),
+no built-in `sorted()` (we hand-roll quicksort on List[str]), no str→f64
+parser (we added `parse_f64` as a NativeFn — see shared/src/native.rs).
+
+The input path is relative to the CWD when the .spyc runs."""
+
+final INPUT_PATH: str = "sample.csv"
+
+# ── Splitting ──────────────────────────────────────────────────────────
+# StrictPy v0.1 has no `str.split(sep)` so we walk the string char-by-char
+# with a manual state machine, like wordcount.spy. CR (`\r`) is treated as
+# a line terminator too so Windows CRLF files parse cleanly.
+
+fn is_eol(c: char) -> bool:
+    return c == '\n' or c == '\r'
+
+fn split_lines(s: str) -> List[str]:
+    out: List[str] = []
+    n: i64 = i64(len(s))
+    i: i64 = 0
+    start: i64 = 0
+    while i < n:
+        c: char = s[i]
+        if is_eol(c):
+            if i > start:
+                out.append(s.slice(start, i))
+            start = i + 1
+        i = i + 1
+    if start < n:
+        out.append(s.slice(start, n))
+    return out
+
+fn split_csv_row(row: str) -> List[str]:
+    # Naïve splitter: no escaping, no quoted commas. Documented as a gap.
+    out: List[str] = []
+    n: i64 = i64(len(row))
+    i: i64 = 0
+    start: i64 = 0
+    while i < n:
+        c: char = row[i]
+        if c == ',':
+            out.append(row.slice(start, i))
+            start = i + 1
+        i = i + 1
+    out.append(row.slice(start, n))
+    return out
+
+# ── Aggregation ────────────────────────────────────────────────────────
+
+fn aggregate(lines: List[str]) -> Dict[str, f64]:
+    agg: Dict[str, f64] = {}
+    # Skip the header row (index 0).
+    i: i64 = 1
+    while i < len(lines):
+        row: str = lines[i]
+        cells: List[str] = split_csv_row(row)
+        # Defensive: only aggregate rows with at least 2 cells.
+        if len(cells) >= 2:
+            key: str = cells[0]
+            amount: f64 = parse_f64(cells[1])
+            prev: f64? = agg.get(key)
+            if prev is none:
+                agg[key] = amount
+            else:
+                agg[key] = prev + amount
+        i = i + 1
+    return agg
+
+# ── Sorting (Lomuto-style quicksort on List[str], in place) ────────────
+# No built-in sort in v0.1. We compare strings lexicographically by walking
+# code units; equal-prefix-then-shorter wins, matching Python's default.
+
+fn str_less(a: str, b: str) -> bool:
+    na: i64 = i64(len(a))
+    nb: i64 = i64(len(b))
+    n: i64 = na
+    if nb < n:
+        n = nb
+    i: i64 = 0
+    while i < n:
+        ca: char = a[i]
+        cb: char = b[i]
+        if ca < cb:
+            return true
+        if ca > cb:
+            return false
+        i = i + 1
+    # Common prefix — the shorter one is "less".
+    return na < nb
+
+fn partition_strs(a: List[str], lo: i64, hi: i64) -> i64:
+    pivot: str = a[hi]
+    i: i64 = lo - 1
+    j: i64 = lo
+    while j < hi:
+        if str_less(a[j], pivot) or a[j] == pivot:
+            i = i + 1
+            tmp: str = a[i]
+            a[i] = a[j]
+            a[j] = tmp
+        j = j + 1
+    tmp2: str = a[i + 1]
+    a[i + 1] = a[hi]
+    a[hi] = tmp2
+    return i + 1
+
+fn sort_strings(a: List[str], lo: i64, hi: i64) -> None:
+    if lo < hi:
+        p: i64 = partition_strs(a, lo, hi)
+        sort_strings(a, lo, p - 1)
+        sort_strings(a, p + 1, hi)
+
+# ── Output ─────────────────────────────────────────────────────────────
+
+fn print_sorted(agg: Dict[str, f64]) -> None:
+    keys: List[str] = agg.keys()
+    n: i64 = i64(len(keys))
+    if n > 0:
+        sort_strings(keys, 0, n - 1)
+    println("category,total")
+    i: i64 = 0
+    while i < n:
+        k: str = keys[i]
+        v: f64 = agg[k]
+        # No printf-style formatting in v0.1 — `str(f64)` prints whatever
+        # Rust's default Display gives us, which is shortest-round-trip
+        # (e.g. 83.5 not 83.50). Documented as a gap.
+        println(k + "," + str(v))
+        i = i + 1
+
+fn main() -> i32:
+    text: str = ""
+    with open(INPUT_PATH, "r") as f: io.File:
+        text = f.read()
+    lines: List[str] = split_lines(text)
+    agg: Dict[str, f64] = aggregate(lines)
+    print_sorted(agg)
+    return 0

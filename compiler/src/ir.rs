@@ -1529,7 +1529,16 @@ fn emit_binop(
     ty: Ty,
 ) -> ValueId {
     // Look up operand type from one of the inputs to choose int vs float op.
-    let operand_ty = find_value_ty(fb, l).unwrap_or(ty.clone());
+    // real-world: csv_aggregate — unwrap Nullable() because the typechecker
+    // narrows `prev: f64?` to `f64` inside an `else: prev + amount` branch
+    // but the IR slot still carries the declared `f64?` type. Without this
+    // unwrap, `lower_binop` saw `operand_ty = Nullable(f64)` and emitted an
+    // integer IAdd on the raw bit pattern, silently returning garbage.
+    let raw_operand_ty = find_value_ty(fb, l).unwrap_or(ty.clone());
+    let operand_ty = match &raw_operand_ty {
+        Ty::Nullable(inner) => (**inner).clone(),
+        _ => raw_operand_ty,
+    };
     let is_float = matches!(operand_ty, Ty::Primitive(p) if p.is_float());
     let is_str = matches!(operand_ty, Ty::Primitive(PrimTy::Str));
     let irop = match op {
