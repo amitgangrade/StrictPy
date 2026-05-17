@@ -1,0 +1,31 @@
+fn build_a(n: i64) -> List[f64]:
+    a: List[f64] = []
+    i: i64 = 0
+    while i < n:
+        a.append(f64(i))
+        i = i + 1
+    return a
+
+fn build_b(n: i64) -> List[f64]:
+    b: List[f64] = []
+    i: i64 = 0
+    while i < n:
+        b.append(f64(i) * 2.0)
+        i = i + 1
+    return b
+
+fn dot(a: List[f64], b: List[f64]) -> f64:
+    s: f64 = 0.0
+    i: i64 = 0
+    n: i64 = i64(len(a))
+    while i < n:
+        s = s + a[i] * b[i]
+        i = i + 1
+    return s
+
+fn main() -> i32:
+    a: List[f64] = build_a(100000)
+    b: List[f64] = build_b(100000)
+    result: f64 = dot(a, b)
+    println("dot=" + str(result))
+    return 0

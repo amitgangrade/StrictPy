@@ -1,0 +1,48 @@
+"""ASCII Mandelbrot set, 60 columns x 30 rows. Exercises nested `while`
+loops over f64, inline complex multiplication (StrictPy v0.1 has no
+`Complex` type per §5.1.1), and per-row string building. Prints '#' for
+points that stayed bounded after 50 iterations, ' ' for escapes."""
+
+final WIDTH: i32 = 60
+final HEIGHT: i32 = 30
+final MAX_ITER: i32 = 50
+final ESCAPE: f64 = 4.0
+
+fn in_set(cx: f64, cy: f64) -> bool:
+    zx: f64 = 0.0
+    zy: f64 = 0.0
+    i: i32 = 0
+    while i < MAX_ITER:
+        # z = z*z + c, with z = zx + zy*i
+        zx2: f64 = zx * zx - zy * zy + cx
+        zy2: f64 = 2.0 * zx * zy + cy
+        zx = zx2
+        zy = zy2
+        if zx * zx + zy * zy > ESCAPE:
+            return false
+        i = i + 1
+    return true
+
+fn main() -> i32:
+    x_min: f64 = -2.0
+    x_max: f64 = 1.0
+    y_min: f64 = -1.0
+    y_max: f64 = 1.0
+    dx: f64 = (x_max - x_min) / f64(WIDTH)
+    dy: f64 = (y_max - y_min) / f64(HEIGHT)
+
+    row: i32 = 0
+    while row < HEIGHT:
+        line: str = ""
+        col: i32 = 0
+        while col < WIDTH:
+            cx: f64 = x_min + f64(col) * dx
+            cy: f64 = y_min + f64(row) * dy
+            if in_set(cx, cy):
+                line = line + "#"
+            else:
+                line = line + " "
+            col = col + 1
+        println(line)
+        row = row + 1
+    return 0

@@ -1,0 +1,5 @@
+"""Hello world. Smallest legal StrictPy program: defines `main`, returns i32."""
+
+fn main() -> i32:
+    println("Hello, StrictPy!")
+    return 0

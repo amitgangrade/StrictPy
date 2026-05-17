@@ -1,0 +1,65 @@
+"""Word-frequency counter. Reads a file, tokenizes on whitespace using a
+hand-written state machine (str.split is not in the v0.1 stdlib per §9),
+counts occurrences into a Dict[str, i32], and prints them. Exercises
+`with`/`File`, character indexing per §7.4, and Dict mutation."""
+
+# NOTE: §7.4 specifies `s[i]` returns the i-th code point as a `char`.
+# v0.1 stdlib (§9) does not declare `str.char_at`, so we use subscripting.
+
+final INPUT_PATH: str = "input.txt"
+
+fn is_ws(c: char) -> bool:
+    return c == ' ' or c == '\t' or c == '\n' or c == '\r'
+
+fn split_ws(s: str) -> List[str]:
+    out: List[str] = []
+    n: i64 = i64(len(s))
+    i: i64 = 0
+    start: i64 = 0
+    in_word: bool = false
+    while i < n:
+        c: char = s[i]
+        if is_ws(c):
+            if in_word:
+                out.append(s.slice(start, i))
+                in_word = false
+        else:
+            if not in_word:
+                start = i
+                in_word = true
+        i = i + 1
+    if in_word:
+        out.append(s.slice(start, n))
+    return out
+
+fn count_words(words: List[str]) -> Dict[str, i32]:
+    counts: Dict[str, i32] = {}
+    i: i64 = 0
+    while i < len(words):
+        w: str = words[i]
+        prev: i32? = counts.get(w)
+        if prev is none:
+            counts[w] = 1
+        else:
+            counts[w] = prev + 1
+        i = i + 1
+    return counts
+
+fn print_counts(counts: Dict[str, i32]) -> None:
+    keys: List[str] = counts.keys()
+    i: i64 = 0
+    while i < len(keys):
+        k: str = keys[i]
+        v: i32 = counts[k]
+        println(k + "\t" + str(v))
+        i = i + 1
+
+fn main() -> i32:
+    text: str = ""
+    with open(INPUT_PATH, "r") as f: io.File:
+        text = f.read()
+    words: List[str] = split_ws(text)
+    counts: Dict[str, i32] = count_words(words)
+    println("unique words: " + str(len(counts)))
+    print_counts(counts)
+    return 0

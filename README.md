@@ -1,0 +1,151 @@
+# StrictPy
+
+A statically typed dialect of Python, with a dedicated compiler and bytecode VM.
+
+The full language and VM specification lives in **[STRICTPY_SPEC.md](STRICTPY_SPEC.md)**.
+Read it first — every design decision below traces back to a section of the spec.
+
+## Workspace layout
+
+```
+.
+├── STRICTPY_SPEC.md      Canonical language + VM specification
+├── Cargo.toml            Workspace manifest
+├── shared/               Definitions used by both compiler and VM
+│   └── src/
+│       ├── opcode.rs     Bytecode opcode enum (spec §13)
+│       ├── file_format.rs `.spyc` header, constant tags, sentinels (spec §12)
+│       └── type_tag.rs   Inline operand type tags (spec §13.3.6)
+├── compiler/             `spyc` — compiles .spy → .spyc
+├── vm/                   `spy`  — loads and runs .spyc
+└── examples/             Sample StrictPy programs
+```
+
+## Implementation language
+
+Rust, throughout. The two top-level rationales:
+
+- **One language across the toolchain** keeps the dependency surface small and lets
+  us share crates (notably `strictpy-shared`) without FFI glue.
+- **Algebraic data types** are well suited to AST / IR work; the borrow checker
+  catches most lifetime issues in the compiler.
+
+The dispatch loop in the VM uses `unsafe` for direct-threaded dispatch (computed-goto
+analogue via a function-pointer table). That `unsafe` is bounded to one module
+(`vm/src/interp.rs`). If you want to swap the VM out for a C or Zig implementation
+later, the `.spyc` format is fully specified and the shared crate is FFI-friendly.
+
+## Building
+
+```powershell
+cargo build
+cargo test
+```
+
+Compile and run an example:
+
+```powershell
+cargo run --bin spyc -- examples/hello.spy -o hello.spyc
+cargo run --bin spy  -- hello.spyc
+```
+
+## Implementation status
+
+Following the milestones in spec §19:
+
+- [x] M0 — Spec frozen at v0.1
+- [x] M1 — Lexer + parser + pretty-printer (all 7 examples lex / parse / round-trip)
+- [x] M2 — Resolver + type checker (20-case conformance suite; all 7 examples typecheck)
+- [x] M3 — IR lowering + simple opts + bytecode emission (.spyc writer)
+- [x] M4 — Loader + interpreter + object model + stop-the-world mark-sweep GC
+- [x] M5 — Native stdlib (math, file IO, channels, dicts, range, str helpers)
+- [x] M6 — Real OS threading (Arc'd module + per-thread interp); compiler-side
+  vtable + lambda fixes; generational GC deferred to M8
+- [x] M7 — Runtime-class method dispatch for stdlib types (Channel / File / Dict /
+  str), Dict subscripts, `with`-block desugaring. **All 7 examples now run
+  end-to-end.** Plus several real correctness bugs caught and fixed (see
+  "incidental fixes").
+- [x] M8 — **Cranelift AOT compilation.** Each IR function with JIT-supported
+  ops gets compiled to native code at module load. Fully JIT'd benchmarks
+  beat CPython 3.12 by 5-15× (see `bench/BENCH_REPORT.md`). fib(30) went
+  from 931ms → 14.6ms — a **64× speedup vs the M7 interpreter**, and
+  **11× faster than CPython**.
+- [x] M9 — **Full JIT coverage** for heap mutation (ArraySet/ListPush/ArrayNew),
+  field access (LoadField/StoreField), allocation (New via runtime helper),
+  and virtual calls. **StrictPy now beats CPython 3.12 on every benchmark
+  cell** by 4-17×. fib stayed at 11×, quicksort 100K went from 3× slower
+  to 12× faster, dot 1M went from 2× slower to 4× faster.
+- [ ] M10 — Precise stack-map GC (current `in_jit` flag blocks GC during
+  JIT'd execution — fine for benchmarks, bad for long-running programs),
+  closure/RefEq JIT support (unblocks producer.spy full coverage),
+  bounds-check elimination, inheritance-stable vtables, try/except, for-loops
+
+### What actually runs
+
+`cargo build --release` then any of the 7 examples:
+
+```powershell
+./target/release/spyc.exe examples/hello.spy      -o hello.spyc      ; ./target/release/spy.exe hello.spyc
+./target/release/spyc.exe examples/fib.spy        -o fib.spyc        ; ./target/release/spy.exe fib.spyc
+./target/release/spyc.exe examples/dot.spy        -o dot.spyc        ; ./target/release/spy.exe dot.spyc
+./target/release/spyc.exe examples/tree.spy       -o tree.spyc       ; ./target/release/spy.exe tree.spyc
+./target/release/spyc.exe examples/mandelbrot.spy -o mandelbrot.spyc ; ./target/release/spy.exe mandelbrot.spyc
+./target/release/spyc.exe examples/producer.spy   -o producer.spyc   ; ./target/release/spy.exe producer.spyc
+# wordcount needs an input.txt in the cwd:
+echo "the quick brown fox the lazy dog the quick fox" > input.txt
+./target/release/spyc.exe examples/wordcount.spy  -o wordcount.spyc  ; ./target/release/spy.exe wordcount.spyc
+```
+
+All 7 produce real output:
+- greeting, Fibonacci 0..610, dot product = 70.0, tree sum = 15, ASCII fractal
+- producer/consumer (real OS threads sharing a channel) prints `got 0` through `got 99`
+- wordcount prints `unique words: 6` plus a per-word frequency table
+
+### Test totals
+
+`cargo test --workspace` → **134 passing, 0 failing, 1 ignored** across 23 test binaries:
+- 83 compiler unit tests (lexer 11 + parser 25 + pretty 19 + resolver 6 + typecheck 13 + ir/codegen/opts 9)
+- 28 VM unit tests
+- 20-case negative conformance + positive conformance
+- Lex / parse / round-trip / typecheck / compile_examples integration over all 7 example files
+- VM threading integration (8 concurrent workers on a shared channel)
+- **All 7 example end-to-end runs verified**
+
+### Incidental fixes from M7
+
+While wiring runtime-class dispatch the agent uncovered three real correctness
+bugs that had been producing wrong-looking-but-not-obviously-wrong behavior:
+
+- **`not x` was emitting bitwise NOT** instead of logical negation —
+  `not 1` returned `0xFFFFFFFE` (truthy!). Every `if not …:` was silently
+  wrong. Fixed to emit `x == 0`.
+- **`none` was stored as `0`** instead of the `NONE_SENTINEL` constant, so
+  `if v is none:` matched zero-valued integers and zero-byte pointers.
+- **`Thread(closure)` emitted a generic `Alloc`** returning a zeroed header,
+  so spawned threads always saw a null closure.
+
+### Known gaps remaining
+
+- **Generational GC + precise stack maps** — deferred to M8. The current
+  mark-sweep is conservative and stop-the-world; it's correct across threads
+  but can keep dead objects alive through false-positive root scans.
+- **Inheritance-stable vtables** — subclasses that *add* virtual methods get
+  wrong slot numbers. Works for `tree.spy` because subclasses only override.
+- **`for x in iter:`** — parser accepts; IR doesn't desugar to
+  `__iter__`/`__next__`. Use `while` with an explicit index for now.
+- **`try`/`except`** — parser accepts; codegen doesn't lower exception
+  tables. No example uses exceptions.
+- **JIT coverage for heap-mutating ops** — `ArraySet`, `ListPush`, `Alloc`,
+  `LoadField`, `StoreField`, `VirtualCall` all fall back to the interpreter.
+  Adding ~3 runtime helpers (alloc_list, list_push, array_set) and a vtable-
+  pointer-load primitive would unblock quicksort, dot at large sizes, and
+  every tree.spy method.
+- **`try_recv` returns the same `none` sentinel for "empty" and
+  "disconnected"** — benign race in the producer/consumer pattern; the
+  consumer test allows any prefix ≥10 lines.
+- `debug_dot_capture` — leftover debugging scratchpad, ignored to keep
+  `cargo test` output clean.
+
+## License
+
+MIT OR Apache-2.0

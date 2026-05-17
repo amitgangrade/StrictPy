@@ -1,0 +1,33 @@
+"""Producer/consumer over a Channel[i32]. The producer sends 0..100 then
+closes; the consumer drains via `try_recv` until it sees `none`.
+Demonstrates §16.1 (Thread) and §16.3 (Channel) and lambda capture per
+the §21.4 style — `Thread(fn() -> None: producer(ch))`."""
+
+# NOTE: §16 declares `Thread` and `Channel` as runtime classes but does
+# not pin down their import path. Following the example in §21.4, we
+# import from `threading`.
+from threading import Thread, Channel
+
+fn producer(ch: Channel[i32]) -> None:
+    i: i32 = 0
+    while i < 100:
+        ch.send(i)
+        i = i + 1
+    ch.close()
+
+fn consumer(ch: Channel[i32]) -> None:
+    while true:
+        v: i32? = ch.try_recv()
+        if v is none:
+            break
+        println("got " + str(v))
+
+fn main() -> i32:
+    ch: Channel[i32] = Channel[i32](16)
+    t1: Thread = Thread(fn() -> None: producer(ch))
+    t2: Thread = Thread(fn() -> None: consumer(ch))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    return 0

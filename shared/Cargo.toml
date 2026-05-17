@@ -1,0 +1,9 @@
+[package]
+name = "strictpy-shared"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared types and constants for the StrictPy compiler and VM"
+
+[dependencies]
+thiserror.workspace = true

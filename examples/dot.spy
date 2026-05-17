@@ -1,0 +1,18 @@
+"""Vector dot product over List[f64]. Demonstrates typed list literals,
+indexed access, and a `while` loop accumulating into an f64."""
+
+fn dot(a: List[f64], b: List[f64]) -> f64:
+    assert(len(a) == len(b), "dot: length mismatch")
+    sum: f64 = 0.0
+    i: i64 = 0
+    while i < len(a):
+        sum = sum + a[i] * b[i]
+        i = i + 1
+    return sum
+
+fn main() -> i32:
+    u: List[f64] = [1.0, 2.0, 3.0, 4.0]
+    v: List[f64] = [5.0, 6.0, 7.0, 8.0]
+    result: f64 = dot(u, v)
+    println("dot(u, v) = " + str(result))
+    return 0

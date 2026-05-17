@@ -1,0 +1,44 @@
+fn partition(a: List[i64], lo: i64, hi: i64) -> i64:
+    pivot: i64 = a[hi]
+    i: i64 = lo - 1i64
+    j: i64 = lo
+    while j < hi:
+        if a[j] <= pivot:
+            i = i + 1i64
+            tmp: i64 = a[i]
+            a[i] = a[j]
+            a[j] = tmp
+        j = j + 1i64
+    tmp2: i64 = a[i + 1i64]
+    a[i + 1i64] = a[hi]
+    a[hi] = tmp2
+    return i + 1i64
+
+fn quicksort(a: List[i64], lo: i64, hi: i64) -> None:
+    if lo < hi:
+        p: i64 = partition(a, lo, hi)
+        quicksort(a, lo, p - 1i64)
+        quicksort(a, p + 1i64, hi)
+
+fn build(n: i64) -> List[i64]:
+    a: List[i64] = []
+    i: i64 = 0i64
+    while i < n:
+        a.append(i)
+        i = i + 1i64
+    seed: i64 = 12345i64
+    j: i64 = n - 1i64
+    while j > 0i64:
+        seed = (seed * 1103515245i64 + 12345i64) % 2147483648i64
+        k: i64 = seed % (j + 1i64)
+        tmp: i64 = a[j]
+        a[j] = a[k]
+        a[k] = tmp
+        j = j - 1i64
+    return a
+
+fn main() -> i32:
+    a: List[i64] = build(50000i64)
+    quicksort(a, 0i64, 50000i64 - 1i64)
+    println("first=" + str(a[0]) + " last=" + str(a[50000i64 - 1i64]))
+    return 0

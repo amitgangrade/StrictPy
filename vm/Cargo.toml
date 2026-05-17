@@ -1,0 +1,38 @@
+[package]
+name = "strictpy-vm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "StrictPy bytecode interpreter and runtime"
+
+[lib]
+name = "strictpy_vm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "spy"
+path = "src/main.rs"
+
+[features]
+default = ["jit"]
+# Enable the Cranelift-based AOT-at-load native compiler. Disable with
+# `cargo build --no-default-features` to fall back to the pure interpreter
+# (useful for sanity-checking the interpreter alone or for environments
+# where Cranelift cannot be built).
+jit = ["dep:cranelift", "dep:cranelift-jit", "dep:cranelift-module", "dep:cranelift-codegen", "dep:cranelift-frontend"]
+
+[dependencies]
+strictpy-shared.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+clap.workspace = true
+byteorder.workspace = true
+cranelift = { version = "0.115", optional = true }
+cranelift-jit = { version = "0.115", optional = true }
+cranelift-codegen = { version = "0.115", optional = true }
+cranelift-frontend = { version = "0.115", optional = true }
+cranelift-module = { version = "0.115", optional = true }
+
+[dev-dependencies]
+strictpy-compiler = { path = "../compiler" }

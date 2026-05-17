@@ -1,0 +1,14 @@
+"""Recursive Fibonacci. Exercises i64 arithmetic, self-recursion, and a
+`while` loop driving repeated calls. Prints fib(0) through fib(15)."""
+
+fn fib(n: i64) -> i64:
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+fn main() -> i32:
+    i: i64 = 0
+    while i <= 15:
+        println("fib(" + str(i) + ") = " + str(fib(i)))
+        i = i + 1
+    return 0

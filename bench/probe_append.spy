@@ -1,0 +1,9 @@
+fn main() -> i32:
+    a: List[i64] = []
+    a.append(1)
+    a.append(2)
+    a.append(3)
+    println("len=" + str(len(a)))
+    println("a[0]=" + str(a[0]))
+    println("a[2]=" + str(a[2]))
+    return 0

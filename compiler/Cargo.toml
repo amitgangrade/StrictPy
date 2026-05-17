@@ -1,0 +1,25 @@
+[package]
+name = "strictpy-compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "StrictPy compiler frontend, IR, and bytecode emitter"
+
+[lib]
+name = "strictpy_compiler"
+path = "src/lib.rs"
+
+[[bin]]
+name = "spyc"
+path = "src/main.rs"
+
+[dependencies]
+strictpy-shared.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+clap.workspace = true
+byteorder.workspace = true
+
+[dev-dependencies]
+strictpy-vm = { path = "../vm" }

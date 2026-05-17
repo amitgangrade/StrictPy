@@ -1,0 +1,15 @@
+/target
+*.spyc
+*.spya
+*.swp
+.DS_Store
+.vscode/
+.idea/
+
+# Local Claude Code state — not part of the project.
+.claude/
+
+# Auto-generated Python bytecode in bench/generated/.
+__pycache__/
+*.pyc
+

@@ -1,0 +1,18 @@
+[
+  {"name": "fib", "size": "n20", "spy_ms": 16.2, "py_ms": 75.9, "ratio": 0.21, "note": "py compiled to .pyc first; fair comparison"},
+  {"name": "fib", "size": "n25", "spy_ms": 79.7, "py_ms": 88.8, "ratio": 0.90, "note": ""},
+  {"name": "fib", "size": "n28", "spy_ms": 347.1, "py_ms": 143.0, "ratio": 2.43, "note": ""},
+  {"name": "fib", "size": "n30", "spy_ms": 931.2, "py_ms": 259.8, "ratio": 3.58, "note": ""},
+  {"name": "fib", "size": "n32", "spy_ms": 1550.3, "py_ms": 303.8, "ratio": 5.10, "note": ""},
+  {"name": "fib", "size": "n33", "spy_ms": 2410.0, "py_ms": 521.3, "ratio": 4.62, "note": ""},
+  {"name": "quicksort", "size": "1000", "spy_ms": 12.4, "py_ms": 54.3, "ratio": 0.23, "note": ""},
+  {"name": "quicksort", "size": "5000", "spy_ms": 36.0, "py_ms": 62.5, "ratio": 0.58, "note": ""},
+  {"name": "quicksort", "size": "10000", "spy_ms": 58.3, "py_ms": 66.3, "ratio": 0.88, "note": ""},
+  {"name": "quicksort", "size": "50000", "spy_ms": 325.7, "py_ms": 136.3, "ratio": 2.39, "note": ""},
+  {"name": "quicksort", "size": "100000", "spy_ms": 659.6, "py_ms": 229.2, "ratio": 2.88, "note": ""},
+  {"name": "dot", "size": "10000", "spy_ms": 13.9, "py_ms": 55.4, "ratio": 0.25, "note": ""},
+  {"name": "dot", "size": "100000", "spy_ms": 70.9, "py_ms": 70.5, "ratio": 1.01, "note": ""},
+  {"name": "dot", "size": "500000", "spy_ms": 303.8, "py_ms": 129.7, "ratio": 2.34, "note": ""},
+  {"name": "dot", "size": "1000000", "spy_ms": 604.1, "py_ms": 216.4, "ratio": 2.79, "note": ""},
+  {"name": "mandelbrot", "size": "60x30", "spy_ms": 25.4, "py_ms": 50.2, "ratio": 0.50, "note": ""}
+]
