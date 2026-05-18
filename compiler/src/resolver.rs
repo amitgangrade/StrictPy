@@ -634,6 +634,334 @@ impl Resolver {
             ],
         };
         self.stdlib_modules.insert("io".into(), io_mod);
+
+        // ── M20b: `time` module ────────────────────────────────────────
+        // Wall-clock + monotonic clock + sleep, anchored to the
+        // interpreter's per-process Instant for monotonic.
+        const TIME_NOW: u32        = 175;
+        const TIME_NOW_MS: u32     = 176;
+        const TIME_MONOTONIC: u32  = 177;
+        const TIME_SLEEP_S: u32    = 178;
+        const TIME_SLEEP_MS: u32   = 179;
+        const TIME_FORMAT_ISO: u32 = 180;
+
+        let f64_ty = Ty::Primitive(PrimTy::F64);
+        let i64_ty = Ty::Primitive(PrimTy::I64);
+        let i32_ty = Ty::Primitive(PrimTy::I32);
+        // (str_ty, unit_ty, bool_ty already in scope from M20a registrations.)
+
+        let time_mod = StdlibModule {
+            name: "time".into(),
+            items: vec![
+                StdlibItem {
+                    name: "now".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], f64_ty.clone()),
+                    native_id: TIME_NOW,
+                },
+                StdlibItem {
+                    name: "now_ms".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], i64_ty.clone()),
+                    native_id: TIME_NOW_MS,
+                },
+                StdlibItem {
+                    name: "monotonic".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], f64_ty.clone()),
+                    native_id: TIME_MONOTONIC,
+                },
+                StdlibItem {
+                    name: "sleep_s".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![f64_ty.clone()], unit_ty.clone()),
+                    native_id: TIME_SLEEP_S,
+                },
+                StdlibItem {
+                    name: "sleep_ms".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], unit_ty.clone()),
+                    native_id: TIME_SLEEP_MS,
+                },
+                StdlibItem {
+                    name: "format_iso".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![f64_ty.clone()], str_ty.clone()),
+                    native_id: TIME_FORMAT_ISO,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("time".into(), time_mod);
+
+        // ── M20b: `random` module ──────────────────────────────────────
+        // LCG-backed pseudo-random.  No generics in stdlib for v0.2, so
+        // `choice` / `shuffle` / `sample` ship as monomorphic
+        // `_i64` / `_f64` / `_str` triples.
+        const RANDOM_SEED: u32          = 185;
+        const RANDOM_RANDINT: u32       = 186;
+        const RANDOM_RANDOM: u32        = 187;
+        const RANDOM_CHOICE_I64: u32    = 188;
+        const RANDOM_CHOICE_F64: u32    = 189;
+        const RANDOM_CHOICE_STR: u32    = 190;
+        const RANDOM_SHUFFLE_I64: u32   = 191;
+        const RANDOM_SHUFFLE_F64: u32   = 192;
+        const RANDOM_SHUFFLE_STR: u32   = 193;
+        const RANDOM_SAMPLE_I64: u32    = 194;
+        const RANDOM_SAMPLE_F64: u32    = 195;
+        const RANDOM_SAMPLE_STR: u32    = 196;
+
+        let list_i64_ty = Ty::Generic {
+            base: TypeCtor::List,
+            args: vec![i64_ty.clone()],
+        };
+        let list_f64_ty = Ty::Generic {
+            base: TypeCtor::List,
+            args: vec![f64_ty.clone()],
+        };
+        let list_str_ty_random = Ty::Generic {
+            base: TypeCtor::List,
+            args: vec![str_ty.clone()],
+        };
+
+        let random_mod = StdlibModule {
+            name: "random".into(),
+            items: vec![
+                StdlibItem {
+                    name: "seed".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], unit_ty.clone()),
+                    native_id: RANDOM_SEED,
+                },
+                StdlibItem {
+                    name: "randint".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i64_ty.clone()], i64_ty.clone()),
+                    native_id: RANDOM_RANDINT,
+                },
+                StdlibItem {
+                    name: "random".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], f64_ty.clone()),
+                    native_id: RANDOM_RANDOM,
+                },
+                StdlibItem {
+                    name: "choice_i64".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![list_i64_ty.clone()], i64_ty.clone()),
+                    native_id: RANDOM_CHOICE_I64,
+                },
+                StdlibItem {
+                    name: "choice_f64".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![list_f64_ty.clone()], f64_ty.clone()),
+                    native_id: RANDOM_CHOICE_F64,
+                },
+                StdlibItem {
+                    name: "choice_str".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![list_str_ty_random.clone()], str_ty.clone()),
+                    native_id: RANDOM_CHOICE_STR,
+                },
+                StdlibItem {
+                    name: "shuffle_i64".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![list_i64_ty.clone()], unit_ty.clone()),
+                    native_id: RANDOM_SHUFFLE_I64,
+                },
+                StdlibItem {
+                    name: "shuffle_f64".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![list_f64_ty.clone()], unit_ty.clone()),
+                    native_id: RANDOM_SHUFFLE_F64,
+                },
+                StdlibItem {
+                    name: "shuffle_str".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![list_str_ty_random.clone()], unit_ty.clone()),
+                    native_id: RANDOM_SHUFFLE_STR,
+                },
+                StdlibItem {
+                    name: "sample_i64".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![list_i64_ty.clone(), i32_ty.clone()],
+                        list_i64_ty.clone(),
+                    ),
+                    native_id: RANDOM_SAMPLE_I64,
+                },
+                StdlibItem {
+                    name: "sample_f64".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![list_f64_ty.clone(), i32_ty.clone()],
+                        list_f64_ty.clone(),
+                    ),
+                    native_id: RANDOM_SAMPLE_F64,
+                },
+                StdlibItem {
+                    name: "sample_str".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![list_str_ty_random.clone(), i32_ty.clone()],
+                        list_str_ty_random.clone(),
+                    ),
+                    native_id: RANDOM_SAMPLE_STR,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("random".into(), random_mod);
+
+        // ── M20b: `math` module (extensions) ───────────────────────────
+        // The prelude bare-name natives `sqrt` / `sin` / `cos` / `pow` /
+        // `floor` / `ceil` / `log` / `exp` (NativeFn::Math* ids 70–79)
+        // remain registered as prelude functions, so `sqrt(x)` works
+        // *without* `import math`.  This module re-exposes them as
+        // namespaced `math.sqrt(x)` plus new helpers (`log2`, `log10`,
+        // `gcd`, `factorial`, `is_nan`, `is_inf`) and the constants
+        // (`pi`, `e`, `tau`, `inf`, `nan`).
+        const MATH_SQRT: u32      = 70;  // existing MathSqrt
+        const MATH_SIN: u32       = 71;
+        const MATH_COS: u32       = 72;
+        const MATH_LOG: u32       = 74;
+        const MATH_EXP: u32       = 75;
+        const MATH_POW: u32       = 76;
+        const MATH_LOG2: u32      = 200;
+        const MATH_LOG10: u32     = 201;
+        const MATH_FLOOR_I: u32   = 202;
+        const MATH_CEIL_I: u32    = 203;
+        const MATH_GCD: u32       = 204;
+        const MATH_FACTORIAL: u32 = 205;
+        const MATH_IS_NAN: u32    = 206;
+        const MATH_IS_INF: u32    = 207;
+        const MATH_PI: u32        = 208;
+        const MATH_E: u32         = 209;
+        const MATH_TAU: u32       = 210;
+        const MATH_INF: u32       = 211;
+        const MATH_NAN: u32       = 212;
+
+        let math_mod = StdlibModule {
+            name: "math".into(),
+            items: vec![
+                // Constants
+                StdlibItem {
+                    name: "pi".into(),
+                    kind: StdlibItemKind::Const,
+                    ty: f64_ty.clone(),
+                    native_id: MATH_PI,
+                },
+                StdlibItem {
+                    name: "e".into(),
+                    kind: StdlibItemKind::Const,
+                    ty: f64_ty.clone(),
+                    native_id: MATH_E,
+                },
+                StdlibItem {
+                    name: "tau".into(),
+                    kind: StdlibItemKind::Const,
+                    ty: f64_ty.clone(),
+                    native_id: MATH_TAU,
+                },
+                StdlibItem {
+                    name: "inf".into(),
+                    kind: StdlibItemKind::Const,
+                    ty: f64_ty.clone(),
+                    native_id: MATH_INF,
+                },
+                StdlibItem {
+                    name: "nan".into(),
+                    kind: StdlibItemKind::Const,
+                    ty: f64_ty.clone(),
+                    native_id: MATH_NAN,
+                },
+                // Wrapped existing prelude natives — same NativeFn ids.
+                StdlibItem {
+                    name: "sqrt".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![f64_ty.clone()], f64_ty.clone()),
+                    native_id: MATH_SQRT,
+                },
+                StdlibItem {
+                    name: "sin".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![f64_ty.clone()], f64_ty.clone()),
+                    native_id: MATH_SIN,
+                },
+                StdlibItem {
+                    name: "cos".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![f64_ty.clone()], f64_ty.clone()),
+                    native_id: MATH_COS,
+                },
+                StdlibItem {
+                    name: "log".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![f64_ty.clone()], f64_ty.clone()),
+                    native_id: MATH_LOG,
+                },
+                StdlibItem {
+                    name: "exp".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![f64_ty.clone()], f64_ty.clone()),
+                    native_id: MATH_EXP,
+                },
+                StdlibItem {
+                    name: "pow".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![f64_ty.clone(), f64_ty.clone()], f64_ty.clone()),
+                    native_id: MATH_POW,
+                },
+                // New helpers.
+                StdlibItem {
+                    name: "log2".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![f64_ty.clone()], f64_ty.clone()),
+                    native_id: MATH_LOG2,
+                },
+                StdlibItem {
+                    name: "log10".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![f64_ty.clone()], f64_ty.clone()),
+                    native_id: MATH_LOG10,
+                },
+                StdlibItem {
+                    name: "floor".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![f64_ty.clone()], i64_ty.clone()),
+                    native_id: MATH_FLOOR_I,
+                },
+                StdlibItem {
+                    name: "ceil".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![f64_ty.clone()], i64_ty.clone()),
+                    native_id: MATH_CEIL_I,
+                },
+                StdlibItem {
+                    name: "gcd".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i64_ty.clone()], i64_ty.clone()),
+                    native_id: MATH_GCD,
+                },
+                StdlibItem {
+                    name: "factorial".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i64_ty.clone()),
+                    native_id: MATH_FACTORIAL,
+                },
+                StdlibItem {
+                    name: "is_nan".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![f64_ty.clone()], bool_ty.clone()),
+                    native_id: MATH_IS_NAN,
+                },
+                StdlibItem {
+                    name: "is_inf".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![f64_ty.clone()], bool_ty.clone()),
+                    native_id: MATH_IS_INF,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("math".into(), math_mod);
     }
 
     // ─────────────────────────────────────────────────────────────────────

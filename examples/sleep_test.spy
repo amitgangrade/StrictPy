@@ -1,0 +1,28 @@
+"""sleep_test.spy — wall-clock sanity check for `time.sleep_ms` (M20b).
+
+Exercises:
+  * `import time` — clocks + sleep.
+  * `time.sleep_ms(100)` — block ~100ms.
+  * `time.monotonic()` — verifies the wall-clock advanced.
+
+The test asserts the printed elapsed-ms is at least 80ms (lenient floor
+to absorb OS scheduling variance, especially on Windows where the
+default sleep granularity is 15.6ms).
+
+Tests:
+  * `compiler/tests/sleep_test_runs.rs` — subprocess assertion.
+"""
+
+import time
+
+fn main() -> i32:
+    t0: f64 = time.monotonic()
+    time.sleep_ms(100i64)
+    t1: f64 = time.monotonic()
+    elapsed_ms: i64 = i64((t1 - t0) * 1000.0)
+    # Print "yes" / "no" so the test can grep without parsing a float.
+    if elapsed_ms >= 80i64:
+        println("slept-yes")
+    else:
+        println("slept-no")
+    return 0

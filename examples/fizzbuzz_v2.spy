@@ -1,0 +1,36 @@
+"""fizzbuzz_v2.spy — 20 random fizzbuzz lines (M20b).
+
+Exercises:
+  * `import random` — M20b stdlib module backed by a Numerical Recipes LCG.
+  * `random.seed(42)` + `random.randint(1, 100)` — deterministic across runs.
+  * if/elif/else over modulo arithmetic — classic FizzBuzz with random
+    inputs instead of the usual 1..N range.
+
+The output is always identical for seed=42 thanks to the LCG being a
+pure function of (state, multiplier, increment).
+
+Tests:
+  * `vm/tests/m20b_time_random_math.rs::random_seed_is_deterministic`
+    (inline) — pins the first three numbers for seed=42.
+  * `compiler/tests/fizzbuzz_v2_runs.rs` — subprocess assertion.
+"""
+
+import random
+
+fn classify(n: i64) -> str:
+    if n % 15i64 == 0i64:
+        return "FizzBuzz"
+    if n % 3i64 == 0i64:
+        return "Fizz"
+    if n % 5i64 == 0i64:
+        return "Buzz"
+    return str(n)
+
+fn main() -> i32:
+    random.seed(42i64)
+    i: i64 = 0i64
+    while i < 20i64:
+        n: i64 = random.randint(1i64, 100i64)
+        println(classify(n))
+        i = i + 1i64
+    return 0

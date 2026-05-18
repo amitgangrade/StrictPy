@@ -301,6 +301,17 @@ pub struct Interpreter {
     /// `sys.argv is sys.argv` is true, and so that any user-side
     /// mutation of the list — `sys.argv.pop()` — is visible).
     pub(crate) sys_argv_cache: Option<u64>,
+
+    /// M20b: anchor for `time.monotonic()`.  Set at interpreter construction
+    /// (in `from_shared`) so the value is well-defined for the entire
+    /// program lifetime, immune to wall-clock adjustments.
+    pub(crate) monotonic_start: std::time::Instant,
+
+    /// M20b: state for the `random` module's LCG.
+    /// Numerical Recipes constants:
+    ///   next = (state * 1103515245 + 12345) mod 2^31
+    /// `random.seed(s)` overwrites this; default is `0` (deterministic).
+    pub(crate) random_lcg_state: i64,
 }
 
 impl Interpreter {
@@ -328,6 +339,8 @@ impl Interpreter {
             pending_exception: None,
             argv: Vec::new(),
             sys_argv_cache: None,
+            monotonic_start: std::time::Instant::now(),
+            random_lcg_state: 0,
         }
     }
 

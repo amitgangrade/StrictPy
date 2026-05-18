@@ -1270,6 +1270,151 @@ Semantics:
 Note: in v0.2 there are no `sys.stdin` / `sys.stdout` / `sys.stderr`
 `File`-typed handles. The functions above are the supported interface.
 
+### 9.10 Module `time` (v0.2 — M20b)
+
+Wall-clock + monotonic clock + sleep. Sister to M20a's `os` / `io` —
+plugs into the same M19 stdlib-module-table infrastructure.
+
+```
+fn now() -> f64
+fn now_ms() -> i64
+fn monotonic() -> f64
+fn sleep_s(seconds: f64) -> None
+fn sleep_ms(millis: i64) -> None
+fn format_iso(epoch_s: f64) -> str
+```
+
+Semantics:
+
+* `now()` returns Unix-epoch seconds with fractional precision (Rust's
+  `SystemTime::now().duration_since(UNIX_EPOCH).as_secs_f64()`).  The
+  underlying system clock can jump backwards under NTP adjustments — for
+  benchmarking, use `monotonic()` instead.
+* `now_ms()` returns Unix-epoch milliseconds as `i64`.  Convenient when
+  the program will compare two timestamps without needing sub-ms
+  precision (network logs, jitter samples, etc.).
+* `monotonic()` returns seconds-since-this-interpreter-started (anchored
+  to a per-process `Instant` set at VM construction).  Guaranteed to be
+  non-decreasing across reads; not affected by wall-clock adjustments.
+  This is the correct primitive for micro-benchmarks.
+* `sleep_s(secs)` and `sleep_ms(ms)` block the calling thread for the
+  given duration.  Negative or NaN inputs are silently no-ops (matches
+  Python's `time.sleep`).  Sleep granularity is OS-dependent — Windows'
+  default tick is ~15.6ms; Linux is typically 1ms.  Tests should use
+  generous (≥50ms) floor assertions to absorb OS scheduling variance.
+* `format_iso(epoch_s)` produces a fixed `"YYYY-MM-DDTHH:MM:SSZ"` UTC
+  string for the given epoch seconds (no fractional component, no
+  timezone offsets — UTC only).  The conversion uses Howard Hinnant's
+  `civil_from_days` algorithm, so dates pre-1970 and far into the
+  future round-trip correctly.
+
+### 9.11 Module `random` (v0.2 — M20b)
+
+Seeded pseudo-random number generation.  Backed by a linear-congruential
+generator (LCG) with the Numerical Recipes constants
+(multiplier 1103515245, increment 12345, modulus 2^31).  LCG state lives
+on the interpreter — calling `random.seed(s)` resets it; default state
+at process start is `0`.
+
+```
+fn seed(s: i64) -> None
+fn randint(lo: i64, hi: i64) -> i64
+fn random() -> f64
+
+# Monomorphic variants — see "Generics" below.
+fn choice_i64(xs: List[i64]) -> i64
+fn choice_f64(xs: List[f64]) -> f64
+fn choice_str(xs: List[str]) -> str
+
+fn shuffle_i64(xs: List[i64]) -> None
+fn shuffle_f64(xs: List[f64]) -> None
+fn shuffle_str(xs: List[str]) -> None
+
+fn sample_i64(xs: List[i64], n: i32) -> List[i64]
+fn sample_f64(xs: List[f64], n: i32) -> List[f64]
+fn sample_str(xs: List[str], n: i32) -> List[str]
+```
+
+Semantics:
+
+* `randint(lo, hi)` returns a uniform integer in `[lo, hi]` (inclusive
+  on both ends).  Raises `ValueError` when `hi < lo`.
+* `random()` returns a uniform `f64` in `[0.0, 1.0)`.  Two LCG draws are
+  combined for ~53 bits of mantissa entropy.
+* `choice_T(xs)` returns one element of `xs` chosen uniformly at random.
+  Raises `IndexError` on an empty list.
+* `shuffle_T(xs)` shuffles `xs` in place via Fisher-Yates.  Preserves
+  length and element identity (no copies).
+* `sample_T(xs, n)` returns a fresh `List[T]` of `n` distinct elements
+  drawn uniformly from `xs`.  Raises `ValueError` on `n < 0` or
+  `n > len(xs)`.  Implementation is a partial Fisher-Yates over a copy
+  of `xs`, so the source list is unchanged.
+
+**Generics**: stdlib functions cannot be generic in v0.2 (the M17
+generic-fn worklist only sees user-defined `.spy` fns).  We ship
+monomorphic `_i64` / `_f64` / `_str` variants for `choice` / `shuffle` /
+`sample`.  A true generic `random.choice[T](xs: List[T]) -> T` is
+deferred to v0.3.
+
+**Quality**: LCGs are reproducible and fast, not crypto-quality.  The
+NR constants are well-known and have decent statistical properties for
+casual use (games, fuzzers, monte-carlo demos), but the period is only
+~2^31.  Programs requiring cryptographic randomness should use the
+underlying OS RNG (a future v0.3 `os.urandom` is the planned answer).
+
+### 9.12 Module `math` (v0.2 — M20b)
+
+Numeric helpers, namespaced.  This module *extends* the §9.4 surface —
+the existing prelude bare-name functions (`sqrt(x)`, `sin(x)`, `cos(x)`,
+`pow(x, y)`, `floor(x)`, `ceil(x)`, `log(x)`, `exp(x)`) remain available
+without `import math`, for backward compatibility with v0.1 programs.
+
+```
+final pi:  f64    # π
+final e:   f64    # Euler's number
+final tau: f64    # 2π
+final inf: f64    # +∞
+final nan: f64    # NaN
+
+# Wrapped — same NativeFn ids as the prelude bare-name versions.
+fn sqrt(x: f64) -> f64
+fn sin(x: f64) -> f64
+fn cos(x: f64) -> f64
+fn log(x: f64) -> f64      # natural log
+fn exp(x: f64) -> f64
+fn pow(x: f64, y: f64) -> f64
+
+# New in M20b.
+fn log2(x: f64) -> f64
+fn log10(x: f64) -> f64
+fn floor(x: f64) -> i64    # returns int, not float (cf. Python's math.floor)
+fn ceil(x: f64) -> i64
+fn gcd(a: i64, b: i64) -> i64
+fn factorial(n: i64) -> i64
+fn is_nan(x: f64) -> bool
+fn is_inf(x: f64) -> bool  # true for both +∞ and -∞
+```
+
+Semantics:
+
+* Constants are `final f64` (M20b's stdlib-table `Const` items lower to
+  zero-arg `CallNative` instructions that return the bit pattern).
+* `floor` / `ceil` return `i64` to match Python 3's `math.floor` /
+  `math.ceil` semantics (Python returns `int`, not `float`).  Non-finite
+  inputs raise `ValueError`.
+* `gcd(a, b)` runs the Euclidean algorithm on `|a|` / `|b|`; result is
+  non-negative.  `gcd(0, 0) == 0`.
+* `factorial(n)` is defined for `0 ≤ n ≤ 20`.  Outside that range:
+  * `n < 0` → `ValueError`,
+  * `n > 20` → `OverflowError` (21! exceeds `i64::MAX`).
+* `is_nan(x)` and `is_inf(x)` are NaN-/inf-safe (don't trap on inputs
+  that would otherwise be problematic in arithmetic comparisons).
+
+The wrapped functions (`math.sqrt`, etc.) route to the same `NativeFn`
+ids as the prelude `sqrt` etc. — the only difference is the source-level
+surface (namespaced vs bare).  Both forms type-check, both lower to the
+same opcode, and both produce identical results.
+
 ---
 
 ## 10. Compiler Architecture

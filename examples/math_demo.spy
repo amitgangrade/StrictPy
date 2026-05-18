@@ -1,0 +1,42 @@
+"""math_demo.spy — exercise the M20b `math` module.
+
+Exercises:
+  * `math.pi`, `math.e`, `math.tau` — f64 constants.
+  * `math.sqrt(x)` — wrapped from the prelude bare `sqrt`.  Both forms
+    (`sqrt(x)` and `math.sqrt(x)`) keep working — the M20b module
+    registers the same NativeFn under a new namespace.
+  * `math.log2(x)` — new in M20b.
+  * `math.gcd(a, b)` / `math.factorial(n)` — new integer helpers.
+  * `math.is_nan(x)` / `math.is_inf(x)` — predicates.
+
+Tests:
+  * `compiler/tests/math_demo_runs.rs` — subprocess assertion.
+"""
+
+import math
+
+fn main() -> i32:
+    # Constants.  `math.pi` is the same value whether read through the
+    # module or computed; we print it as a sanity line.
+    println("pi=" + str(math.pi))
+    println("e=" + str(math.e))
+    println("tau-2pi=" + str(math.tau - 2.0 * math.pi))
+
+    # Wrapped natives.  `math.sqrt` routes to the same NativeFn id as
+    # the legacy prelude `sqrt` — the same value, namespaced.
+    println("sqrt-16=" + str(math.sqrt(16.0)))
+    println("sin-0=" + str(math.sin(0.0)))
+
+    # New helpers.
+    println("log2-1024=" + str(math.log2(1024.0)))
+    println("gcd-12-18=" + str(math.gcd(12i64, 18i64)))
+    println("factorial-5=" + str(math.factorial(5i64)))
+    println("factorial-10=" + str(math.factorial(10i64)))
+
+    # Predicates.
+    println("is-nan-nan=" + str(math.is_nan(math.nan)))
+    println("is-nan-0=" + str(math.is_nan(0.0)))
+    println("is-inf-inf=" + str(math.is_inf(math.inf)))
+    println("is-inf-finite=" + str(math.is_inf(1.5)))
+
+    return 0

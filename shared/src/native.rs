@@ -208,6 +208,92 @@ pub enum NativeFn {
     /// `io.flush_stdout()` — flush so prompts appear before the next read.
     IoFlushStdout = 174,
 
+    // ── 175–184: `time` module (M20b) ───────────────────────────────────
+    // Wall-clock + monotonic clock + sleep.  All times use Rust's `std::time`
+    // primitives; `monotonic()` is anchored to a per-process `Instant` set
+    // up at interpreter construction.
+    /// `time.now() -> f64` — Unix-epoch seconds (fractional precision).
+    TimeNow       = 175,
+    /// `time.now_ms() -> i64` — Unix-epoch milliseconds.
+    TimeNowMs     = 176,
+    /// `time.monotonic() -> f64` — seconds since interpreter init.
+    TimeMonotonic = 177,
+    /// `time.sleep_s(seconds: f64) -> None`.
+    TimeSleepS    = 178,
+    /// `time.sleep_ms(millis: i64) -> None`.
+    TimeSleepMs   = 179,
+    /// `time.format_iso(epoch_s: f64) -> str` — hand-formatted ISO 8601 UTC.
+    TimeFormatIso = 180,
+
+    // ── 185–199: `random` module (M20b) ─────────────────────────────────
+    // Seeded LCG (Numerical Recipes constants).  State lives on the
+    // interpreter so it's per-program; `random.seed(s)` resets it.
+    //
+    // Generics: stdlib functions can't be generic in v0.2 (the M17
+    // generic-fn worklist only sees user-defined .spy fns), so we ship
+    // monomorphic `_i64` / `_f64` / `_str` variants for `choice` /
+    // `shuffle` / `sample`.  The underlying VM implementation is the same
+    // raw-u64-slot logic; the variant just pins the typecheck signature.
+    /// `random.seed(s: i64) -> None` — set the LCG state.
+    RandomSeed        = 185,
+    /// `random.randint(lo: i64, hi: i64) -> i64` — inclusive on both ends.
+    RandomRandint     = 186,
+    /// `random.random() -> f64` — uniform in `[0.0, 1.0)`.
+    RandomRandom      = 187,
+    /// `random.choice_i64(xs: List[i64]) -> i64`.  Raises IndexError on `[]`.
+    RandomChoiceI64   = 188,
+    /// `random.choice_f64(xs: List[f64]) -> f64`.
+    RandomChoiceF64   = 189,
+    /// `random.choice_str(xs: List[str]) -> str`.
+    RandomChoiceStr   = 190,
+    /// `random.shuffle_i64(xs: List[i64]) -> None` — in-place Fisher-Yates.
+    RandomShuffleI64  = 191,
+    /// `random.shuffle_f64(xs: List[f64]) -> None`.
+    RandomShuffleF64  = 192,
+    /// `random.shuffle_str(xs: List[str]) -> None`.
+    RandomShuffleStr  = 193,
+    /// `random.sample_i64(xs: List[i64], n: i32) -> List[i64]`.
+    /// Raises ValueError when `n < 0` or `n > len(xs)`.
+    RandomSampleI64   = 194,
+    /// `random.sample_f64(xs: List[f64], n: i32) -> List[f64]`.
+    RandomSampleF64   = 195,
+    /// `random.sample_str(xs: List[str], n: i32) -> List[str]`.
+    RandomSampleStr   = 196,
+
+    // ── 200–229: `math` module (M20b) ───────────────────────────────────
+    // The flat prelude `sqrt` / `sin` / `cos` / etc. natives (ids 70–79)
+    // remain unchanged for backward compatibility.  `math.sqrt(x)` and
+    // friends route to the *same* underlying NativeFn ids, so the diff
+    // is just a registration in `seed_stdlib_modules`.  Genuinely new
+    // entries are `log2`, `log10`, `gcd`, `factorial`, `is_nan`, `is_inf`,
+    // and `floor`/`ceil`-to-i64 (Python returns int, not float).
+    /// `math.log2(x: f64) -> f64`.
+    MathLog2      = 200,
+    /// `math.log10(x: f64) -> f64`.
+    MathLog10     = 201,
+    /// `math.floor(x: f64) -> i64` — truncates toward `-inf`, returns int.
+    MathFloorI    = 202,
+    /// `math.ceil(x: f64) -> i64` — toward `+inf`, returns int.
+    MathCeilI     = 203,
+    /// `math.gcd(a: i64, b: i64) -> i64` — Euclidean; result is non-negative.
+    MathGcd       = 204,
+    /// `math.factorial(n: i64) -> i64`.  Range `0 ≤ n ≤ 20`; outside that
+    /// the function raises `ValueError` (negative) or `OverflowError`
+    /// (would exceed i64::MAX).
+    MathFactorial = 205,
+    /// `math.is_nan(x: f64) -> bool`.
+    MathIsNan     = 206,
+    /// `math.is_inf(x: f64) -> bool` — true for both `+inf` and `-inf`.
+    MathIsInf     = 207,
+    /// `math.pi` / `math.e` / `math.tau` / `math.inf` / `math.nan` —
+    /// f64 constants exposed as zero-arg natives.  Each handler ignores
+    /// its args and returns the constant's bit pattern.
+    MathConstPi   = 208,
+    MathConstE    = 209,
+    MathConstTau  = 210,
+    MathConstInf  = 211,
+    MathConstNan  = 212,
+
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
     /// encounters. The VM treats this as a runtime error.
@@ -321,6 +407,40 @@ impl NativeFn {
             172 => Some(Self::IoWriteStdout),
             173 => Some(Self::IoWriteStderr),
             174 => Some(Self::IoFlushStdout),
+            // M20b: time module.
+            175 => Some(Self::TimeNow),
+            176 => Some(Self::TimeNowMs),
+            177 => Some(Self::TimeMonotonic),
+            178 => Some(Self::TimeSleepS),
+            179 => Some(Self::TimeSleepMs),
+            180 => Some(Self::TimeFormatIso),
+            // M20b: random module.
+            185 => Some(Self::RandomSeed),
+            186 => Some(Self::RandomRandint),
+            187 => Some(Self::RandomRandom),
+            188 => Some(Self::RandomChoiceI64),
+            189 => Some(Self::RandomChoiceF64),
+            190 => Some(Self::RandomChoiceStr),
+            191 => Some(Self::RandomShuffleI64),
+            192 => Some(Self::RandomShuffleF64),
+            193 => Some(Self::RandomShuffleStr),
+            194 => Some(Self::RandomSampleI64),
+            195 => Some(Self::RandomSampleF64),
+            196 => Some(Self::RandomSampleStr),
+            // M20b: math module extensions.
+            200 => Some(Self::MathLog2),
+            201 => Some(Self::MathLog10),
+            202 => Some(Self::MathFloorI),
+            203 => Some(Self::MathCeilI),
+            204 => Some(Self::MathGcd),
+            205 => Some(Self::MathFactorial),
+            206 => Some(Self::MathIsNan),
+            207 => Some(Self::MathIsInf),
+            208 => Some(Self::MathConstPi),
+            209 => Some(Self::MathConstE),
+            210 => Some(Self::MathConstTau),
+            211 => Some(Self::MathConstInf),
+            212 => Some(Self::MathConstNan),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

@@ -1,0 +1,33 @@
+"""timer_demo.spy — micro-benchmark with `time.monotonic` (M20b).
+
+Exercises:
+  * `import time` — M20b clocks module.
+  * `time.monotonic()` — non-decreasing seconds-since-process-start clock,
+    immune to wall-clock adjustments.  The right primitive for benchmarks.
+  * Loop arithmetic — sums 1..100_000 and prints the total + elapsed ms.
+
+The test asserts on the printed sum (deterministic) rather than the
+elapsed time (host-dependent).  A few hundred microseconds is typical
+on a modern CPU.
+
+Tests:
+  * `compiler/tests/timer_demo_runs.rs` — subprocess assertion.
+"""
+
+import time
+
+fn main() -> i32:
+    t0: f64 = time.monotonic()
+    n: i64 = 100000i64
+    total: i64 = 0i64
+    i: i64 = 1i64
+    while i <= n:
+        total = total + i
+        i = i + 1i64
+    t1: f64 = time.monotonic()
+    elapsed_ms: f64 = (t1 - t0) * 1000.0
+    println("sum=" + str(total))
+    # Print elapsed using a coarse format — we don't want the test to be
+    # flaky over host-clock variance.  An f64 second value is fine.
+    println("elapsed-ms-positive=" + str(elapsed_ms >= 0.0))
+    return 0

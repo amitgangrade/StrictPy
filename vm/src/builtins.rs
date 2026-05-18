@@ -1030,10 +1030,340 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             Ok(0)
         }
 
+        // ── M20b: `time` module ────────────────────────────────────────
+        NativeFn::TimeNow => {
+            // Unix epoch seconds with fractional precision.  We tolerate
+            // the "system clock is before the epoch" failure mode (rare,
+            // but possible on freshly imaged VMs) by returning 0.0 — a
+            // ValueError would be wrong: callers don't typically wrap
+            // a `time.now()` in try/except, and a sentinel zero is more
+            // diagnostic than a panic.
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let secs = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            Ok(secs.to_bits())
+        }
+        NativeFn::TimeNowMs => {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            Ok(ms as u64)
+        }
+        NativeFn::TimeMonotonic => {
+            // Seconds since this interpreter's `monotonic_start` anchor.
+            // `Instant::elapsed` is guaranteed non-decreasing and is
+            // immune to wall-clock adjustments — the right primitive for
+            // benchmarking.
+            let secs = interp.monotonic_start.elapsed().as_secs_f64();
+            Ok(secs.to_bits())
+        }
+        NativeFn::TimeSleepS => {
+            let secs = arg_f64(args, 0);
+            if secs.is_nan() || secs < 0.0 {
+                // Negative / NaN sleep is silently a no-op (matches
+                // Python's `time.sleep` for 0 and negative values).
+                return Ok(0);
+            }
+            // f64 secs → Duration; saturate at u64::MAX seconds rather
+            // than overflow.
+            let dur = std::time::Duration::from_secs_f64(secs.min(u64::MAX as f64));
+            std::thread::sleep(dur);
+            Ok(0)
+        }
+        NativeFn::TimeSleepMs => {
+            let ms = arg_i64(args, 0);
+            if ms <= 0 {
+                return Ok(0);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+            Ok(0)
+        }
+        NativeFn::TimeFormatIso => {
+            // Hand-formatted ISO 8601 UTC ("2026-05-18T14:23:11Z").  We
+            // don't pull in `chrono` for one function — a few lines of
+            // arithmetic gets us the same result.  Implementation pinches
+            // the civil_from_days algorithm by Howard Hinnant (public
+            // domain, used by libc++).
+            let secs = arg_f64(args, 0);
+            let s = format_epoch_iso(secs);
+            let p = interp.alloc_string(&s);
+            Ok(p as u64)
+        }
+
+        // ── M20b: `random` module ──────────────────────────────────────
+        NativeFn::RandomSeed => {
+            let s = arg_i64(args, 0);
+            interp.random_lcg_state = s;
+            Ok(0)
+        }
+        NativeFn::RandomRandint => {
+            let lo = arg_i64(args, 0);
+            let hi = arg_i64(args, 1);
+            if hi < lo {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("randint: empty range [{lo}, {hi}]"),
+                });
+            }
+            let r = lcg_next(&mut interp.random_lcg_state);
+            // Map a positive 31-bit value into [lo, hi].
+            let span = (hi.wrapping_sub(lo) as u64).wrapping_add(1);
+            // Handle the full-range case where span == 0 (overflow).  In
+            // that pathological case we fall back to letting r through
+            // unsigned — still uniform on the 31-bit slice.
+            let v = if span == 0 {
+                r
+            } else {
+                (r as u64 % span) as i64 + lo
+            };
+            Ok(v as u64)
+        }
+        NativeFn::RandomRandom => {
+            // Uniform f64 in [0.0, 1.0).  We feed two 31-bit LCG draws
+            // into the mantissa for ~53 bits of entropy.
+            let a = lcg_next(&mut interp.random_lcg_state) as u64;
+            let b = lcg_next(&mut interp.random_lcg_state) as u64;
+            // Combine: upper 26 bits from `a`, lower 27 bits from `b`.
+            let mant = ((a & ((1 << 26) - 1)) << 27) | (b & ((1 << 27) - 1));
+            let r = (mant as f64) / ((1u64 << 53) as f64);
+            Ok(r.to_bits())
+        }
+        NativeFn::RandomChoiceI64
+        | NativeFn::RandomChoiceF64
+        | NativeFn::RandomChoiceStr => {
+            let lst = arg_u64(args, 0) as *const crate::object::ListRepr;
+            if lst.is_null() {
+                return Err(VmError::UncaughtException {
+                    type_name: "NullPointerError".into(),
+                    message: "choice on null list".into(),
+                });
+            }
+            // SAFETY: lst is a heap-allocated ListRepr.
+            unsafe {
+                let len = (*lst).length;
+                if len == 0 {
+                    return Err(VmError::UncaughtException {
+                        type_name: "IndexError".into(),
+                        message: "choice from empty list".into(),
+                    });
+                }
+                let r = lcg_next(&mut interp.random_lcg_state) as u64;
+                let idx = (r % len as u64) as usize;
+                let data = (*lst).data as *const u64;
+                Ok(std::ptr::read_unaligned(data.add(idx)))
+            }
+        }
+        NativeFn::RandomShuffleI64
+        | NativeFn::RandomShuffleF64
+        | NativeFn::RandomShuffleStr => {
+            let lst = arg_u64(args, 0) as *mut crate::object::ListRepr;
+            if lst.is_null() {
+                return Err(VmError::UncaughtException {
+                    type_name: "NullPointerError".into(),
+                    message: "shuffle on null list".into(),
+                });
+            }
+            // Fisher-Yates.  We treat slots as opaque u64 so str-ptr /
+            // i64 / f64 all work the same way.
+            unsafe {
+                let len = (*lst).length;
+                if len <= 1 {
+                    return Ok(0);
+                }
+                let data = (*lst).data as *mut u64;
+                for i in (1..len).rev() {
+                    let r = lcg_next(&mut interp.random_lcg_state) as u64;
+                    let j = (r % (i as u64 + 1)) as usize;
+                    let a = std::ptr::read_unaligned(data.add(i));
+                    let b = std::ptr::read_unaligned(data.add(j));
+                    std::ptr::write_unaligned(data.add(i), b);
+                    std::ptr::write_unaligned(data.add(j), a);
+                }
+            }
+            Ok(0)
+        }
+        NativeFn::RandomSampleI64
+        | NativeFn::RandomSampleF64
+        | NativeFn::RandomSampleStr => {
+            let src = arg_u64(args, 0) as *const crate::object::ListRepr;
+            let n = arg_i64(args, 1);
+            if src.is_null() {
+                return Err(VmError::UncaughtException {
+                    type_name: "NullPointerError".into(),
+                    message: "sample on null list".into(),
+                });
+            }
+            if n < 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("sample: n must be >= 0 (got {n})"),
+                });
+            }
+            // SAFETY: src is a heap-allocated ListRepr.
+            let (len, indices_pool) = unsafe {
+                let length = (*src).length;
+                if (n as usize) > length {
+                    return Err(VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "sample: n={n} larger than list length {length}"
+                        ),
+                    });
+                }
+                let data = (*src).data as *const u64;
+                let mut pool: Vec<u64> = Vec::with_capacity(length);
+                for i in 0..length {
+                    pool.push(std::ptr::read_unaligned(data.add(i)));
+                }
+                (length, pool)
+            };
+            // Partial Fisher-Yates: walk the index range, swap the
+            // selected slot to the front, take the first `n`.
+            let n = n as usize;
+            let mut pool = indices_pool;
+            for i in 0..n {
+                let remaining = (len - i) as u64;
+                let r = lcg_next(&mut interp.random_lcg_state) as u64;
+                let j = i + (r % remaining) as usize;
+                pool.swap(i, j);
+            }
+            let out = interp.alloc_list(n);
+            for v in pool.iter().take(n) {
+                // SAFETY: out is freshly allocated and owned by us.
+                unsafe { interp.list_push(out, *v) };
+            }
+            Ok(out as u64)
+        }
+
+        // ── M20b: `math` module extensions ─────────────────────────────
+        // The `math.sqrt`/etc. wrappers route to MathSqrt/Sin/Cos/etc.
+        // through the same NativeFn ids (70–79), so no new dispatch
+        // arms are needed for them.  The arms below handle the new
+        // helpers and the constants.
+        NativeFn::MathLog2 => Ok(arg_f64(args, 0).log2().to_bits()),
+        NativeFn::MathLog10 => Ok(arg_f64(args, 0).log10().to_bits()),
+        NativeFn::MathFloorI => {
+            let v = arg_f64(args, 0).floor();
+            if !v.is_finite() {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("floor: cannot convert {v} to int"),
+                });
+            }
+            Ok(v as i64 as u64)
+        }
+        NativeFn::MathCeilI => {
+            let v = arg_f64(args, 0).ceil();
+            if !v.is_finite() {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("ceil: cannot convert {v} to int"),
+                });
+            }
+            Ok(v as i64 as u64)
+        }
+        NativeFn::MathGcd => {
+            let mut a = arg_i64(args, 0).unsigned_abs();
+            let mut b = arg_i64(args, 1).unsigned_abs();
+            while b != 0 {
+                let t = b;
+                b = a % b;
+                a = t;
+            }
+            Ok(a as i64 as u64)
+        }
+        NativeFn::MathFactorial => {
+            let n = arg_i64(args, 0);
+            if n < 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("factorial: negative input {n}"),
+                });
+            }
+            if n > 20 {
+                return Err(VmError::UncaughtException {
+                    type_name: "OverflowError".into(),
+                    message: format!("factorial: {n}! overflows i64 (max safe input is 20)"),
+                });
+            }
+            let mut acc: i64 = 1;
+            for i in 2..=n {
+                acc = acc.wrapping_mul(i);
+            }
+            Ok(acc as u64)
+        }
+        NativeFn::MathIsNan => Ok(if arg_f64(args, 0).is_nan() { 1 } else { 0 }),
+        NativeFn::MathIsInf => Ok(if arg_f64(args, 0).is_infinite() { 1 } else { 0 }),
+        // f64 constants — module-attribute reads dispatch as zero-arg
+        // CallNative.  Each handler ignores args and returns the bits.
+        NativeFn::MathConstPi => Ok(std::f64::consts::PI.to_bits()),
+        NativeFn::MathConstE => Ok(std::f64::consts::E.to_bits()),
+        NativeFn::MathConstTau => Ok(std::f64::consts::TAU.to_bits()),
+        NativeFn::MathConstInf => Ok(f64::INFINITY.to_bits()),
+        NativeFn::MathConstNan => Ok(f64::NAN.to_bits()),
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
     }
+}
+
+/// One step of the Numerical Recipes LCG used by the `random` module.
+/// Constants: multiplier 1103515245, increment 12345, modulus 2^31.
+/// Returns the new state's value in `[0, 2^31)`.
+fn lcg_next(state: &mut i64) -> i64 {
+    let next = state
+        .wrapping_mul(1_103_515_245)
+        .wrapping_add(12_345)
+        & 0x7FFF_FFFF;
+    *state = next;
+    next
+}
+
+/// Format a unix-epoch f64 as `"YYYY-MM-DDTHH:MM:SSZ"` (UTC).  No
+/// fractional seconds — `time.format_iso` is intended for human-readable
+/// timestamps in logs; programs that need ms precision should print the
+/// epoch directly.
+fn format_epoch_iso(secs: f64) -> String {
+    if !secs.is_finite() {
+        return "<invalid-time>".into();
+    }
+    let total = secs.floor() as i64;
+    let day_seconds = 86_400i64;
+    // Pull the time-of-day off and keep `days` as a signed epoch-day
+    // count.  Rust's `rem_euclid` gives us the right sign behaviour for
+    // pre-1970 timestamps.
+    let days = total.div_euclid(day_seconds);
+    let sec_of_day = total.rem_euclid(day_seconds);
+    let hh = sec_of_day / 3600;
+    let mm = (sec_of_day / 60) % 60;
+    let ss = sec_of_day % 60;
+    let (y, m, d) = civil_from_days(days);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y, m, d, hh, mm, ss
+    )
+}
+
+/// Convert epoch-days (signed, days since 1970-01-01) to `(year, month,
+/// day)` using Howard Hinnant's algorithm (public domain).  Handles
+/// pre-1970 dates correctly via signed arithmetic.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }
 
 /// Read one line from the process's stdin, stripping the trailing
