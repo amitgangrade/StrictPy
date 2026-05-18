@@ -1,0 +1,61 @@
+"""Generic quicksort: one body, two element types.
+
+Before M17 each element type needed its own hand-rolled copy of
+`partition` + `quicksort` (see `examples/quicksort.spy`, the i64-only
+original — kept around so the v0.1 baseline still exercises the
+non-generic call path). With M17 we declare them once, parameterised
+over `T`, and the compiler emits one bytecode function per distinct
+instantiation (`quicksort__list_i64_i64_i64`, `quicksort__list_f64_i64_i64`,
+plus matching `partition__*`). Call sites infer `T` from the static
+argument type at each call.
+
+`T` is unbounded in v0.1 — the typechecker accepts any `<` use inside
+the body and the per-instantiation IR lowering picks the right compare
+op (ILt for i64, FLt for f64). A future v0.2 bounds system will move
+those checks back to compile time per instantiation."""
+
+fn partition[T](a: List[T], lo: i64, hi: i64) -> i64:
+    pivot: T = a[hi]
+    i: i64 = lo - 1
+    j: i64 = lo
+    while j < hi:
+        if a[j] < pivot:
+            i = i + 1
+            tmp: T = a[i]
+            a[i] = a[j]
+            a[j] = tmp
+        j = j + 1
+    tmp2: T = a[i + 1]
+    a[i + 1] = a[hi]
+    a[hi] = tmp2
+    return i + 1
+
+fn quicksort[T](a: List[T], lo: i64, hi: i64) -> None:
+    if lo < hi:
+        p: i64 = partition(a, lo, hi)
+        quicksort(a, lo, p - 1)
+        quicksort(a, p + 1, hi)
+
+fn print_i64(xs: List[i64]) -> None:
+    n: i64 = i64(len(xs))
+    i: i64 = 0
+    while i < n:
+        println(str(xs[i]))
+        i = i + 1
+
+fn print_f64(xs: List[f64]) -> None:
+    n: i64 = i64(len(xs))
+    i: i64 = 0
+    while i < n:
+        println(str(xs[i]))
+        i = i + 1
+
+fn main() -> i32:
+    ints: List[i64] = [5, 2, 8, 1, 9, 3, 7, 4, 6, 0]
+    quicksort(ints, 0, i64(len(ints)) - 1)
+    print_i64(ints)
+    println("---")
+    floats: List[f64] = [3.14, 1.41, 2.72, 0.58, 1.62, 2.23]
+    quicksort(floats, 0, i64(len(floats)) - 1)
+    print_f64(floats)
+    return 0

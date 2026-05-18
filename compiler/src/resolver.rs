@@ -13,6 +13,7 @@ use crate::ast::{
 use crate::error::{codes, CompileError, ErrorCode};
 use crate::types::{
     ClassId, ClassLayout, FieldInfo, MethodSig, PrimTy, ProtoId, ProtocolInfo, Ty, TypeCtor,
+    TypeVarId,
 };
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -119,6 +120,11 @@ pub struct FunctionSig {
     pub params: Vec<(String, Ty)>,
     pub ret: Ty,
     pub generics: Vec<String>,
+    /// One TypeVarId per entry of `generics`, in declaration order. Empty for
+    /// non-generic functions. Set by the resolver so the type-checker can
+    /// build substitutions at call sites without re-walking the source.
+    /// M17 (generics v0.1).
+    pub generic_tvars: Vec<TypeVarId>,
     /// For methods, the class id of the receiver (else None).
     pub receiver: Option<ClassId>,
     pub span: Span,
@@ -158,6 +164,10 @@ pub struct Resolver {
     next_sym: u32,
     next_class: u32,
     next_proto: u32,
+    /// M17: fresh TypeVarId allocator. Each generic parameter (`T` in
+    /// `fn id[T](x: T) -> T`) gets one. Resolver-allocated so the type-checker
+    /// can build substitutions at call sites by index.
+    next_tvar: u32,
     ident_to_symbol: HashMap<(u32, u32), SymbolId>,
     ast_type_to_ty: HashMap<(u32, u32), Ty>,
     class_layouts: HashMap<ClassId, ClassLayout>,
@@ -195,6 +205,11 @@ impl Resolver {
     fn fresh_proto(&mut self) -> ProtoId {
         let id = ProtoId(self.next_proto);
         self.next_proto += 1;
+        id
+    }
+    fn fresh_tvar(&mut self) -> TypeVarId {
+        let id = TypeVarId(self.next_tvar);
+        self.next_tvar += 1;
         id
     }
 
@@ -830,25 +845,44 @@ impl Resolver {
     fn build_function_sig(&mut self, scope: ScopeId, f: &FuncDecl, receiver: Option<ClassId>)
         -> Result<FunctionSig, CompileError>
     {
+        // M17: if the function declares type parameters, allocate a TypeVarId
+        // per `T`, seed them as `TypeAlias` symbols (carrying `Ty::Var(...)`)
+        // inside a scratch scope nested under `scope`, and lower the params /
+        // return type against that scope so every occurrence of `T` resolves
+        // to the same `Ty::Var`.
+        let mut generic_tvars: Vec<TypeVarId> = Vec::new();
+        let sig_scope = if f.generics.is_empty() {
+            scope
+        } else {
+            let s = self.table.new_scope(Some(scope), false);
+            for g in &f.generics {
+                let tv = self.fresh_tvar();
+                generic_tvars.push(tv);
+                self.make_symbol(s, &g.name, SymbolKind::TypeAlias, g.span,
+                                 Some(Ty::Var(tv)));
+            }
+            s
+        };
         let mut params = Vec::new();
         for p in &f.params {
             let ty = if receiver.is_some() && p.name == "self" {
                 Ty::Class(receiver.unwrap())
             } else {
-                self.lower_ast_type_with_class(&p.ty, scope, receiver)?
+                self.lower_ast_type_with_class(&p.ty, sig_scope, receiver)?
             };
             params.push((p.name.clone(), ty));
         }
         let ret = if matches!(f.return_ty, ast::Type::Named { ref name, .. } if name == "None") {
             Ty::Primitive(PrimTy::Unit)
         } else {
-            self.lower_ast_type_with_class(&f.return_ty, scope, receiver)?
+            self.lower_ast_type_with_class(&f.return_ty, sig_scope, receiver)?
         };
         Ok(FunctionSig {
             name: f.name.clone(),
             params,
             ret,
             generics: f.generics.iter().map(|g| g.name.clone()).collect(),
+            generic_tvars,
             receiver,
             span: f.span,
         })
@@ -883,10 +917,31 @@ impl Resolver {
         // Build a fresh function scope chained to the parent.
         let fn_scope = self.table.new_scope(Some(parent_scope), true);
 
-        // Type-parameter names go in scope so type annotations can reference them.
-        for g in &f.generics {
+        // M17: re-bind type parameters to the SAME `Ty::Var(...)`s already
+        // allocated during `build_function_sig`. For top-level fns we can look
+        // up the sig by the fn-symbol name in `parent_scope`. For methods we
+        // mint fresh ones here — body resolution uses them locally and the
+        // typechecker's substitution proceeds on each instantiation anyway.
+        // The contract: occurrences of `T` in param/return annotations and in
+        // the body must lower to the same `Ty::Var` so substitution at call
+        // sites sees a uniform variable.
+        let cached_tvars: Vec<TypeVarId> = if let Some(sid) =
+            self.table.lookup_local(parent_scope, &f.name)
+        {
+            self.function_sigs
+                .get(&sid)
+                .map(|s| s.generic_tvars.clone())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        for (i, g) in f.generics.iter().enumerate() {
+            let tv = cached_tvars
+                .get(i)
+                .copied()
+                .unwrap_or_else(|| self.fresh_tvar());
             self.make_symbol(fn_scope, &g.name, SymbolKind::TypeAlias, g.span,
-                              Some(Ty::Never));  // placeholder
+                              Some(Ty::Var(tv)));
         }
 
         // Register params.
@@ -898,7 +953,8 @@ impl Resolver {
             let pty = if receiver.is_some() && p.name == "self" {
                 Ty::Class(receiver.unwrap())
             } else {
-                self.lower_ast_type_with_class(&p.ty, parent_scope, receiver)?
+                // Lower against fn_scope so generic-param `T` is visible.
+                self.lower_ast_type_with_class(&p.ty, fn_scope, receiver)?
             };
             self.make_symbol(fn_scope, &p.name, SymbolKind::Param, p.span, Some(pty));
             if let Some(def) = &p.default {

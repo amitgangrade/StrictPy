@@ -422,11 +422,103 @@ class Box[T]:
         return self.value
 ```
 
-Bounds:
+Bounds (declarative — v0.2):
 ```python
 fn sum_all[T: Numeric](items: List[T]) -> T:
     ...
 ```
+
+##### v0.1 (M17) generic free functions
+
+Implemented:
+
+1. **Declaration.** A free function may carry one or more type parameters
+   between square brackets after the name. Type parameters are visible
+   inside parameter annotations, the return type, and local-binding
+   annotations.
+
+   ```python
+   fn id[T](x: T) -> T:
+       return x
+
+   fn first[K, V](p: Tuple[K, V]) -> K:
+       return p.0
+
+   fn first_of[T](xs: List[T]) -> T:
+       return xs[0]
+   ```
+
+2. **Call-site inference.** Type arguments are *not* written at the call;
+   the type checker unifies each parameter annotation with the
+   corresponding argument's static type. The substitution must collapse
+   to a unique solution per type parameter; otherwise the call site
+   reports `E2001` pointing at the offending argument.
+
+   ```python
+   id(7)            # T := i32
+   id("hi")         # T := str
+   first((1, "x"))  # K := i32, V := str
+   id(true)         # T := bool
+   ```
+
+   Inside a generic-fn body, calls to *other* generic functions also
+   participate in inference: the substitution active for the enclosing
+   body resolves any `Ty::Var` in the argument types before unification,
+   so a call to a generic helper threads the outer `T` through to the
+   inner instantiation.
+
+3. **Monomorphisation.** The IR lowerer emits exactly one bytecode
+   function per distinct `(fn_sym, type_args)` pair discovered at
+   call sites. The original generic template is **not** emitted;
+   every call site dispatches to a mangled per-instantiation `FuncId`.
+   The lowerer drives a worklist — instantiations discovered transitively
+   inside a generic body are queued and lowered in turn — so every
+   reachable specialisation is emitted exactly once.
+
+4. **Mangling scheme.** A mangled name has the form
+   `<src_name>__<arg1_mangled>_<arg2_mangled>...`. Each element follows:
+
+   | Type             | Mangle |
+   |------------------|--------|
+   | `i32`/`i64`/etc. | `i32`/`i64`/... (lowercase primitive name)        |
+   | `bool`, `char`, `str` | `bool`, `char`, `str`                             |
+   | `class C` (id=N) | `class<N>`                                        |
+   | `Tuple[A, B]`    | `tuple_<A>_<B>`                                   |
+   | `List[T]`        | `list_<T>` (constructor name lowercased)          |
+   | `Dict[K, V]`     | `dict_<K>_<V>`                                    |
+   | `T?`             | `opt_<T>`                                         |
+
+   Example: `quicksort__list_i64_i64_i64` is the i64 instantiation of
+   `fn quicksort[T](a: List[T], lo: i64, hi: i64)`.
+
+5. **Per-instantiation operator binding.** Comparison and arithmetic
+   operators inside a generic body see `Ty::Var(T)` operands at type-
+   check time; the type-checker accepts them deferred. At IR lowering
+   the active substitution applies, so `xs[j] < pivot` lowers to `ILt`
+   in `quicksort__list_i64_i64_i64` and to `FLt` in
+   `quicksort__list_f64_i64_i64` from the *same* source body.
+
+6. **Recursion.** A generic function calling itself with the same
+   substitution dispatches to its own mangled `FuncId` — i.e. recursion
+   inside `quicksort[T]` lowers to a direct call to the matching
+   per-instantiation function, not back to the template.
+
+##### v0.1 limits (deferred to v0.2)
+
+- **No generic classes.** Parser accepts `class Box[T]:` but the type
+  checker rejects field-typed references to `T`. (v0.2 will extend
+  monomorphisation through class layouts.)
+- **No bounds.** `T: Comparable` parses but the checker ignores the
+  bound. A body that uses `<` on `T` typechecks, and instantiations
+  where `<` is unsupported (e.g. user-defined class without comparison)
+  trap at runtime rather than reject at compile time. (v0.2 will add
+  protocol-typed bounds and per-instantiation re-typecheck.)
+- **No auto-inference from return-type context.** `let x: i64 = id(0)`
+  does *not* propagate the i64 expectation into the call; the
+  unsuffixed `0` synths as i32 and inference picks `T := i32`. Users
+  pin the type via a typed local (`big: i64 = 0; id(big)`), a literal
+  suffix (`0i64`), or an explicit cast (`i64(0)`).
+- **No higher-rank generics.** `fn apply(f: fn[T](T) -> T)` is rejected.
 
 #### 5.1.6 Protocols
 

@@ -316,3 +316,73 @@ actually a `Pair`?" at runtime).
   hierarchy programs (`json_parse.spy`, `lisp.spy`, `lambda_calc.spy`)
   whose discriminator workarounds CAN now be deleted; per the brief, we
   do not migrate them in this round.
+
+---
+
+## Fixed in M17
+
+One language-gap closure: **user-code generic free functions**. Every
+M10–M16 agent report flagged "rewrite-per-type friction" — `partition` /
+`quicksort` / `min_heap` / `linked_list` had to be hand-rolled per element
+type because the AST already carried `GenericParam` on `FuncDecl` but the
+resolver bound `T` to `Ty::Never`, the typechecker rejected calls (no
+substitution mechanism), and the IR lowered each function exactly once.
+
+| # | Gap closed | Fix location | Regression test |
+|---|------------|--------------|-----------------|
+| M17 | `fn id[T](x: T) -> T: return x` declared, called, and inferred at the call site; per-instantiation IR lowering with mangled FuncIds; transitive monomorphisation across generic-to-generic calls. | (1) `compiler/src/resolver.rs::build_function_sig` — each generic param gets a fresh `TypeVarId` recorded on the `FunctionSig`; the seed type-symbol carries `Ty::Var(tv)` instead of `Ty::Never`. (2) `compiler/src/typecheck.rs::check_generic_call` — interleaved synth-then-unify per arg, with `subst_ty` applied to each expected param type so already-solved vars switch to `check_expr` (giving int-literal width inference). Unification failures surface as `E2001`. (3) `compiler/src/typecheck.rs::check_binary` — `Ty::Var` operands typecheck as deferred (instantiation-specific). (4) `compiler/src/ir.rs::Lowerer::run` — Pass 2.6 seeds the worklist from fully-concrete typechecker instantiations; Pass 3 skips generic templates; Pass 3.5 drains the worklist via `lower_func_instantiation`, which applies a `Ty::Var(id) -> concrete` substitution at every `expr_ty(span)` and at every param/return type. (5) `compiler/src/ir.rs::lower_call` — generic callee dispatch: rebuild the substitution from the current call's argument types (already substituted by the enclosing body's subst), mangle, look up or mint a `FuncId`, emit `DirectCall`. (6) New mangle scheme in `compiler/src/typecheck.rs::mangle_args_key` (deterministic, debuggable, e.g. `quicksort__list_i64_i64_i64`). | `vm/tests/m17_generics.rs` (8 tests covering identity over 5 widths, multi-param tuple projection, `List[T]` arg, transitive monomorphisation, inference failure, instantiation-specific `+` over i32/str, tuple swap, generic over user class), and `compiler/tests/quicksort_generic_runs.rs` (the load-bearing demo). |
+
+M17 closed: generic free functions with call-site monomorphisation.
+Generic classes deferred to v0.2.
+
+### Notes for the next round
+
+- **Generic classes (`class Box[T]:`)** are deferred. The parser accepts the
+  syntax and the resolver assigns a `ClassLayout.generics` field, but field-
+  typed references to `T` aren't substituted at instantiation time. Closing
+  this requires the same lazy-mono worklist treatment applied at the class-
+  layout layer: one type-table entry per `(class_sym, type_args)` with
+  substituted field types, and call sites to constructors must dispatch by
+  type-args.
+
+- **Bounds (`T: Comparable`)** are deferred. The parser accepts the syntax;
+  the resolver ignores it. A future bounds system can either: (a) compile
+  the bound to a deferred constraint that the per-instantiation typecheck
+  resolves to a concrete method-set, or (b) restrict the body's operations
+  to those declared by the bound's protocol, with no per-instantiation
+  re-check. Option (b) is more conservative and probably the right v0.2
+  target.
+
+- **Auto-inference from return-type context** (`let x: i64 = id(0)`) is
+  deferred. The call-site loop currently uses `synth_expr` whenever the
+  expected param type contains an unbound var, so a bare `0` defaults to
+  i32. Plumbing the let-binding's expected type into the generic-call
+  inference would let `id(0)` solve `T := i64` from outside. Spec §10.4
+  promises this; v0.1 doesn't deliver it.
+
+- **Calls to generic methods on non-generic classes** (`class Foo: fn cast[T](self) -> T`)
+  are NOT yet implemented. `synth_method_call` would need the same
+  `check_generic_call` path; this round only wired free functions.
+
+- **Quicksort over `List[str]`** doesn't work — `<` on `str` traps in the
+  VM (no `StrLt` native). That's a pre-existing M9 limitation surfaced by
+  the M17 demo, not a regression. A small follow-up can add `StrLt`/`StrLe`
+  natives; until then the demo uses `List[i64]` and `List[f64]`.
+
+- **One incidental bug found during M17 development**: the
+  `TypedModule::instantiations` field was declared `HashSet<(SymbolId,
+  Vec<Ty>)>` since (apparently) an earlier scaffolding pass — but `Ty`
+  doesn't derive `Hash`/`Eq`, so the field was never populated and the
+  declaration compiled only because no one inserted into it. Replaced
+  with `Vec<(SymbolId, Vec<Ty>)>` + a parallel `HashSet<(SymbolId,
+  String)>` keyed by `mangle_args_key` for dedup. No user-visible
+  symptom; cleanup of half-built scaffolding.
+
+- **Demo LOC**: `examples/quicksort_generic.spy` is 55 lines including a
+  long docstring header (38 lines of code). It sorts both `List[i64]` and
+  `List[f64]` from the same `quicksort[T]` / `partition[T]` bodies. The
+  pre-M17 `examples/quicksort.spy` (35 lines, i64 only) is kept untouched
+  per the brief. A hand-rolled two-type baseline would be ~65 lines of
+  code (two copies of partition + quicksort + main) — so the generic
+  version is roughly 40% shorter at *two* element types and the savings
+  scale linearly per added type.

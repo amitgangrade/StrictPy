@@ -93,6 +93,39 @@ Post-M16 state (2026-05-18 later):
   evaluator demo).
 - BUG-028 (lexer line continuation) is still the only deferred bug.
 
+Post-M17 state (2026-05-18 even later):
+
+- **M17 closed the "no user-code generics" language gap**: every M10–M16
+  agent report flagged "rewrite-per-type friction" — `partition` /
+  `quicksort` / `min_heap` / `linked_list` had to be hand-rolled per
+  element type. The AST carried `GenericParam` from M0 but the resolver
+  bound type parameters to `Ty::Never`, the typechecker had no
+  substitution mechanism at call sites, and the IR lowerer always
+  emitted exactly one function per `FuncDecl`. M17 wires the resolver
+  (each `T` gets a fresh `TypeVarId`, recorded on `FunctionSig`), the
+  typechecker (`check_generic_call` walks args left-to-right doing
+  interleaved synth-then-unify with progressive substitution, recording
+  `(SymbolId, Vec<Ty>)` instantiations), and the IR (`Lowerer::run`
+  Pass 3.5 drives a worklist of `(sid, type_args)` pairs through
+  `lower_func_instantiation`, which applies `Ty::Var(id) -> concrete`
+  substitution at every `expr_ty(span)` lookup). Call sites dispatch
+  via a deterministic mangle scheme (`quicksort__list_i64_i64_i64`).
+  Transitive monomorphisation is handled by `lower_call` minting a
+  fresh `FuncId` and pushing onto the worklist when it sees a
+  previously-unseen instantiation.
+- **M17 closed**: generic free functions with call-site
+  monomorphisation. Generic classes deferred to v0.2.
+- Tests: `vm/tests/m17_generics.rs` (8 tests),
+  `compiler/tests/quicksort_generic_runs.rs` (2 tests),
+  `examples/quicksort_generic.spy` (sorts both `List[i64]` and
+  `List[f64]` from one body).
+- Carve-outs (deferred to v0.2): generic classes, bounds
+  (`T: Comparable`), auto-inference from return-type context, generic
+  methods on non-generic classes. See BUGS_KNOWN.md §"Fixed in M17"
+  notes for the full list.
+- BUG-028 (lexer line continuation) is still the only legacy deferred
+  bug.
+
 ## Full catalog
 
 ### Critical: silent miscompiles

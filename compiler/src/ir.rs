@@ -20,8 +20,8 @@ use crate::ast::{
     Span, Stmt, TopDecl, UnaryOp,
 };
 use crate::resolver::{SymbolId, SymbolKind};
-use crate::typecheck::TypedModule;
-use crate::types::{display_ty, ClassId, ClassLayout, PrimTy, Ty, TypeCtor};
+use crate::typecheck::{mangle_args_key, subst_ty, unify_one as unify_lower, TypedModule};
+use crate::types::{display_ty, ClassId, ClassLayout, PrimTy, Ty, TypeCtor, TypeVarId};
 
 // ─────────────────────────────────────────────────────────────────────────
 //  IR node types
@@ -269,7 +269,10 @@ struct Lowerer {
     out: IRModule,
     /// Intern table: string → string-table index.
     str_intern: HashMap<String, u32>,
-    /// Top-level function name → assigned fn id.
+    /// Top-level function name → assigned fn id. For generic functions this
+    /// maps to the **first instantiation**'s FuncId so legacy callers (no
+    /// substitution) get a sensible default; M17 generic-aware call sites
+    /// instead consult `fn_id_for_inst`.
     fn_id_by_name: HashMap<String, FuncId>,
     /// Class id → assigned type-table type_id.
     class_type_id: HashMap<u32, u32>,
@@ -286,6 +289,29 @@ struct Lowerer {
     next_fn_id: u32,
     /// Next free type id (after primitives 0..15).
     next_type_id: u32,
+    /// M17: every generic top-level fn whose declaration carries `[T, ...]`.
+    /// Indexed by source name. Used to look up the FuncDecl when lowering
+    /// per-instantiation copies.
+    generic_fn_decls: HashMap<String, FuncDecl>,
+    /// M17: source name → SymbolId, so the typechecker-recorded instantiation
+    /// list can be located.
+    generic_fn_sid: HashMap<String, SymbolId>,
+    /// M17: per-instantiation FuncId. Key: `(sid, mangle_args_key)`.
+    fn_id_for_inst: HashMap<(SymbolId, String), FuncId>,
+    /// M17: per-instantiation generic-arg vector. Same key; lets the lowerer
+    /// reconstruct the substitution map when emitting the body.
+    type_args_for_inst: HashMap<(SymbolId, String), Vec<Ty>>,
+    /// M17: name of the mangled IRFunction for `(sid, key)` — used to set the
+    /// `irfn.name` so codegen / debugging show the substituted signature.
+    mangled_name_for_inst: HashMap<(SymbolId, String), String>,
+    /// M17: TypeVarIds declared by each generic fn, in declaration order, so
+    /// `lower_call` (which only has access to `Lowerer` state via `LowerCtx`)
+    /// can rebuild the substitution from arg types.
+    tvars_for_sid: HashMap<SymbolId, Vec<TypeVarId>>,
+    /// M17 worklist: instantiations to lower. Populated from
+    /// `typed.instantiations` at startup, extended on-the-fly when a
+    /// generic body calls another generic (transitive monomorphisation).
+    inst_worklist: Vec<(SymbolId, Vec<Ty>)>,
 }
 
 impl Lowerer {
@@ -300,6 +326,13 @@ impl Lowerer {
             module_consts: HashMap::new(),
             next_fn_id: 0,
             next_type_id: 16,
+            generic_fn_decls: HashMap::new(),
+            generic_fn_sid: HashMap::new(),
+            fn_id_for_inst: HashMap::new(),
+            type_args_for_inst: HashMap::new(),
+            mangled_name_for_inst: HashMap::new(),
+            tvars_for_sid: HashMap::new(),
+            inst_worklist: Vec::new(),
         }
     }
 
@@ -333,6 +366,30 @@ impl Lowerer {
         for d in &decls {
             match d {
                 TopDecl::Func(f) => {
+                    if !f.generics.is_empty() {
+                        // M17: generic free fns get one FuncId per instantiation,
+                        // not one shared id. Stash the AST so the worklist can
+                        // re-walk the body once per (T1, T2, ...). The unmangled
+                        // name is **not** registered in `fn_id_by_name` because
+                        // there is no IRFunction to dispatch to — every call site
+                        // must rewrite to a mangled per-instantiation id.
+                        self.generic_fn_decls.insert(f.name.clone(), f.clone());
+                        if let Some(sid) = self
+                            .typed
+                            .resolved
+                            .symbols
+                            .lookup(self.typed.resolved.module_scope, &f.name)
+                        {
+                            self.generic_fn_sid.insert(f.name.clone(), sid);
+                            if let Some(sig) =
+                                self.typed.resolved.function_sigs.get(&sid)
+                            {
+                                self.tvars_for_sid
+                                    .insert(sid, sig.generic_tvars.clone());
+                            }
+                        }
+                        continue;
+                    }
                     let fid = self.fresh_fn_id();
                     self.fn_id_by_name.insert(f.name.clone(), fid);
                 }
@@ -466,10 +523,24 @@ impl Lowerer {
         // computed purely from arity + index.
         self.register_tuple_types();
 
+        // Pass 2.6 (M17): pre-register a FuncId for every *fully concrete*
+        // generic-fn instantiation the typechecker discovered (i.e. those
+        // whose type args don't contain any unbound `Ty::Var`). Calls that
+        // appear inside another generic body get rediscovered with concrete
+        // arguments during Pass 3.5 lowering.
+        let initial: Vec<(SymbolId, Vec<Ty>)> = self.typed.instantiations.clone();
+        for (sid, type_args) in initial {
+            if type_args.iter().any(has_unbound_var) { continue; }
+            self.register_instantiation(sid, type_args);
+        }
+
         // Pass 3: lower function bodies.
         for d in &decls {
             match d {
                 TopDecl::Func(f) => {
+                    // M17: generic templates aren't lowered directly — they
+                    // produce one IRFunction per instantiation in Pass 3.5.
+                    if !f.generics.is_empty() { continue; }
                     let fid = *self.fn_id_by_name.get(&f.name).unwrap();
                     let irfn = self.lower_func(fid, f, None);
                     self.register_fn_table(&irfn);
@@ -499,6 +570,127 @@ impl Lowerer {
                 _ => {}
             }
         }
+
+        // Pass 3.5 (M17): drive the monomorphisation worklist. Each entry is
+        // a `(sid, type_args)` discovered either by the typechecker or as a
+        // transitive instantiation introduced while lowering a previous
+        // entry's body. We pop until the worklist drains; new entries can
+        // appear during `lower_func_instantiation` via `lower_call`.
+        while let Some((sid, type_args)) = self.inst_worklist.pop() {
+            let key = mangle_args_key(&type_args);
+            let fid = match self.fn_id_for_inst.get(&(sid, key.clone())).copied() {
+                Some(f) => f,
+                None => continue, // shouldn't happen — register_instantiation pre-assigns
+            };
+            let mangled = self.mangled_name_for_inst
+                .get(&(sid, key.clone())).cloned().unwrap_or_default();
+            // Look up the source name from the SymbolId.
+            let src_name = self.typed.resolved.symbols.get(sid).name.clone();
+            let decl = match self.generic_fn_decls.get(&src_name).cloned() {
+                Some(d) => d,
+                None => continue,
+            };
+            let tvars = self.tvars_for_sid.get(&sid).cloned().unwrap_or_default();
+            let mut subst: HashMap<u32, Ty> = HashMap::new();
+            for (tv, ty_arg) in tvars.iter().zip(&type_args) {
+                subst.insert(tv.0, ty_arg.clone());
+            }
+            let irfn = self.lower_func_instantiation(fid, &decl, &mangled, &subst);
+            self.register_fn_table(&irfn);
+            self.out.functions.push(irfn);
+        }
+    }
+
+    /// M17: register a fresh `FuncId` and mangled name for a generic-fn
+    /// instantiation `(sid, type_args)`. Idempotent — calls with the same
+    /// key are no-ops. Pushes the entry onto `inst_worklist` for body
+    /// lowering in Pass 3.5.
+    fn register_instantiation(&mut self, sid: SymbolId, type_args: Vec<Ty>) -> FuncId {
+        let key = mangle_args_key(&type_args);
+        if let Some(fid) = self.fn_id_for_inst.get(&(sid, key.clone())).copied() {
+            return fid;
+        }
+        let src_name = self.typed.resolved.symbols.get(sid).name.clone();
+        let mangled = format!("{}__{}", src_name, key);
+        let fid = self.fresh_fn_id();
+        self.fn_id_for_inst.insert((sid, key.clone()), fid);
+        self.type_args_for_inst.insert((sid, key.clone()), type_args.clone());
+        self.mangled_name_for_inst.insert((sid, key.clone()), mangled);
+        self.inst_worklist.push((sid, type_args));
+        fid
+    }
+
+    /// M17: lower one body of a generic fn under substitution `subst`. The
+    /// substitution applies to every type annotation (params, return type,
+    /// locals) and to every `expr_types` lookup during expression lowering
+    /// — the lowerer carries it inside `LowerCtx::type_subst`.
+    fn lower_func_instantiation(
+        &mut self,
+        id: FuncId,
+        f: &FuncDecl,
+        mangled_name: &str,
+        subst: &HashMap<u32, Ty>,
+    ) -> IRFunction {
+        let mut fb = FuncBuilder::new(id, mangled_name);
+        let mut param_tys: Vec<Ty> = Vec::new();
+        for p in &f.params {
+            let raw = self.lookup_ast_ty(&p.ty).unwrap_or(Ty::Primitive(PrimTy::Unit));
+            let ty = subst_ty(&raw, subst);
+            param_tys.push(ty.clone());
+            fb.params.push((p.name.clone(), ty));
+        }
+        let raw_ret = self.lookup_ast_ty(&f.return_ty).unwrap_or(Ty::Primitive(PrimTy::Unit));
+        let ret_ty = subst_ty(&raw_ret, subst);
+
+        let entry = fb.new_block();
+        fb.current = entry;
+        for (idx, (name, ty)) in fb.params.clone().iter().enumerate() {
+            let v = fb.push_value(ty.clone(), ValueKind::Param { idx: idx as u32 });
+            let slot = fb.alloc_slot(name, ty.clone());
+            fb.emit_write_local(slot, v);
+        }
+
+        let mut lifted: Vec<IRFunction> = Vec::new();
+        {
+            let mut ctx = LowerCtx {
+                typed: &self.typed,
+                str_intern: &mut self.str_intern,
+                string_table: &mut self.out.string_table,
+                fn_id_by_name: &self.fn_id_by_name,
+                class_layouts: &self.typed.resolved.class_layouts,
+                class_type_id: &self.class_type_id,
+                tuple_type_id: &self.tuple_type_id,
+                module_consts: &self.module_consts,
+                next_fn_id: &mut self.next_fn_id,
+                lifted_functions: &mut lifted,
+                type_subst: subst.clone(),
+                generic_fn_sid: &self.generic_fn_sid,
+                fn_id_for_inst: &mut self.fn_id_for_inst,
+                mangled_name_for_inst: &mut self.mangled_name_for_inst,
+                tvars_for_sid: &self.tvars_for_sid,
+                inst_worklist: &mut self.inst_worklist,
+            };
+            let _ = lower_block(&mut fb, &mut ctx, &f.body);
+        }
+
+        let cur_id = fb.current;
+        let cur_idx = cur_id.0 as usize;
+        if let Terminator::Unreachable = fb.blocks[cur_idx].terminator {
+            fb.blocks[cur_idx].terminator = Terminator::Ret { value: None };
+        }
+
+        let main_irfn = IRFunction {
+            id,
+            name: mangled_name.to_string(),
+            params: param_tys,
+            ret: ret_ty,
+            blocks: fb.blocks,
+        };
+        for lf in lifted {
+            self.register_fn_table(&lf);
+            self.out.functions.push(lf);
+        }
+        main_irfn
     }
 
     /// Walk every expression / param / return / field / local type observed
@@ -683,19 +875,28 @@ impl Lowerer {
 
         // Lower body — best-effort.
         let mut lifted: Vec<IRFunction> = Vec::new();
-        let mut ctx = LowerCtx {
-            typed: &self.typed,
-            str_intern: &mut self.str_intern,
-            string_table: &mut self.out.string_table,
-            fn_id_by_name: &self.fn_id_by_name,
-            class_layouts: &self.typed.resolved.class_layouts,
-            class_type_id: &self.class_type_id,
-            tuple_type_id: &self.tuple_type_id,
-            module_consts: &self.module_consts,
-            next_fn_id: &mut self.next_fn_id,
-            lifted_functions: &mut lifted,
-        };
-        let _ = lower_block(&mut fb, &mut ctx, &f.body);
+        {
+            let mut ctx = LowerCtx {
+                typed: &self.typed,
+                str_intern: &mut self.str_intern,
+                string_table: &mut self.out.string_table,
+                fn_id_by_name: &self.fn_id_by_name,
+                class_layouts: &self.typed.resolved.class_layouts,
+                class_type_id: &self.class_type_id,
+                tuple_type_id: &self.tuple_type_id,
+                module_consts: &self.module_consts,
+                next_fn_id: &mut self.next_fn_id,
+                lifted_functions: &mut lifted,
+                // M17: non-generic bodies have an empty substitution.
+                type_subst: HashMap::new(),
+                generic_fn_sid: &self.generic_fn_sid,
+                fn_id_for_inst: &mut self.fn_id_for_inst,
+                mangled_name_for_inst: &mut self.mangled_name_for_inst,
+                tvars_for_sid: &self.tvars_for_sid,
+                inst_worklist: &mut self.inst_worklist,
+            };
+            let _ = lower_block(&mut fb, &mut ctx, &f.body);
+        }
 
         // Ensure the last block has a terminator.
         let cur_id = fb.current;
@@ -884,6 +1085,27 @@ struct LowerCtx<'a> {
     /// outer lowerer flushes them into the module's function list once
     /// the parent function finishes.
     lifted_functions: &'a mut Vec<IRFunction>,
+    /// M17: type-substitution active for the *current* function body. Empty
+    /// for non-generic fns; a `Var(tv) -> concrete` map for an
+    /// instantiation. Used by `expr_ty` to apply substitution to recorded
+    /// types and by `lower_call` to specialise generic-callee dispatch.
+    type_subst: HashMap<u32, Ty>,
+    /// M17: source name → SymbolId for every generic top-level fn.
+    generic_fn_sid: &'a HashMap<String, SymbolId>,
+    /// M17: per-instantiation FuncId table keyed by `(sid, mangle_key)`.
+    /// Mutable so `lower_call` can mint a fresh FuncId the *first* time it
+    /// sees a transitive instantiation (e.g. `quicksort[i64]` inside its
+    /// own body, or `partition[i64]` from `quicksort[i64]`), and emit a
+    /// well-formed `DirectCall` to it immediately.
+    fn_id_for_inst: &'a mut HashMap<(SymbolId, String), FuncId>,
+    /// M17: mangled name per instantiation (parallel to `fn_id_for_inst`).
+    mangled_name_for_inst: &'a mut HashMap<(SymbolId, String), String>,
+    /// M17: TypeVarIds declared by each generic fn, in declaration order.
+    tvars_for_sid: &'a HashMap<SymbolId, Vec<TypeVarId>>,
+    /// M17: worklist of `(sid, type_args)` pairs needing body lowering.
+    /// `lower_call` pushes here when it mints a new FuncId; the outer
+    /// `run()` loop pops from here.
+    inst_worklist: &'a mut Vec<(SymbolId, Vec<Ty>)>,
 }
 
 impl<'a> LowerCtx<'a> {
@@ -898,11 +1120,16 @@ impl<'a> LowerCtx<'a> {
     }
 
     fn expr_ty(&self, span: Span) -> Ty {
-        self.typed
+        let raw = self.typed
             .expr_types
             .get(&(span.start, span.end))
             .cloned()
-            .unwrap_or(Ty::Primitive(PrimTy::Unit))
+            .unwrap_or(Ty::Primitive(PrimTy::Unit));
+        // M17: if we're inside an instantiated generic body, apply the
+        // active substitution so downstream lowering sees concrete types
+        // (e.g. `Ty::Var(0)` becomes `Ty::Primitive(PrimTy::I64)`). For
+        // non-generic bodies the map is empty and this is a no-op.
+        if self.type_subst.is_empty() { raw } else { subst_ty(&raw, &self.type_subst) }
     }
 }
 
@@ -2668,6 +2895,20 @@ fn lower_short_circuit(
     fb.emit_read_local(slot)
 }
 
+/// M17: does `t` reference any `Ty::Var`? Used by Pass 2.6 to skip
+/// typechecker-recorded instantiations that are still abstract.
+fn has_unbound_var(t: &Ty) -> bool {
+    match t {
+        Ty::Var(_) => true,
+        Ty::Generic { args, .. } | Ty::Tuple(args) => args.iter().any(has_unbound_var),
+        Ty::Function { params, ret } => {
+            params.iter().any(has_unbound_var) || has_unbound_var(ret)
+        }
+        Ty::Nullable(inner) => has_unbound_var(inner),
+        _ => false,
+    }
+}
+
 fn find_value_ty(fb: &FuncBuilder, v: ValueId) -> Option<Ty> {
     for b in &fb.blocks {
         for val in &b.values {
@@ -2800,6 +3041,69 @@ fn lower_call(
                     }
                 }
                 SymbolKind::Function => {
+                    // M17: generic function call — rebuild the substitution
+                    // from this call's argument types and dispatch to the
+                    // matching mangled FuncId. Argument types may themselves
+                    // contain `Ty::Var` if the call appears inside another
+                    // generic body; the current `type_subst` resolves those
+                    // before unification, which yields the concrete type
+                    // args for the callee. If the (sid, type_args) pair is
+                    // brand new (no FuncId yet), mint one *here* and push
+                    // onto the worklist so its body gets lowered later.
+                    if let Some(gen_sid) = ctx.generic_fn_sid.get(name).copied() {
+                        if let Some(sig) =
+                            ctx.typed.resolved.function_sigs.get(&gen_sid).cloned()
+                        {
+                            let mut subst: HashMap<u32, Ty> = HashMap::new();
+                            for (i, (_, ptype)) in sig.params.iter().enumerate() {
+                                if let Some(a) = args.get(i) {
+                                    let mut arg_ty = ctx.expr_ty(expr_span(&a.value));
+                                    arg_ty = subst_ty(&arg_ty, &ctx.type_subst);
+                                    let _ = unify_lower(ptype, &arg_ty, &mut subst);
+                                }
+                            }
+                            let mut type_args: Vec<Ty> = Vec::new();
+                            for tv in &sig.generic_tvars {
+                                type_args.push(
+                                    subst.get(&tv.0).cloned().unwrap_or(Ty::Never),
+                                );
+                            }
+                            let key = mangle_args_key(&type_args);
+                            let fid = if let Some(f) =
+                                ctx.fn_id_for_inst.get(&(gen_sid, key.clone())).copied()
+                            {
+                                f
+                            } else {
+                                // Mint a FuncId on the fly. Caller-side
+                                // worklist registration so the outer pass
+                                // lowers the body next iteration.
+                                let raw = *ctx.next_fn_id;
+                                *ctx.next_fn_id += 1;
+                                let f = FuncId(raw);
+                                let src = ctx
+                                    .typed
+                                    .resolved
+                                    .symbols
+                                    .get(gen_sid)
+                                    .name
+                                    .clone();
+                                let mangled = format!("{}__{}", src, key);
+                                ctx.fn_id_for_inst
+                                    .insert((gen_sid, key.clone()), f);
+                                ctx.mangled_name_for_inst
+                                    .insert((gen_sid, key.clone()), mangled);
+                                ctx.inst_worklist.push((gen_sid, type_args));
+                                f
+                            };
+                            return fb.push_value(
+                                ret_ty,
+                                ValueKind::Op {
+                                    op: IROp::DirectCall { fn_id: fid },
+                                    args: arg_vs,
+                                },
+                            );
+                        }
+                    }
                     // User-defined function?
                     if let Some(fid) = ctx.fn_id_by_name.get(name).copied() {
                         return fb.push_value(

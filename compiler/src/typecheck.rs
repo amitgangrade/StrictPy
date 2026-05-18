@@ -18,10 +18,10 @@ use crate::ast::{
     self, Arg, BinOp, Block, ClassDecl, Expr, FuncDecl, Literal, Lvalue, Span, Stmt, TopDecl, UnaryOp,
 };
 use crate::error::{codes, CompileError, ErrorCode};
-use crate::resolver::{ResolvedModule, SymbolId, SymbolKind};
+use crate::resolver::{FunctionSig, ResolvedModule, SymbolId, SymbolKind};
 use crate::types::{
     is_subtype, is_subtype_trivial, ty_eq, ClassId, ClassLayout, PrimTy, ProtoId,
-    ProtocolInfo, Ty, TypeContext, TypeCtor,
+    ProtocolInfo, Ty, TypeContext, TypeCtor, TypeVarId,
 };
 
 #[derive(Debug, Clone)]
@@ -44,7 +44,11 @@ pub struct TypedBlock {
 pub struct TypedModule {
     pub resolved: ResolvedModule,
     pub expr_types: HashMap<(u32, u32), Ty>,
-    pub instantiations: HashSet<(SymbolId, Vec<Ty>)>,
+    /// M17: every (fn_sym, type_args) pair discovered at a call site during
+    /// typecheck. The IR lowerer materialises one mangled function per entry.
+    /// Stored as `Vec` (not `HashSet`) because `Ty` is not Hash/Eq.
+    /// De-duplicated by `display_ty(type_args)` while building.
+    pub instantiations: Vec<(SymbolId, Vec<Ty>)>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -54,7 +58,10 @@ pub struct TypedModule {
 #[derive(Default)]
 pub struct TypeChecker {
     expr_types: HashMap<(u32, u32), Ty>,
-    instantiations: HashSet<(SymbolId, Vec<Ty>)>,
+    instantiations: Vec<(SymbolId, Vec<Ty>)>,
+    /// Set of `(sid, mangled_args_key)` already in `instantiations`, used to
+    /// dedupe across call sites (and across transitive monomorphisations).
+    instantiation_keys: HashSet<(SymbolId, String)>,
 }
 
 /// One frame of local-binding type info.  Used for flow-sensitive narrowing
@@ -897,6 +904,11 @@ impl TypeChecker {
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 let lt = self.synth_expr(lhs, env, ctx, r)?;
                 let rt = self.check_or_synth(rhs, Some(&lt), env, ctx, r)?;
+                // M17: defer comparison-shape checks inside generic bodies
+                // (see Add/Sub/... arm for the same pattern).
+                if matches!(lt, Ty::Var(_)) || matches!(rt, Ty::Var(_)) {
+                    return Ok(Ty::Primitive(PrimTy::Bool));
+                }
                 if !ty_eq(&lt, &rt)
                     && !is_subtype(&lt, &rt, &ctx.ty_ctx())
                     && !is_subtype(&rt, &lt, &ctx.ty_ctx())
@@ -916,6 +928,18 @@ impl TypeChecker {
             | BinOp::Rem | BinOp::Pow | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
             | BinOp::Shl | BinOp::Shr => {
                 let lt = self.synth_expr(lhs, env, ctx, r)?;
+                // M17: inside a generic body, operand types may be unresolved
+                // `Ty::Var`. Defer the operand-shape check to the per-
+                // instantiation IR lowering — at the typecheck level we
+                // return the operand type as-is so the body still typechecks
+                // structurally. Concrete-substitution errors (e.g. `T + T`
+                // with `T := some-class-with-no-Add`) surface at IR time as
+                // VM traps for now; a future bounds system can move these
+                // back to compile-time per instantiation.
+                if matches!(lt, Ty::Var(_)) {
+                    let _ = self.synth_expr(rhs, env, ctx, r)?;
+                    return Ok(lt);
+                }
                 // Allow `str + str` (concat per spec §7.4).
                 if matches!(op, BinOp::Add) && matches!(lt, Ty::Primitive(PrimTy::Str)) {
                     let rt = self.check_or_synth(rhs, Some(&Ty::Primitive(PrimTy::Str)), env, ctx, r)?;
@@ -926,6 +950,9 @@ impl TypeChecker {
                     return Ok(Ty::Primitive(PrimTy::Str));
                 }
                 let rt = self.check_or_synth(rhs, Some(&lt), env, ctx, r)?;
+                if matches!(rt, Ty::Var(_)) {
+                    return Ok(rt);
+                }
                 if !ty_eq(&lt, &rt) {
                     return Err(type_err(span, codes::TYPE_BINOP_MISMATCH,
                         format!("operand type mismatch: cannot apply `{:?}` to {} and {}",
@@ -1073,6 +1100,22 @@ impl TypeChecker {
                 _ => {}
             }
         }
+        // M17: generic free-function call (`fn id[T](x: T) -> T: ...`). When
+        // the callee names a user-defined function whose `FunctionSig` has
+        // non-empty `generics`, infer the substitution from argument types
+        // and record the instantiation so the IR lowerer can emit one
+        // bytecode function per (sym_id, type_args) pair.
+        if let Expr::Ident { name, .. } = callee {
+            if let Some(sid) = r.symbols.lookup(r.module_scope, name) {
+                if matches!(r.symbols.get(sid).kind, SymbolKind::Function) {
+                    if let Some(sig) = r.function_sigs.get(&sid).cloned() {
+                        if !sig.generic_tvars.is_empty() {
+                            return self.check_generic_call(sid, &sig, args, span, env, ctx, r);
+                        }
+                    }
+                }
+            }
+        }
         // Generic callee.
         let cty = self.synth_expr(callee, env, ctx, r)?;
         match cty {
@@ -1140,6 +1183,91 @@ impl TypeChecker {
             _ => Err(type_err(span, codes::TYPE_NOT_CALLABLE,
                 format!("value of type {} is not callable", cty.display()))),
         }
+    }
+
+    /// M17 call-site inference for `fn f[T1, T2, ...](...)`.
+    ///
+    /// 1. Synthesize a type for each argument expression.
+    /// 2. Unify each parameter type against its argument type, accumulating a
+    ///    substitution `{Var(tv) -> concrete_ty}`. Conflicts (same tv assigned
+    ///    incompatible types) and unsolved type vars produce a `TYPE_MISMATCH`
+    ///    error pointed at the call.
+    /// 3. Record the (sid, ordered_type_args) instantiation so IR lowering
+    ///    can emit a mangled bytecode function per instantiation.
+    /// 4. Return the substituted result type.
+    fn check_generic_call(
+        &mut self,
+        sid: SymbolId,
+        sig: &FunctionSig,
+        args: &[Arg],
+        span: Span,
+        env: &Env,
+        ctx: &Ctx,
+        r: &ResolvedModule,
+    ) -> Result<Ty, CompileError> {
+        if args.len() != sig.params.len() {
+            return Err(type_err(
+                span,
+                codes::TYPE_ARITY,
+                format!("expected {} args, got {}", sig.params.len(), args.len()),
+            ));
+        }
+        // Step 1+2 interleaved: for each (param, arg) in declaration order,
+        // substitute already-solved type vars into the param type. If the
+        // resulting expected type is fully concrete (no unbound TypeVars), use
+        // `check_expr` so int-literal width inference (i64 from `0`) etc.
+        // works. Otherwise `synth_expr` then unify to bind new vars.
+        let mut subst: HashMap<u32, Ty> = HashMap::new();
+        let mut arg_tys: Vec<Ty> = Vec::with_capacity(args.len());
+        for (i, (_, ptype)) in sig.params.iter().enumerate() {
+            let expected = subst_ty(ptype, &subst);
+            let got = if contains_unbound_var(&expected) {
+                self.synth_expr(&args[i].value, env, ctx, r)?
+            } else {
+                self.check_expr(&args[i].value, &expected, env, ctx, r)?
+            };
+            arg_tys.push(got.clone());
+            unify_one(&expected, &got, &mut subst).map_err(|m| {
+                type_err(
+                    span,
+                    codes::TYPE_MISMATCH,
+                    format!(
+                        "generic call to `{}`: argument {} type {} doesn't match parameter type {} ({})",
+                        sig.name,
+                        i + 1,
+                        got.display(),
+                        expected.display(),
+                        m
+                    ),
+                )
+            })?;
+        }
+        // Every declared type-parameter must have been solved.
+        let mut type_args: Vec<Ty> = Vec::with_capacity(sig.generic_tvars.len());
+        for tv in &sig.generic_tvars {
+            match subst.get(&tv.0).cloned() {
+                Some(t) => type_args.push(t),
+                None => {
+                    return Err(type_err(
+                        span,
+                        codes::TYPE_MISMATCH,
+                        format!(
+                            "cannot infer type parameter for generic call to `{}`; supply argument types that pin every type variable",
+                            sig.name
+                        ),
+                    ));
+                }
+            }
+        }
+        // Step 3: record the instantiation (de-duped by mangled key).
+        let key = mangle_args_key(&type_args);
+        if self.instantiation_keys.insert((sid, key)) {
+            self.instantiations.push((sid, type_args.clone()));
+        }
+        // Step 4: substitute the return type.
+        let ret = subst_ty(&sig.ret, &subst);
+        let _ = ctx;
+        Ok(ret)
     }
 
     fn synth_method_call(&mut self, recv: &Ty, method: &str, args: &[Arg], span: Span,
@@ -1519,6 +1647,145 @@ fn narrowings_from_cond(cond: &Expr, r: &ResolvedModule, env: &Env) -> (Narrowin
         }
     }
     (then_n, else_n)
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  M17: generic-call unification + substitution helpers.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// First-order unification: walk `pat` (which may contain `Ty::Var`s) against
+/// `concrete` (which shouldn't), extending `subst`. Returns an error string
+/// when the structures conflict.
+///
+/// Conflicts at the *generic-parameter* level (same `Ty::Var` bound to two
+/// concrete types) trigger an error; downstream the type-checker re-runs
+/// against each substitution so that instantiation-specific operator failures
+/// (e.g. `T + T` where `T := bool`) still surface as a normal `E2*` error.
+pub(crate) fn unify_one(pat: &Ty, concrete: &Ty, subst: &mut HashMap<u32, Ty>) -> Result<(), String> {
+    match (pat, concrete) {
+        (Ty::Var(TypeVarId(id)), c) => {
+            if let Some(existing) = subst.get(id).cloned() {
+                // Already bound — require structural equality with `c`.
+                if !ty_eq(&existing, c) {
+                    return Err(format!(
+                        "type parameter ?T{} solved to both {} and {}",
+                        id, existing.display(), c.display()
+                    ));
+                }
+                Ok(())
+            } else {
+                subst.insert(*id, c.clone());
+                Ok(())
+            }
+        }
+        (Ty::Primitive(p), Ty::Primitive(q)) if p == q => Ok(()),
+        (Ty::Class(a), Ty::Class(b)) if a == b => Ok(()),
+        (Ty::Protocol(a), Ty::Protocol(b)) if a == b => Ok(()),
+        (Ty::Generic { base: b1, args: a1 }, Ty::Generic { base: b2, args: a2 })
+            if b1 == b2 && a1.len() == a2.len() =>
+        {
+            for (x, y) in a1.iter().zip(a2) { unify_one(x, y, subst)?; }
+            Ok(())
+        }
+        (Ty::Tuple(a), Ty::Tuple(b)) if a.len() == b.len() => {
+            for (x, y) in a.iter().zip(b) { unify_one(x, y, subst)?; }
+            Ok(())
+        }
+        (Ty::Nullable(a), Ty::Nullable(b)) => unify_one(a, b, subst),
+        // T may be inferred from a non-null concrete type passed to a `T?` slot
+        // — but only the inner type is bound. The reverse (param: T, arg: U?)
+        // would lose nullability and is rejected here.
+        (Ty::Nullable(a), c) => unify_one(a, c, subst),
+        (Ty::Function { params: pp, ret: pr },
+         Ty::Function { params: cp, ret: cr })
+            if pp.len() == cp.len() =>
+        {
+            for (x, y) in pp.iter().zip(cp) { unify_one(x, y, subst)?; }
+            unify_one(pr, cr, subst)
+        }
+        (a, b) if ty_eq(a, b) => Ok(()),
+        (a, b) => Err(format!("cannot unify {} with {}", a.display(), b.display())),
+    }
+}
+
+/// Does `t` reference any `Ty::Var`? Used by the generic-call helper to
+/// decide whether `check_expr` (no, expected type is fully ground) or
+/// `synth_expr + unify` (yes) is the right strategy for an argument.
+pub(crate) fn contains_unbound_var(t: &Ty) -> bool {
+    match t {
+        Ty::Var(_) => true,
+        Ty::Generic { args, .. } | Ty::Tuple(args) => args.iter().any(contains_unbound_var),
+        Ty::Function { params, ret } => {
+            params.iter().any(contains_unbound_var) || contains_unbound_var(ret)
+        }
+        Ty::Nullable(inner) => contains_unbound_var(inner),
+        _ => false,
+    }
+}
+
+/// Apply a substitution to a type. Unbound vars are left in place (caller
+/// decides whether that's an error).
+pub(crate) fn subst_ty(t: &Ty, subst: &HashMap<u32, Ty>) -> Ty {
+    match t {
+        Ty::Var(TypeVarId(id)) => subst.get(id).cloned().unwrap_or_else(|| t.clone()),
+        Ty::Generic { base, args } => Ty::Generic {
+            base: base.clone(),
+            args: args.iter().map(|a| subst_ty(a, subst)).collect(),
+        },
+        Ty::Function { params, ret } => Ty::Function {
+            params: params.iter().map(|p| subst_ty(p, subst)).collect(),
+            ret: Box::new(subst_ty(ret, subst)),
+        },
+        Ty::Tuple(xs) => Ty::Tuple(xs.iter().map(|x| subst_ty(x, subst)).collect()),
+        Ty::Nullable(inner) => Ty::Nullable(Box::new(subst_ty(inner, subst))),
+        _ => t.clone(),
+    }
+}
+
+/// Mangle a list of types into a deterministic, debuggable suffix.
+/// Examples: `i32`, `str_i64`, `tuple_i32_str`, `list_class3`.
+pub fn mangle_args_key(args: &[Ty]) -> String {
+    let mut out = String::new();
+    for (i, t) in args.iter().enumerate() {
+        if i > 0 { out.push('_'); }
+        out.push_str(&mangle_ty(t));
+    }
+    out
+}
+
+fn mangle_ty(t: &Ty) -> String {
+    match t {
+        Ty::Primitive(p) => match p {
+            PrimTy::Bool => "bool".into(),
+            PrimTy::I8 => "i8".into(),  PrimTy::I16 => "i16".into(),
+            PrimTy::I32 => "i32".into(), PrimTy::I64 => "i64".into(),
+            PrimTy::U8 => "u8".into(),  PrimTy::U16 => "u16".into(),
+            PrimTy::U32 => "u32".into(), PrimTy::U64 => "u64".into(),
+            PrimTy::F32 => "f32".into(), PrimTy::F64 => "f64".into(),
+            PrimTy::Char => "char".into(),
+            PrimTy::Str => "str".into(),
+            PrimTy::Bytes => "bytes".into(),
+            PrimTy::BigInt => "bigint".into(),
+            PrimTy::Null => "null".into(),
+            PrimTy::Unit => "unit".into(),
+        },
+        Ty::Class(ClassId(id)) => format!("class{}", id),
+        Ty::Protocol(ProtoId(id)) => format!("proto{}", id),
+        Ty::Generic { base, args } => {
+            let mut s = format!("{:?}", base).to_lowercase();
+            for a in args { s.push('_'); s.push_str(&mangle_ty(a)); }
+            s
+        }
+        Ty::Tuple(xs) => {
+            let mut s = String::from("tuple");
+            for x in xs { s.push('_'); s.push_str(&mangle_ty(x)); }
+            s
+        }
+        Ty::Nullable(inner) => format!("opt_{}", mangle_ty(inner)),
+        Ty::Function { .. } => "fn".into(),
+        Ty::Never => "never".into(),
+        Ty::Var(TypeVarId(id)) => format!("T{}", id),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
