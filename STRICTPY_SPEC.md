@@ -1415,6 +1415,109 @@ ids as the prelude `sqrt` etc. — the only difference is the source-level
 surface (namespaced vs bare).  Both forms type-check, both lower to the
 same opcode, and both produce identical results.
 
+### 9.13 Module `json` (v0.2 — M20c)
+
+Validate and re-serialize JSON.  Backed by the `serde_json` crate.
+
+```
+fn parse_to_string(s: str) -> str   # parse + canonical compact form
+fn minify(s: str) -> str            # alias of parse_to_string
+fn is_valid(s: str) -> bool         # true iff `s` parses as JSON
+fn pretty(s: str, indent: i32) -> str   # parse + N-space pretty print
+fn escape(s: str) -> str            # render `s` as a JSON string literal
+```
+
+Semantics:
+
+* `parse_to_string(s)` parses `s`, then re-serializes it.  Whitespace
+  is normalised away; object keys are sorted lexicographically (a
+  property of serde_json's BTreeMap representation).  Raises
+  `ValueError` on malformed input.
+* `minify(s)` is exactly `parse_to_string(s)` — both names exist for
+  readability at call sites.
+* `is_valid(s)` returns `true` if `s` parses as a valid JSON document;
+  `false` otherwise.  Never raises.
+* `pretty(s, indent)` parses `s` and emits an indented form with
+  `indent` spaces per level.  `indent` is clamped to `[0, 32]`; an
+  `indent` of `0` produces the compact form.  Raises `ValueError` on
+  malformed input.
+* `escape(s)` returns `s` wrapped as a JSON string literal: surrounding
+  double quotes, control characters / non-ASCII escaped per RFC 8259.
+  Useful for hand-building JSON output (escape variables, concatenate
+  with the structural parts).
+
+What v0.2 does **not** ship:
+
+* A typed `JsonValue` tree exposed through the stdlib.  M18's
+  `examples/json_parse_v2.spy` keeps the sealed-class hierarchy
+  approach for programs that want pattern matching over JSON; the
+  built-in `json` module is the ergonomic validate/reserialize subset.
+  Typed-class registration inside stdlib modules is v0.3 work.
+* Streaming / incremental parse.  Pull or SAX-style interfaces are out
+  of scope for v0.2.
+
+### 9.14 Module `re` (v0.2 — M20c)
+
+Regex matching, search, replace, and split.  Backed by the `regex`
+crate (linear-time NFA-based matcher, no catastrophic backtracking).
+
+```
+fn fullmatch(pattern: str, s: str) -> bool
+fn search(pattern: str, s: str) -> bool
+fn find(pattern: str, s: str) -> Tuple[i32, i32]
+fn find_all(pattern: str, s: str) -> List[str]
+fn replace(pattern: str, replacement: str, s: str) -> str
+fn split(pattern: str, s: str) -> List[str]
+fn is_valid(pattern: str) -> bool
+```
+
+Semantics:
+
+* `fullmatch(pattern, s)` returns `true` iff `pattern` matches the
+  *entire* string `s` (anchored at both ends — equivalent to wrapping
+  the pattern in `^...$`).  Python's `re.match` would only anchor at
+  the start; M20c picks the fullmatch semantic because it's the more
+  useful "does this match exactly" question.  The name `fullmatch`
+  (rather than `match`) sidesteps StrictPy's `match` keyword.
+* `search(pattern, s)` returns `true` if the pattern matches anywhere
+  in `s`.
+* `find(pattern, s)` returns `(start, end)` byte offsets of the first
+  match, or `(-1, -1)` if there's no match.  The tuple shape reuses
+  the M14 tuple machinery (and the `alloc_tuple_obj` helper from
+  M20a's `path.splitext`).
+* `find_all(pattern, s)` returns all non-overlapping match substrings
+  as `List[str]`.  Empty if no match.
+* `replace(pattern, replacement, s)` substitutes every non-overlapping
+  match.  Argument order matches Python's `re.sub(pattern, repl, s)`.
+  The replacement string supports `$1` / `${name}` backreferences per
+  the `regex` crate's `replace_all` semantics (literal `$` must be
+  escaped as `\$`).
+* `split(pattern, s)` returns the substrings of `s` between matches of
+  `pattern`, as `List[str]`.  Empty captures produce empty strings.
+* `is_valid(pattern)` returns `true` if `pattern` compiles, `false`
+  otherwise.  Never raises — useful for "did the user typo their
+  regex?" checks before a `try/except` around the real call.
+
+All other functions raise `ValueError` on an invalid pattern (compile
+error), with the message `"re: invalid pattern \"...\": <regex-crate
+error>"`.
+
+What v0.2 does **not** ship:
+
+* A cached `Pattern` handle.  Every call to a `re.*` function
+  recompiles the pattern.  For tight loops over a fixed pattern this
+  is wasteful; v0.3 will add `re.compile(pattern) -> Pattern` plus
+  `Pattern.match`/`Pattern.search`/etc. method dispatch.
+* Capture groups.  `find` returns positions, `find_all` returns whole
+  matches.  Named captures and group extraction wait for v0.3 (they'd
+  need an iterator-of-Match type that v0.2 can't naturally express).
+* Python-specific syntax that `regex` doesn't support: lookbehind with
+  variable width, `(?P<name>...)` (use `(?<name>...)` instead), and
+  the look-around assertions Python's `re` carries for backwards
+  compat.  The `regex` crate's syntax is documented at
+  `https://docs.rs/regex/latest/regex/#syntax` — by and large it's a
+  superset of `re` minus catastrophic-backtracking constructs.
+
 ---
 
 ## 10. Compiler Architecture

@@ -962,6 +962,139 @@ impl Resolver {
             ],
         };
         self.stdlib_modules.insert("math".into(), math_mod);
+
+        // ── M20c: `json` module ────────────────────────────────────────
+        // Validation + canonical reserialize.  The typed-JsonValue tree
+        // (sealed class hierarchy) remains out-of-band as the M18
+        // example `examples/json_parse_v2.spy`; exposing that as a
+        // stdlib surface would require registering classes in the
+        // stdlib module table, which is v0.3 work.  For v0.2 we ship
+        // the validate-and-reserialize subset, which covers every
+        // practical JSON-config-file use case.
+        const JSON_PARSE_TO_STRING: u32 = 213;
+        const JSON_IS_VALID: u32        = 214;
+        const JSON_PRETTY: u32          = 215;
+        const JSON_ESCAPE: u32          = 216;
+        const JSON_MINIFY: u32          = 217;
+
+        let json_mod = StdlibModule {
+            name: "json".into(),
+            items: vec![
+                StdlibItem {
+                    name: "parse_to_string".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: JSON_PARSE_TO_STRING,
+                },
+                StdlibItem {
+                    name: "is_valid".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], bool_ty.clone()),
+                    native_id: JSON_IS_VALID,
+                },
+                StdlibItem {
+                    name: "pretty".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone(), i32_ty.clone()], str_ty.clone()),
+                    native_id: JSON_PRETTY,
+                },
+                StdlibItem {
+                    name: "escape".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: JSON_ESCAPE,
+                },
+                StdlibItem {
+                    name: "minify".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: JSON_MINIFY,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("json".into(), json_mod);
+
+        // ── M20c: `re` module ──────────────────────────────────────────
+        // Regex matching via the `regex` crate.  `re.find` returns
+        // `(i32, i32)` tuples (start, end), reusing the alloc_tuple_obj
+        // helper from M20a's path.splitext.  Patterns are recompiled
+        // on every call for v0.2; a Pattern handle for cached
+        // compilation is v0.3 work.
+        const RE_MATCH: u32     = 220;
+        const RE_SEARCH: u32    = 221;
+        const RE_FIND: u32      = 222;
+        const RE_FIND_ALL: u32  = 223;
+        const RE_REPLACE: u32   = 224;
+        const RE_SPLIT: u32     = 225;
+        const RE_IS_VALID: u32  = 226;
+
+        let tuple_i32_i32_ty = Ty::Tuple(vec![i32_ty.clone(), i32_ty.clone()]);
+
+        let re_mod = StdlibModule {
+            name: "re".into(),
+            items: vec![
+                // Python's `re.match` anchors only at the start; this
+                // shipping name `fullmatch` matches the entire string,
+                // which is what the brief asks for.  Python's parser
+                // treats `match` as a contextual keyword (it can still
+                // be an attribute name); StrictPy's lexer makes `match`
+                // strictly reserved, so an attribute named `match`
+                // would force a parser change.  Naming it `fullmatch`
+                // sidesteps the lexer collision and is what Python
+                // calls this exact semantic anyway.
+                StdlibItem {
+                    name: "fullmatch".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone(), str_ty.clone()], bool_ty.clone()),
+                    native_id: RE_MATCH,
+                },
+                StdlibItem {
+                    name: "search".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone(), str_ty.clone()], bool_ty.clone()),
+                    native_id: RE_SEARCH,
+                },
+                StdlibItem {
+                    name: "find".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone(), str_ty.clone()], tuple_i32_i32_ty.clone()),
+                    native_id: RE_FIND,
+                },
+                StdlibItem {
+                    name: "find_all".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone(), str_ty.clone()], list_str_ty.clone()),
+                    native_id: RE_FIND_ALL,
+                },
+                // Argument order matches Python's `re.sub`:
+                // `(pattern, replacement, s)`.  The brief's example
+                // `re.replace("[0-9]", "X", "a1b2c3") -> "aXbXcX"`
+                // only makes sense under this order (the haystack is
+                // the third argument).
+                StdlibItem {
+                    name: "replace".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), str_ty.clone(), str_ty.clone()],
+                        str_ty.clone(),
+                    ),
+                    native_id: RE_REPLACE,
+                },
+                StdlibItem {
+                    name: "split".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone(), str_ty.clone()], list_str_ty.clone()),
+                    native_id: RE_SPLIT,
+                },
+                StdlibItem {
+                    name: "is_valid".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], bool_ty.clone()),
+                    native_id: RE_IS_VALID,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("re".into(), re_mod);
     }
 
     // ─────────────────────────────────────────────────────────────────────

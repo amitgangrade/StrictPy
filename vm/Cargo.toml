@@ -28,6 +28,11 @@ anyhow.workspace = true
 thiserror.workspace = true
 clap.workspace = true
 byteorder.workspace = true
+# M20c: regex + serde_json for the `re` and `json` stdlib modules.  Both
+# are ubiquitous; the diff is ~10 LOC per native handler instead of a
+# hand-rolled NFA / JSON parser.
+serde_json = "1"
+regex = "1"
 cranelift = { version = "0.115", optional = true }
 cranelift-jit = { version = "0.115", optional = true }
 cranelift-codegen = { version = "0.115", optional = true }

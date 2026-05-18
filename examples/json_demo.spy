@@ -1,0 +1,68 @@
+"""json_demo — M20c demo of the stdlib `json` module.
+
+The M18 example `examples/json_parse_v2.spy` keeps demonstrating the
+typed `JsonValue` sealed-class parser written in pure StrictPy.  This
+M20c demo shows the ergonomic *built-in* surface — `json.parse_to_string`,
+`json.is_valid`, `json.pretty`, `json.escape`, `json.minify` — which
+covers everyday "validate this config file and print it back" use cases
+without rewriting a parser.
+
+The typed `JsonValue` tree exposed through the stdlib is v0.3 work; this
+v0.2 surface is the validate-and-reserialize subset.
+"""
+
+import json
+
+fn main() -> i32:
+    # 1. Validate + canonicalize.  Whitespace and extra commas in the
+    # input are normalised away.
+    src: str = "{\"name\": \"alice\", \"age\":  30, \"active\": true, \"tags\": [\"admin\", \"user\"]}"
+    canonical: str = json.parse_to_string(src)
+    println("canonical: " + canonical)
+
+    # 2. is_valid round-trips: the canonical form is itself valid.
+    if json.is_valid(canonical):
+        println("is_valid: true")
+    else:
+        println("is_valid: false")
+
+    # 3. Pretty-print with 2-space indent.  We just print the result
+    # verbatim; the snapshot test asserts on the first few characters.
+    pretty: str = json.pretty(src, 2i32)
+    println("pretty:")
+    println(pretty)
+
+    # 4. Minify is the same as parse_to_string — handy alias.
+    mini: str = json.minify(src)
+    if mini == canonical:
+        println("minify == parse_to_string: true")
+    else:
+        println("minify == parse_to_string: false")
+
+    # 5. Escape a raw string for inclusion in JSON output.
+    raw: str = "hello \"world\"\n"
+    esc: str = json.escape(raw)
+    println("escape: " + esc)
+
+    # 6. Error handling on malformed input.
+    try:
+        bad: str = json.parse_to_string("not json")
+        println("UNREACHED: " + bad)
+    except ValueError as e:
+        println("caught ValueError")
+
+    # 7. is_valid on malformed input — doesn't raise.
+    if json.is_valid("not json"):
+        println("is_valid(bad): true")
+    else:
+        println("is_valid(bad): false")
+
+    # 8. Nested object round-trip.
+    nested: str = "{\"a\":{\"b\":{\"c\":[1,2,3]}}}"
+    if json.parse_to_string(nested) == nested:
+        println("nested round-trip: true")
+    else:
+        println("nested round-trip: false")
+
+    println("done")
+    return 0

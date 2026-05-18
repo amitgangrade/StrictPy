@@ -294,6 +294,52 @@ pub enum NativeFn {
     MathConstInf  = 211,
     MathConstNan  = 212,
 
+    // ── 213–219: `json` module (M20c) ───────────────────────────────────
+    // M20c ships json without exposing a typed JsonValue tree to user
+    // code — the typed-class path needs stdlib-class registration
+    // infrastructure that doesn't yet exist (deferred to v0.3).  The
+    // M18 example `examples/json_parse_v2.spy` remains the canonical
+    // typed-parser demo; this module is the ergonomic
+    // validate-and-reserialize surface for everyday programs.
+    /// `json.parse_to_string(s: str) -> str` — parse, then re-serialize
+    /// as canonical compact JSON.  Raises `ValueError` on malformed
+    /// input.  Useful for "is this valid + normalize it".
+    JsonParseToString = 213,
+    /// `json.is_valid(s: str) -> bool` — true iff `s` parses as JSON.
+    JsonIsValid       = 214,
+    /// `json.pretty(s: str, indent: i32) -> str` — parse + pretty-print
+    /// with N-space indent.  Raises `ValueError` on malformed input.
+    JsonPretty        = 215,
+    /// `json.escape(s: str) -> str` — render `s` as a JSON string
+    /// literal (surrounding quotes included, control chars escaped).
+    JsonEscape        = 216,
+    /// `json.minify(s: str) -> str` — alias of `parse_to_string`.
+    JsonMinify        = 217,
+
+    // ── 220–229: `re` module (M20c) ─────────────────────────────────────
+    // Backed by the `regex` crate.  Patterns are recompiled on each
+    // call for v0.2 — a Pattern handle for cached compilation is v0.3.
+    // Bad patterns raise `ValueError`.  Find/find_all/replace/split
+    // follow the `regex::Regex` semantics, which are close enough to
+    // Python's `re` for v0.2 purposes (the divergences are documented
+    // in spec §9.14).
+    /// `re.match(pattern: str, s: str) -> bool` — Python `fullmatch`.
+    ReMatch    = 220,
+    /// `re.search(pattern: str, s: str) -> bool`.
+    ReSearch   = 221,
+    /// `re.find(pattern: str, s: str) -> (i32, i32)` — first match
+    /// (start, end), or `(-1, -1)` if no match.
+    ReFind     = 222,
+    /// `re.find_all(pattern: str, s: str) -> List[str]`.
+    ReFindAll  = 223,
+    /// `re.replace(pattern: str, s: str, repl: str) -> str`.
+    ReReplace  = 224,
+    /// `re.split(pattern: str, s: str) -> List[str]`.
+    ReSplit    = 225,
+    /// `re.is_valid(pattern: str) -> bool` — true iff the pattern
+    /// compiles.  Doesn't raise.
+    ReIsValid  = 226,
+
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
     /// encounters. The VM treats this as a runtime error.
@@ -441,6 +487,20 @@ impl NativeFn {
             210 => Some(Self::MathConstTau),
             211 => Some(Self::MathConstInf),
             212 => Some(Self::MathConstNan),
+            // M20c: json module.
+            213 => Some(Self::JsonParseToString),
+            214 => Some(Self::JsonIsValid),
+            215 => Some(Self::JsonPretty),
+            216 => Some(Self::JsonEscape),
+            217 => Some(Self::JsonMinify),
+            // M20c: re module.
+            220 => Some(Self::ReMatch),
+            221 => Some(Self::ReSearch),
+            222 => Some(Self::ReFind),
+            223 => Some(Self::ReFindAll),
+            224 => Some(Self::ReReplace),
+            225 => Some(Self::ReSplit),
+            226 => Some(Self::ReIsValid),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

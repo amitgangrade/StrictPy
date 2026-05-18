@@ -1,0 +1,88 @@
+"""regex_demo — M20c demo of the stdlib `re` module.
+
+The M12 example `examples/regex.spy` keeps demonstrating a from-scratch
+Thompson-NFA matcher written in pure StrictPy.  This M20c demo shows
+the ergonomic *built-in* surface — `re.match`, `re.search`, `re.find`,
+`re.find_all`, `re.replace`, `re.split`, `re.is_valid` — backed by
+Rust's `regex` crate.
+
+Semantics line up with Python's `re` module where the regex crate
+agrees with Python's PCRE-style syntax (which is most of the time for
+real-world programs).  Where they differ (lookahead/lookbehind, named
+groups, etc.) the regex crate's behaviour wins — documented in spec
+§9.14.
+"""
+
+import re
+
+fn main() -> i32:
+    # 1. re.match — Python's `fullmatch` semantics.  Anchored at both
+    # ends; the entire string must satisfy the pattern.
+    if re.fullmatch("^[a-z]+$", "hello"):
+        println("match alphanumeric: true")
+    else:
+        println("match alphanumeric: false")
+
+    # 2. re.match against partial input — fails because of fullmatch.
+    if re.fullmatch("[a-z]+", "abc 123"):
+        println("match partial: true")
+    else:
+        println("match partial: false")
+
+    # 3. re.search — matches anywhere.
+    if re.search("[0-9]+", "abc123def"):
+        println("search digit: true")
+    else:
+        println("search digit: false")
+
+    # 4. re.find returns (start, end) tuple — uses M14 tuples and
+    # tuple destructuring.
+    pos: Tuple[i32, i32] = re.find("[0-9]+", "abc123def")
+    println("find pos: (" + str(pos.0) + ", " + str(pos.1) + ")")
+
+    # 5. re.find on no-match returns (-1, -1).
+    miss: Tuple[i32, i32] = re.find("xyz", "abcdef")
+    println("find miss: (" + str(miss.0) + ", " + str(miss.1) + ")")
+
+    # 6. re.find_all — all non-overlapping matches as List[str].
+    words: List[str] = re.find_all("[a-z]+", "abc 123 def 456 ghi")
+    println("find_all count: " + str(len(words)))
+    i: i64 = 0
+    while i < i64(len(words)):
+        println("  " + words[i])
+        i = i + 1
+
+    # 7. re.replace — substitute every match.
+    masked: str = re.replace("[0-9]", "X", "a1b2c3")
+    println("replace: " + masked)
+
+    # 8. re.split — split on any "," (with optional whitespace).
+    # NOTE: `\s*` only strips whitespace AFTER the comma; "c " keeps
+    # its trailing space because the regex is one-sided by design.
+    parts: List[str] = re.split(",\\s*", "a, b,c, d")
+    println("split count: " + str(len(parts)))
+    j: i64 = 0
+    while j < i64(len(parts)):
+        println("  " + parts[j])
+        j = j + 1
+
+    # 9. re.is_valid — predicate that doesn't raise.
+    if re.is_valid("[a-z]+"):
+        println("is_valid good: true")
+    else:
+        println("is_valid good: false")
+
+    if re.is_valid("[invalid"):
+        println("is_valid bad: true")
+    else:
+        println("is_valid bad: false")
+
+    # 10. Bad pattern raises ValueError.
+    try:
+        unused: bool = re.fullmatch("[invalid", "x")
+        println("UNREACHED: " + str(unused))
+    except ValueError as e:
+        println("caught bad pattern")
+
+    println("done")
+    return 0

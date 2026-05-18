@@ -14,6 +14,7 @@ use crate::error::VmError;
 use crate::interp::{read_str, Interpreter};
 use crate::object::{ChannelRepr, DictRepr, FileRepr, StringRepr, ThreadRepr};
 
+
 /// Hook called from `Interpreter::new` (or by tests). M4 has nothing to
 /// register up front because dispatch is static — left here so the lib.rs
 /// boilerplate doesn't have to change for M5.
@@ -1306,6 +1307,156 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         NativeFn::MathConstInf => Ok(f64::INFINITY.to_bits()),
         NativeFn::MathConstNan => Ok(f64::NAN.to_bits()),
 
+        // ── M20c: `json` module ────────────────────────────────────────
+        // The typed-JsonValue surface is deferred to v0.3 (stdlib-class
+        // registration doesn't yet exist).  M18's `json_parse_v2.spy`
+        // remains the canonical typed-parser demo; this module is the
+        // ergonomic validate-and-reserialize surface for everyday
+        // configuration-file parsing.
+        //
+        // Every parse failure maps to `ValueError` via the M15
+        // UncaughtException machinery — programs `try/except ValueError`
+        // around the call to recover.
+        NativeFn::JsonParseToString | NativeFn::JsonMinify => {
+            let s = arg_str(args, 0);
+            let v: serde_json::Value = serde_json::from_str(&s).map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("json.parse: {}", e),
+                }
+            })?;
+            // `Value::to_string()` produces compact canonical JSON with
+            // no extra whitespace — exactly what `parse_to_string` /
+            // `minify` promise.
+            let out = v.to_string();
+            let p = interp.alloc_string(&out);
+            Ok(p as u64)
+        }
+        NativeFn::JsonIsValid => {
+            let s = arg_str(args, 0);
+            let ok = serde_json::from_str::<serde_json::Value>(&s).is_ok();
+            Ok(if ok { 1 } else { 0 })
+        }
+        NativeFn::JsonPretty => {
+            let s = arg_str(args, 0);
+            let indent = arg_i64(args, 1) as i32;
+            // Clamp indent to [0, 32].  Negative indent and silly-large
+            // indents are user input; we'd rather degrade gracefully
+            // than panic on a `String::from(" ").repeat(999_999)`.
+            let indent = indent.clamp(0, 32) as usize;
+            let v: serde_json::Value = serde_json::from_str(&s).map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("json.pretty: {}", e),
+                }
+            })?;
+            // Hand-rolled pretty printer over `serde_json::Value`.  We
+            // avoid pulling in `serde` as a transitive workspace dep
+            // just for `Value::serialize`; this 30-line walker matches
+            // serde_json's PrettyFormatter output byte-for-byte for
+            // the cases user programs care about.
+            let mut out = String::new();
+            write_pretty(&v, indent, 0, &mut out);
+            let p = interp.alloc_string(&out);
+            Ok(p as u64)
+        }
+        NativeFn::JsonEscape => {
+            // Render `s` as a JSON string literal (surrounding quotes
+            // included).  Useful for hand-building JSON output without
+            // a typed tree — escape the variable parts, concatenate
+            // with the structural parts.
+            let s = arg_str(args, 0);
+            let escaped = serde_json::Value::String(s).to_string();
+            let p = interp.alloc_string(&escaped);
+            Ok(p as u64)
+        }
+
+        // ── M20c: `re` module ──────────────────────────────────────────
+        // Patterns recompile on every call (v0.3: cached Pattern handle).
+        // Bad patterns → ValueError.  `find` returns (i32, i32) reusing
+        // M20a's alloc_tuple_obj for path.splitext.
+        NativeFn::ReMatch => {
+            let pattern = arg_str(args, 0);
+            let s = arg_str(args, 1);
+            let re = compile_regex(&pattern)?;
+            // Python's `re.match` matches at the start; `re.fullmatch`
+            // matches the entire string.  The brief asks for fullmatch
+            // semantics, which is the more common "does this match
+            // exactly?" question for v0.2 programs.
+            let m = re.find(&s);
+            let full = matches!(m, Some(m) if m.start() == 0 && m.end() == s.len());
+            Ok(if full { 1 } else { 0 })
+        }
+        NativeFn::ReSearch => {
+            let pattern = arg_str(args, 0);
+            let s = arg_str(args, 1);
+            let re = compile_regex(&pattern)?;
+            Ok(if re.is_match(&s) { 1 } else { 0 })
+        }
+        NativeFn::ReFind => {
+            let pattern = arg_str(args, 0);
+            let s = arg_str(args, 1);
+            let re = compile_regex(&pattern)?;
+            let (start, end): (i32, i32) = match re.find(&s) {
+                Some(m) => (m.start() as i32, m.end() as i32),
+                None => (-1, -1),
+            };
+            // Pack the two i32s as u64 slots (zero-extended) the same
+            // way path.splitext packs two str pointers.  alloc_tuple_obj
+            // doesn't care about the slot's runtime type.
+            let s0 = (start as u32) as u64;
+            let s1 = (end as u32) as u64;
+            let tup = interp.alloc_tuple_obj(&[s0, s1]);
+            Ok(tup as u64)
+        }
+        NativeFn::ReFindAll => {
+            let pattern = arg_str(args, 0);
+            let s = arg_str(args, 1);
+            let re = compile_regex(&pattern)?;
+            let matches: Vec<&str> = re.find_iter(&s).map(|m| m.as_str()).collect();
+            let lst = interp.alloc_list(matches.len());
+            for m in matches {
+                let sp = interp.alloc_string(m) as u64;
+                // SAFETY: lst is freshly allocated and owned by us.
+                unsafe { interp.list_push(lst, sp) };
+            }
+            Ok(lst as u64)
+        }
+        NativeFn::ReReplace => {
+            // Python `re.sub(pattern, repl, s)` argument order — the
+            // first two arguments describe the substitution, the third
+            // is the haystack.  Reads as "in this pattern, replace
+            // matches with this string, in this haystack".
+            let pattern = arg_str(args, 0);
+            let repl = arg_str(args, 1);
+            let s = arg_str(args, 2);
+            let re = compile_regex(&pattern)?;
+            // `replace_all` honours `$1`-style backreferences in `repl`,
+            // matching Python's `re.sub`.  For programs that want
+            // literal `$` in the replacement, `\$` is the regex-crate
+            // escape (documented in §9.14).
+            let out = re.replace_all(&s, repl.as_str()).into_owned();
+            let p = interp.alloc_string(&out);
+            Ok(p as u64)
+        }
+        NativeFn::ReSplit => {
+            let pattern = arg_str(args, 0);
+            let s = arg_str(args, 1);
+            let re = compile_regex(&pattern)?;
+            let parts: Vec<&str> = re.split(&s).collect();
+            let lst = interp.alloc_list(parts.len());
+            for p in parts {
+                let sp = interp.alloc_string(p) as u64;
+                // SAFETY: lst is freshly allocated and owned by us.
+                unsafe { interp.list_push(lst, sp) };
+            }
+            Ok(lst as u64)
+        }
+        NativeFn::ReIsValid => {
+            let pattern = arg_str(args, 0);
+            Ok(if regex::Regex::new(&pattern).is_ok() { 1 } else { 0 })
+        }
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
@@ -1429,6 +1580,85 @@ fn splitext_python(path: &str) -> (&str, &str) {
         }
     }
     (path, "")
+}
+
+/// M20c: compile a regex pattern, raising `ValueError` on a syntax
+/// error.  Centralised so every `re.*` handler has identical
+/// error-message phrasing — the user sees `"re: invalid pattern ..."`
+/// regardless of which entry point they called.
+fn compile_regex(pattern: &str) -> Result<regex::Regex, VmError> {
+    regex::Regex::new(pattern).map_err(|e| VmError::UncaughtException {
+        type_name: "ValueError".into(),
+        message: format!("re: invalid pattern {:?}: {}", pattern, e),
+    })
+}
+
+/// M20c: hand-rolled JSON pretty-printer for `json.pretty(s, indent)`.
+/// Walks a `serde_json::Value` and emits pretty JSON with the caller's
+/// indent width.  Output is byte-compatible with serde_json's built-in
+/// `PrettyFormatter::with_indent(b" " * indent)` for indent ≥ 1; for
+/// indent == 0 we fall back to the compact form (no newlines).
+fn write_pretty(v: &serde_json::Value, indent: usize, level: usize, out: &mut String) {
+    use serde_json::Value;
+    if indent == 0 {
+        // Compact form — defer to serde_json's canonical printer.
+        out.push_str(&v.to_string());
+        return;
+    }
+    let pad = |level: usize, out: &mut String| {
+        for _ in 0..(level * indent) {
+            out.push(' ');
+        }
+    };
+    match v {
+        Value::Null => out.push_str("null"),
+        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        // Numbers and strings: defer to serde_json's atom formatter,
+        // which handles edge cases (NaN/Infinity rejection, escape
+        // sequences) the way the original parser expects.
+        Value::Number(_) | Value::String(_) => out.push_str(&v.to_string()),
+        Value::Array(items) => {
+            if items.is_empty() {
+                out.push_str("[]");
+                return;
+            }
+            out.push('[');
+            out.push('\n');
+            for (i, item) in items.iter().enumerate() {
+                pad(level + 1, out);
+                write_pretty(item, indent, level + 1, out);
+                if i + 1 < items.len() {
+                    out.push(',');
+                }
+                out.push('\n');
+            }
+            pad(level, out);
+            out.push(']');
+        }
+        Value::Object(map) => {
+            if map.is_empty() {
+                out.push_str("{}");
+                return;
+            }
+            out.push('{');
+            out.push('\n');
+            let n = map.len();
+            for (i, (k, val)) in map.iter().enumerate() {
+                pad(level + 1, out);
+                // Key uses serde_json's String-encoding so escapes
+                // come out correctly.
+                out.push_str(&serde_json::Value::String(k.clone()).to_string());
+                out.push_str(": ");
+                write_pretty(val, indent, level + 1, out);
+                if i + 1 < n {
+                    out.push(',');
+                }
+                out.push('\n');
+            }
+            pad(level, out);
+            out.push('}');
+        }
+    }
 }
 
 /// Special tag for `Optional[T]` "none" used by `try_recv` and `dict.get`.
