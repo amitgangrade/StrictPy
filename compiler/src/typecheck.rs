@@ -820,12 +820,22 @@ impl TypeChecker {
                                             mod_name, method
                                         )));
                                 }
-                                return Err(type_err(*span,
-                                    codes::LINK_NO_SUCH_MODULE_ITEM,
-                                    format!(
-                                        "module `{}` has no item named `{}`",
-                                        mod_name, method
-                                    )));
+                                // M20a: legacy fall-through. The pre-M19
+                                // `io` BuiltinModule symbol pre-exists in
+                                // the prelude (so `io.File` resolves);
+                                // method calls on it for items not in the
+                                // stdlib table should keep working. Pass
+                                // to the regular receiver path.
+                                let joined = format!("{}.{}", mname, method);
+                                if r.symbols.lookup(r.module_scope, &joined).is_none() {
+                                    return Err(type_err(*span,
+                                        codes::LINK_NO_SUCH_MODULE_ITEM,
+                                        format!(
+                                            "module `{}` has no item named `{}`",
+                                            mod_name, method
+                                        )));
+                                }
+                                // else: fall through to synth_method_call.
                             }
                         }
                     }
@@ -853,6 +863,16 @@ impl TypeChecker {
                             if let Some(m) = r.stdlib_modules.get(&mod_name) {
                                 if let Some(item) = m.find(name) {
                                     return Ok(item.ty.clone());
+                                }
+                                // M20a: try legacy flattened-name path
+                                // *before* erroring out — `io.File` was
+                                // pre-registered in the prelude under the
+                                // joined symbol "io.File" since M5, and
+                                // the new `io` stdlib module doesn't list
+                                // `File` (it's a class, not a NativeFn).
+                                let joined = format!("{}.{}", mname, name);
+                                if let Some(s2) = r.symbols.lookup(r.module_scope, &joined) {
+                                    if let Some(t) = ctx.base_types.get(&s2) { return Ok(t.clone()); }
                                 }
                                 return Err(type_err(*span,
                                     codes::LINK_NO_SUCH_MODULE_ITEM,

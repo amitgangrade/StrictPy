@@ -825,10 +825,280 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             Ok(p as u64)
         }
 
+        // ── M20a: `os` module ──────────────────────────────────────────
+        // Each variant wraps one `std::env` or `std::fs` syscall.  All
+        // failures surface as IOError per the M5 `open()` convention.
+        NativeFn::OsEnv => {
+            // `os.env(key) -> str?`.  `std::env::var` returns Err on
+            // unset OR on non-UTF8 value; we collapse both to `none`
+            // (a `none` is more useful than an IOError for "is this set?"
+            // patterns).
+            let key = arg_str(args, 0);
+            match std::env::var(&key) {
+                Ok(v) => {
+                    let p = interp.alloc_string(&v);
+                    Ok(p as u64)
+                }
+                Err(_) => Ok(NONE_SENTINEL),
+            }
+        }
+        NativeFn::OsSetEnv => {
+            let key = arg_str(args, 0);
+            let val = arg_str(args, 1);
+            // SAFETY: `set_var` is `unsafe` on rust 2024 edition; we're on
+            // 2021 here.  This is a process-local mutation — callers can
+            // race themselves but the VM doesn't expose threads that
+            // mutate env-vars.
+            std::env::set_var(&key, &val);
+            Ok(0)
+        }
+        NativeFn::OsGetCwd => {
+            let cwd = std::env::current_dir().map_err(|e| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("getcwd: {}", e),
+            })?;
+            let p = interp.alloc_string(&cwd.to_string_lossy());
+            Ok(p as u64)
+        }
+        NativeFn::OsChdir => {
+            let path = arg_str(args, 0);
+            std::env::set_current_dir(&path).map_err(|e| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("chdir({:?}): {}", path, e),
+            })?;
+            Ok(0)
+        }
+        NativeFn::OsListDir => {
+            let path = arg_str(args, 0);
+            // Read every dir entry up front (closing the iterator before
+            // we start allocating heap strings — avoids holding a borrow
+            // on the OS handle while interp.alloc_* runs).
+            let mut names: Vec<String> = Vec::new();
+            let iter = std::fs::read_dir(&path).map_err(|e| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("listdir({:?}): {}", path, e),
+            })?;
+            for entry in iter {
+                let entry = entry.map_err(|e| VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!("listdir({:?}): {}", path, e),
+                })?;
+                names.push(entry.file_name().to_string_lossy().into_owned());
+            }
+            let lst = interp.alloc_list(names.len());
+            for n in &names {
+                let sp = interp.alloc_string(n) as u64;
+                // SAFETY: lst freshly allocated.
+                unsafe { interp.list_push(lst, sp) };
+            }
+            Ok(lst as u64)
+        }
+        NativeFn::OsRemove => {
+            let path = arg_str(args, 0);
+            std::fs::remove_file(&path).map_err(|e| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("remove({:?}): {}", path, e),
+            })?;
+            Ok(0)
+        }
+        NativeFn::OsMkdir => {
+            let path = arg_str(args, 0);
+            std::fs::create_dir(&path).map_err(|e| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("mkdir({:?}): {}", path, e),
+            })?;
+            Ok(0)
+        }
+        NativeFn::OsExists => {
+            let path = arg_str(args, 0);
+            Ok(if std::path::Path::new(&path).exists() { 1 } else { 0 })
+        }
+        NativeFn::OsIsFile => {
+            let path = arg_str(args, 0);
+            Ok(if std::path::Path::new(&path).is_file() { 1 } else { 0 })
+        }
+        NativeFn::OsIsDir => {
+            let path = arg_str(args, 0);
+            Ok(if std::path::Path::new(&path).is_dir() { 1 } else { 0 })
+        }
+        NativeFn::OsReadFile => {
+            // Stretch goal: convenience wrapper over open+read+close.
+            let path = arg_str(args, 0);
+            let s = std::fs::read_to_string(&path).map_err(|e| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("read_file({:?}): {}", path, e),
+            })?;
+            let p = interp.alloc_string(&s);
+            Ok(p as u64)
+        }
+        NativeFn::OsWriteFile => {
+            let path = arg_str(args, 0);
+            let content = arg_str(args, 1);
+            std::fs::write(&path, &content).map_err(|e| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("write_file({:?}): {}", path, e),
+            })?;
+            Ok(0)
+        }
+
+        // ── M20a: `path` module ────────────────────────────────────────
+        NativeFn::PathJoin => {
+            let a = arg_str(args, 0);
+            let b = arg_str(args, 1);
+            let joined = std::path::Path::new(&a).join(&b);
+            let p = interp.alloc_string(&joined.to_string_lossy());
+            Ok(p as u64)
+        }
+        NativeFn::PathJoin3 => {
+            let a = arg_str(args, 0);
+            let b = arg_str(args, 1);
+            let c = arg_str(args, 2);
+            let joined = std::path::Path::new(&a).join(&b).join(&c);
+            let p = interp.alloc_string(&joined.to_string_lossy());
+            Ok(p as u64)
+        }
+        NativeFn::PathDirname => {
+            let path = arg_str(args, 0);
+            let parent = std::path::Path::new(&path)
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let p = interp.alloc_string(&parent);
+            Ok(p as u64)
+        }
+        NativeFn::PathBasename => {
+            let path = arg_str(args, 0);
+            let base = std::path::Path::new(&path)
+                .file_name()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.clone());
+            let p = interp.alloc_string(&base);
+            Ok(p as u64)
+        }
+        NativeFn::PathSplitext => {
+            // Match Python's `os.path.splitext` semantics:
+            //   "a.txt"     → ("a", ".txt")
+            //   "a"         → ("a", "")
+            //   "/x/a.txt"  → ("/x/a", ".txt")
+            //   ".bashrc"   → (".bashrc", "")   # leading dot, no ext
+            let path = arg_str(args, 0);
+            let (without_ext, ext) = splitext_python(&path);
+            let s0 = interp.alloc_string(without_ext) as u64;
+            let s1 = interp.alloc_string(ext) as u64;
+            let tup = interp.alloc_tuple_obj(&[s0, s1]);
+            Ok(tup as u64)
+        }
+        NativeFn::PathSep => {
+            // Allocate a fresh str.  Cheap enough — `path.sep` is read
+            // at module-init time in real programs.
+            let sep = if cfg!(windows) { "\\" } else { "/" };
+            let p = interp.alloc_string(sep);
+            Ok(p as u64)
+        }
+
+        // ── M20a: `io` module (stdin / stdout / stderr) ────────────────
+        NativeFn::IoInput => {
+            let s = read_line_from_stdin()?;
+            let p = interp.alloc_string(&s);
+            Ok(p as u64)
+        }
+        NativeFn::IoInputPrompt => {
+            let prompt = arg_str(args, 0);
+            interp.stdout_write(&prompt);
+            flush_stdout()?;
+            let s = read_line_from_stdin()?;
+            let p = interp.alloc_string(&s);
+            Ok(p as u64)
+        }
+        NativeFn::IoWriteStdout => {
+            let s = arg_str(args, 0);
+            interp.stdout_write(&s);
+            Ok(0)
+        }
+        NativeFn::IoWriteStderr => {
+            use std::io::Write;
+            let s = arg_str(args, 0);
+            let stderr = std::io::stderr();
+            let mut h = stderr.lock();
+            // Best-effort: a write error here is unrecoverable for the
+            // user's diagnostic, so swallow it instead of trapping.
+            let _ = h.write_all(s.as_bytes());
+            Ok(0)
+        }
+        NativeFn::IoFlushStdout => {
+            flush_stdout()?;
+            Ok(0)
+        }
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
     }
+}
+
+/// Read one line from the process's stdin, stripping the trailing
+/// `\n` (and `\r\n` on Windows).  Raises IOError on EOF before any
+/// characters or on a read error.
+fn read_line_from_stdin() -> Result<String, VmError> {
+    use std::io::BufRead;
+    let stdin = std::io::stdin();
+    let mut handle = stdin.lock();
+    let mut buf = String::new();
+    let n = handle.read_line(&mut buf).map_err(|e| VmError::UncaughtException {
+        type_name: "IOError".into(),
+        message: format!("input: {}", e),
+    })?;
+    if n == 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "IOError".into(),
+            message: "input: EOF reached before any input".into(),
+        });
+    }
+    // Strip trailing newline (handles both \n and \r\n).
+    if buf.ends_with('\n') {
+        buf.pop();
+        if buf.ends_with('\r') {
+            buf.pop();
+        }
+    }
+    Ok(buf)
+}
+
+/// Flush the process's real stdout.  Note: this only flushes the OS-side
+/// stdout buffer; if the program is running under `run_file_capture` the
+/// capture sink has no buffering and `flush` is a no-op.
+fn flush_stdout() -> Result<(), VmError> {
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut h = stdout.lock();
+    h.flush().map_err(|e| VmError::UncaughtException {
+        type_name: "IOError".into(),
+        message: format!("flush_stdout: {}", e),
+    })
+}
+
+/// Pythonic `os.path.splitext`.  Splits a path into `(without_ext, ext)`
+/// where `ext` includes the leading dot.  A leading dot in the basename
+/// (e.g. `.bashrc`) is NOT treated as an extension.
+fn splitext_python(path: &str) -> (&str, &str) {
+    // Find the last separator so we can constrain the dot search to the
+    // basename.  We accept both `/` and `\` regardless of host OS — it's
+    // safer when callers manipulate path strings from data files.
+    let last_sep = path.rfind(|c: char| c == '/' || c == '\\');
+    let basename_start = last_sep.map(|i| i + 1).unwrap_or(0);
+    let basename = &path[basename_start..];
+    // Look for the last dot, but skip leading dots (Python: "a..b" →
+    // ("a.", ".b"); ".bashrc" → (".bashrc", "")).
+    if let Some(dot_in_base) = basename.rfind('.') {
+        // Count leading dots in basename; if the rfind dot is among them,
+        // there's no real extension.
+        let leading_dots = basename.chars().take_while(|&c| c == '.').count();
+        if dot_in_base >= leading_dots {
+            let dot = basename_start + dot_in_base;
+            return (&path[..dot], &path[dot..]);
+        }
+    }
+    (path, "")
 }
 
 /// Special tag for `Optional[T]` "none" used by `try_recv` and `dict.get`.

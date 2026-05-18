@@ -2023,6 +2023,31 @@ impl Interpreter {
         tp
     }
 
+    /// M20a: allocate an N-slot tuple-shaped object on the heap.  Used by
+    /// native functions whose declared return type is `Ty::Tuple(_)` (e.g.
+    /// `path.splitext`).  The IR-side tuple lowering uses
+    /// `Alloc(class_id)` because it knows the registered tuple type id at
+    /// compile time; native code can't see that table, so we allocate with
+    /// a null type pointer and `GcKind::Class` — the GC scans the payload
+    /// as a uniform sequence of 8-byte slots, which is exactly what every
+    /// tuple needs.  Returns the raw object pointer.
+    pub(crate) fn alloc_tuple_obj(&mut self, slots: &[u64]) -> *mut u8 {
+        let size = HDR + slots.len() * 8;
+        let p = self
+            .shared
+            .heap
+            .lock()
+            .unwrap()
+            .alloc(size, std::ptr::null(), GcKind::Class);
+        unsafe {
+            let base = p.add(HDR);
+            for (i, v) in slots.iter().enumerate() {
+                std::ptr::write_unaligned(base.add(i * 8) as *mut u64, *v);
+            }
+        }
+        p
+    }
+
     /// Allocate a `DictRepr` backed by an empty side-table HashMap.
     pub(crate) fn alloc_dict(&mut self, key_kind: u32) -> *mut DictRepr {
         let handle = {

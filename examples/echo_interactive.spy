@@ -1,0 +1,20 @@
+"""echo_interactive.spy — read a line from stdin, echo it (M20a).
+
+Exercises:
+  * `io.input_with_prompt(prompt)` — writes the prompt, flushes stdout
+    so it actually appears before the line read, then reads a line and
+    returns it without the trailing newline.
+  * `io.write_stdout` — explicit non-newline write (so we can show the
+    final newline is from `println`, not from echo).
+
+Tests:
+  * `compiler/tests/echo_interactive_runs.rs` — pipes a line into the
+    subprocess's stdin, asserts the echo is present.
+"""
+
+import io
+
+fn main() -> i32:
+    line: str = io.input_with_prompt("> ")
+    println("echo: " + line)
+    return 0

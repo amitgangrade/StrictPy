@@ -1165,6 +1165,111 @@ I/O handles (`sys.stdin` / `sys.stdout` / `sys.stderr`) are deferred to
 M20 — the M5 `io.File` type requires going through `open(...)` and the
 pseudo-files for stdin/stdout/stderr don't fit that constructor cleanly.
 
+### 9.7 Module `os` (v0.2 — M20a)
+
+Environment-variable and filesystem syscalls. Every function below wraps a
+Rust `std::env` or `std::fs` call directly; OS errors surface as
+`IOError` (catchable via `try ... except IOError`) — the same pattern
+as M5's `open(...)`.
+
+```
+fn env(key: str) -> str?
+fn set_env(key: str, value: str) -> None
+fn getcwd() -> str
+fn chdir(path: str) -> None
+fn listdir(path: str) -> List[str]
+fn remove(path: str) -> None
+fn mkdir(path: str) -> None
+fn exists(path: str) -> bool
+fn is_file(path: str) -> bool
+fn is_dir(path: str) -> bool
+fn read_file(path: str) -> str
+fn write_file(path: str, content: str) -> None
+```
+
+Semantics:
+
+* `env` returns `none` for both "variable unset" and "value not valid
+  UTF-8". The distinction isn't preserved (use `??` or `is none` to
+  branch).
+* `set_env` mutates the process environment — visible to child processes
+  spawned afterward but **not** to already-running threads on Windows.
+* `listdir` returns bare entry names (no path prefix, no trailing
+  separator). Symbolic links surface as their name; their target type
+  is queryable via `is_file`/`is_dir`.
+* `mkdir` is non-recursive (no `mkdir -p`). A future `os.makedirs` is
+  v0.3 work.
+* `read_file` / `write_file` are convenience wrappers over the M5
+  `open()` + `read`/`write` + `close` dance; they're not in CPython's
+  `os` (they live in `pathlib`/`open(...).read()`) but bundling them
+  saves ~6 lines per script.
+* The path argument is interpreted by the host OS. Forward slashes work
+  on Windows (they're translated by the Win32 API); use `path.sep` if
+  you want to be explicit.
+
+### 9.8 Module `path` (v0.2 — M20a)
+
+Pure path-string manipulation. Python ships these under `os.path` but
+StrictPy v0.2 has no submodule support (deferred to v0.3), so they live
+under a flat top-level `path` module.
+
+```
+fn join(a: str, b: str) -> str
+fn join3(a: str, b: str, c: str) -> str
+fn dirname(p: str) -> str
+fn basename(p: str) -> str
+fn splitext(p: str) -> Tuple[str, str]
+
+sep: str
+```
+
+Semantics:
+
+* `join` / `join3` delegate to Rust's `std::path::Path::join`. The OS
+  separator is used (`/` on Unix, `\` on Windows). 3-arg `join3` exists
+  because the v0.2 language has no variadic functions.
+* `dirname("/a/b/c.txt")` → `"/a/b"`; `dirname("bare")` → `""`. Empty
+  result is intentional (Python returns `""` too).
+* `basename("/a/b/c.txt")` → `"c.txt"`. Trailing separators are
+  stripped (Python compatibility).
+* `splitext("a.txt")` → `("a", ".txt")` — the dot is part of the
+  extension. Leading-dot filenames (`.bashrc`) are treated as having no
+  extension: `splitext(".bashrc")` → `(".bashrc", "")`. Returns a
+  heap-allocated `(str, str)` tuple (M14).
+* `sep` is the OS path separator string — `"/"` or `"\\"`. Read it once
+  at module load if you're building paths from data.
+
+### 9.9 Module `io` (v0.2 — M20a)
+
+Line-based standard-stream IO. Complements the M5 `io.File` class
+(opened-file reads/writes) with stdin/stdout/stderr access.
+
+```
+fn input() -> str
+fn input_with_prompt(prompt: str) -> str
+fn write_stdout(s: str) -> None
+fn write_stderr(s: str) -> None
+fn flush_stdout() -> None
+```
+
+Semantics:
+
+* `input()` reads one line from stdin, stripping the trailing `\n`
+  (and `\r\n` on Windows). Raises `IOError` on EOF before any byte or
+  on a read error.
+* `input_with_prompt(prompt)` writes `prompt` to stdout (no newline),
+  flushes, then reads a line. Convenience for CLI tools.
+* `write_stdout(s)` and `write_stderr(s)` write `s` literally — no
+  auto-appended newline. `print` / `println` cover the newline case;
+  these are for streaming output or for emitting partial lines.
+* `flush_stdout()` flushes the process's OS-level stdout buffer. Needed
+  before reading stdin if the program wrote a prompt without a trailing
+  newline (most terminals line-buffer stdout, so without flushing the
+  prompt won't appear until the line read completes).
+
+Note: in v0.2 there are no `sys.stdin` / `sys.stdout` / `sys.stderr`
+`File`-typed handles. The functions above are the supported interface.
+
 ---
 
 ## 10. Compiler Architecture

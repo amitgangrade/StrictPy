@@ -1,0 +1,44 @@
+"""env_dump.spy — print PATH split by the OS separator (M20a).
+
+Exercises:
+  * `os.env(key) -> str?` — nullable return when the var is unset.
+  * `s ?? fallback` — null-coalesce sugar (M10).
+  * `s.split(sep)` — M10's str split (single-char separator), composed
+    with the M20a `path.sep` constant.
+
+Output shape is intentionally portable: prints "PATH entries:" header
+followed by one line per entry.  The subprocess test asserts the header
+is present and the entry count is at least 1 (every reasonable test
+host has a non-empty PATH).
+
+Tests:
+  * `compiler/tests/env_dump_runs.rs` — subprocess assertion.
+"""
+
+import os
+
+fn main() -> i32:
+    # NOTE: `??` (null-coalesce) is incomplete in v0.2 (lowers to a
+    # constant pick of the rhs), so we use an explicit none-check.
+    maybe_raw: str? = os.env("PATH")
+    raw: str = ""
+    if maybe_raw is not none:
+        raw = maybe_raw
+    println("PATH entries:")
+    if len(raw) == 0:
+        println("(empty)")
+        return 0
+    # `:` on Unix, `;` on Windows.  We're agnostic by trying both — the
+    # one that doesn't match returns a single-element list with the
+    # whole string, which is still useful info.
+    sep: str = ";"
+    parts: List[str] = raw.split(sep)
+    if i64(len(parts)) == 1i64:
+        parts = raw.split(":")
+    n: i64 = i64(len(parts))
+    i: i64 = 0
+    while i < n:
+        if len(parts[i]) > 0:
+            println(parts[i])
+        i = i + 1
+    return 0

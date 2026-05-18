@@ -147,6 +147,67 @@ pub enum NativeFn {
     /// `sys.version` — version banner string. Constant per build.
     SysVersion  = 133,
 
+    // ── 140–159: `os` module (M20a) ─────────────────────────────────────
+    // Environment + filesystem syscalls.  Each variant maps to a Rust
+    // `std::env` or `std::fs` call.  All failures raise `IOError` via the
+    // M15 `VmError::UncaughtException` machinery (mirrors `IoOpen`).
+    /// `os.env(key: str) -> str?` — reads a process env var.  `none` if unset.
+    OsEnv      = 140,
+    /// `os.set_env(key: str, value: str) -> None` — process-local set.
+    OsSetEnv   = 141,
+    /// `os.getcwd() -> str` — `std::env::current_dir`.
+    OsGetCwd   = 142,
+    /// `os.chdir(path: str) -> None` — `std::env::set_current_dir`.
+    OsChdir    = 143,
+    /// `os.listdir(path: str) -> List[str]` — entry names only.
+    OsListDir  = 144,
+    /// `os.remove(path: str) -> None` — `std::fs::remove_file`.
+    OsRemove   = 145,
+    /// `os.mkdir(path: str) -> None` — non-recursive `std::fs::create_dir`.
+    OsMkdir    = 146,
+    /// `os.exists(path: str) -> bool` — true for file *or* dir.
+    OsExists   = 147,
+    /// `os.is_file(path: str) -> bool`.
+    OsIsFile   = 148,
+    /// `os.is_dir(path: str) -> bool`.
+    OsIsDir    = 149,
+    /// `os.read_file(path: str) -> str` — convenience wrapper.
+    OsReadFile  = 150,
+    /// `os.write_file(path: str, content: str) -> None` — convenience.
+    OsWriteFile = 151,
+
+    // ── 160–169: `path` module (M20a) ────────────────────────────────────
+    // Pure path-manipulation helpers.  Use Rust's `std::path::Path` so the
+    // OS separator is picked up correctly (`/` on Unix, `\` on Windows).
+    /// `path.join(a, b)` — 2-arg path concat.
+    PathJoin    = 160,
+    /// `path.join3(a, b, c)` — 3-arg path concat (no varargs in v0.2).
+    PathJoin3   = 161,
+    /// `path.dirname(p)` — parent dir (empty for bare name).
+    PathDirname = 162,
+    /// `path.basename(p)` — last component.
+    PathBasename = 163,
+    /// `path.splitext(p) -> (without_ext, ext_with_dot)`.  Returns a
+    /// heap-allocated `(str, str)` tuple (16-byte payload, two str-ptr slots).
+    PathSplitext = 164,
+    /// `path.sep` — the OS separator string (`"/"` or `"\\"`).
+    PathSep     = 165,
+
+    // ── 170–179: `io` module (M20a) ─────────────────────────────────────
+    // Line-based stdin/stdout/stderr.  Sister to M5's `io.File` (read/write
+    // on opened files); these natives operate on the process's standard
+    // streams via `interp.stdout_write` + a fresh `io::stdin().read_line`.
+    /// `io.input() -> str` — one line from stdin, no trailing newline.
+    IoInput     = 170,
+    /// `io.input_with_prompt(prompt) -> str` — print + flush + read line.
+    IoInputPrompt = 171,
+    /// `io.write_stdout(s)` — like `print` but reachable as a stdlib symbol.
+    IoWriteStdout = 172,
+    /// `io.write_stderr(s)` — diagnostics to the process's stderr.
+    IoWriteStderr = 173,
+    /// `io.flush_stdout()` — flush so prompts appear before the next read.
+    IoFlushStdout = 174,
+
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
     /// encounters. The VM treats this as a runtime error.
@@ -234,6 +295,32 @@ impl NativeFn {
             131 => Some(Self::SysExit),
             132 => Some(Self::SysPlatform),
             133 => Some(Self::SysVersion),
+            // M20a: os module.
+            140 => Some(Self::OsEnv),
+            141 => Some(Self::OsSetEnv),
+            142 => Some(Self::OsGetCwd),
+            143 => Some(Self::OsChdir),
+            144 => Some(Self::OsListDir),
+            145 => Some(Self::OsRemove),
+            146 => Some(Self::OsMkdir),
+            147 => Some(Self::OsExists),
+            148 => Some(Self::OsIsFile),
+            149 => Some(Self::OsIsDir),
+            150 => Some(Self::OsReadFile),
+            151 => Some(Self::OsWriteFile),
+            // M20a: path module.
+            160 => Some(Self::PathJoin),
+            161 => Some(Self::PathJoin3),
+            162 => Some(Self::PathDirname),
+            163 => Some(Self::PathBasename),
+            164 => Some(Self::PathSplitext),
+            165 => Some(Self::PathSep),
+            // M20a: io module.
+            170 => Some(Self::IoInput),
+            171 => Some(Self::IoInputPrompt),
+            172 => Some(Self::IoWriteStdout),
+            173 => Some(Self::IoWriteStderr),
+            174 => Some(Self::IoFlushStdout),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

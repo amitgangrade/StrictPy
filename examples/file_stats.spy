@@ -1,0 +1,40 @@
+"""file_stats.spy — composite os+path+sys demo (M20a).
+
+Takes a path as `sys.argv[1]` and prints a small report:
+
+    path     : <arg>
+    exists   : true|false
+    is_file  : true|false
+    is_dir   : true|false
+    dirname  : <parent>
+    basename : <name>
+    splitext : (<without_ext>, <ext>)
+
+Exercises:
+  * `import sys` (M19) — argv consumption.
+  * `import os` (M20a) — `exists`, `is_file`, `is_dir`.
+  * `import path` (M20a) — pure path manipulation.
+  * Tuple destructure of `path.splitext`'s `(str, str)` return.
+
+Tests:
+  * `compiler/tests/file_stats_runs.rs` — feeds it a known path.
+"""
+
+import sys
+import os
+import path
+
+fn main() -> i32:
+    if i64(len(sys.argv)) < 2i64:
+        println("usage: file_stats <path>")
+        return 1
+    p: str = sys.argv[1]
+    println("path     : " + p)
+    println("exists   : " + str(os.exists(p)))
+    println("is_file  : " + str(os.is_file(p)))
+    println("is_dir   : " + str(os.is_dir(p)))
+    println("dirname  : " + path.dirname(p))
+    println("basename : " + path.basename(p))
+    parts: Tuple[str, str] = path.splitext(p)
+    println("splitext : (" + parts.0 + ", " + parts.1 + ")")
+    return 0

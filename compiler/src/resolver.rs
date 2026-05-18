@@ -420,6 +420,220 @@ impl Resolver {
             ],
         };
         self.stdlib_modules.insert("sys".into(), sys);
+
+        // ── M20a: `os` module ──────────────────────────────────────────
+        // Native ids 140–159.  Each item maps to a NativeFn that wraps a
+        // Rust `std::env` / `std::fs` call.  Failures surface as IOError
+        // (matches the M5 `open()` semantics).
+        const OS_ENV: u32        = 140;
+        const OS_SET_ENV: u32    = 141;
+        const OS_GETCWD: u32     = 142;
+        const OS_CHDIR: u32      = 143;
+        const OS_LISTDIR: u32    = 144;
+        const OS_REMOVE: u32     = 145;
+        const OS_MKDIR: u32      = 146;
+        const OS_EXISTS: u32     = 147;
+        const OS_IS_FILE: u32    = 148;
+        const OS_IS_DIR: u32     = 149;
+        const OS_READ_FILE: u32  = 150;
+        const OS_WRITE_FILE: u32 = 151;
+
+        let fn_ty = |params: Vec<Ty>, ret: Ty| Ty::Function {
+            params,
+            ret: Box::new(ret),
+        };
+        let str_ty = Ty::Primitive(PrimTy::Str);
+        let unit_ty = Ty::Primitive(PrimTy::Unit);
+        let bool_ty = Ty::Primitive(PrimTy::Bool);
+        let nullable_str_ty = Ty::Nullable(Box::new(Ty::Primitive(PrimTy::Str)));
+        let list_str_ty = Ty::Generic {
+            base: TypeCtor::List,
+            args: vec![Ty::Primitive(PrimTy::Str)],
+        };
+
+        let os = StdlibModule {
+            name: "os".into(),
+            items: vec![
+                StdlibItem {
+                    name: "env".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], nullable_str_ty.clone()),
+                    native_id: OS_ENV,
+                },
+                StdlibItem {
+                    name: "set_env".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone(), str_ty.clone()], unit_ty.clone()),
+                    native_id: OS_SET_ENV,
+                },
+                StdlibItem {
+                    name: "getcwd".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], str_ty.clone()),
+                    native_id: OS_GETCWD,
+                },
+                StdlibItem {
+                    name: "chdir".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], unit_ty.clone()),
+                    native_id: OS_CHDIR,
+                },
+                StdlibItem {
+                    name: "listdir".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], list_str_ty.clone()),
+                    native_id: OS_LISTDIR,
+                },
+                StdlibItem {
+                    name: "remove".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], unit_ty.clone()),
+                    native_id: OS_REMOVE,
+                },
+                StdlibItem {
+                    name: "mkdir".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], unit_ty.clone()),
+                    native_id: OS_MKDIR,
+                },
+                StdlibItem {
+                    name: "exists".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], bool_ty.clone()),
+                    native_id: OS_EXISTS,
+                },
+                StdlibItem {
+                    name: "is_file".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], bool_ty.clone()),
+                    native_id: OS_IS_FILE,
+                },
+                StdlibItem {
+                    name: "is_dir".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], bool_ty.clone()),
+                    native_id: OS_IS_DIR,
+                },
+                StdlibItem {
+                    name: "read_file".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: OS_READ_FILE,
+                },
+                StdlibItem {
+                    name: "write_file".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone(), str_ty.clone()], unit_ty.clone()),
+                    native_id: OS_WRITE_FILE,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("os".into(), os);
+
+        // ── M20a: `path` module ────────────────────────────────────────
+        // Native ids 160–169.  `os.path` is Python's natural home but
+        // submodules are v0.3 work, so we ship a flat top-level `path`.
+        const PATH_JOIN: u32     = 160;
+        const PATH_JOIN3: u32    = 161;
+        const PATH_DIRNAME: u32  = 162;
+        const PATH_BASENAME: u32 = 163;
+        const PATH_SPLITEXT: u32 = 164;
+        const PATH_SEP: u32      = 165;
+
+        let path_mod = StdlibModule {
+            name: "path".into(),
+            items: vec![
+                StdlibItem {
+                    name: "join".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone(), str_ty.clone()], str_ty.clone()),
+                    native_id: PATH_JOIN,
+                },
+                StdlibItem {
+                    name: "join3".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), str_ty.clone(), str_ty.clone()],
+                        str_ty.clone(),
+                    ),
+                    native_id: PATH_JOIN3,
+                },
+                StdlibItem {
+                    name: "dirname".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: PATH_DIRNAME,
+                },
+                StdlibItem {
+                    name: "basename".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: PATH_BASENAME,
+                },
+                StdlibItem {
+                    name: "splitext".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone()],
+                        Ty::Tuple(vec![str_ty.clone(), str_ty.clone()]),
+                    ),
+                    native_id: PATH_SPLITEXT,
+                },
+                StdlibItem {
+                    name: "sep".into(),
+                    kind: StdlibItemKind::Const,
+                    ty: str_ty.clone(),
+                    native_id: PATH_SEP,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("path".into(), path_mod);
+
+        // ── M20a: `io` module ──────────────────────────────────────────
+        // Native ids 170–179.  `sys.stdin/stdout/stderr` were deferred in
+        // M19; we ship the line-based subset here instead.
+        const IO_INPUT: u32        = 170;
+        const IO_INPUT_PROMPT: u32 = 171;
+        const IO_WRITE_STDOUT: u32 = 172;
+        const IO_WRITE_STDERR: u32 = 173;
+        const IO_FLUSH_STDOUT: u32 = 174;
+
+        let io_mod = StdlibModule {
+            name: "io".into(),
+            items: vec![
+                StdlibItem {
+                    name: "input".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], str_ty.clone()),
+                    native_id: IO_INPUT,
+                },
+                StdlibItem {
+                    name: "input_with_prompt".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: IO_INPUT_PROMPT,
+                },
+                StdlibItem {
+                    name: "write_stdout".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], unit_ty.clone()),
+                    native_id: IO_WRITE_STDOUT,
+                },
+                StdlibItem {
+                    name: "write_stderr".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], unit_ty.clone()),
+                    native_id: IO_WRITE_STDERR,
+                },
+                StdlibItem {
+                    name: "flush_stdout".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], unit_ty.clone()),
+                    native_id: IO_FLUSH_STDOUT,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("io".into(), io_mod);
     }
 
     // ─────────────────────────────────────────────────────────────────────
