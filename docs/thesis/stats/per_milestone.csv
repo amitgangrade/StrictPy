@@ -1,0 +1,13 @@
+milestone,date,tests_passing,tests_ignored,compiler_loc,vm_loc,shared_loc,examples_loc,bugs_found,bugs_fixed_here,bugs_deferred_here,bench_wins,bench_ties,bench_losses,fib30_ms,bench_geomean_ratio_vs_cpython,notes
+M0,2026-05-17,0,0,0,0,0,0,0,0,0,,,,,,Spec frozen at v0.1
+M1,2026-05-17,55,0,5618,0,500,0,0,0,0,,,,,,Lexer+parser+pretty
+M2,2026-05-17,74,0,8662,0,500,0,0,0,0,,,,,,Resolver+typechecker+conformance
+M3,2026-05-17,89,0,11900,0,720,202,0,0,0,,,,,,IR+codegen+bytecode
+M4,2026-05-17,95,0,11900,3125,720,202,3,0,3,,,,,,Interp+loader+object+mark-sweep GC. Bugs found: fib infinite loop / dot vacuous / mandelbrot vacuous
+M3.5,2026-05-17,107,0,12500,3125,720,202,3,3,0,,,,,,Fixed M4-discovered bugs; broke tree.spy in the process
+M5,2026-05-17,121,0,12500,5200,720,202,0,0,0,,,,,,Native stdlib: math/io/channels/dicts. Threads deferred to M6.
+M6,2026-05-17,132,0,13000,5500,720,202,6,6,0,,,,,,Tree regression fix (3 vtable bugs) + real OS threading. Lambda lifting verified.
+M7,2026-05-17,134,0,13200,5650,720,202,3,3,0,,,,,,Runtime-class dispatch. Incidental fixes: not-x-bitwise / none-as-zero / Thread-as-Alloc.
+M8,2026-05-17,134,0,13200,6900,720,202,0,0,0,10,2,4,14.6,0.45,Cranelift AOT compilation lands. fib(30) 931ms -> 14.6ms (64x speedup)
+M9,2026-05-17,134,0,13200,7300,720,202,0,0,0,16,0,0,13.5,0.14,Full JIT coverage. StrictPy beats CPython on every cell.
+M10,2026-05-18,173,1,13700,8600,720,1660,17,11,6,16,0,0,15.8,0.16,6 real-world programs land. Nullable audit catches 4 more silent miscompiles. C2 stress test finds 8 bugs incl. is-not-none INVERTED.
