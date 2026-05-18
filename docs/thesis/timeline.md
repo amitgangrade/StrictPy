@@ -256,6 +256,53 @@ file ownership — compiler/VM changes in AB, only-add-new-files in C1/C2/C3.
 
 ---
 
+---
+
+## M11 — Class-system overhaul
+
+**Scope**: write 5 more real-world programs to stress-test the class system,
+then fix the architectural bugs they surface plus the deferred entries in
+`BUGS_KNOWN.md`.
+
+**Round 1** — 3 parallel agents wrote:
+- **lambda_calc.spy** (232 lines) — λ-calculus with `Var`/`Abs`/`App` AST, capture-avoiding substitution, divergence detection
+- **calculator.spy** (249 lines) — recursive-descent arithmetic parser + evaluator
+- **tictactoe.spy** (285 lines) — 9-cell board, minimax to depth 9
+- **levenshtein.spy** (146 lines) — 2D DP edit distance
+- **lisp.spy** (647 lines) — toy Lisp with closures, environments, builtins
+
+**Bugs surfaced**:
+- 3 known bugs from `BUGS_KNOWN.md` confirmed (sealed dispatch, field aliasing, vtable mod-4)
+- **N1**: vtable cap at 4 total slots on the base class — sharpens BUG-017
+- **N2**: deterministic heap corruption on subclass-with-class-ref-fields + virtual call
+- **i32(i64) silent truncation** — `i32`, `i64`, `f64`, `char` ctors all dispatch to a fixed native id, ignoring arg type. Same pattern as M10's `str(char)` fix.
+- **str(f64)** of whole number prints `"3.0"` not `"3"` (low severity, doc inconsistency)
+
+**Round 2 (fix pass)** — single agent fixed:
+- BUG-015 (sealed dispatch) — `lower_method_call` devirt now requires `!is_open && !is_sealed`
+- BUG-016 (subclass field aliasing) — `layout_class` seeds offset from `parent.payload_size`; subclasses inherit parent fields
+- BUG-017 + N1 (vtable cap) — **three converging sub-bugs**:
+  - Subclass vtables didn't inherit parent methods
+  - IR didn't walk up the chain for inherited fn_ids
+  - **`op_new` class_id vs type_id collision** — long-standing M3 hack that worked only while ids didn't collide; the 4th user class (`class_id 16`) collided with Shape's `type_id 16`
+- N2 — confirmed to be BUG-016 in disguise (subclass `car` field overwrote vtable pointer at offset 0)
+- Primitive ctor dispatch — `lower_call` mirrors `str(x)` pattern for all prim ctors
+- `str(f64)` — was already correct, just needed spec doc
+
+**The surprise finding (worth a thesis paragraph)**: BUG-026 (non-deterministic
+heap corruption in json_parse/calculator) was **also BUG-016 in disguise**.
+After the M11 fix, both calculator and json_parse run **5/5 cleanly** where
+they were 0/3 before. The non-determinism was heap layout varying across
+runs; the underlying trigger was always the same offset-aliasing causing
+the GC to walk through a corrupted vtable pointer.
+
+**Tests**: 173 → 201 (+12 regression tests in `vm/tests/m11_fixes.rs` + 9
+example integration tests + 7 reshuffled).
+
+**Benchmarks**: still 16/16 wins, slight perf improvement (fib(33) 35.5ms → 30.6ms).
+
+---
+
 ## What this trajectory shows
 
 - **Bugs found scales with running real programs, not with writing tests.**

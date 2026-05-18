@@ -43,6 +43,10 @@ pub enum NativeFn {
     // first program that needs str→number parsing.
     F64FromStr    = 26,
     I64FromStr    = 27,
+    /// M11 fix: `i64(f: f64)` — truncate toward zero. The IR lowerer
+    /// previously had no entry for this and routed every `i64(x)` through
+    /// `I64FromI32`, which read the f64 bit pattern as an integer.
+    I64FromF64    = 29,
     // real-world: csv_aggregate / wordcount / markov — every stress test
     // that touches text rolled its own splitter. `s.split(sep) -> List[str]`
     // lifts that boilerplate. Returns the empty list for an empty `s`
@@ -159,6 +163,7 @@ impl NativeFn {
             26 => Some(Self::F64FromStr),
             27 => Some(Self::I64FromStr),
             28 => Some(Self::StrSplit),
+            29 => Some(Self::I64FromF64),
             30 => Some(Self::IoOpen),
             31 => Some(Self::FileRead),
             32 => Some(Self::FileWrite),

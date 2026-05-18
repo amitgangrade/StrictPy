@@ -1,0 +1,232 @@
+"""Untyped lambda-calculus evaluator. Three node types — Var/Abs/App —
+each `final class` extending an `open class Expr` (NOT `sealed`, see
+BUGS_KNOWN.md #1). Parent `Expr` carries NO fields (BUGS_KNOWN.md #2).
+Each base method has exactly 3 overrides — one per subclass — staying
+inside the BUGS_KNOWN.md #3 vtable-wrap-at-4 limit.
+
+What this program exercises:
+
+  - Virtual method dispatch through `open class Expr` (the workaround for
+    the sealed-class bug). render/subst/step/try_apply/has_free all
+    dispatch through the vtable from sibling subclass methods.
+
+  - Recursive sub-class methods that return `Expr` and re-enter through
+    the vtable on the result. This is the test for whether virtual
+    dispatch composes through many levels.
+
+  - Manual capture-avoiding substitution with fresh-name generation
+    (`name + "'"`).
+
+  - `Expr?` (Optional) — `step`/`try_apply` return `none` for non-redex
+    or normal form.
+
+Test programs at the bottom:
+  1. `(\\x. x) (\\y. y)`         — reduces in one step to `(\\y. y)`.
+  2. `(\\x. \\y. x) a b`         — K applied to two args, reduces to `a`.
+  3. `(\\x. x x) (\\x. x x)`     — Omega; diverges. Capped at max_steps.
+"""
+
+# ── AST ────────────────────────────────────────────────────────────────────
+#
+# Each virtual is declared on the base. Var/Abs/App each provide one
+# override per virtual. We deliberately do NOT add a 6th virtual that
+# would force a 4th override — that's where BUG-017 (vtable mod 4) bites.
+
+open class Expr:
+    fn __init__(self) -> None:
+        pass
+
+    open fn render(self) -> str:
+        return "<Expr:unimpl>"
+
+    # Per-node substitution. Caller passes in the name to replace and the
+    # value to put in its place; returns a *new* Expr.
+    open fn subst(self, name: str, value: Expr) -> Expr:
+        return self
+
+    # One small-step beta reduction; returns none if this node is in
+    # weak/normal head form and nothing to reduce.
+    open fn step(self) -> Expr?:
+        return none
+
+    # If self is an Abs `(\\p. body)`, return `body[p ↦ arg]`. Otherwise
+    # return none. This is the virtual we use instead of a downcast in
+    # App.step.
+    open fn try_apply(self, arg: Expr) -> Expr?:
+        return none
+
+    # True iff `name` appears free anywhere in self.
+    open fn has_free(self, name: str) -> bool:
+        return false
+
+final class Var(Expr):
+    name: str
+
+    fn __init__(self, name: str) -> None:
+        self.name = name
+
+    fn render(self) -> str:
+        return self.name
+
+    fn subst(self, name: str, value: Expr) -> Expr:
+        if self.name == name:
+            return value
+        return self
+
+    fn step(self) -> Expr?:
+        return none
+
+    fn try_apply(self, arg: Expr) -> Expr?:
+        return none
+
+    fn has_free(self, name: str) -> bool:
+        return self.name == name
+
+final class Abs(Expr):
+    param: str
+    body: Expr
+
+    fn __init__(self, param: str, body: Expr) -> None:
+        self.param = param
+        self.body = body
+
+    fn render(self) -> str:
+        return "(\\" + self.param + ". " + self.body.render() + ")"
+
+    fn subst(self, name: str, value: Expr) -> Expr:
+        # Shadowing — the binder shadows `name`; nothing to do.
+        if self.param == name:
+            return self
+        # Capture check: if `value` mentions `self.param` free, we'd
+        # accidentally capture. Alpha-rename the binder first.
+        if value.has_free(self.param):
+            fresh: str = self.fresh_name_for(value)
+            renamed_body: Expr = self.body.subst(self.param, Var(fresh))
+            return Abs(fresh, renamed_body.subst(name, value))
+        return Abs(self.param, self.body.subst(name, value))
+
+    fn step(self) -> Expr?:
+        # Reduce under the lambda — needed so the K-combinator test
+        # finishes inside max_steps.
+        inner: Expr? = self.body.step()
+        if inner is none:
+            return none
+        b: Expr = unwrap_expr(inner)
+        return Abs(self.param, b)
+
+    fn try_apply(self, arg: Expr) -> Expr?:
+        return self.body.subst(self.param, arg)
+
+    fn has_free(self, name: str) -> bool:
+        if self.param == name:
+            return false
+        return self.body.has_free(name)
+
+    # Cheap fresh-variable generator: keep appending `'` until the result
+    # doesn't appear free in either `value` or `self.body`.
+    fn fresh_name_for(self, value: Expr) -> str:
+        candidate: str = self.param + "'"
+        i: i32 = 0
+        while i < 100:
+            if (not value.has_free(candidate)) and (not self.body.has_free(candidate)):
+                return candidate
+            candidate = candidate + "'"
+            i = i + 1
+        return candidate
+
+final class App(Expr):
+    fn_expr: Expr
+    arg: Expr
+
+    fn __init__(self, fn_expr: Expr, arg: Expr) -> None:
+        self.fn_expr = fn_expr
+        self.arg = arg
+
+    fn render(self) -> str:
+        return "(" + self.fn_expr.render() + " " + self.arg.render() + ")"
+
+    fn subst(self, name: str, value: Expr) -> Expr:
+        return App(self.fn_expr.subst(name, value), self.arg.subst(name, value))
+
+    fn step(self) -> Expr?:
+        # Top-level beta-redex: ask the function whether it can apply
+        # itself to the argument. Abs.try_apply returns a Some; Var/App
+        # return none.
+        reduced: Expr? = self.fn_expr.try_apply(self.arg)
+        if reduced is not none:
+            return reduced
+        # Try the function position first.
+        f_stepped: Expr? = self.fn_expr.step()
+        if f_stepped is not none:
+            f: Expr = unwrap_expr(f_stepped)
+            return App(f, self.arg)
+        # Then the argument position.
+        a_stepped: Expr? = self.arg.step()
+        if a_stepped is not none:
+            a: Expr = unwrap_expr(a_stepped)
+            return App(self.fn_expr, a)
+        return none
+
+    fn try_apply(self, arg: Expr) -> Expr?:
+        return none
+
+    fn has_free(self, name: str) -> bool:
+        if self.fn_expr.has_free(name):
+            return true
+        return self.arg.has_free(name)
+
+# ── Helpers ─────────────────────────────────────────────────────────────
+
+# Optional-unwrap that satisfies the typechecker. Callers guard with
+# `is not none` before calling.
+fn unwrap_expr(e: Expr?) -> Expr:
+    if e is none:
+        return Var("__bug__")
+    return e
+
+# ── Evaluator ───────────────────────────────────────────────────────────
+
+fn eval_expr(e: Expr, max_steps: i32) -> Expr:
+    cur: Expr = e
+    i: i32 = 0
+    while i < max_steps:
+        nxt: Expr? = cur.step()
+        if nxt is none:
+            return cur
+        cur = unwrap_expr(nxt)
+        i = i + 1
+    return cur
+
+# ── Driver ──────────────────────────────────────────────────────────────
+
+fn trace(label: str, e: Expr, max_steps: i32) -> None:
+    println(label + ":")
+    println("  " + e.render())
+    cur: Expr = e
+    i: i32 = 0
+    while i < max_steps:
+        nxt: Expr? = cur.step()
+        if nxt is none:
+            println("  = " + cur.render())
+            return
+        cur = unwrap_expr(nxt)
+        println("  -> " + cur.render())
+        i = i + 1
+    println("  <diverges>")
+
+fn main() -> i32:
+    # 1) Identity applied to identity:  (\\x. x) (\\y. y)  ->  (\\y. y)
+    e1: Expr = App(Abs("x", Var("x")), Abs("y", Var("y")))
+    trace("test 1: I I", e1, 5)
+
+    # 2) K combinator applied to two args:  (\\x. \\y. x) a b  ->  a
+    k: Expr = Abs("x", Abs("y", Var("x")))
+    e2: Expr = App(App(k, Var("a")), Var("b"))
+    trace("test 2: K a b", e2, 5)
+
+    # 3) Omega: (\\x. x x) (\\x. x x)  — diverges. Cap at 4 steps.
+    self_app: Expr = Abs("x", App(Var("x"), Var("x")))
+    e3: Expr = App(self_app, self_app)
+    trace("test 3: Omega (diverges)", e3, 4)
+
+    return 0

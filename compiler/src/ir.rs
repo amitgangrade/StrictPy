@@ -353,24 +353,50 @@ impl Lowerer {
             // `Class.method` name. `__init__` is intentionally excluded —
             // constructors are direct-called by name and shouldn't take
             // a vtable slot (see resolver.rs comment).
+            //
+            // M11 BUG-017+N1 fix: walk up the inheritance chain when a
+            // subclass doesn't override an inherited method. Without this
+            // step, an inherited slot would be filled with u32::MAX and the
+            // first call through a base-typed receiver would trap with
+            // "unresolved vtable slot N".
             let mut vtable = Vec::new();
             for m in &layout.methods {
                 if m.name == "__init__" {
                     continue;
                 }
-                let key = format!("{}.{}", layout.name, m.name);
-                if let Some(FuncId(fid)) = self.fn_id_by_name.get(&key) {
-                    vtable.push(*fid);
-                } else {
-                    vtable.push(u32::MAX); // unresolved (e.g. inherited prelude method)
+                // Walk this class and its ancestors looking for the most
+                // derived definition of `m.name` that has an emitted fn id.
+                let mut fid = u32::MAX;
+                let mut cur = Some(cid);
+                while let Some(c) = cur {
+                    let cur_layout = match class_layouts.get(&c) {
+                        Some(l) => l,
+                        None => break,
+                    };
+                    let key = format!("{}.{}", cur_layout.name, m.name);
+                    if let Some(FuncId(found)) = self.fn_id_by_name.get(&key) {
+                        fid = *found;
+                        break;
+                    }
+                    cur = cur_layout.base;
                 }
+                vtable.push(fid);
             }
             let base_type = layout
                 .base
                 .and_then(|b| self.class_type_id.get(&b.0).copied())
                 .unwrap_or(strictpy_shared::file_format::NO_BASE_TYPE);
-            // Conservative size: 16 (object header) + 8 per field.
-            let size = 16 + (layout.fields.len() as u32) * 8;
+            // M11 BUG-016 fix: subclass allocations must include parent
+            // fields too. With `layout.fields` now containing the parent's
+            // fields verbatim plus the subclass's own, the conservative
+            // `8 * fields.len()` formula naturally covers both — and we
+            // additionally take the max with `payload_size` (which respects
+            // natural alignment of mixed-width primitives) as a belt-and-
+            // braces guard. The GC scans 8 bytes at a time so always pad up.
+            let words = (layout.fields.len() as u32).max(
+                (layout.payload_size + 7) / 8
+            );
+            let size = 16 + words * 8;
             self.out.type_table.push(TypeTableEntry {
                 type_id: tid,
                 kind: 1, // class
@@ -1777,9 +1803,23 @@ fn lower_call(
                             }
                         }
                         // Allocate + call __init__ (if present).
+                        //
+                        // M11 fix (BUG-N1 subsidiary): emit the runtime
+                        // *type_id* rather than the resolver's class_id.
+                        // The VM's `op_new` previously fell back to using
+                        // class_id as a type-table index, but once enough
+                        // user classes existed the class_id numerically
+                        // collided with another class's type_id and the
+                        // direct lookup returned the wrong RuntimeType
+                        // (Pentagon got Shape's vtable, etc.).
+                        let tid = ctx
+                            .class_type_id
+                            .get(&cid.0)
+                            .copied()
+                            .unwrap_or(cid.0);
                         let alloc = fb.push_value(
                             Ty::Class(cid),
-                            ValueKind::Op { op: IROp::Alloc { class_id: cid.0 }, args: vec![] },
+                            ValueKind::Op { op: IROp::Alloc { class_id: tid }, args: vec![] },
                         );
                         let init_name = format!("{}.__init__", name);
                         if let Some(FuncId(fid)) = ctx.fn_id_by_name.get(&init_name).copied() {
@@ -1864,10 +1904,15 @@ fn lower_call(
                     // generic StrFromAny heuristic in the VM segfaults on
                     // non-pointer bit patterns (e.g. f64 values look like
                     // wild pointers).
+                    //
+                    // M11 fix: the same per-arg-type dispatch is required
+                    // for the *numeric* ctors `i32(x)`, `i64(x)`, `f64(x)`,
+                    // `char(x)`. Previously `NativeFn::from_name("i32")`
+                    // returned `I32FromF64` unconditionally, so `i32(i64)`
+                    // reinterpreted the i64 bit pattern as f64 (tiny ints
+                    // look like denormal f64s and truncate to 0).
+                    let arg_ty = args.first().map(|a| ctx.expr_ty(expr_span(&a.value)));
                     let nid = if name == "str" {
-                        let arg_ty = args
-                            .first()
-                            .map(|a| ctx.expr_ty(expr_span(&a.value)));
                         match arg_ty {
                             Some(Ty::Primitive(PrimTy::I32))
                             | Some(Ty::Primitive(PrimTy::U32))
@@ -1894,6 +1939,106 @@ fn lower_call(
                                 );
                             }
                             _ => NativeFn::StrFromAny as u32,
+                        }
+                    } else if name == "i32" {
+                        match arg_ty {
+                            Some(Ty::Primitive(PrimTy::I64))
+                            | Some(Ty::Primitive(PrimTy::U64)) => NativeFn::I32FromI64 as u32,
+                            Some(Ty::Primitive(PrimTy::F32))
+                            | Some(Ty::Primitive(PrimTy::F64)) => NativeFn::I32FromF64 as u32,
+                            // i32(char) reads the codepoint — char's storage
+                            // already fits in 32 bits, so a no-op copy is fine.
+                            Some(Ty::Primitive(PrimTy::Char)) => {
+                                return fb.push_value(
+                                    ret_ty,
+                                    ValueKind::Op { op: IROp::Copy, args: arg_vs },
+                                );
+                            }
+                            // Identity / widen-from-smaller-int — just copy.
+                            Some(Ty::Primitive(PrimTy::I32))
+                            | Some(Ty::Primitive(PrimTy::U32))
+                            | Some(Ty::Primitive(PrimTy::I8))
+                            | Some(Ty::Primitive(PrimTy::I16))
+                            | Some(Ty::Primitive(PrimTy::U8))
+                            | Some(Ty::Primitive(PrimTy::U16))
+                            | Some(Ty::Primitive(PrimTy::Bool)) => {
+                                return fb.push_value(
+                                    ret_ty,
+                                    ValueKind::Op { op: IROp::Copy, args: arg_vs },
+                                );
+                            }
+                            _ => NativeFn::I32FromF64 as u32, // fallback (legacy)
+                        }
+                    } else if name == "i64" {
+                        match arg_ty {
+                            Some(Ty::Primitive(PrimTy::I32))
+                            | Some(Ty::Primitive(PrimTy::U32))
+                            | Some(Ty::Primitive(PrimTy::I8))
+                            | Some(Ty::Primitive(PrimTy::I16))
+                            | Some(Ty::Primitive(PrimTy::U8))
+                            | Some(Ty::Primitive(PrimTy::U16))
+                            | Some(Ty::Primitive(PrimTy::Bool)) => NativeFn::I64FromI32 as u32,
+                            Some(Ty::Primitive(PrimTy::F32))
+                            | Some(Ty::Primitive(PrimTy::F64)) => NativeFn::I64FromF64 as u32,
+                            // i64(char) — codepoint zero-extended to 64 bits.
+                            // Char storage already zero-extends so a copy works.
+                            Some(Ty::Primitive(PrimTy::Char)) => {
+                                return fb.push_value(
+                                    ret_ty,
+                                    ValueKind::Op { op: IROp::Copy, args: arg_vs },
+                                );
+                            }
+                            // i64(i64): identity copy.
+                            Some(Ty::Primitive(PrimTy::I64))
+                            | Some(Ty::Primitive(PrimTy::U64)) => {
+                                return fb.push_value(
+                                    ret_ty,
+                                    ValueKind::Op { op: IROp::Copy, args: arg_vs },
+                                );
+                            }
+                            _ => NativeFn::I64FromI32 as u32,
+                        }
+                    } else if name == "f64" {
+                        match arg_ty {
+                            Some(Ty::Primitive(PrimTy::I32))
+                            | Some(Ty::Primitive(PrimTy::U32))
+                            | Some(Ty::Primitive(PrimTy::I8))
+                            | Some(Ty::Primitive(PrimTy::I16))
+                            | Some(Ty::Primitive(PrimTy::U8))
+                            | Some(Ty::Primitive(PrimTy::U16))
+                            | Some(Ty::Primitive(PrimTy::Bool)) => NativeFn::F64FromI32 as u32,
+                            Some(Ty::Primitive(PrimTy::I64))
+                            | Some(Ty::Primitive(PrimTy::U64)) => NativeFn::F64FromI64 as u32,
+                            // f64(f64): identity copy.
+                            Some(Ty::Primitive(PrimTy::F32))
+                            | Some(Ty::Primitive(PrimTy::F64)) => {
+                                return fb.push_value(
+                                    ret_ty,
+                                    ValueKind::Op { op: IROp::Copy, args: arg_vs },
+                                );
+                            }
+                            _ => NativeFn::F64FromI64 as u32,
+                        }
+                    } else if name == "char" {
+                        match arg_ty {
+                            // char(i32) — already the canonical case.
+                            Some(Ty::Primitive(PrimTy::I32))
+                            | Some(Ty::Primitive(PrimTy::U32))
+                            | Some(Ty::Primitive(PrimTy::I8))
+                            | Some(Ty::Primitive(PrimTy::I16))
+                            | Some(Ty::Primitive(PrimTy::U8))
+                            | Some(Ty::Primitive(PrimTy::U16)) => NativeFn::CharFromI32 as u32,
+                            // char(i64) — truncate the codepoint to 32 bits.
+                            Some(Ty::Primitive(PrimTy::I64))
+                            | Some(Ty::Primitive(PrimTy::U64)) => NativeFn::CharFromI32 as u32,
+                            // char(char): identity copy.
+                            Some(Ty::Primitive(PrimTy::Char)) => {
+                                return fb.push_value(
+                                    ret_ty,
+                                    ValueKind::Op { op: IROp::Copy, args: arg_vs },
+                                );
+                            }
+                            _ => NativeFn::CharFromI32 as u32,
                         }
                     } else {
                         NativeFn::from_name(name)
@@ -1971,12 +2116,18 @@ fn lower_method_call(
                 .position(|m| m.name == method)
             {
                 // Only devirtualise to a DirectCall when the receiver's
-                // static type is `final` — for `open` classes (and any
-                // class with subclasses in scope) the actual runtime type
-                // may be a subclass that overrides this method, and we
-                // must dispatch through the vtable to see the override.
+                // static type is `final` — for `open` *and* `sealed`
+                // classes the actual runtime type may be a subclass that
+                // overrides this method, and we must dispatch through the
+                // vtable to see the override.
+                //
+                // M11 BUG-015 fix: previously this branch only checked
+                // `!is_open`, so sealed-typed receivers dropped to the
+                // base implementation even when the runtime instance was
+                // a subclass override. `sealed` controls *who may define
+                // subclasses*, not how methods are dispatched.
                 let key = format!("{}.{}", layout.name, method);
-                if !layout.is_open {
+                if !layout.is_open && !layout.is_sealed {
                     if let Some(fid) = ctx.fn_id_by_name.get(&key).copied() {
                         return fb.push_value(
                             ret_ty,

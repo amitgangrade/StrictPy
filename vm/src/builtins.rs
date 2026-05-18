@@ -185,6 +185,10 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         NativeFn::F64FromI32 => Ok((arg_i64(args, 0) as i32 as f64).to_bits()),
         NativeFn::F64FromI64 => Ok((arg_i64(args, 0) as f64).to_bits()),
         NativeFn::I32FromF64 => Ok((arg_f64(args, 0) as i32) as i64 as u64),
+        // M11 fix: `i64(f: f64)` — truncate toward zero. Without this dispatch
+        // the IR previously routed every `i64(x)` through `I64FromI32` and the
+        // f64 bit pattern was read as an integer (so `i64(3.14)` → ~4.6e18).
+        NativeFn::I64FromF64 => Ok(arg_f64(args, 0) as i64 as u64),
         NativeFn::CharFromI32 => Ok(arg_u64(args, 0) & 0xFFFF_FFFF),
         NativeFn::BoolFromAny => Ok(if arg_u64(args, 0) != 0 { 1 } else { 0 }),
 

@@ -1,0 +1,285 @@
+"""Tic-tac-toe with a minimax AI plays itself out from a partially-played
+opening position. Board is a flat `List[i32]` of length 9 (row-major:
+indices 0..2 are the top row), with 0 = empty, 1 = X (maximiser), 2 = O
+(minimiser).
+
+Two AI players alternate, each picking the minimax-optimal move from the
+current position. With perfect play from any "fair" partial start, the
+expected outcome is a draw — but to surface bugs we deliberately seed an
+asymmetric opening (X in centre, O in a corner, X in another corner)
+that's already X-favourable, so the run *should* end with either an X
+win or a draw, never an O win.
+
+This program stresses StrictPy's:
+  - Recursive `i32`-returning functions with negative values (minimax
+    losing leaf returns -10). Comparison and storage of negative i32 was
+    not previously stressed by examples/sudoku.spy (which only used
+    non-negative values).
+  - Boolean parameter (`is_max: bool`) threaded through recursion.
+  - `min(a, b)` and `max(a, b)` builtins (spec §9: 2-arg form only).
+  - Returning early from a loop based on `winner != 0` — boolean
+    expressions whose result depends on a recently-mutated cell.
+  - Mutating then restoring a `List[i32]` cell around a recursive call,
+    same pattern as sudoku's backtracker.
+
+Recursion depth: from the seeded position (3 moves already played), the
+deepest minimax call sees 6 empty cells, so peak recursion depth is 6 —
+well under StrictPy's 1024-frame cap (§14.2).
+"""
+
+# ── Constants ─────────────────────────────────────────────────────────
+
+final EMPTY: i32 = 0
+final X_MARK: i32 = 1
+final O_MARK: i32 = 2
+
+# Sentinel returned by check_winner when neither player has won and the
+# board is full.
+final DRAW: i32 = 3
+
+# Minimax leaf scores. Picked so that depth penalties (subtract depth on
+# the max side, add depth on the min side) can't flip the sign. Tic-tac-
+# toe has at most 9 plies, so |score| stays well under 100.
+final WIN_SCORE: i32 = 100
+final LOSE_SCORE: i32 = -100
+
+# ── Board helpers ─────────────────────────────────────────────────────
+
+fn make_board() -> List[i32]:
+    """Allocate an empty 9-cell board (3x3, row-major)."""
+    b: List[i32] = []
+    i: i32 = 0
+    while i < 9:
+        b.append(EMPTY)
+        i = i + 1
+    return b
+
+fn cell_str(v: i32) -> str:
+    """Render one cell. We pad to a single space so the grid lines up."""
+    if v == X_MARK:
+        return "X"
+    if v == O_MARK:
+        return "O"
+    return " "
+
+fn render(board: List[i32]) -> None:
+    """Print the board as a 3x3 ASCII grid with `|` and `-` separators."""
+    r: i32 = 0
+    while r < 3:
+        # Build one row: " X | O |   "
+        base: i32 = r * 3
+        line: str = " " + cell_str(board[base]) + " | " + cell_str(board[base + 1]) + " | " + cell_str(board[base + 2])
+        println(line)
+        if r < 2:
+            println("-----------")
+        r = r + 1
+
+# ── Win detection ─────────────────────────────────────────────────────
+# We enumerate the 8 winning lines explicitly rather than computing
+# them, because StrictPy v0.1 has no compile-time list-of-list literal
+# in the existing examples and the runtime cost is identical.
+
+fn line_winner(board: List[i32], a: i32, b: i32, c: i32) -> i32:
+    """Return the marker (1 or 2) if the three cells (a, b, c) all hold
+    the same non-empty value, else 0."""
+    va: i32 = board[a]
+    if va == EMPTY:
+        return 0
+    if board[b] != va:
+        return 0
+    if board[c] != va:
+        return 0
+    return va
+
+fn check_winner(board: List[i32]) -> i32:
+    """Return 1 (X) or 2 (O) if that player has three in a row; DRAW (3)
+    if the board is full with no winner; 0 if the game is still on."""
+    # Rows
+    w: i32 = line_winner(board, 0, 1, 2)
+    if w != 0:
+        return w
+    w = line_winner(board, 3, 4, 5)
+    if w != 0:
+        return w
+    w = line_winner(board, 6, 7, 8)
+    if w != 0:
+        return w
+    # Columns
+    w = line_winner(board, 0, 3, 6)
+    if w != 0:
+        return w
+    w = line_winner(board, 1, 4, 7)
+    if w != 0:
+        return w
+    w = line_winner(board, 2, 5, 8)
+    if w != 0:
+        return w
+    # Diagonals
+    w = line_winner(board, 0, 4, 8)
+    if w != 0:
+        return w
+    w = line_winner(board, 2, 4, 6)
+    if w != 0:
+        return w
+    # No winner — board full?
+    i: i32 = 0
+    while i < 9:
+        if board[i] == EMPTY:
+            return 0
+        i = i + 1
+    return DRAW
+
+# ── Minimax ───────────────────────────────────────────────────────────
+
+fn minimax(board: List[i32], depth: i32, is_max: bool) -> i32:
+    """Standard minimax with depth penalty so faster wins outscore slow
+    ones (otherwise the AI sees all wins as equal and dithers).
+
+    Returns:
+      - WIN_SCORE - depth  if X has won (maximiser),
+      - LOSE_SCORE + depth if O has won (minimiser),
+      - 0                  if draw,
+      - the best score over all legal moves otherwise.
+    """
+    w: i32 = check_winner(board)
+    if w == X_MARK:
+        return WIN_SCORE - depth
+    if w == O_MARK:
+        return LOSE_SCORE + depth
+    if w == DRAW:
+        return 0
+
+    # Recurse over every empty cell. We hand-roll the running best
+    # rather than collecting into a list — fewer allocations on a hot
+    # recursion path.
+    if is_max:
+        best: i32 = -1000
+        i: i32 = 0
+        while i < 9:
+            if board[i] == EMPTY:
+                board[i] = X_MARK
+                score: i32 = minimax(board, depth + 1, false)
+                board[i] = EMPTY
+                # Inline max(best, score) — the builtin works, but
+                # hand-roll keeps the hot path simple to read.
+                if score > best:
+                    best = score
+            i = i + 1
+        return best
+    else:
+        best2: i32 = 1000
+        i2: i32 = 0
+        while i2 < 9:
+            if board[i2] == EMPTY:
+                board[i2] = O_MARK
+                score2: i32 = minimax(board, depth + 1, true)
+                board[i2] = EMPTY
+                if score2 < best2:
+                    best2 = score2
+            i2 = i2 + 1
+        return best2
+
+fn best_move(board: List[i32], player: i32) -> i32:
+    """Pick the cell index that yields the best minimax score for
+    `player`. Returns -1 if there are no empty cells (caller should
+    check_winner first to avoid this)."""
+    best_idx: i32 = -1
+    if player == X_MARK:
+        # Maximiser: start below any reachable score.
+        best_score: i32 = -1000
+        i: i32 = 0
+        while i < 9:
+            if board[i] == EMPTY:
+                board[i] = X_MARK
+                s: i32 = minimax(board, 1, false)
+                board[i] = EMPTY
+                if s > best_score:
+                    best_score = s
+                    best_idx = i
+            i = i + 1
+        return best_idx
+    else:
+        best_score2: i32 = 1000
+        i2: i32 = 0
+        while i2 < 9:
+            if board[i2] == EMPTY:
+                board[i2] = O_MARK
+                s2: i32 = minimax(board, 1, true)
+                board[i2] = EMPTY
+                if s2 < best_score2:
+                    best_score2 = s2
+                    best_idx = i2
+            i2 = i2 + 1
+        return best_idx
+
+# ── Outcome reporting ─────────────────────────────────────────────────
+
+fn outcome_str(w: i32) -> str:
+    if w == X_MARK:
+        return "X wins"
+    if w == O_MARK:
+        return "O wins"
+    return "draw"
+
+# ── Driver ────────────────────────────────────────────────────────────
+
+fn main() -> i32:
+    board: List[i32] = make_board()
+
+    # Seeded asymmetric opening: X has the centre and one corner already;
+    # O has the opposing corner. From here perfect play gives X the win
+    # in at most 4 more plies.
+    #
+    # Layout (indices):
+    #     0 | 1 | 2
+    #     ---------
+    #     3 | 4 | 5
+    #     ---------
+    #     6 | 7 | 8
+    board[4] = X_MARK   # X centre
+    board[0] = O_MARK   # O top-left
+    board[8] = X_MARK   # X bottom-right (X has the long diagonal)
+
+    println("opening position:")
+    render(board)
+    println("")
+
+    # O moves first from here (X has placed 2 stones, O 1, so it's O's
+    # turn). We use a small turn counter cap so a bug that prevents the
+    # game from ending can't loop forever.
+    current: i32 = O_MARK
+    turn: i32 = 1
+    max_turns: i32 = 10
+    final_w: i32 = 0
+    while turn <= max_turns:
+        w: i32 = check_winner(board)
+        if w != 0:
+            final_w = w
+            break
+
+        # Score reporting before the move, so the test can see the AI's
+        # confidence at each step.
+        mv: i32 = best_move(board, current)
+        if mv < 0:
+            # Shouldn't happen — check_winner above catches a full board
+            # via the DRAW sentinel — but defend just in case.
+            final_w = DRAW
+            break
+
+        board[mv] = current
+        println("turn " + str(turn) + ": " + cell_str(current) + " plays at index " + str(mv))
+        render(board)
+        println("")
+
+        if current == X_MARK:
+            current = O_MARK
+        else:
+            current = X_MARK
+        turn = turn + 1
+
+    # If we fell out of the loop without a winner found above, recheck.
+    if final_w == 0:
+        final_w = check_winner(board)
+
+    println("result: " + outcome_str(final_w))
+    return 0

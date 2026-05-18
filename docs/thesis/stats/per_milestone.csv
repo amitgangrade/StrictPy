@@ -11,3 +11,4 @@ M7,2026-05-17,134,0,13200,5650,720,202,3,3,0,,,,,,Runtime-class dispatch. Incide
 M8,2026-05-17,134,0,13200,6900,720,202,0,0,0,10,2,4,14.6,0.45,Cranelift AOT compilation lands. fib(30) 931ms -> 14.6ms (64x speedup)
 M9,2026-05-17,134,0,13200,7300,720,202,0,0,0,16,0,0,13.5,0.14,Full JIT coverage. StrictPy beats CPython on every cell.
 M10,2026-05-18,173,1,13700,8600,720,1660,17,11,6,16,0,0,15.8,0.16,6 real-world programs land. Nullable audit catches 4 more silent miscompiles. C2 stress test finds 8 bugs incl. is-not-none INVERTED.
+M11,2026-05-18,201,1,13900,8600,725,3470,6,10,2,16,0,0,13.1,0.13,5 more programs (lambda_calc/calculator/tictactoe/levenshtein/lisp). Class-system overhaul: fixed BUG-015/016/017 + N1 + N2. Found class_id vs type_id collision as root of vtable-mod-4 symptom. Fixed prim ctor dispatch (i32/i64/f64/char). BUG-026/027 provisionally closed (likely BUG-016 in disguise — calculator + json_parse now run 5/5 cleanly).

@@ -1,127 +1,48 @@
 # Known Bugs (Deferred)
 
 This file collects bugs surfaced by the parallel real-world program stress
-test (Game of Life, Sudoku, JSON parser, Markov chain, KV store, Brainfuck)
-that are too architectural to fix in the same pass that landed the
+tests that are too architectural to fix in the same pass that landed the
 straightforward fixes. Each entry has a short repro, the symptom, a
 location speculation, and a fix sketch.
 
 The "trivial" cousins of these bugs (`is not none` inversion, `str(char)`,
 `char(i32)`, `dict.has`, `list.pop`) are already fixed; see
-`vm/tests/real_world_fixes.rs` for the regressions.
+`vm/tests/real_world_fixes.rs` for the regressions. The M11 fix pass
+landed the class/vtable cleanup + primitive-ctor dispatch fix (see
+"Fixed in M11" at the bottom + `vm/tests/m11_fixes.rs`).
 
 ---
 
-## 1. Sealed-class virtual dispatch drops to the base method
+## 1. ~~Sealed-class virtual dispatch drops to the base method~~  *(Fixed in M11)*
 
-### Repro
-```python
-sealed class SealedBase:
-    fn name(self) -> str:
-        return "base"
-
-final class SealedSub(SealedBase):
-    fn name(self) -> str:
-        return "sub"
-
-fn main() -> i32:
-    b: SealedBase = SealedSub()
-    println(b.name())        # prints "base"; should print "sub"
-    return 0
-```
-Replacing `sealed` with `open` makes the same program print `"sub"`.
-
-### Symptom
-Virtual calls on a `sealed`-typed receiver always reach the *base*
-implementation, even when the runtime type is a subclass that overrides
-the method. The receiver's runtime vtable is bypassed entirely.
-
-### Speculation
-The IR `lower_method_call` path (`compiler/src/ir.rs`, around the
-`VirtualCall` emission near line 1987) appears to treat `sealed` as
-"closed-world devirtualisable to base", so it picks the base method's
-function id at compile time. This is wrong: `sealed` only restricts where
-subclasses may *be defined*, not what method body actually runs.
-
-### Fix sketch
-For `sealed` receivers, still emit `VirtualCall { vtable_slot }` exactly
-like for `open` — UNLESS the resolver can statically prove the receiver's
-runtime type (e.g. flow analysis on a `final` ctor result). The current
-`is_open` check at line 1979 should grow a `|| layout.is_sealed` clause,
-or be inverted to `is_final`.
+See bottom of this file. Sealed receivers now dispatch through the vtable
+just like open ones.
 
 ---
 
-## 2. Subclass field offsets alias parent's last field
+## 2. ~~Subclass field offsets alias parent's last field~~  *(Fixed in M11)*
 
-### Repro
-```python
-class Base:
-    kind: i32
-
-class Sub(Base):
-    n: i32
-    value: bool
-    fn __init__(self, v: bool) -> None:
-        self.kind = 200
-        self.n = 7
-        self.value = v
-
-fn main() -> i32:
-    s: Sub = Sub(true)
-    println(str(s.kind))   # expected 200, prints 1 (overlapped by self.n=7? no — by self.value=true)
-    return 0
-```
-
-### Symptom
-When a subclass declares its own fields, the first subclass field starts
-at offset 0 rather than after the parent's last field. The two slots
-alias: writing the subclass field overwrites the parent's field.
-
-### Speculation
-`compiler/src/resolver.rs::layout_class` (the routine that computes
-`ClassLayout.fields[*].offset`) restarts the offset counter at 0 for
-subclasses instead of seeding it with `parent.size`.
-
-### Fix sketch
-When laying out a subclass, initialise the next-offset cursor to
-`parent_layout.size_in_words` (or whatever the layout uses), then proceed.
-Also update `ClassLayout.size` so further subclasses extend correctly.
-Touches GC scanning (object size lookup) and `Opcode::New` (allocation
-size), so verify those read the *whole-class* size, not the parent's.
+See bottom of this file. Subclass fields are now laid out after the
+parent's payload, parent fields are inherited into the subclass's
+`ClassLayout.fields`, and the type-table size accounts for the full
+chain.
 
 ---
 
-## 3. Virtual dispatch table wraps modulo 4
+## 3. ~~Virtual dispatch table wraps modulo 4~~  *(Fixed in M11)*
 
-### Repro
-```python
-open class Shape:
-    fn name(self) -> str: return "shape"
+See bottom of this file. The root cause was *not* a `& 0x3` mask but
+two adjacent bugs:
 
-final class A(Shape): fn name(self) -> str: return "A"
-final class B(Shape): fn name(self) -> str: return "B"
-final class C(Shape): fn name(self) -> str: return "C"
-final class D(Shape): fn name(self) -> str: return "D"   # falls back to "shape"
-final class E(Shape): fn name(self) -> str: return "E"   # prints "A"
-```
+- Subclass vtables didn't inherit parent methods, so a 4th sibling that
+  *didn't* override an inherited method got `u32::MAX` in the slot and
+  dispatch trapped (or fell back to the base).
+- The VM's `op_new` looked up the type table by *class_id* as a fallback,
+  but `class_id` could numerically collide with another class's
+  `type_id` once enough classes existed, sending Pentagon's instance
+  through Shape's vtable.
 
-### Symptom
-With four or more sibling overrides of the same base method, dispatch
-keys wrap: the 4th sibling resolves to the base, the 5th to the first
-sibling, etc.
-
-### Speculation
-A vtable slot index somewhere is masked with `& 0x3` (or equivalently a
-fixed 2-bit shift) instead of taking the full slot. Could be in
-`Opcode::CallVirtual` decode in `vm/src/interp.rs`, or in
-`Opcode::LoadVtable`, or in the codegen of `IROp::VirtualCall`.
-
-### Fix sketch
-Grep for `& 0x3`, `& 3`, `>> 2`, and any byte-packed encoding around
-vtable slots. Replace with a full `u32` slot id. Make sure the type table
-writer (`compiler/src/ir.rs::write_type_table`) and the runtime
-`ObjectHeader.vtable` reader agree on the stride.
+Both are fixed.
 
 ---
 
@@ -136,11 +57,29 @@ it crashes depends on:
     (C2's probe 63: inserting a no-op function between two siblings
     toggled the crash).
 
+The M11 round produced a *deterministic* sibling of this (N2: subclass
+with class-ref fields + virtual call crashes on the first call) which
+turned out to be BUG-016 (subclass field offsets aliased the vtable
+pointer at offset 0). Fixing BUG-016 fixed N2 deterministically.
+
+**Post-M11 verification (2026-05-18)**: ran `examples/calculator.spy`
+and `examples/json_parse.spy` 5 times each after the M11 class-system
+fixes. Both completed cleanly all 5/5 runs (previously calculator was
+0-of-3 clean, json_parse 0-of-3). **Strong empirical evidence that
+BUG-026 was a manifestation of BUG-016** — subclass field aliasing
+overwrote the vtable pointer; the non-determinism was the heap layout
+varying across runs; the underlying trigger was always the same
+offset-aliasing. This bug is **provisionally closed**, pending a real
+torture test (e.g. running each example 100 times in CI) to upgrade to
+"confirmed fixed".
+
 ### Speculation
 Likely caused by the GC walking objects in the M9 `in_jit`-paused heap,
 or holding stale references after the JIT releases a module. The fact
 that source-position changes flip the outcome points at a function-table
-indexing bug (see #5).
+indexing bug (see #5). With BUG-016 (the deterministic sibling) fixed,
+re-run the JSON / calculator programs in a loop to see whether anything
+non-deterministic remains.
 
 ### Fix sketch
 Repro reliably first (try the JSON parser plus a deterministic seed).
@@ -163,6 +102,11 @@ Some part of the function table is indexed by source position (e.g.
 line/col span, AST node id derived from source order) where it should be
 indexed by a stable identifier (FuncId). When the order changes, the key
 collides differently.
+
+The class_id → type_id alias bug fixed in M11 also flipped under
+declaration-order changes (Pentagon as 4th vs 5th subclass), so a chunk
+of this symptom may already be gone. The fact that re-running calculator
+and json_parse is still non-deterministic should be verified.
 
 ### Fix sketch
 Find every `Span`-keyed `HashMap` / `BTreeMap` in `compiler/src/`
@@ -200,7 +144,7 @@ flag. When the next raw newline arrives, drop it if the flag is set
 
 ---
 
-## Reference: bugs fixed in the same pass
+## Reference: bugs fixed in the same pass (M10)
 
 | # | Bug | Fix location | Regression test |
 |---|-----|--------------|-----------------|
@@ -210,3 +154,36 @@ flag. When the next raw newline arrives, drop it if the flag is set
 | 4 | `dict.has` E2004 no method | `compiler/src/typecheck.rs` (synth_method_call) | `vm/tests/real_world_fixes.rs::dict_has_typechecks_and_returns_bool` |
 | 5 | `print` unreachable from source | already wired in `shared/src/native.rs::from_name` | (no-op — see commit notes) |
 | 6 | `list.pop()` missing | `shared/src/native.rs`, `compiler/src/typecheck.rs`, `vm/src/builtins.rs` | `vm/tests/real_world_fixes.rs::list_pop_removes_and_returns_last_element` |
+
+---
+
+## Fixed in M11
+
+The class/vtable subsystem and the primitive-constructor dispatch path
+landed coherent fixes in this round. All regressions live in
+`vm/tests/m11_fixes.rs`.
+
+| # | Bug | Fix location | Regression test |
+|---|-----|--------------|-----------------|
+| BUG-015 | sealed receivers dropped to base | `compiler/src/ir.rs::lower_method_call` (devirtualisation guard now `!is_open && !is_sealed`) | `sealed_base_dispatches_to_subclass_override` |
+| BUG-016 | subclass field offsets aliased parent's | `compiler/src/resolver.rs::layout_class` (seed cursor from `parent.payload_size`, inherit parent fields); `compiler/src/types.rs` (new `payload_size` on `ClassLayout`); `compiler/src/ir.rs` (use payload_size in type-table `size`) | `subclass_field_offsets_do_not_alias_parent_fields`, `subclass_with_three_inherited_fields_does_not_alias` |
+| BUG-017 / N1 | vtable lookups effectively capped at 4 slots | (a) `compiler/src/resolver.rs::layout_class` inherits parent methods into subclass's `methods`, so vtable slot indices stay stable across the chain; (b) `compiler/src/ir.rs` collect_types walks up the inheritance chain when filling vtable slots; (c) `compiler/src/ir.rs` emits the runtime `type_id` (not the resolver's `class_id`) on `Alloc` so `op_new`'s direct lookup picks the correct RuntimeType when class_ids and type_ids collide numerically | `vtable_supports_six_virtual_methods_with_override`, `subclass_can_inherit_method_without_override`, `natural_class_hierarchy_with_parent_fields_and_six_virtuals` |
+| N2 | heap corruption on subclass-with-class-ref-fields + virtual call | Same fix as BUG-016 — the corruption was the load-from-stale-vtable-pointer symptom of subclass field aliasing | `pair_with_class_ref_fields_dispatches_through_vtable` |
+| PRIM-CTOR | `i32(x: i64)` / `i64(f64)` / `f64(i64)` / `char(i64)` all read the arg's bit pattern as f64 | `compiler/src/ir.rs::lower_call` (per-arg-type dispatch mirroring the `str(x)` path); new `NativeFn::I64FromF64 = 29` in `shared/src/native.rs` + VM dispatch in `vm/src/builtins.rs` | `i32_of_i64_truncates_value`, `i64_of_i32_widens_value`, `f64_of_i64_widens_value`, `i64_of_f64_truncates_toward_zero` |
+| STR-F64 | `str(3.0)` formatting consistency | (no code change — already correctly emits `"3.0"` via `format_f64`'s `:.1` for integer-valued floats; spec §9.1 now documents the convention) | `str_of_integer_valued_float_keeps_decimal` |
+
+### Notes for the next round
+
+- **BUG-026 / BUG-027 (non-deterministic heap corruption)** — the
+  deterministic sibling N2 is now fixed by BUG-016. Re-run calculator +
+  json_parse + lambda_calc in a tight loop after M11 to see whether
+  *any* non-determinism remains. If yes, that's a real separate GC/JIT
+  teardown bug; if no, sections #4 and #5 above can be closed too.
+- **BUG-028 (no line continuation across `+`)** — separate lexer
+  enhancement; still open.
+- The M11 examples (`lambda_calc.spy`, `calculator.spy`, `tictactoe.spy`,
+  `levenshtein.spy`, `lisp.spy`) all compile cleanly under
+  `vm/tests/m11_fixes.rs::m11_examples_compile_cleanly`. Whether they
+  *run* cleanly is the next thing to verify — most are written with
+  workarounds for the bugs we just fixed, so the workarounds are now
+  unnecessary but they're not actively wrong.

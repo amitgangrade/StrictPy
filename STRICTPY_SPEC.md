@@ -717,6 +717,18 @@ fn max[T: Comparable](a: T, b: T) -> T
 fn range(start: i64, stop: i64, step: i64 = 1) -> Range
 fn assert(cond: bool, msg: str = "") -> None
 
+# str(x: T) -> str  -- canonical text form of x
+#   * For floats, integral values keep one trailing decimal place
+#     (`str(3.0) == "3.0"`) so the result is unambiguously a float
+#     when round-tripped through parse_f64. Non-integral values use
+#     Rust's shortest-round-trip representation (`str(3.14) == "3.14"`).
+#   * For chars, the single-codepoint string (`str('h') == "h"`).
+#   * For ints/bool, the obvious decimal / "true"/"false" form.
+# Primitive constructors (i32(x), i64(x), f64(x), char(x)) dispatch on
+# the *static* type of the argument; mixing arg types is well-defined
+# (e.g. `i32(i64_var)` truncates, `f64(i64_var)` widens). See M11 fix
+# notes — pre-M11 they all read the bit pattern as if it were f64.
+
 class Exception:
     message: str
     fn __init__(self, message: str) -> None

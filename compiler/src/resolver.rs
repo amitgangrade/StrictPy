@@ -399,6 +399,7 @@ impl Resolver {
                 // stdlib: exception classes carry no methods of their own and
                 // are raised/caught by name; not handle-backed, so not native.
                 is_native: false,
+                payload_size: 0,
             });
         }
 
@@ -439,6 +440,7 @@ impl Resolver {
             // stdlib: io.File is handle-backed (FileRepr in vm/src/object.rs);
             // dispatch read/write/close via NativeFn, not a vtable.
             is_native: true,
+            payload_size: 0,
         });
 
         // `io` module (so `io.File` could be referenced as an attribute path —
@@ -484,6 +486,7 @@ impl Resolver {
             // stdlib: Thread is handle-backed (ThreadRepr in vm/src/object.rs);
             // start/join dispatch via NativeFn, not a vtable.
             is_native: true,
+            payload_size: 0,
         });
 
         // math module — stdlib: spec §9, used by mandelbrot if needed
@@ -599,6 +602,7 @@ impl Resolver {
             // User-defined classes always go through the vtable for method
             // dispatch — only built-in stdlib classes are native.
             is_native: false,
+            payload_size: 0,
         });
         Ok(())
     }
@@ -678,9 +682,18 @@ impl Resolver {
 
         self.class_layouts.get_mut(&cid).unwrap().base = base_cid;
 
+        // M11 BUG-016 fix: seed the field-offset cursor with the parent's
+        // payload size and inherit parent fields verbatim (their offsets are
+        // already relative to the start of the object payload, which is the
+        // same for parent and subclass). Subclass-declared fields then lay
+        // out *after* every inherited field instead of aliasing them.
+        let (mut fields, mut offset) = if let Some(b) = base_cid {
+            let base_layout = self.class_layouts.get(&b).expect("base laid out");
+            (base_layout.fields.clone(), base_layout.payload_size)
+        } else {
+            (Vec::<FieldInfo>::new(), 0u32)
+        };
         // Fields with offsets (natural alignment per spec §8.3).
-        let mut fields = Vec::<FieldInfo>::new();
-        let mut offset: u32 = 0;
         for f in &c.fields {
             let ty = self.lower_ast_type(&f.ty, scope)?;
             let size = size_of_ty(&ty);
@@ -689,6 +702,11 @@ impl Resolver {
             fields.push(FieldInfo { name: f.name.clone(), ty, offset });
             offset += size;
         }
+        // Final payload size = max(offset, parent payload). The parent's
+        // payload always fits at the start, so `offset` (which grew from
+        // parent payload) is the right answer.
+        let payload_size = offset;
+
         // Build methods sigs.
         //
         // NOTE: `__init__` is included here so type-check can look it up
@@ -699,20 +717,53 @@ impl Resolver {
         // numbering (see `vtable_methods` in `compiler::ir`). Adding it
         // to the vtable would offset every override by one slot and make
         // a parent's vtable layout incompatible with a subclass's.
-        let mut methods: Vec<MethodSig> = Vec::new();
+        //
+        // M11 BUG-017+N1 fix: subclass `methods` inherits the parent's
+        // method list so vtable slot indices stay stable across the
+        // inheritance chain. An override replaces the inherited entry
+        // in-place; a brand-new method is appended.
+        let mut methods: Vec<MethodSig> = if let Some(b) = base_cid {
+            // Copy non-__init__ methods from the parent so slot indices
+            // remain stable. The subclass installs its own __init__ (if
+            // any) below — never inherit the parent's __init__ because
+            // its signature might not match the subclass's.
+            self.class_layouts
+                .get(&b)
+                .expect("base laid out")
+                .methods
+                .iter()
+                .filter(|m| m.name != "__init__")
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
         let init_sig: Option<MethodSig> = if let Some(init) = &c.init {
             let sig = self.build_method_sig(scope, init, cid)?;
             Some(sig)
         } else {
             None
         };
-        if let Some(sig) = init_sig { methods.push(sig); }
+        if let Some(sig) = init_sig {
+            // Keep __init__ at the *front* of the methods list — IR/codegen
+            // strip it out by name before assigning vtable slots, so its
+            // index here doesn't matter beyond convention.
+            methods.insert(0, sig);
+        }
         for m in &c.methods {
-            methods.push(self.build_method_sig(scope, m, cid)?);
+            let sig = self.build_method_sig(scope, m, cid)?;
+            // Override semantics: if a parent already has this method,
+            // replace its entry in-place so the vtable slot stays put.
+            if let Some(slot) = methods.iter().position(|p| p.name == sig.name) {
+                methods[slot] = sig;
+            } else {
+                methods.push(sig);
+            }
         }
         let layout = self.class_layouts.get_mut(&cid).unwrap();
         layout.fields = fields;
         layout.methods = methods;
+        layout.payload_size = payload_size;
         Ok(())
     }
 

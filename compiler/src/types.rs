@@ -199,6 +199,10 @@ pub struct ClassLayout {
     /// whose methods are dispatched via NativeFn rather than a vtable.
     /// User-defined classes are always false. See ir.rs::lower_method_call.
     pub is_native: bool,
+    /// Payload size in bytes (excluding the 16-byte object header). For a
+    /// subclass this includes the parent's payload — so the next subclass's
+    /// fields lay out *after* every inherited field. See M11 BUG-016.
+    pub payload_size: u32,
 }
 
 #[derive(Debug, Clone)]

@@ -9,6 +9,7 @@ Snapshots taken at major milestones to support the "performance journey" narrati
 | `m8_jit.json` + `.md` | M8 (JIT) | Cranelift AOT compilation for arith/cmp/branch/call/list-read. | 14.6ms (**11× faster than Python**) |
 | `m9_full_jit.json` + `.md` | M9 (full coverage) | JIT coverage extended to heap mutation, fields, virtual calls. | 13.5ms (12× faster) |
 | `m10_real_world.json` + `.md` | M10 (real-world stress test) | 6 new programs landed (game_of_life, sudoku, json_parse, markov, kvstore, brainfuck); 11 bugs surfaced, 6 critical-or-medium fixed, 6 architectural deferred to BUGS_KNOWN.md; new stdlib: for-in, str.split, sorted/sort, list.pop. Same wins as M9 with no regression. | 15.8ms (10× faster) |
+| `m11_class_fix.json` + `.md` | M11 (class-system overhaul) | 5 more programs (lambda_calc, calculator, tictactoe, levenshtein, lisp). Class/vtable cluster fixed: BUG-015/016/017 + N1 (vtable >4 slots) + N2 (heap corruption on subclass+vcall). Root cause for vtable-mod-4 was a class_id vs type_id collision in op_new. Primitive ctors (i32/i64/f64/char) now do arg-type dispatch. BUG-026/027 provisionally closed. Same 16/16 wins, slight perf improvement. | 13.1ms (11× faster) |
 
 Each `.json` is consumed directly by `bench/harness.py --report-only` to regenerate the matching report. The `.md` files are the rendered reports at that point in time.
 

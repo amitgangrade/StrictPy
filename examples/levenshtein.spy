@@ -1,0 +1,146 @@
+"""Levenshtein edit distance via the textbook bottom-up DP table.
+
+For two strings `a` and `b`, computes the minimum number of single-char
+insertions, deletions, or substitutions needed to turn `a` into `b`.
+
+Five hardcoded test cases are run on `main` and each result is printed
+on its own line in the form `"a" -> "b" = d`.
+
+This program stresses StrictPy's:
+  - `List[List[i32]]` allocation of a (len_a+1)x(len_b+1) table — same
+    nested-list idiom as game_of_life.spy but on irregular dimensions
+    instead of a fixed 30x15.
+  - 2D mutation via `dp[i][j] = v` (the `dp[i]`-returns-a-reference
+    invariant — also exercised by sudoku.spy, but with `i64` indexing
+    here since `len()` returns `i64`).
+  - Char comparison `a[i] == b[j]` between two `char` values pulled out
+    of two distinct strings (csv_aggregate exercised char-vs-literal
+    only, not char-vs-char from two strings).
+  - Empty-string handling: `edit_distance("", "abc")` and
+    `edit_distance("abc", "")` must skip the indexed-string read paths
+    entirely (the `i`/`j` loops just degenerate to the base-case row/
+    column fill).
+
+No tuple support exercised; helper signatures use i32/i64 explicitly.
+"""
+
+# ── min of three i32s ─────────────────────────────────────────────────
+# `min` builtin (spec §9) takes exactly 2 args. For the classic DP
+# recurrence we need the minimum of three candidate costs.
+
+fn min2(a: i32, b: i32) -> i32:
+    if a < b:
+        return a
+    return b
+
+fn min3(a: i32, b: i32, c: i32) -> i32:
+    return min2(min2(a, b), c)
+
+# ── Edit-distance DP ──────────────────────────────────────────────────
+
+fn make_table(rows: i64, cols: i64) -> List[List[i32]]:
+    """Allocate a `rows`x`cols` table of zeros. Rows and cols may be
+    1 (when one input is empty) — never 0, because the table is
+    (len_a+1)x(len_b+1)."""
+    t: List[List[i32]] = []
+    r: i64 = 0
+    while r < rows:
+        row: List[i32] = []
+        c: i64 = 0
+        while c < cols:
+            row.append(0)
+            c = c + 1
+        t.append(row)
+        r = r + 1
+    return t
+
+fn edit_distance(a: str, b: str) -> i32:
+    """Classic Wagner-Fischer DP. Time/space O(len_a * len_b)."""
+    na: i64 = i64(len(a))
+    nb: i64 = i64(len(b))
+
+    # Allocate (na+1) x (nb+1) table. Empty-string cases collapse one
+    # dimension to 1 row/column of base-case fills.
+    dp: List[List[i32]] = make_table(na + 1, nb + 1)
+
+    # Base row: turning "" into b[:j] costs j insertions.
+    #
+    # NOTE: We thread a parallel i32 counter (`jv`) alongside the i64
+    # index (`j`) and store `jv` instead of `i32(j)`. The `i32(...)`
+    # constructor on an i64 argument currently lowers to NativeFn::
+    # I32FromF64 (see shared/src/native.rs `from_name("i32")`), which
+    # reinterprets the i64 bit pattern as f64 and truncates to 0 for
+    # small values. Documented as a NEW bug in this round's report.
+    j: i64 = 0
+    jv: i32 = 0
+    while j <= nb:
+        dp[0][j] = jv
+        j = j + 1
+        jv = jv + 1
+    # Base column: turning a[:i] into "" costs i deletions. Same i64→i32
+    # workaround as the base row.
+    i: i64 = 0
+    iv: i32 = 0
+    while i <= na:
+        dp[i][0] = iv
+        i = i + 1
+        iv = iv + 1
+
+    # Fill the inner cells. Loop bounds skip the row-0 and column-0
+    # base cases we just wrote.
+    ii: i64 = 1
+    while ii <= na:
+        jj: i64 = 1
+        while jj <= nb:
+            ca: char = a[ii - 1]
+            cb: char = b[jj - 1]
+            sub_cost: i32 = 1
+            if ca == cb:
+                sub_cost = 0
+            delete_v: i32 = dp[ii - 1][jj] + 1
+            insert_v: i32 = dp[ii][jj - 1] + 1
+            substitute_v: i32 = dp[ii - 1][jj - 1] + sub_cost
+            dp[ii][jj] = min3(delete_v, insert_v, substitute_v)
+            jj = jj + 1
+        ii = ii + 1
+
+    return dp[na][nb]
+
+# ── Test runner ───────────────────────────────────────────────────────
+
+fn run_case(a: str, b: str, expected: i32) -> bool:
+    """Compute, print, and check one case. Returns true on a match."""
+    got: i32 = edit_distance(a, b)
+    tag: str = "ok"
+    if got != expected:
+        tag = "FAIL"
+    line: str = "\"" + a + "\" -> \"" + b + "\" = " + str(got) + " (expected " + str(expected) + ", " + tag + ")"
+    println(line)
+    return got == expected
+
+fn main() -> i32:
+    all_ok: bool = true
+    # Classic Wikipedia examples first.
+    if not run_case("kitten", "sitting", 3):
+        all_ok = false
+    # Empty-string cases — both directions must work without indexing
+    # the empty string.
+    if not run_case("", "abc", 3):
+        all_ok = false
+    if not run_case("abc", "", 3):
+        all_ok = false
+    # Short anagram-ish pair: 4 chars each, 2 substitutions suffice.
+    if not run_case("flaw", "lawn", 2):
+        all_ok = false
+    # Longer pair with mixed insert/substitute optimum.
+    if not run_case("intention", "execution", 5):
+        all_ok = false
+    # Also exercise the trivial identity case.
+    if not run_case("same", "same", 0):
+        all_ok = false
+
+    if all_ok:
+        println("summary: all 6 cases passed")
+        return 0
+    println("summary: at least one case FAILED")
+    return 1

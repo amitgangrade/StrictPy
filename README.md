@@ -75,10 +75,25 @@ Following the milestones in spec §19:
   and virtual calls. **StrictPy now beats CPython 3.12 on every benchmark
   cell** by 4-17×. fib stayed at 11×, quicksort 100K went from 3× slower
   to 12× faster, dot 1M went from 2× slower to 4× faster.
-- [ ] M10 — Precise stack-map GC (current `in_jit` flag blocks GC during
-  JIT'd execution — fine for benchmarks, bad for long-running programs),
-  closure/RefEq JIT support (unblocks producer.spy full coverage),
-  bounds-check elimination, inheritance-stable vtables, try/except, for-loops
+- [x] M10 — 6 real-world programs (csv_aggregate, game_of_life, sudoku,
+  json_parse, markov, kvstore, brainfuck) surface 17 bugs. 11 fixed
+  including `is not none` inverted, `str(char)` codepoint, `dict.has`,
+  `char(i32)`, `list.pop`. Nullable-narrowing audit catches 4 more
+  silent miscompiles in codegen. Stdlib gains `for x in xs:`,
+  `str.split(sep)`, `sorted()`/`sort()`.
+- [x] M11 — 5 more programs (lambda_calc, calculator, tictactoe,
+  levenshtein, lisp). **Class system overhauled.** Closed BUG-015/016/017
+  plus newly-found N1 (vtable >4 slots unreachable) and N2 (deterministic
+  heap corruption on subclass-with-class-ref-fields + virtual call).
+  Root cause for the vtable-mod-4 symptom turned out to be a
+  **`class_id` vs `type_id` collision in `op_new`** — a latent M3-era
+  hack that only worked while id ranges didn't overlap. Primitive ctors
+  `i32(x)` / `i64(x)` / `f64(x)` / `char(x)` now dispatch by arg type
+  (was silently truncating). **BUG-026/027 (heap corruption) provisionally
+  closed** — calculator + json_parse now run 5/5 cleanly, were 0/3 before.
+- [ ] M12 — line continuation across infix operators (BUG-028), precise
+  stack-map GC (replaces M9 `in_jit` pause), `isinstance` / match
+  exhaustiveness, exception handling codegen, generics in user code
 
 ### What actually runs
 

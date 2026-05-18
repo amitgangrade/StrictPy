@@ -1,0 +1,647 @@
+"""Toy Lisp interpreter — tokenize / parse / eval a tiny subset of Scheme.
+
+Most ambitious real-world StrictPy program: stresses recursive
+evaluation, nullable narrowing, and closures.
+
+DESIGN HISTORY (this section is the deliverable as much as the code is):
+
+The natural Lisp design uses a sealed AST hierarchy:
+  Value = Number | Symbol | Pair
+
+I tried that exact shape first. Outcome:
+
+  ATTEMPT 1: `open class Value` + 3 subclasses (Number/Symbol/Pair) with
+  6 virtual methods on Value (tag, n_val, sym_name, car_val, cdr_val,
+  render). Compiled cleanly. At runtime:
+
+      VM trap: vtable slot 5 out of range
+
+  Triggered by `expr.render()` on a Pair-typed receiver. This is a
+  SHARPER variant of BUGS_KNOWN.md #3 (vtable wraps mod 4): the
+  observed cap is not just "≤3 sibling overrides per slot" but also
+  "≤4 total virtual slots on the base class". With 6 declared `open
+  fn`s on Value, slot 5 (render) is unreachable.
+
+  ATTEMPT 2: shrink to 4 virtual methods (tag, render, car_or_self,
+  cdr_or_none). Compiled. At runtime:
+
+      STATUS_HEAP_CORRUPTION on the FIRST p.tag() call.
+
+  Even constructing a Pair with `car: Value` + `cdr: Value?` then
+  calling any virtual method on a Value reference to it crashed the
+  VM. Probes confirmed: a Number-typed Value works fine; a
+  Pair-typed Value crashes regardless of which virtual we call.
+  This is consistent with BUGS_KNOWN.md #2 (subclass field offsets
+  alias parent's), even though Value has no parent fields — the
+  symptom feels related to subclass-class-field layout.
+
+  ATTEMPT 3: collapse Pair's `cdr: Value?` to `cdr: Value` (nil
+  sentinel). Did not change the symptom; still crashed at p.tag().
+
+CONCLUSION: in StrictPy v0.1 you cannot reliably (a) build a 3-way
+open-class AST whose largest variant carries class-typed fields and
+(b) call virtual methods on it through a base-class reference.
+
+This program therefore PIVOTS to the tagged-union pattern that
+json_parse.spy adopted for the same reason: a SINGLE `final class
+Value` carrying a kind discriminator and ALL possible payload fields.
+No virtual dispatch, no subclass layout issues, no vtable allocation
+to overflow. The interpretation switch becomes an explicit
+`if kind == X` ladder.
+
+Tagged-union design downsides we live with:
+  - Memory waste: every Number carries the unused `name` (empty
+    string) and `car`/`cdr` (none) slots.
+  - No way to fail on a Number that's used as a Pair (no static
+    type help); we tag-check at every access.
+  - Renders feel less like a Lisp interpreter and more like an
+    AST walker over a sum type.
+
+OTHER KNOWN-BUG DODGES STILL IN EFFECT:
+  - `Dict[str, Value]` is unreliable per json_parse notes; we use
+    parallel `List[str]` keys + `List[Value]` vals for the env.
+  - Lambdas live in a separate `List[Lambda]` to avoid swelling
+    Value with closure-specific fields (would push the class size
+    even further). Encoded in the AST as a Pair-via-tag with a
+    Number(lambda_id) payload.
+  - String accumulation, not implicit continuation across `+`
+    (BUGS_KNOWN.md #6).
+  - `is not none` for narrowing; an `unwrap_value` helper because
+    v0.1 doesn't narrow VARIABLE types inside the branch
+    (lambda_calc.spy hits the same friction).
+  - All Lisp-level `state_err` strings are pre-built; we avoid
+    method-on-class-with-str-param patterns (json_parse note 4).
+"""
+
+# ── Value: tagged union ───────────────────────────────────────────────────
+# kind values:
+#   1 = Number  (payload: n)
+#   2 = Symbol  (payload: name)
+#   3 = Pair    (payload: car, cdr)
+
+final class Value:
+    kind: i32
+    n: i64
+    name: str
+    car: Value?
+    cdr: Value?
+
+    fn __init__(self, kind: i32, n: i64, name: str, car: Value?, cdr: Value?) -> None:
+        self.kind = kind
+        self.n = n
+        self.name = name
+        self.car = car
+        self.cdr = cdr
+
+
+fn mk_num(n: i64) -> Value:
+    return Value(1i32, n, "", none, none)
+
+fn mk_sym(s: str) -> Value:
+    return Value(2i32, 0i64, s, none, none)
+
+fn mk_pair(car: Value, cdr: Value?) -> Value:
+    return Value(3i32, 0i64, "", car, cdr)
+
+# Encode nil as Symbol("<nil>") so it's a Value and not just none.
+fn mk_nil() -> Value:
+    return mk_sym("<nil>")
+
+fn is_nil(v: Value) -> bool:
+    if v.kind != 2i32:
+        return false
+    return v.name == "<nil>"
+
+# Optional-unwrap helper. v0.1 narrows `x is not none`'s expression but
+# NOT the underlying variable — `r: Value = rest` after
+# `if rest is not none:` fails to typecheck. Mirrors lambda_calc's
+# `unwrap_expr`.
+fn unwrap_value(v: Value?) -> Value:
+    if v is none:
+        return mk_nil()
+    return v
+
+
+# ── Lambdas (side table) ──────────────────────────────────────────────────
+
+final class Lambda:
+    params: List[str]
+    body: Value
+    env_id: i64
+
+    fn __init__(self, params: List[str], body: Value, env_id: i64) -> None:
+        self.params = params
+        self.body = body
+        self.env_id = env_id
+
+
+# ── Env frames (side table) ───────────────────────────────────────────────
+# parent < 0 marks the root.
+
+final class EnvFrame:
+    parent: i64
+    keys: List[str]
+    vals: List[Value]
+
+    fn __init__(self, parent: i64) -> None:
+        self.parent = parent
+        self.keys = []
+        self.vals = []
+
+
+# ── Interpreter state ────────────────────────────────────────────────────
+
+final class State:
+    envs: List[EnvFrame]
+    lambdas: List[Lambda]
+    errored: bool
+    err_msg: str
+
+    fn __init__(self) -> None:
+        self.envs = []
+        self.lambdas = []
+        self.errored = false
+        self.err_msg = ""
+
+
+fn state_new_env(st: State, parent: i64) -> i64:
+    f: EnvFrame = EnvFrame(parent)
+    st.envs.append(f)
+    return i64(len(st.envs)) - 1i64
+
+fn state_env_define(st: State, env_id: i64, name: str, val: Value) -> None:
+    f: EnvFrame = st.envs[env_id]
+    i: i64 = 0
+    while i < i64(len(f.keys)):
+        if f.keys[i] == name:
+            f.vals[i] = val
+            return
+        i = i + 1
+    f.keys.append(name)
+    f.vals.append(val)
+
+fn state_env_lookup(st: State, env_id: i64, name: str) -> Value?:
+    cur: i64 = env_id
+    while cur >= 0i64:
+        f: EnvFrame = st.envs[cur]
+        i: i64 = 0
+        while i < i64(len(f.keys)):
+            if f.keys[i] == name:
+                return f.vals[i]
+            i = i + 1
+        cur = f.parent
+    return none
+
+fn state_add_lambda(st: State, l: Lambda) -> i64:
+    st.lambdas.append(l)
+    return i64(len(st.lambdas)) - 1i64
+
+fn state_err(st: State, msg: str) -> Value:
+    st.errored = true
+    st.err_msg = msg
+    return mk_nil()
+
+
+# ── Value rendering ──────────────────────────────────────────────────────
+
+fn render(v: Value) -> str:
+    if v.kind == 1i32:
+        return str(v.n)
+    if v.kind == 2i32:
+        return v.name
+    if v.kind == 3i32:
+        out: str = "("
+        car: Value = unwrap_value(v.car)
+        out = out + render(car)
+        rest: Value? = v.cdr
+        while rest is not none:
+            r: Value = unwrap_value(rest)
+            if r.kind == 3i32:
+                out = out + " "
+                out = out + render(unwrap_value(r.car))
+                rest = r.cdr
+            else:
+                out = out + " . " + render(r)
+                rest = none
+        return out + ")"
+    return "<value>"
+
+
+# ── Tokenizer ────────────────────────────────────────────────────────────
+
+fn is_ws(c: char) -> bool:
+    return c == ' ' or c == '\t' or c == '\n' or c == '\r'
+
+fn tokenize(src: str) -> List[str]:
+    out: List[str] = []
+    n: i64 = i64(len(src))
+    i: i64 = 0
+    while i < n:
+        c: char = src[i]
+        if is_ws(c):
+            i = i + 1
+        elif c == '(':
+            out.append("(")
+            i = i + 1
+        elif c == ')':
+            out.append(")")
+            i = i + 1
+        else:
+            start: i64 = i
+            while i < n:
+                d: char = src[i]
+                if is_ws(d) or d == '(' or d == ')':
+                    break
+                i = i + 1
+            out.append(src.slice(start, i))
+    return out
+
+
+# ── Parser ───────────────────────────────────────────────────────────────
+
+fn is_digit_char(c: char) -> bool:
+    return c >= '0' and c <= '9'
+
+fn token_is_int(tok: str) -> bool:
+    n: i64 = i64(len(tok))
+    if n == 0:
+        return false
+    i: i64 = 0
+    if tok[0] == '-':
+        if n == 1:
+            return false
+        i = 1
+    while i < n:
+        if not is_digit_char(tok[i]):
+            return false
+        i = i + 1
+    return true
+
+fn parse_expr(tokens: List[str], pos: List[i64]) -> Value:
+    if pos[0] >= i64(len(tokens)):
+        return mk_nil()
+    tok: str = tokens[pos[0]]
+    pos[0] = pos[0] + 1i64
+    if tok == "(":
+        return parse_list(tokens, pos)
+    if tok == ")":
+        return mk_nil()
+    if token_is_int(tok):
+        return mk_num(parse_i64(tok))
+    return mk_sym(tok)
+
+fn parse_list(tokens: List[str], pos: List[i64]) -> Value:
+    items: List[Value] = []
+    while true:
+        if pos[0] >= i64(len(tokens)):
+            break
+        if tokens[pos[0]] == ")":
+            pos[0] = pos[0] + 1i64
+            break
+        items.append(parse_expr(tokens, pos))
+    rest: Value? = none
+    j: i64 = i64(len(items)) - 1i64
+    while j >= 0i64:
+        rest = mk_pair(items[j], rest)
+        j = j - 1i64
+    if rest is none:
+        return mk_nil()
+    return unwrap_value(rest)
+
+
+# ── Evaluator ────────────────────────────────────────────────────────────
+
+# Convert a (right-leaning) Pair chain into a List[Value].
+fn list_to_vec(v: Value) -> List[Value]:
+    out: List[Value] = []
+    cur: Value? = v
+    while cur is not none:
+        c: Value = unwrap_value(cur)
+        if c.kind != 3i32:
+            break
+        if is_nil(c):
+            break
+        out.append(unwrap_value(c.car))
+        cur = c.cdr
+    return out
+
+fn eval_expr(st: State, expr: Value, env_id: i64) -> Value:
+    if st.errored:
+        return mk_nil()
+    if expr.kind == 1i32:
+        return expr
+    if expr.kind == 2i32:
+        nm: str = expr.name
+        if nm == "<nil>":
+            return expr
+        looked: Value? = state_env_lookup(st, env_id, nm)
+        if looked is none:
+            return state_err(st, "unbound symbol: " + nm)
+        return unwrap_value(looked)
+    if expr.kind == 3i32:
+        if is_nil(expr):
+            return expr
+        return eval_pair(st, expr, env_id)
+    return state_err(st, "unknown kind")
+
+fn eval_pair(st: State, expr: Value, env_id: i64) -> Value:
+    head: Value = unwrap_value(expr.car)
+    if head.kind == 2i32:
+        nm: str = head.name
+        if nm == "define":
+            return special_define(st, expr, env_id)
+        if nm == "if":
+            return special_if(st, expr, env_id)
+        if nm == "lambda":
+            return special_lambda(st, expr, env_id)
+        if nm == "quote":
+            return special_quote(st, expr)
+        if nm == "begin":
+            return special_begin(st, expr, env_id)
+    fn_val: Value = eval_expr(st, head, env_id)
+    if st.errored:
+        return mk_nil()
+    rest: Value? = expr.cdr
+    args: List[Value] = []
+    while rest is not none:
+        r: Value = unwrap_value(rest)
+        if r.kind != 3i32:
+            break
+        if is_nil(r):
+            break
+        a: Value = eval_expr(st, unwrap_value(r.car), env_id)
+        if st.errored:
+            return mk_nil()
+        args.append(a)
+        rest = r.cdr
+    return apply(st, fn_val, args)
+
+# (define name expr)
+fn special_define(st: State, expr: Value, env_id: i64) -> Value:
+    parts: List[Value] = list_to_vec(expr)
+    if len(parts) < 3:
+        return state_err(st, "malformed define")
+    name_v: Value = parts[1]
+    if name_v.kind != 2i32:
+        return state_err(st, "define: name must be a symbol")
+    val: Value = eval_expr(st, parts[2], env_id)
+    if st.errored:
+        return mk_nil()
+    state_env_define(st, env_id, name_v.name, val)
+    return val
+
+# (if cond then else)
+fn special_if(st: State, expr: Value, env_id: i64) -> Value:
+    parts: List[Value] = list_to_vec(expr)
+    if len(parts) < 3:
+        return state_err(st, "malformed if")
+    cond: Value = eval_expr(st, parts[1], env_id)
+    if st.errored:
+        return mk_nil()
+    truthy: bool = true
+    if cond.kind == 1i32 and cond.n == 0i64:
+        truthy = false
+    if cond.kind == 2i32 and cond.name == "<nil>":
+        truthy = false
+    if truthy:
+        return eval_expr(st, parts[2], env_id)
+    if len(parts) >= 4:
+        return eval_expr(st, parts[3], env_id)
+    return mk_nil()
+
+# (lambda (params...) body)
+fn special_lambda(st: State, expr: Value, env_id: i64) -> Value:
+    parts: List[Value] = list_to_vec(expr)
+    if len(parts) < 3:
+        return state_err(st, "malformed lambda")
+    params_v: Value = parts[1]
+    body: Value = parts[2]
+    params: List[str] = []
+    pv: List[Value] = list_to_vec(params_v)
+    j: i64 = 0
+    while j < i64(len(pv)):
+        if pv[j].kind != 2i32:
+            return state_err(st, "lambda: param must be a symbol")
+        params.append(pv[j].name)
+        j = j + 1
+    lam: Lambda = Lambda(params, body, env_id)
+    lid: i64 = state_add_lambda(st, lam)
+    inner: Value = mk_pair(mk_num(lid), none)
+    return mk_pair(mk_sym("<closure>"), inner)
+
+fn is_closure_value(v: Value) -> bool:
+    if v.kind != 3i32:
+        return false
+    if is_nil(v):
+        return false
+    head_opt: Value? = v.car
+    if head_opt is none:
+        return false
+    head: Value = unwrap_value(head_opt)
+    if head.kind != 2i32:
+        return false
+    return head.name == "<closure>"
+
+fn closure_id_of(v: Value) -> i64:
+    rest_opt: Value? = v.cdr
+    if rest_opt is none:
+        return -1i64
+    r: Value = unwrap_value(rest_opt)
+    if r.kind != 3i32:
+        return -1i64
+    id_opt: Value? = r.car
+    if id_opt is none:
+        return -1i64
+    id_v: Value = unwrap_value(id_opt)
+    if id_v.kind != 1i32:
+        return -1i64
+    return id_v.n
+
+# (quote x)
+fn special_quote(st: State, expr: Value) -> Value:
+    parts: List[Value] = list_to_vec(expr)
+    if len(parts) < 2:
+        return state_err(st, "malformed quote")
+    return parts[1]
+
+# (begin e1 e2 ... en)
+fn special_begin(st: State, expr: Value, env_id: i64) -> Value:
+    parts: List[Value] = list_to_vec(expr)
+    if len(parts) < 2:
+        return mk_nil()
+    last: Value = mk_nil()
+    i: i64 = 1i64
+    while i < i64(len(parts)):
+        last = eval_expr(st, parts[i], env_id)
+        if st.errored:
+            return mk_nil()
+        i = i + 1i64
+    return last
+
+
+# ── Apply ────────────────────────────────────────────────────────────────
+
+fn apply(st: State, fn_val: Value, args: List[Value]) -> Value:
+    if is_closure_value(fn_val):
+        lid: i64 = closure_id_of(fn_val)
+        if lid < 0i64:
+            return state_err(st, "bad closure")
+        lam: Lambda = st.lambdas[lid]
+        if i64(len(args)) != i64(len(lam.params)):
+            return state_err(st, "arity mismatch")
+        new_env: i64 = state_new_env(st, lam.env_id)
+        i: i64 = 0
+        while i < i64(len(lam.params)):
+            state_env_define(st, new_env, lam.params[i], args[i])
+            i = i + 1i64
+        return eval_expr(st, lam.body, new_env)
+    if fn_val.kind == 2i32:
+        nm: str = fn_val.name
+        if nm == "<builtin:+>":
+            return builtin_add(st, args)
+        if nm == "<builtin:->":
+            return builtin_sub(st, args)
+        if nm == "<builtin:*>":
+            return builtin_mul(st, args)
+        if nm == "<builtin:/>":
+            return builtin_div(st, args)
+        if nm == "<builtin:<>":
+            return builtin_lt(st, args)
+        if nm == "<builtin:=>":
+            return builtin_eq(st, args)
+        if nm == "<builtin:print>":
+            return builtin_print(st, args)
+    return state_err(st, "not callable")
+
+fn require_nums(args: List[Value]) -> bool:
+    i: i64 = 0
+    while i < i64(len(args)):
+        if args[i].kind != 1i32:
+            return false
+        i = i + 1i64
+    return true
+
+fn builtin_add(st: State, args: List[Value]) -> Value:
+    if not require_nums(args):
+        return state_err(st, "+: expected numbers")
+    acc: i64 = 0
+    i: i64 = 0
+    while i < i64(len(args)):
+        acc = acc + args[i].n
+        i = i + 1i64
+    return mk_num(acc)
+
+fn builtin_sub(st: State, args: List[Value]) -> Value:
+    if not require_nums(args):
+        return state_err(st, "-: expected numbers")
+    if len(args) == 0:
+        return mk_num(0)
+    if len(args) == 1:
+        return mk_num(-args[0].n)
+    acc: i64 = args[0].n
+    i: i64 = 1i64
+    while i < i64(len(args)):
+        acc = acc - args[i].n
+        i = i + 1i64
+    return mk_num(acc)
+
+fn builtin_mul(st: State, args: List[Value]) -> Value:
+    if not require_nums(args):
+        return state_err(st, "*: expected numbers")
+    acc: i64 = 1
+    i: i64 = 0
+    while i < i64(len(args)):
+        acc = acc * args[i].n
+        i = i + 1i64
+    return mk_num(acc)
+
+fn builtin_div(st: State, args: List[Value]) -> Value:
+    if not require_nums(args):
+        return state_err(st, "/: expected numbers")
+    if len(args) < 2:
+        return state_err(st, "/: needs at least 2 args")
+    acc: i64 = args[0].n
+    i: i64 = 1i64
+    while i < i64(len(args)):
+        d: i64 = args[i].n
+        if d == 0:
+            return state_err(st, "/: division by zero")
+        acc = acc / d
+        i = i + 1i64
+    return mk_num(acc)
+
+fn builtin_lt(st: State, args: List[Value]) -> Value:
+    if not require_nums(args):
+        return state_err(st, "<: expected numbers")
+    if len(args) != 2:
+        return state_err(st, "<: needs 2 args")
+    if args[0].n < args[1].n:
+        return mk_num(1)
+    return mk_num(0)
+
+fn builtin_eq(st: State, args: List[Value]) -> Value:
+    if not require_nums(args):
+        return state_err(st, "=: expected numbers")
+    if len(args) != 2:
+        return state_err(st, "=: needs 2 args")
+    if args[0].n == args[1].n:
+        return mk_num(1)
+    return mk_num(0)
+
+fn builtin_print(st: State, args: List[Value]) -> Value:
+    out: str = ""
+    i: i64 = 0
+    while i < i64(len(args)):
+        if i > 0:
+            out = out + " "
+        out = out + render(args[i])
+        i = i + 1i64
+    println(out)
+    return mk_nil()
+
+
+# ── Global env setup ──────────────────────────────────────────────────────
+
+fn install_builtins(st: State, env_id: i64) -> None:
+    state_env_define(st, env_id, "+", mk_sym("<builtin:+>"))
+    state_env_define(st, env_id, "-", mk_sym("<builtin:->"))
+    state_env_define(st, env_id, "*", mk_sym("<builtin:*>"))
+    state_env_define(st, env_id, "/", mk_sym("<builtin:/>"))
+    state_env_define(st, env_id, "<", mk_sym("<builtin:<>"))
+    state_env_define(st, env_id, "=", mk_sym("<builtin:=>"))
+    state_env_define(st, env_id, "print", mk_sym("<builtin:print>"))
+
+
+# ── Top-level driver ─────────────────────────────────────────────────────
+
+fn run_program(src: str) -> None:
+    st: State = State()
+    root_env: i64 = state_new_env(st, -1i64)
+    install_builtins(st, root_env)
+    toks: List[str] = tokenize(src)
+    pos: List[i64] = [0i64]
+    while pos[0] < i64(len(toks)):
+        expr: Value = parse_expr(toks, pos)
+        result: Value = eval_expr(st, expr, root_env)
+        if st.errored:
+            println("error: " + st.err_msg)
+            return
+
+
+# ── Test program ─────────────────────────────────────────────────────────
+
+fn make_test_program() -> str:
+    # Accumulate to dodge BUGS_KNOWN.md #6 (no implicit line continuation
+    # across trailing `+`).
+    s: str = ""
+    s = s + "(define x 10) "
+    s = s + "(define y 20) "
+    s = s + "(print (+ x y)) "
+    s = s + "(define square (lambda (n) (* n n))) "
+    s = s + "(print (square 7))"
+    return s
+
+fn main() -> i32:
+    src: str = make_test_program()
+    run_program(src)
+    return 0

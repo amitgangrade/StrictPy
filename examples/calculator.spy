@@ -1,0 +1,249 @@
+"""Recursive-descent arithmetic calculator. Grammar:
+
+    expr   = term   (('+' | '-') term)*
+    term   = factor (('*' | '/') factor)*
+    factor = NUMBER | '(' expr ')' | '-' factor
+
+Three AST node types — Lit, BinOp, UnaryOp — all `final class` extending
+an `open class Expr` (NOT `sealed`, per BUGS_KNOWN.md #1). Parent Expr
+has NO fields (BUGS_KNOWN.md #2). Each base method has at most 3
+overrides, within the BUGS_KNOWN.md #3 vtable-wrap limit.
+
+WHAT THIS PROGRAM FOUND ABOUT STRICTPY (deliverable is the bug report):
+
+  1. The natural shape — `final class Parser` with instance methods
+     `peek/eat/parse_expr/parse_term/parse_factor` — destabilises the heap
+     and produces `STATUS_HEAP_CORRUPTION` (Windows 0xC0000374). The
+     program either silently produces a wrong value for the first
+     expression and then crashes, or crashes before any output. Behaviour
+     is non-deterministic: small unrelated edits (declaration order,
+     adding/removing functions) flip the outcome. This is the same family
+     as BUGS_KNOWN.md #4 and #5 that surfaced in json_parse.spy. The
+     in-process VM also crashes during teardown the same way json_parse
+     does. Workaround: same as json_parse — make every Parser operation a
+     FREE FUNCTION taking `p: Parser` as the first argument, and keep
+     Parser's class body to bare state + __init__.
+
+  2. `str(f64)` does NOT always shortest-round-trip the way csv_aggregate
+     said it did: `str(3.0)` prints `"3.0"` (we asserted in the test on
+     `1 + 2 = 3` originally and it failed — actual output was
+     `1 + 2 = 3.0`). The csv_aggregate doc-string claim ("3 not 3.0") is
+     stale. This is a minor formatting discrepancy, not wrong arithmetic.
+
+What this program exercises that DOES work:
+
+  - Virtual `eval(self) -> f64` and `render(self) -> str` dispatch through
+    `open class Expr` to all 3 subclasses. Composes recursively
+    (BinOp.eval calls lhs.eval + rhs.eval through the vtable).
+
+  - Char comparison on `op: char` inside virtual `eval` — `if c == '+':`.
+
+  - `parse_f64(s.slice(start, end))` on the source.
+"""
+
+# ── AST ────────────────────────────────────────────────────────────────────
+
+open class Expr:
+    fn __init__(self) -> None:
+        pass
+
+    open fn eval(self) -> f64:
+        return 0.0
+
+    open fn render(self) -> str:
+        return "<Expr:unimpl>"
+
+final class Lit(Expr):
+    value: f64
+
+    fn __init__(self, value: f64) -> None:
+        self.value = value
+
+    fn eval(self) -> f64:
+        return self.value
+
+    fn render(self) -> str:
+        return str(self.value)
+
+final class BinOp(Expr):
+    op: char
+    lhs: Expr
+    rhs: Expr
+
+    fn __init__(self, op: char, lhs: Expr, rhs: Expr) -> None:
+        self.op = op
+        self.lhs = lhs
+        self.rhs = rhs
+
+    fn eval(self) -> f64:
+        a: f64 = self.lhs.eval()
+        b: f64 = self.rhs.eval()
+        if self.op == '+':
+            return a + b
+        if self.op == '-':
+            return a - b
+        if self.op == '*':
+            return a * b
+        if self.op == '/':
+            if b == 0.0:
+                # No exception handling in our other example programs —
+                # sentinel-return 0.0 and the driver can recognise it.
+                return 0.0
+            return a / b
+        return 0.0
+
+    fn render(self) -> str:
+        op_str: str = " ? "
+        if self.op == '+':
+            op_str = " + "
+        if self.op == '-':
+            op_str = " - "
+        if self.op == '*':
+            op_str = " * "
+        if self.op == '/':
+            op_str = " / "
+        return "(" + self.lhs.render() + op_str + self.rhs.render() + ")"
+
+final class UnaryOp(Expr):
+    op: char
+    operand: Expr
+
+    fn __init__(self, op: char, operand: Expr) -> None:
+        self.op = op
+        self.operand = operand
+
+    fn eval(self) -> f64:
+        v: f64 = self.operand.eval()
+        if self.op == '-':
+            return 0.0 - v
+        return v
+
+    fn render(self) -> str:
+        return "(-" + self.operand.render() + ")"
+
+# ── Parser state holder (no methods — see header bug #1) ───────────────
+
+final class Parser:
+    src: str
+    pos: i64
+    n: i64
+
+    fn __init__(self, src: str) -> None:
+        self.src = src
+        self.pos = 0
+        self.n = i64(len(src))
+
+# ── Char helpers ───────────────────────────────────────────────────────
+
+fn is_digit(c: char) -> bool:
+    return c >= '0' and c <= '9'
+
+fn is_ws(c: char) -> bool:
+    return c == ' ' or c == '\t' or c == '\n' or c == '\r'
+
+# ── Parser ops (free functions) ────────────────────────────────────────
+
+fn p_at_end(p: Parser) -> bool:
+    return p.pos >= p.n
+
+fn p_peek(p: Parser) -> char:
+    if p.pos >= p.n:
+        return '\0'
+    return p.src[p.pos]
+
+fn p_skip_ws(p: Parser) -> None:
+    while p.pos < p.n:
+        c: char = p.src[p.pos]
+        if is_ws(c):
+            p.pos = p.pos + 1
+        else:
+            return
+
+fn p_number(p: Parser) -> Expr:
+    start: i64 = p.pos
+    while p.pos < p.n and is_digit(p.src[p.pos]):
+        p.pos = p.pos + 1
+    if p.pos < p.n and p.src[p.pos] == '.':
+        p.pos = p.pos + 1
+        while p.pos < p.n and is_digit(p.src[p.pos]):
+            p.pos = p.pos + 1
+    lex: str = p.src.slice(start, p.pos)
+    if i64(len(lex)) == 0:
+        return Lit(0.0)
+    return Lit(parse_f64(lex))
+
+fn p_factor(p: Parser) -> Expr:
+    p_skip_ws(p)
+    if p_at_end(p):
+        return Lit(0.0)
+    c: char = p_peek(p)
+    if c == '-':
+        p.pos = p.pos + 1
+        operand: Expr = p_factor(p)
+        return UnaryOp('-', operand)
+    if c == '(':
+        p.pos = p.pos + 1
+        inner: Expr = p_expr(p)
+        p_skip_ws(p)
+        if p.pos < p.n and p_peek(p) == ')':
+            p.pos = p.pos + 1
+        return inner
+    return p_number(p)
+
+fn p_term(p: Parser) -> Expr:
+    p_skip_ws(p)
+    node: Expr = p_factor(p)
+    p_skip_ws(p)
+    while p.pos < p.n:
+        c: char = p_peek(p)
+        if c == '*' or c == '/':
+            p.pos = p.pos + 1
+            p_skip_ws(p)
+            rhs: Expr = p_factor(p)
+            node = BinOp(c, node, rhs)
+            p_skip_ws(p)
+        else:
+            return node
+    return node
+
+fn p_expr(p: Parser) -> Expr:
+    p_skip_ws(p)
+    node: Expr = p_term(p)
+    p_skip_ws(p)
+    while p.pos < p.n:
+        c: char = p_peek(p)
+        if c == '+' or c == '-':
+            p.pos = p.pos + 1
+            p_skip_ws(p)
+            rhs: Expr = p_term(p)
+            node = BinOp(c, node, rhs)
+            p_skip_ws(p)
+        else:
+            return node
+    return node
+
+# ── Driver ──────────────────────────────────────────────────────────────
+
+fn show(src: str) -> None:
+    p: Parser = Parser(src)
+    e: Expr = p_expr(p)
+    r: f64 = e.eval()
+    println(src + " = " + str(r))
+
+fn main() -> i32:
+    # Full battery — exercises each grammar production. When the program
+    # runs to completion the printed answers are correct for ALL 7
+    # expressions (3.0, 17.0, 9.0, 5.0, 10.0, 0.0, 7.0). But on Windows
+    # the .spyc non-deterministically aborts mid-execution with
+    # STATUS_HEAP_CORRUPTION (BUGS_KNOWN.md #4/#5) — same .spyc, same VM
+    # binary, sometimes you get all 7 lines, sometimes 1, sometimes 0.
+    # The bug travels with the AST/Parser/free-function combination, the
+    # same family as the json_parse hierarchy.
+    show("1 + 2")
+    show("3 * 4 + 5")
+    show("(1 + 2) * 3")
+    show("-5 + 10")
+    show("2 * (3 + 4) - 8 / 2")
+    show("10 / 0")
+    show("3.5 * 2")
+    return 0
