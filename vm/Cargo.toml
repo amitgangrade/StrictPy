@@ -33,6 +33,16 @@ byteorder.workspace = true
 # hand-rolled NFA / JSON parser.
 serde_json = "1"
 regex = "1"
+# M22 P2B: base64 + hashlib stdlib modules.  Each crate is small,
+# well-maintained, and pure Rust — the alternative of hand-rolling
+# (~80 LOC for base64, ~500+ for SHA-2) buys nothing and would have to
+# re-validate against the same NIST/RFC test vectors these crates
+# already pass.  `hmac` is for `hashlib.hmac_sha256`.
+base64 = "0.22"
+md-5 = "0.10"
+sha1 = "0.10"
+sha2 = "0.10"
+hmac = "0.12"
 cranelift = { version = "0.115", optional = true }
 cranelift-jit = { version = "0.115", optional = true }
 cranelift-codegen = { version = "0.115", optional = true }

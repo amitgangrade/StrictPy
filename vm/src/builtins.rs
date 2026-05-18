@@ -2077,6 +2077,131 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             Ok(lst as u64)
         }
 
+        // ── M22 P2B: `base64` module ───────────────────────────────────
+        // The `base64` crate exposes a stable engine API (0.22).  We
+        // pick two pre-built engines: `STANDARD` (RFC 4648 §4,
+        // `+`/`/`, `=` padding) and `URL_SAFE_NO_PAD` (RFC 4648 §5,
+        // `-`/`_`, no padding).  Both encode + decode are infallible
+        // *for the engine*; the only failure modes are malformed input
+        // on decode and non-UTF-8 output after decode, both of which
+        // map to ValueError.
+        NativeFn::Base64Encode => {
+            use base64::Engine as _;
+            let s = arg_str(args, 0);
+            let out = base64::engine::general_purpose::STANDARD.encode(s.as_bytes());
+            let p = interp.alloc_string(&out);
+            Ok(p as u64)
+        }
+        NativeFn::Base64Decode => {
+            use base64::Engine as _;
+            let s = arg_str(args, 0);
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(s.as_bytes())
+                .map_err(|e| VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("base64.decode: {}", e),
+                })?;
+            // StrictPy strings are UTF-8; reject non-UTF-8 payloads with
+            // a clear error.  Programs that need raw bytes back can use
+            // the v0.3 `decode_bytes` companion (not shipped — see report).
+            let out = String::from_utf8(bytes).map_err(|e| VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!("base64.decode: non-UTF-8 payload: {}", e),
+            })?;
+            let p = interp.alloc_string(&out);
+            Ok(p as u64)
+        }
+        NativeFn::Base64EncodeUrlSafe => {
+            use base64::Engine as _;
+            let s = arg_str(args, 0);
+            let out = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s.as_bytes());
+            let p = interp.alloc_string(&out);
+            Ok(p as u64)
+        }
+        NativeFn::Base64DecodeUrlSafe => {
+            use base64::Engine as _;
+            let s = arg_str(args, 0);
+            let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(s.as_bytes())
+                .map_err(|e| VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("base64.decode_url_safe: {}", e),
+                })?;
+            let out = String::from_utf8(bytes).map_err(|e| VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!("base64.decode_url_safe: non-UTF-8 payload: {}", e),
+            })?;
+            let p = interp.alloc_string(&out);
+            Ok(p as u64)
+        }
+
+        // ── M22 P2B: `hashlib` module ──────────────────────────────────
+        // One handler per algorithm; each consumes its `str` argument
+        // as UTF-8 bytes, runs the digest, and emits the canonical
+        // lowercase hex form via `to_hex_lower`.  Output matches Python
+        // `hashlib.<algo>(data.encode()).hexdigest()` byte-for-byte.
+        NativeFn::HashlibMd5 => {
+            use md5::{Digest, Md5};
+            let s = arg_str(args, 0);
+            let mut h = Md5::new();
+            h.update(s.as_bytes());
+            let digest = h.finalize();
+            let hex = to_hex_lower(&digest);
+            let p = interp.alloc_string(&hex);
+            Ok(p as u64)
+        }
+        NativeFn::HashlibSha1 => {
+            use sha1::{Digest, Sha1};
+            let s = arg_str(args, 0);
+            let mut h = Sha1::new();
+            h.update(s.as_bytes());
+            let digest = h.finalize();
+            let hex = to_hex_lower(&digest);
+            let p = interp.alloc_string(&hex);
+            Ok(p as u64)
+        }
+        NativeFn::HashlibSha256 => {
+            use sha2::{Digest, Sha256};
+            let s = arg_str(args, 0);
+            let mut h = Sha256::new();
+            h.update(s.as_bytes());
+            let digest = h.finalize();
+            let hex = to_hex_lower(&digest);
+            let p = interp.alloc_string(&hex);
+            Ok(p as u64)
+        }
+        NativeFn::HashlibSha512 => {
+            use sha2::{Digest, Sha512};
+            let s = arg_str(args, 0);
+            let mut h = Sha512::new();
+            h.update(s.as_bytes());
+            let digest = h.finalize();
+            let hex = to_hex_lower(&digest);
+            let p = interp.alloc_string(&hex);
+            Ok(p as u64)
+        }
+        NativeFn::HashlibHmacSha256 => {
+            use hmac::{Hmac, Mac};
+            use sha2::Sha256;
+            type HmacSha256 = Hmac<Sha256>;
+            let key = arg_str(args, 0);
+            let data = arg_str(args, 1);
+            // `Hmac::new_from_slice` accepts a key of any length (it
+            // performs the standard SHA-256 block-fold for over-block
+            // keys).  Construction is infallible for the SHA-256 case.
+            let mut mac = HmacSha256::new_from_slice(key.as_bytes()).map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("hashlib.hmac_sha256: bad key: {}", e),
+                }
+            })?;
+            mac.update(data.as_bytes());
+            let result = mac.finalize().into_bytes();
+            let hex = to_hex_lower(&result);
+            let p = interp.alloc_string(&hex);
+            Ok(p as u64)
+        }
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
@@ -2347,6 +2472,22 @@ fn splitext_python(path: &str) -> (&str, &str) {
         }
     }
     (path, "")
+}
+
+/// M22 P2B: lowercase-hex encode a byte slice.  Used by every
+/// `hashlib.*` handler so digest output matches Python
+/// `hashlib.<algo>(data.encode()).hexdigest()` byte-for-byte (md5 →
+/// 32 chars, sha1 → 40, sha256 → 64, sha512 → 128).  The dedicated
+/// helper avoids pulling in `hex` as a workspace dep just for this
+/// one-liner.
+fn to_hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0F) as usize] as char);
+    }
+    out
 }
 
 /// M20c: compile a regex pattern, raising `ValueError` on a syntax

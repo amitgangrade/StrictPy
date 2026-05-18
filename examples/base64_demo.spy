@@ -1,0 +1,78 @@
+"""base64_demo — M22 P2B demo of the stdlib `base64` module.
+
+Round-trips a few strings through the standard (`+`/`/`, `=`-padded) and
+URL-safe (`-`/`_`, no padding) base64 codecs.  Demonstrates the
+`ValueError` raised by `base64.decode` on malformed input.
+
+The dedicated `bytes` surface (`encode_bytes` / `decode_bytes`) is
+deferred to v0.3 — string-only round-trips cover the common case of
+encoding text payloads (tokens, small config blobs) for transport over
+text channels.
+"""
+
+import base64
+
+fn main() -> i32:
+    # 1. Standard encode / decode round-trip.
+    plain: str = "Hello, StrictPy!"
+    encoded: str = base64.encode(plain)
+    println("encoded: " + encoded)
+    decoded: str = base64.decode(encoded)
+    println("decoded: " + decoded)
+    if decoded == plain:
+        println("round-trip: true")
+    else:
+        println("round-trip: false")
+
+    # 2. Empty string round-trip.
+    e_empty: str = base64.encode("")
+    if e_empty == "":
+        println("empty encode: ok")
+    else:
+        println("empty encode: " + e_empty)
+    if base64.decode("") == "":
+        println("empty decode: ok")
+
+    # 3. A multi-byte UTF-8 payload to confirm we don't lose bytes
+    #    along the way.  The euro sign `€` is three bytes in UTF-8.
+    utf8_in: str = "Pay 5 €uros"
+    e_utf8: str = base64.encode(utf8_in)
+    println("utf8 encoded: " + e_utf8)
+    d_utf8: str = base64.decode(e_utf8)
+    if d_utf8 == utf8_in:
+        println("utf8 round-trip: true")
+    else:
+        println("utf8 round-trip: false")
+
+    # 4. URL-safe encode / decode — should produce no `+` `/` `=` chars.
+    raw: str = "subjects?>=??"
+    url_enc: str = base64.encode_url_safe(raw)
+    println("url-safe encoded: " + url_enc)
+    url_dec: str = base64.decode_url_safe(url_enc)
+    if url_dec == raw:
+        println("url-safe round-trip: true")
+    else:
+        println("url-safe round-trip: false")
+
+    # 5. Known vector — the Wikipedia base64 example.  "Man" -> "TWFu".
+    if base64.encode("Man") == "TWFu":
+        println("known vector Man: ok")
+    if base64.decode("TWFu") == "Man":
+        println("known vector decode: ok")
+
+    # 6. Decode of malformed input raises ValueError.
+    try:
+        bad: str = base64.decode("!!!not-base64!!!")
+        println("UNREACHED: " + bad)
+    except ValueError as e:
+        println("caught bad base64")
+
+    # 7. URL-safe decoder rejects the standard alphabet's special chars.
+    try:
+        also_bad: str = base64.decode_url_safe("a+b/")
+        println("UNREACHED url-safe: " + also_bad)
+    except ValueError as e:
+        println("caught bad url-safe")
+
+    println("done")
+    return 0

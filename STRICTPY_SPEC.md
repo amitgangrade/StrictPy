@@ -1754,6 +1754,94 @@ What v0.2 does **not** ship:
   v0.3 may add a `parse_query_dict` that collapses duplicates by
   picking the last value (Python's default).
 
+### 9.19 Module `base64` (v0.2 — M22 P2B)
+
+Standard (RFC 4648 §4) and URL-safe (RFC 4648 §5) base64 codecs over
+`str`.  Backed by the `base64` crate's `Engine` API.
+
+```
+fn encode(data: str) -> str             # std alphabet, `=` padded
+fn decode(b64: str) -> str              # std alphabet; raises ValueError
+fn encode_url_safe(data: str) -> str    # url-safe alphabet, no padding
+fn decode_url_safe(b64: str) -> str     # url-safe; raises ValueError
+```
+
+Semantics:
+
+* `encode(s)` UTF-8-encodes `s`, then base64-encodes the bytes using
+  the standard alphabet (`A-Z`, `a-z`, `0-9`, `+`, `/`) with `=`
+  padding.  Output is ASCII.
+* `decode(b64)` parses `b64` as standard base64, then UTF-8-decodes
+  the result back to `str`.  Raises `ValueError` on malformed base64
+  input *and* on a non-UTF-8 payload.  Programs that need to round-trip
+  arbitrary bytes (binary files, encrypted blobs) need to wait for the
+  v0.3 `bytes` surface.
+* `encode_url_safe(s)` uses the URL-safe alphabet (`A-Z`, `a-z`,
+  `0-9`, `-`, `_`) with **no padding**.  Output is safe to embed in
+  URLs and filenames without further escaping.
+* `decode_url_safe(b64)` decodes URL-safe base64.  Strict: it rejects
+  the standard alphabet's `+` / `/` characters.
+
+What v0.2 does **not** ship:
+
+* `encode_bytes(data: bytes) -> str` and `decode_bytes(b64: str) -> bytes`.
+  StrictPy v0.2's `bytes` is a legacy prelude alias for `str` and has
+  no first-class byte-buffer API; a real `bytes` surface is v0.3
+  infrastructure.  Until then, programs round-trip text payloads only.
+* MIME-style line-wrapped output (76-char lines).  All four entry
+  points produce single-line output.  Wrapping is one `re.split` /
+  string-builder loop in user code if needed.
+* The `b32` (base32) and `b16` (hex) family.  Hex digests are already
+  available via `hashlib`; base32 has no shipping example program.
+
+### 9.20 Module `hashlib` (v0.2 — M22 P2B)
+
+Cryptographic + checksum digests.  Backed by the `md-5`, `sha1`,
+`sha2`, and `hmac` crates (pure-Rust, RustCrypto family).
+
+```
+fn md5(data: str)                       -> str
+fn sha1(data: str)                      -> str
+fn sha256(data: str)                    -> str
+fn sha512(data: str)                    -> str
+fn hmac_sha256(key: str, data: str)     -> str
+```
+
+Semantics:
+
+* Each entry point UTF-8-encodes its input, runs the named digest,
+  and returns the lowercase hex form of the standard length:
+
+  | Function      | Output length |
+  |---|---|
+  | `md5`         | 32 chars      |
+  | `sha1`        | 40 chars      |
+  | `sha256`      | 64 chars      |
+  | `sha512`      | 128 chars     |
+  | `hmac_sha256` | 64 chars      |
+
+  Output matches Python `hashlib.<algo>(data.encode()).hexdigest()`
+  and `hmac.new(key.encode(), data.encode(), hashlib.sha256).hexdigest()`
+  byte-for-byte.
+* `md5` and `sha1` are kept for compatibility with config files,
+  legacy hashes, and non-cryptographic checksum use cases.  They are
+  **not** suitable for security-sensitive work; use `sha256` /
+  `sha512` for that.
+* `hmac_sha256(key, data)` accepts a key of any length (the HMAC
+  construction handles oversize keys by SHA-256-folding them first).
+  The key MUST NOT be empty in practice — pass a non-trivial secret.
+
+What v0.2 does **not** ship:
+
+* A streaming `update()` API.  Programs that need to digest more than
+  a single string concatenate first.  The `Hasher` handle is v0.3
+  work — it needs stdlib-class registration to expose `update` /
+  `hexdigest` methods.
+* SHA-3 (Keccak), BLAKE2/BLAKE3, RIPEMD.  Adding each is one crate +
+  one handler; held back until a real-world example program asks.
+* `pbkdf2_hmac` / `scrypt` / `argon2`.  Password-hashing primitives
+  are deferred to v0.3.
+
 ---
 
 ## 10. Compiler Architecture

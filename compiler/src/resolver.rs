@@ -1483,6 +1483,106 @@ impl Resolver {
             ],
         };
         self.stdlib_modules.insert("urllib_parse".into(), urllib_mod);
+
+        // ── M22 P2B: `base64` module ───────────────────────────────────
+        // Standard and URL-safe base64 codecs over `str`.  Strings carry
+        // UTF-8 in StrictPy, so we round-trip the bytes through UTF-8
+        // (encode: bytes-of-utf8, decode: utf8-of-decoded-bytes).  A
+        // dedicated `bytes` surface is v0.3 — see report for the
+        // tradeoffs.  Bad base64 in `decode` / `decode_url_safe`, and
+        // non-UTF-8 bytes after decoding, both surface as `ValueError`.
+        const BASE64_ENCODE: u32          = 290;
+        const BASE64_DECODE: u32          = 291;
+        const BASE64_ENCODE_URL_SAFE: u32 = 292;
+        const BASE64_DECODE_URL_SAFE: u32 = 293;
+
+        let base64_mod = StdlibModule {
+            name: "base64".into(),
+            items: vec![
+                StdlibItem {
+                    name: "encode".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: BASE64_ENCODE,
+                },
+                StdlibItem {
+                    name: "decode".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: BASE64_DECODE,
+                },
+                StdlibItem {
+                    name: "encode_url_safe".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: BASE64_ENCODE_URL_SAFE,
+                },
+                StdlibItem {
+                    name: "decode_url_safe".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: BASE64_DECODE_URL_SAFE,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("base64".into(), base64_mod);
+
+        // ── M22 P2B: `hashlib` module ──────────────────────────────────
+        // Cryptographic-and-checksum digests over `str`.  Each entry
+        // takes a single `str` and returns the canonical lowercase hex
+        // digest of the standard length (32/40/64/128 chars for
+        // md5/sha1/sha256/sha512).  Output is byte-compatible with
+        // Python `hashlib.<algo>(data.encode()).hexdigest()`.
+        //
+        // No streaming `update()` API in v0.2 — programs needing it
+        // concatenate first.  HMAC ships as a single helper
+        // `hmac_sha256(key, data)` rather than a separate `hmac` module
+        // (the module-namespacing cost outweighs the single function).
+        const HASHLIB_MD5: u32         = 300;
+        const HASHLIB_SHA1: u32        = 301;
+        const HASHLIB_SHA256: u32      = 302;
+        const HASHLIB_SHA512: u32      = 303;
+        const HASHLIB_HMAC_SHA256: u32 = 304;
+
+        let hashlib_mod = StdlibModule {
+            name: "hashlib".into(),
+            items: vec![
+                StdlibItem {
+                    name: "md5".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: HASHLIB_MD5,
+                },
+                StdlibItem {
+                    name: "sha1".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: HASHLIB_SHA1,
+                },
+                StdlibItem {
+                    name: "sha256".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: HASHLIB_SHA256,
+                },
+                StdlibItem {
+                    name: "sha512".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: HASHLIB_SHA512,
+                },
+                StdlibItem {
+                    name: "hmac_sha256".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), str_ty.clone()],
+                        str_ty.clone(),
+                    ),
+                    native_id: HASHLIB_HMAC_SHA256,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("hashlib".into(), hashlib_mod);
     }
 
     // ─────────────────────────────────────────────────────────────────────

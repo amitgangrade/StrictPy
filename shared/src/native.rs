@@ -477,6 +477,37 @@ pub enum NativeFn {
     /// `urllib_parse.parse_query(qs: str) -> List[Tuple[str, str]]`.
     UrlParseQuery = 347,
 
+    // ── 290–299: `base64` module (M22 P2B) ──────────────────────────────
+    // Backed by the `base64` crate (engine API).  Strings round-trip
+    // through UTF-8.  `decode` raises `ValueError` on malformed input;
+    // `encode` cannot fail.  Two variants: standard (`+`/`/`, padded)
+    // and URL-safe (`-`/`_`, no padding).
+    /// `base64.encode(data: str) -> str` — encode UTF-8 input as base64.
+    Base64Encode         = 290,
+    /// `base64.decode(b64: str) -> str` — decode; UTF-8 check.
+    Base64Decode         = 291,
+    /// `base64.encode_url_safe(data: str) -> str`.
+    Base64EncodeUrlSafe  = 292,
+    /// `base64.decode_url_safe(b64: str) -> str`.
+    Base64DecodeUrlSafe  = 293,
+
+    // ── 300–309: `hashlib` module (M22 P2B) ─────────────────────────────
+    // Backed by the `md-5` and `sha2` crates.  All entry points take a
+    // single `str` argument and return the lowercase hex digest as a
+    // `str`.  No streaming API in v0.2 — programs that need it can
+    // concatenate first, or wait for v0.3.
+    /// `hashlib.md5(data: str) -> str` — 32-char hex digest of MD5.
+    HashlibMd5     = 300,
+    /// `hashlib.sha1(data: str) -> str` — 40-char hex digest.
+    HashlibSha1    = 301,
+    /// `hashlib.sha256(data: str) -> str` — 64-char hex digest.
+    HashlibSha256  = 302,
+    /// `hashlib.sha512(data: str) -> str` — 128-char hex digest.
+    HashlibSha512  = 303,
+    /// `hashlib.hmac_sha256(key: str, data: str) -> str` — 64-char hex
+    /// digest of HMAC-SHA256(key, data).  Backed by the `hmac` crate.
+    HashlibHmacSha256 = 304,
+
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
     /// encounters. The VM treats this as a runtime error.
@@ -638,6 +669,17 @@ impl NativeFn {
             224 => Some(Self::ReReplace),
             225 => Some(Self::ReSplit),
             226 => Some(Self::ReIsValid),
+            // M22 P2B: base64 module.
+            290 => Some(Self::Base64Encode),
+            291 => Some(Self::Base64Decode),
+            292 => Some(Self::Base64EncodeUrlSafe),
+            293 => Some(Self::Base64DecodeUrlSafe),
+            // M22 P2B: hashlib module.
+            300 => Some(Self::HashlibMd5),
+            301 => Some(Self::HashlibSha1),
+            302 => Some(Self::HashlibSha256),
+            303 => Some(Self::HashlibSha512),
+            304 => Some(Self::HashlibHmacSha256),
             // M22 P2C: itertools module.
             310 => Some(Self::ItertoolsRangeStep),
             311 => Some(Self::ItertoolsEnumerateStr),

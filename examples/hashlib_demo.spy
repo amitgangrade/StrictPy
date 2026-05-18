@@ -1,0 +1,81 @@
+"""hashlib_demo — M22 P2B demo of the stdlib `hashlib` module.
+
+Known-vector checks for md5, sha1, sha256, sha512, and HMAC-SHA256.
+Every entry takes a `str`, UTF-8-encodes it, and returns the lowercase
+hex digest of the standard length.  Output matches Python:
+    hashlib.<algo>(data.encode()).hexdigest()
+
+No streaming `update()` API in v0.2 — programs that need to digest more
+than a single string concatenate first.  See the M22 P2B agent report
+for the rationale.
+"""
+
+import hashlib
+
+fn check(label: str, got: str, want: str) -> None:
+    if got == want:
+        println(label + ": ok")
+    else:
+        println(label + ": FAIL  got=" + got + " want=" + want)
+
+fn main() -> i32:
+    # ── md5 known vectors ─────────────────────────────────────────────
+    # md5("") = d41d8cd98f00b204e9800998ecf8427e (RFC 1321 §A.5)
+    check("md5(\"\")",
+          hashlib.md5(""),
+          "d41d8cd98f00b204e9800998ecf8427e")
+
+    # The Pangram — md5("The quick brown fox jumps over the lazy dog")
+    pangram: str = "The quick brown fox jumps over the lazy dog"
+    check("md5(pangram)",
+          hashlib.md5(pangram),
+          "9e107d9d372bb6826bd81d3542a419d6")
+
+    # ── sha1 known vectors ────────────────────────────────────────────
+    # sha1("") = da39a3ee5e6b4b0d3255bfef95601890afd80709
+    check("sha1(\"\")",
+          hashlib.sha1(""),
+          "da39a3ee5e6b4b0d3255bfef95601890afd80709")
+
+    # sha1("abc") = a9993e364706816aba3e25717850c26c9cd0d89d
+    check("sha1(\"abc\")",
+          hashlib.sha1("abc"),
+          "a9993e364706816aba3e25717850c26c9cd0d89d")
+
+    # ── sha256 known vectors ──────────────────────────────────────────
+    # sha256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+    check("sha256(\"\")",
+          hashlib.sha256(""),
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+
+    # sha256("abc") — NIST FIPS 180-4 §B.1.
+    check("sha256(\"abc\")",
+          hashlib.sha256("abc"),
+          "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+
+    # ── sha512 known vector ───────────────────────────────────────────
+    # sha512("abc") — NIST FIPS 180-4 §C.1.
+    sha512_abc: str = "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+    check("sha512(\"abc\")",
+          hashlib.sha512("abc"),
+          sha512_abc)
+
+    # ── output lengths sanity ─────────────────────────────────────────
+    # md5 → 32 chars, sha1 → 40, sha256 → 64, sha512 → 128.
+    println("md5 len: " + str(len(hashlib.md5("anything"))))
+    println("sha1 len: " + str(len(hashlib.sha1("anything"))))
+    println("sha256 len: " + str(len(hashlib.sha256("anything"))))
+    println("sha512 len: " + str(len(hashlib.sha512("anything"))))
+
+    # ── HMAC-SHA256 known vector (RFC 4231 §4.2) ──────────────────────
+    # key = 0x0b * 20, data = "Hi There" — except RFC 4231's key is
+    # binary; here we use ASCII for easy reproduction.  Verified
+    # against `python3 -c "import hmac, hashlib;
+    #   print(hmac.new(b'key', b'The quick brown fox jumps over the lazy dog',
+    #                  hashlib.sha256).hexdigest())"`.
+    check("hmac_sha256(key, pangram)",
+          hashlib.hmac_sha256("key", pangram),
+          "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8")
+
+    println("done")
+    return 0
