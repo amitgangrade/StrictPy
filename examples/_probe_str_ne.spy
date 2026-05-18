@@ -1,0 +1,54 @@
+"""HEADLINE BUG found by m12_btree: `str != str` always returns true.
+
+Repro (one screenful):
+
+    a: str = "hello"
+    b: str = "hello"
+    println(str(a == b))    # prints: true   (correct)
+    println(str(a != b))    # prints: true   (WRONG — should be false)
+
+Root cause (compiler/src/ir.rs ≈ line 1716):
+
+    AstBinOp::Eq => {
+        if is_str { IROp::StrEq } else if is_float { IROp::FEq } else { IROp::IEq }
+    }
+    AstBinOp::Ne => if is_float { IROp::FNe } else { IROp::INe },
+                                                   ^^^^^^^^^^^^
+                                                   no is_str branch!
+
+`StrEq` was added to IROp (line 92), but there is no `StrNe`. When
+the lowerer sees `str != str` it falls through to `INe`, which
+compares the two string-handle pointers as integers. Since every
+string literal materialises a fresh handle, distinct equal strings
+have distinct pointers → `INe` returns true.
+
+Symptoms in the wild:
+- m12_btree.spy: ALL search-and-compare-result tests printed FAIL
+  even when the searched value was correct (`got = one` then
+  `got != "one" → true`).
+- Any program using `s != ""` as a "missing" sentinel will
+  effectively go through the "missing" branch every time.
+- Programs that work today by accident: any code that uses
+  `if a == b` (positive form) instead of `!=` is unaffected.
+
+Fix sketch: add `IROp::StrNe`, mirror StrEq's VM dispatch with a
+negated result. Or as a smaller change, lower `AstBinOp::Ne` on
+str operands as `StrEq` followed by `BoolNot`. Either is a few
+lines in `compiler/src/ir.rs`.
+
+Workaround used in m12_btree.spy: `not (a == b)` everywhere.
+"""
+
+fn main() -> i32:
+    a: str = "hello"
+    b: str = "hello"
+    c: str = "world"
+
+    println("a == b → " + str(a == b))   # expect true   — gets true   (OK)
+    println("a != b → " + str(a != b))   # expect false  — gets true   (BUG)
+    println("a == c → " + str(a == c))   # expect false  — gets false  (OK)
+    println("a != c → " + str(a != c))   # expect true   — gets true   (OK)
+
+    # Workaround: `not (a == b)`.
+    println("not (a == b) → " + str(not (a == b)))  # expect false — gets false (OK)
+    return 0

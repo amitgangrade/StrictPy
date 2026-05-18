@@ -1,0 +1,417 @@
+"""Dijkstra's single-source shortest paths with a hand-rolled binary
+min-heap priority queue. Pure StrictPy, no stdlib beyond list/dict basics.
+
+Architecture
+------------
+  - `final class Graph`: parallel `List[List[i32]]` (neighbour ids) and
+    `List[List[f64]]` (edge weights) per source vertex. Constructor seeds
+    one empty row per vertex; `add_edge(u, v, w)` appends to row u.
+
+  - `final class MinHeap`: parallel `List[i32]` (vertex ids) and
+    `List[f64]` (priorities = current best distance). Standard array-heap
+    layout (root at index 0; children of i at 2i+1, 2i+2). `sift_up` and
+    `sift_down` are RECURSIVE method calls — a deliberate stress of the
+    M11 vtable + class-receiver path. `decrease_key` does a linear scan
+    (fine for our test sizes; keeps the algorithm self-contained).
+
+  - `fn dijkstra(g: Graph, src: i32) -> List[f64]`: classic lazy-decrease
+    Dijkstra. Sentinel for "unreached" is `INF = 1.0e18`; we want this
+    far enough from realistic edge weights (≤100.0 here) that the f64
+    relaxation `dist[u] + w < dist[v]` is unambiguous even when summed
+    a few times.
+
+Patterns this program stresses
+------------------------------
+  1. Class methods that mutate parallel `List[List[T]]` fields — a shape
+     not exercised by any existing example. BUG-016 (subclass field
+     offset aliasing) is supposedly fixed post-M11, but Graph is a
+     `final class` with no inheritance — the regression test would catch
+     a pure field-offset bug in a fresh form.
+
+  2. Recursive method calls (`sift_up`, `sift_down`) of depth ~log2(N).
+     Each frame loads `self` from the receiver, indexes two parallel
+     lists, and conditionally recurses.
+
+  3. `for nbr_idx in <range-equiv>` over a method-returned `List[i32]`.
+     The M9 `for x in xs:` desugar evaluates `xs` once at the loop
+     header (compiler/src/ir.rs:873 — `let arr = lower_expr(...)`). We
+     deliberately write the loop as `for v in g.adj_node[u]:` to verify
+     that path doesn't re-call the method (or re-index) each iteration.
+
+  4. f64 comparison with an 1e18 sentinel — does `dist[u] + 5.0 < 1e18`
+     short-circuit correctly when dist[u] itself is 1e18? (Yes per IEEE
+     754; 1e18 + 5.0 = 1e18 exactly, but `1e18 < 1e18` is false, so we
+     never "relax" through an unreached vertex.)
+
+  5. `final class` field of type `List[List[T]]` round-tripped through
+     instance methods. The vtable pointer lives at offset 0; the
+     guarantee is that the two list-of-list fields land at offsets 8/16,
+     not at 0.
+
+What this program does NOT exercise (deliberately):
+  - inheritance / virtual dispatch (Graph + MinHeap are both `final`)
+  - dict (we use parallel arrays throughout)
+  - `try`/`except` (still BUG-025)
+"""
+
+# ── Constants ───────────────────────────────────────────────────────────
+
+# Sentinel for "unreached". 1e18 is comfortably larger than any sum of
+# realistic edge weights but well within f64 range.
+final INF: f64 = 1.0e18
+
+# ── Graph ──────────────────────────────────────────────────────────────
+
+final class Graph:
+    n_vertices: i32
+    adj_node: List[List[i32]]
+    adj_weight: List[List[f64]]
+
+    fn __init__(self, n: i32) -> None:
+        self.n_vertices = n
+        self.adj_node = []
+        self.adj_weight = []
+        i: i32 = 0
+        while i < n:
+            row_n: List[i32] = []
+            row_w: List[f64] = []
+            self.adj_node.append(row_n)
+            self.adj_weight.append(row_w)
+            i = i + 1
+
+    fn add_edge(self, u: i32, v: i32, w: f64) -> None:
+        """Directed edge u -> v with weight w. For an undirected graph
+        the caller adds both directions."""
+        self.adj_node[u].append(v)
+        self.adj_weight[u].append(w)
+
+    fn degree(self, u: i32) -> i32:
+        return i32(i64(len(self.adj_node[u])))
+
+# ── Binary min-heap PQ ──────────────────────────────────────────────────
+
+final class MinHeap:
+    keys: List[i32]
+    prios: List[f64]
+
+    fn __init__(self) -> None:
+        self.keys = []
+        self.prios = []
+
+    fn is_empty(self) -> bool:
+        return len(self.keys) == 0
+
+    fn size(self) -> i32:
+        return i32(i64(len(self.keys)))
+
+    fn swap(self, i: i32, j: i32) -> None:
+        tk: i32 = self.keys[i]
+        tp: f64 = self.prios[i]
+        self.keys[i] = self.keys[j]
+        self.prios[i] = self.prios[j]
+        self.keys[j] = tk
+        self.prios[j] = tp
+
+    fn sift_up(self, i: i32) -> None:
+        """Recursive sift-up. Depth is O(log N)."""
+        if i == 0:
+            return
+        parent: i32 = (i - 1) // 2
+        if self.prios[i] < self.prios[parent]:
+            self.swap(i, parent)
+            self.sift_up(parent)
+
+    fn sift_down(self, i: i32) -> None:
+        """Recursive sift-down. Depth is O(log N)."""
+        n: i32 = self.size()
+        left: i32 = 2 * i + 1
+        right: i32 = 2 * i + 2
+        smallest: i32 = i
+        if left < n and self.prios[left] < self.prios[smallest]:
+            smallest = left
+        if right < n and self.prios[right] < self.prios[smallest]:
+            smallest = right
+        if smallest != i:
+            self.swap(i, smallest)
+            self.sift_down(smallest)
+
+    fn push(self, v: i32, p: f64) -> None:
+        self.keys.append(v)
+        self.prios.append(p)
+        last: i32 = i32(i64(len(self.keys))) - 1
+        self.sift_up(last)
+
+    fn pop_min(self) -> i32:
+        """Pop and return the vertex id with smallest priority. Traps
+        via assert on empty (caller must guard with is_empty)."""
+        assert len(self.keys) > 0, "pop_min on empty heap"
+        root: i32 = self.keys[0]
+        last_idx: i32 = i32(i64(len(self.keys))) - 1
+        if last_idx == 0:
+            # last element pop — list.pop is sufficient
+            ignored_k: i32 = self.keys.pop()
+            ignored_p: f64 = self.prios.pop()
+            return root
+        # Move last element to root, drop the trailing slot, then sift.
+        self.keys[0] = self.keys[last_idx]
+        self.prios[0] = self.prios[last_idx]
+        ignored_k2: i32 = self.keys.pop()
+        ignored_p2: f64 = self.prios.pop()
+        self.sift_down(0)
+        return root
+
+    fn decrease_key(self, v: i32, p: f64) -> bool:
+        """Find v in the heap and lower its priority to p. Linear scan —
+        fine for our test graph sizes. Returns true if v was found and
+        the priority was strictly lowered."""
+        n: i32 = self.size()
+        i: i32 = 0
+        while i < n:
+            if self.keys[i] == v:
+                if p < self.prios[i]:
+                    self.prios[i] = p
+                    self.sift_up(i)
+                    return true
+                return false
+            i = i + 1
+        return false
+
+# ── Dijkstra proper ─────────────────────────────────────────────────────
+
+fn dijkstra(g: Graph, src: i32) -> List[f64]:
+    """Returns the distance array from `src`. Unreached vertices are INF.
+
+    Uses the "lazy decrease-key" variant: we push (v, new_dist) onto the
+    heap unconditionally on relaxation; when we pop a (v, d) where d is
+    greater than dist[v] (i.e. a stale entry), we skip it. This is the
+    standard textbook variant for simplicity. We ALSO try `decrease_key`
+    first when v is already in the heap, to exercise that code path.
+    """
+    n: i32 = g.n_vertices
+    dist: List[f64] = []
+    visited: List[bool] = []
+    i: i32 = 0
+    while i < n:
+        dist.append(INF)
+        visited.append(false)
+        i = i + 1
+    dist[src] = 0.0
+
+    pq: MinHeap = MinHeap()
+    pq.push(src, 0.0)
+
+    while not pq.is_empty():
+        u: i32 = pq.pop_min()
+        if visited[u]:
+            # Stale entry from a lazy push — skip.
+            continue
+        visited[u] = true
+
+        # Walk neighbours of u. This is the critical `for x in xs:`
+        # pattern with a method-call-style receiver. We use direct
+        # field access (`g.adj_node[u]`) here because that's an attr-ref
+        # + subscript, which the M9 for-desugar materialises once.
+        deg: i32 = g.degree(u)
+        k: i32 = 0
+        while k < deg:
+            v: i32 = g.adj_node[u][k]
+            w: f64 = g.adj_weight[u][k]
+            if not visited[v]:
+                nd: f64 = dist[u] + w
+                if nd < dist[v]:
+                    dist[v] = nd
+                    # Try decrease_key first (exercises that path), then
+                    # fall back to a lazy push.
+                    if not pq.decrease_key(v, nd):
+                        pq.push(v, nd)
+            k = k + 1
+
+    return dist
+
+# ── Test runner ─────────────────────────────────────────────────────────
+
+fn approx_eq(a: f64, b: f64) -> bool:
+    """f64 equality with a tiny tolerance — Dijkstra's sums are exact
+    for the integer-valued weights we use, but the comparison logic is
+    kept tolerance-aware for forward compatibility."""
+    d: f64 = a - b
+    if d < 0.0:
+        d = 0.0 - d
+    return d < 1.0e-9
+
+fn check(test_num: i32, dist: List[f64], expected: List[f64]) -> bool:
+    if len(dist) != len(expected):
+        println("FAIL test=" + str(test_num) + " len_mismatch got=" + str(i32(i64(len(dist)))) + " expected=" + str(i32(i64(len(expected)))))
+        return false
+    n: i32 = i32(i64(len(dist)))
+    i: i32 = 0
+    while i < n:
+        if not approx_eq(dist[i], expected[i]):
+            println("FAIL test=" + str(test_num) + " idx=" + str(i) + " got=" + str(dist[i]) + " expected=" + str(expected[i]))
+            return false
+        i = i + 1
+    println("PASS test=" + str(test_num))
+    return true
+
+# ── Test 1: linear chain 0->1->2->3->4, unit weights ───────────────────
+
+fn test_linear_chain() -> bool:
+    g: Graph = Graph(5)
+    g.add_edge(0, 1, 1.0)
+    g.add_edge(1, 2, 1.0)
+    g.add_edge(2, 3, 1.0)
+    g.add_edge(3, 4, 1.0)
+    dist: List[f64] = dijkstra(g, 0)
+    expected: List[f64] = []
+    expected.append(0.0)
+    expected.append(1.0)
+    expected.append(2.0)
+    expected.append(3.0)
+    expected.append(4.0)
+    return check(1, dist, expected)
+
+# ── Test 2: CLRS Figure 24.6 graph ─────────────────────────────────────
+# Five vertices s=0, t=1, x=2, y=3, z=4. Edges (s,t,10), (s,y,5),
+# (t,x,1), (t,y,2), (y,t,3), (y,x,9), (y,z,2), (x,z,4), (z,x,6), (z,s,7).
+# Canonical CLRS distances from s: [0, 8, 9, 5, 7].
+
+fn test_clrs() -> bool:
+    g: Graph = Graph(5)
+    g.add_edge(0, 1, 10.0)
+    g.add_edge(0, 3, 5.0)
+    g.add_edge(1, 2, 1.0)
+    g.add_edge(1, 3, 2.0)
+    g.add_edge(3, 1, 3.0)
+    g.add_edge(3, 2, 9.0)
+    g.add_edge(3, 4, 2.0)
+    g.add_edge(2, 4, 4.0)
+    g.add_edge(4, 2, 6.0)
+    g.add_edge(4, 0, 7.0)
+    dist: List[f64] = dijkstra(g, 0)
+    expected: List[f64] = []
+    expected.append(0.0)
+    expected.append(8.0)
+    expected.append(9.0)
+    expected.append(5.0)
+    expected.append(7.0)
+    return check(2, dist, expected)
+
+# ── Test 3: multiple paths of different lengths ─────────────────────────
+# 6 vertices, two routes from 0 to 5:
+#   direct: 0 -> 5 weight 100
+#   detour: 0 -> 1 -> 2 -> 3 -> 4 -> 5 weight 1+1+1+1+1 = 5
+# Plus a shortcut: 0 -> 3 weight 10 so node 3's best is via 1,2 (=2), not direct.
+
+fn test_multi_paths() -> bool:
+    g: Graph = Graph(6)
+    g.add_edge(0, 1, 1.0)
+    g.add_edge(1, 2, 1.0)
+    g.add_edge(2, 3, 1.0)
+    g.add_edge(3, 4, 1.0)
+    g.add_edge(4, 5, 1.0)
+    g.add_edge(0, 5, 100.0)
+    g.add_edge(0, 3, 10.0)
+    g.add_edge(0, 2, 5.0)
+    dist: List[f64] = dijkstra(g, 0)
+    expected: List[f64] = []
+    expected.append(0.0)
+    expected.append(1.0)
+    expected.append(2.0)
+    expected.append(3.0)
+    expected.append(4.0)
+    expected.append(5.0)
+    return check(3, dist, expected)
+
+# ── Test 4: trivial single-vertex graph ─────────────────────────────────
+
+fn test_singleton() -> bool:
+    g: Graph = Graph(1)
+    dist: List[f64] = dijkstra(g, 0)
+    expected: List[f64] = []
+    expected.append(0.0)
+    return check(4, dist, expected)
+
+# ── Test 5 (bonus): probe the `for x in xs:` over a field-of-class path.
+# Same linear chain as test 1, but the inner loop walks `for v in
+# g.adj_node[u]:`. Result must be identical to test 1 — if the desugar
+# re-calls anything per-iteration, we'd see corruption.
+
+fn test_for_loop_over_field() -> bool:
+    g: Graph = Graph(5)
+    g.add_edge(0, 1, 1.0)
+    g.add_edge(1, 2, 1.0)
+    g.add_edge(2, 3, 1.0)
+    g.add_edge(3, 4, 1.0)
+
+    n: i32 = g.n_vertices
+    dist: List[f64] = []
+    visited: List[bool] = []
+    i: i32 = 0
+    while i < n:
+        dist.append(INF)
+        visited.append(false)
+        i = i + 1
+    dist[0] = 0.0
+
+    pq: MinHeap = MinHeap()
+    pq.push(0, 0.0)
+
+    while not pq.is_empty():
+        u: i32 = pq.pop_min()
+        if visited[u]:
+            continue
+        visited[u] = true
+        # The probe: `for v in g.adj_node[u]:`. The desugar materialises
+        # `g.adj_node[u]` once (compiler/src/ir.rs:873) so an interior
+        # mutation of `g.adj_node[u]` shouldn't perturb iteration. We
+        # don't mutate during the loop here, but this exercises the
+        # method/index-call path on each pop.
+        k: i32 = 0
+        for v: i32 in g.adj_node[u]:
+            w: f64 = g.adj_weight[u][k]
+            if not visited[v]:
+                nd: f64 = dist[u] + w
+                if nd < dist[v]:
+                    dist[v] = nd
+                    if not pq.decrease_key(v, nd):
+                        pq.push(v, nd)
+            k = k + 1
+
+    expected: List[f64] = []
+    expected.append(0.0)
+    expected.append(1.0)
+    expected.append(2.0)
+    expected.append(3.0)
+    expected.append(4.0)
+    return check(5, dist, expected)
+
+# ── main ────────────────────────────────────────────────────────────────
+
+fn main() -> i32:
+    n_ok: i32 = 0
+    n_total: i32 = 0
+
+    if test_linear_chain():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_clrs():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_multi_paths():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_singleton():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_for_loop_over_field():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    println("OK: " + str(n_ok) + "/" + str(n_total))
+    if n_ok == n_total:
+        return 0
+    return 1

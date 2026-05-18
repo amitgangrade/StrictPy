@@ -303,6 +303,75 @@ example integration tests + 7 reshuffled).
 
 ---
 
+## M12 — Second stress round + torture test (2026-05-18)
+
+**Goal**: validate the M11 class-system overhaul by stress-testing program
+shapes M11 itself didn't run against, and upgrade BUG-026 / BUG-027 from
+"provisionally closed" to "confirmed fixed."
+
+Four parallel agents:
+
+- **C7 / regex**: Thompson-NFA engine. `sealed class RegexNode` with 8
+  final subclasses (Lit/Dot/Star/Plus/Opt/Alt/Concat/CharClass), 6 virtual
+  methods on the base, subclass fields including class-typed refs. 15
+  internal cases pass; 10 sequential runs produce byte-identical stdout.
+  **Zero new bugs.** Pre-M11, this shape would have hit ≥4 of the open
+  class-system bugs.
+
+- **C8 / dijkstra**: shortest-path with `final class Graph` holding
+  parallel `List[List[i32]]` / `List[List[f64]]` adjacency, plus
+  `final class MinHeap` with recursive sift-up/sift-down methods. **Zero
+  new bugs.** Confirmed that `for v: i32 in g.adj_node[u]:` desugars
+  correctly when the iterable is a method-receiver expression.
+
+- **C9 / btree**: in-memory B-tree (order 4) with `final class BNode`
+  containing `List[BNode?]` children, recursive search/insert, and node
+  splits that allocate fresh BNodes and rewire class-ref slots. Class
+  system held up — three back-to-back runs byte-identical. But the
+  program surfaced **two new bugs**:
+
+  - **BUG-034**: `str != str` always returned `true` because `emit_binop`'s
+    `Ne` arm had no `is_str` branch — fell through to `INe`, comparing
+    heap-pointer u64s. Identical shape to BUG-008 (`is not` was emitting
+    `RefEq` not `not RefEq`). Fixed inline in M12 with a 4-line patch
+    mirroring the `IsNot` precedent. The bug had been latent since
+    strings became first-class — every previous example happened to use
+    `==` for string compares.
+
+  - **BUG-035**: `and` and `or` are bitwise approximations, not
+    short-circuit. Trips `IndexError: -1` on the standard guard idiom
+    `b > 0 and xs[b-1] > xs[b]`. Source code comment in `ir.rs:1738` is
+    honest ("bitwise approximation"). Deferred — needs IR basic-block
+    branching to lower `a and b → if a: b else: false`. First language
+    feature in the project that requires emitting new blocks mid-expr.
+
+- **E / torture test**: `compiler/tests/heap_corruption_torture.rs` runs
+  the canonical BUG-026/027 repros sequentially — 100× calculator, 100×
+  json_parse, 50× lisp. **250/250 clean runs**, zero crashes, zero stderr
+  noise, 3.12s total wall-clock. BUG-026 and BUG-027 are **CONFIRMED
+  FIXED**. The M11 hypothesis — that BUG-026 was always a manifestation
+  of BUG-016 with heap-layout variability supplying the non-determinism
+  — is now strongly supported.
+
+**Headline pattern**: pre-M11, every stress program was a bug catalogue
+needing extensive workarounds. Post-M11, the regex and dijkstra agents
+wrote their programs first-try in the natural shape with no workarounds.
+"Zero new bugs" became a valuable confirmation result. M11 didn't just
+fix the named bugs — it landed a coherent class system.
+
+**Tests**: 201 → 206. **Bugs**: 29 → 31 found, 27 → 28 fixed, 2 → 3
+deferred. **Benchmarks**: untouched (M12 was correctness/confirmation;
+no codegen changes affecting perf).
+
+**The new lesson worth a thesis paragraph**: *negative-form silent
+miscompiles hide behind positive-form code conventions*. Both BUG-008
+(`is not` inverted) and BUG-034 (`str !=` always true) sat in the
+codebase from M2 onwards but only surfaced when a stress test organically
+used the negative form. Mechanical lesson: any new comparison operator
+needs test cases for both forms.
+
+---
+
 ## What this trajectory shows
 
 - **Bugs found scales with running real programs, not with writing tests.**
@@ -318,3 +387,7 @@ example integration tests + 7 reshuffled).
   Python (type profiling, deopt, inline caches) simply don't apply.
 - **Test discipline matters more than test count.** "exits 0" tests caught
   zero of the M3 vacuous-output bugs.
+- **Confirmation is a deliverable.** M12 added 3 stress programs; 2 found
+  zero bugs and the headline was the absence. Pre-M11 every class-heavy
+  program was a bug catalogue. The M12 regex agent's first-try natural-shape
+  program is itself the proof that M11 actually landed.

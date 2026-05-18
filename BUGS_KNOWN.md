@@ -46,73 +46,69 @@ Both are fixed.
 
 ---
 
-## 4. VM heap corruption in JSON program (non-deterministic)
+## 4. ~~VM heap corruption in JSON program (non-deterministic)~~  *(Confirmed fixed in M12)*
 
-### Symptom
-A program that allocates ~6 nested `Parser`/`JsonAtom` objects sometimes
-crashes with `STATUS_HEAP_CORRUPTION` on Windows during teardown. Whether
-it crashes depends on:
-  - the declaration order of unrelated subclasses,
-  - the declaration order of unrelated free functions
-    (C2's probe 63: inserting a no-op function between two siblings
-    toggled the crash).
-
-The M11 round produced a *deterministic* sibling of this (N2: subclass
-with class-ref fields + virtual call crashes on the first call) which
-turned out to be BUG-016 (subclass field offsets aliased the vtable
-pointer at offset 0). Fixing BUG-016 fixed N2 deterministically.
-
-**Post-M11 verification (2026-05-18)**: ran `examples/calculator.spy`
-and `examples/json_parse.spy` 5 times each after the M11 class-system
-fixes. Both completed cleanly all 5/5 runs (previously calculator was
-0-of-3 clean, json_parse 0-of-3). **Strong empirical evidence that
-BUG-026 was a manifestation of BUG-016** — subclass field aliasing
-overwrote the vtable pointer; the non-determinism was the heap layout
-varying across runs; the underlying trigger was always the same
-offset-aliasing. This bug is **provisionally closed**, pending a real
-torture test (e.g. running each example 100 times in CI) to upgrade to
-"confirmed fixed".
-
-### Speculation
-Likely caused by the GC walking objects in the M9 `in_jit`-paused heap,
-or holding stale references after the JIT releases a module. The fact
-that source-position changes flip the outcome points at a function-table
-indexing bug (see #5). With BUG-016 (the deterministic sibling) fixed,
-re-run the JSON / calculator programs in a loop to see whether anything
-non-deterministic remains.
-
-### Fix sketch
-Repro reliably first (try the JSON parser plus a deterministic seed).
-Audit `vm/src/gc.rs` for code paths that read object headers while the
-JIT is mid-compile, and `vm/src/jit.rs` for dangling pointers into the
-released module. Consider adding a `--gc-debug-poison` flag that fills
-freed slots with `0xDEADBEEF` so use-after-free shows up loudly.
+See "Fixed in M12" section at bottom. The M12 torture test
+(`compiler/tests/heap_corruption_torture.rs`) ran calculator 100×,
+json_parse 100×, and lisp 50× — **250/250 clean runs**, zero crashes,
+zero non-zero exit codes, ~3.12 s total. The M11 hypothesis — that
+BUG-026 was always a manifestation of BUG-016 (subclass-field-aliasing
+overwriting the parent's vtable pointer at offset 0, with heap-layout
+variability supplying the non-determinism) — is now strongly supported.
 
 ---
 
-## 5. Position-sensitive crash from function ordering
+## 5. ~~Position-sensitive crash from function ordering~~  *(Confirmed fixed in M12)*
+
+See "Fixed in M12" section at bottom. The cause was BUG-029 (`op_new`
+class_id ↔ type_id collision flipping under declaration-order changes),
+fixed in M11 alongside BUG-016. The M12 torture test confirmed no
+position sensitivity remains: 250 sequential invocations of the canonical
+repro programs, on a single .spyc each, produced identical clean output.
+
+---
+
+## 7. `and` / `or` do not short-circuit (M12 find — BUG-035)
+
+### Repro
+```python
+xs: List[i32] = [10, 20, 30]
+b: i32 = 0
+# Goal: only check the comparison when b > 0; protects xs[b-1].
+if b > 0i32 and xs[b - 1i32] > xs[b]:
+    pass
+# Currently traps: IndexError: index -1 out of range for length 3
+```
 
 ### Symptom
-Reordering function declarations in the source toggles whether the
-program crashes (see C2's probe 63). The crash mirrors #4, so this is
-probably the same root cause exposed via a different surface.
+`a and b` evaluates both operands unconditionally. The IR lowering for
+`AstBinOp::And` is `IROp::IAnd` (bitwise) and `AstBinOp::Or` is
+`IROp::IOr` (bitwise). The comment in `compiler/src/ir.rs:1738` says
+"bitwise approximation" — it's an honest known-limitation, but it
+breaks the standard guard idiom and is non-Python-conformant.
+
+Surfaced by m12_btree which used `b > 0 and ranks[b-1] > ranks[b]`
+inside the keys-array insertion sort. Worked around with nested `if`.
 
 ### Speculation
-Some part of the function table is indexed by source position (e.g.
-line/col span, AST node id derived from source order) where it should be
-indexed by a stable identifier (FuncId). When the order changes, the key
-collides differently.
-
-The class_id → type_id alias bug fixed in M11 also flipped under
-declaration-order changes (Pentagon as 4th vs 5th subclass), so a chunk
-of this symptom may already be gone. The fact that re-running calculator
-and json_parse is still non-deterministic should be verified.
+`compiler/src/ir.rs::emit_binop` lines 1738-1739. Fix requires lowering
+`a and b` to a basic-block-level `if a: b else: false` (or just `if a:
+b else: a` if `a` is bool-typed) — a real branch, not a bitwise op.
+Same for `or` (lowered to `if a: a else: b`). This is the first
+language change in the project that requires emitting new basic blocks
+mid-expression. Mechanically tractable; not done in M12 because the
+orchestrator decided to keep M12 scoped to confirming M11 holds.
 
 ### Fix sketch
-Find every `Span`-keyed `HashMap` / `BTreeMap` in `compiler/src/`
-(`grep -rn "HashMap<Span"`). Each is a candidate. Replace with a stable
-id (`FuncId`, `ClassId`, etc.) and re-run the failing JSON program in a
-loop to confirm determinism.
+1. In `emit_binop`, special-case `And` and `Or` BEFORE the `is_str` /
+   `is_float` dispatch. Allocate two fresh blocks, emit a conditional
+   branch on `l`, materialise the right operand in the "true" branch
+   for And (or "false" branch for Or), and phi-merge in a join block.
+2. The current bitwise-approximation behaviour is preserved when both
+   operands are pure (no side effects, no traps), so the optimisation
+   pass could fold short-circuit back to bitwise when safe.
+3. Regression test: `b > 0 and xs[b-1] > 0` with `b == 0` and
+   `xs == []` should evaluate to `false` without trapping.
 
 ---
 
@@ -187,3 +183,23 @@ landed coherent fixes in this round. All regressions live in
   *run* cleanly is the next thing to verify — most are written with
   workarounds for the bugs we just fixed, so the workarounds are now
   unnecessary but they're not actively wrong.
+
+---
+
+## Fixed in M12
+
+The M12 round landed three new stress-test programs (regex, dijkstra,
+btree), one inline fix, and a torture test that converted two
+provisional closures to confirmed.
+
+| # | Bug | Fix location | Regression test |
+|---|-----|--------------|-----------------|
+| BUG-034 | `str != str` always returned `true` because `emit_binop`'s `Ne` arm had no `is_str` branch — fell through to `INe` which compared heap-pointer u64s. Same shape as BUG-008 (`is not` was emitting `RefEq` not `not RefEq`). | `compiler/src/ir.rs::emit_binop` (Ne arm now lowers str operands as `StrEq` followed by `BoolNot`, mirroring `IsNot`) | `compiler/tests/btree_runs.rs::str_ne_returns_false_for_equal_strings` |
+| BUG-026 | non-deterministic VM heap corruption — now CONFIRMED FIXED | (M11 BUG-016 fix; M12 torture test verifies) | `compiler/tests/heap_corruption_torture.rs::calculator_torture_100_runs` + `json_parse_torture_100_runs` + `lisp_torture_50_runs` (250/250 clean) |
+| BUG-027 | position-sensitive crash — now CONFIRMED FIXED | (M11 BUG-029 fix; M12 torture test verifies) | same as BUG-026 |
+
+### Bugs found but deferred in M12
+
+| # | Bug | Notes |
+|---|-----|-------|
+| BUG-035 | `and` / `or` do not short-circuit | See §7 above. Needs IR basic-block branching for `a and b → if a: b else: false`. Mechanically tractable, deferred to a focused agent task. |

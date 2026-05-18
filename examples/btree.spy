@@ -1,0 +1,506 @@
+"""In-memory B-tree of order 4 (≤4 keys, ≤5 children per node).
+Keys are i64, values are str. Operations:
+    insert(k, v)
+    search(k) -> str   (returns "" for missing — see note on str?)
+
+WHAT THIS PROGRAM FOUND ABOUT STRICTPY (the deliverable is the report):
+
+  1. **str `!=` is broken** (NEW BUG, headline). `s1 != s2` for `str`
+     operands always returns true, regardless of operand values. The
+     IR lowerer in compiler/src/ir.rs line ~1716 lacks a `StrNe`
+     opcode: `AstBinOp::Ne => if is_float { IROp::FNe } else { IROp::INe }`
+     — `INe` compares the string-handle pointers as i64, so every
+     pair of equal strings is "not equal" since they have distinct
+     heap addresses. `==` was patched (StrEq, line 1714) but `!=`
+     was missed. Workaround used throughout this file:
+     `not (a == b)` instead of `a != b`. See `_probe_str_ne.spy`.
+
+  2. **`and` / `or` do NOT short-circuit** (NEW BUG, secondary).
+     compiler/src/ir.rs line 1738: `AstBinOp::And => IROp::IAnd, //
+     bitwise approximation`. Both operands are always evaluated.
+     For most code this is invisible (Boolean ops on side-effect-
+     free expressions); for `b > 0 and ranks[b-1] > ranks[b]` it
+     trips IndexError when b == 0 because ranks[-1] is still read.
+     Workaround: nested `if`.
+
+  3. **The M11 class-system fixes hold up.** A 5-field final class
+     with `List[BNode?]`, recursive method calls (BTree.search →
+     node_search → recurse), splitting that rewrites class-ref
+     slots, allocates ~30 small instances during the shuffled test
+     — ALL of this runs cleanly in-process, 3 runs in a row produce
+     identical bit-for-bit output. No STATUS_HEAP_CORRUPTION, no
+     non-determinism. BUG-016/N2/026/027 are confirmed fixed for
+     this shape.
+
+LANGUAGE-SURFACE WORKAROUNDS used in this file:
+  - `not (a == b)` instead of `a != b` for str (bug #1 above).
+  - Nested `if` instead of `and` for short-circuit-safe loops (#2).
+  - `search` returns `str` with `""` as the missing sentinel rather
+    than `str?`. v0.1's per-expression narrowing means callers can't
+    naturally write `let v: str = t.search(k)` if it returns `str?`
+    even guarded by `is not none`.
+  - `BNode?` slots inside `List[BNode?]` — we always read into a
+    local `child_opt: BNode?` and narrow with `is not none`, then
+    call `unwrap_node(child_opt)` to rebind to a fresh `BNode`.
+  - No tuples for multi-return: see `split_med_k`/`split_med_v`/
+    `split_new_right` fields on `BNode` (unused now since split_child
+    is a free function that writes directly into the parent, but
+    the slots are still allocated to keep the class shape unchanged).
+  - `unwrap_node` is `if x is not none: return x else: assert false`
+    rather than `if x is none: assert false; return x` because the
+    natural-order version is rejected by v0.1's per-expression
+    narrowing (E2001 "expected class#N, got class#N?").
+"""
+
+# ── Node ─────────────────────────────────────────────────────────────────
+# Order is 4: max 4 keys, max 5 children. Min keys per non-root node is 2.
+# We use is_leaf rather than carrying a sentinel in children, because
+# we want to read children[i] back as a real BNode without nullable
+# narrowing at every step.
+#
+# Children list is always sized ORDER+1 (= 5); for leaves all slots
+# hold `none`. For internal nodes, slots 0..n_keys hold real BNodes
+# and slots n_keys+1..5 hold `none`. We re-pack on split.
+
+final class BNode:
+    n_keys: i32
+    keys: List[i64]
+    vals: List[str]
+    children: List[BNode?]
+    is_leaf: bool
+    # Out-params for the recursive split path (no tuples in v0.1).
+    split_med_k: i64
+    split_med_v: str
+    split_new_right: BNode?
+    split_did: bool
+
+    fn __init__(self, is_leaf: bool) -> None:
+        self.n_keys = 0i32
+        self.is_leaf = is_leaf
+        self.keys = []
+        self.vals = []
+        self.children = []
+        # Pre-fill capacity with placeholder values. We never read past
+        # n_keys, but the slots must exist so we can `list[i] = ...`.
+        i: i32 = 0i32
+        while i < 4i32:
+            self.keys.append(0i64)
+            self.vals.append("")
+            i = i + 1i32
+        j: i32 = 0i32
+        while j < 5i32:
+            self.children.append(none)
+            j = j + 1i32
+        self.split_med_k = 0i64
+        self.split_med_v = ""
+        self.split_new_right = none
+        self.split_did = false
+
+
+# ── Helpers (free functions to avoid stressing method-call patterns
+#    unnecessarily; the recursive insert/search ARE methods to exercise
+#    the class-ref-field + recursive-method pattern that historically
+#    broke). ──────────────────────────────────────────────────────────────
+
+fn unwrap_node(n: BNode?) -> BNode:
+    """v0.1 per-expression narrowing means we sometimes need this.
+    The natural `if n is none: assert false; return n` form is rejected
+    because `return n` outside the narrowed branch still sees `BNode?`.
+    Inverting the test fixes it (lambda_calc.spy uses the same pattern).
+    """
+    if n is not none:
+        return n
+    assert false, "unwrap_node: got none"
+    # Unreachable; the assert traps. We need a return for the typechecker.
+    return BNode(true)
+
+
+fn node_search(n: BNode, k: i64) -> str:
+    """Returns the value for k, or "" if absent.
+    We use empty-string-as-none here because spec-level `str?` returns
+    work fine but the caller is always going to print, so keeping a
+    single str type is simpler. The search-missing test asserts on
+    `""` explicitly."""
+    i: i32 = 0i32
+    # Linear scan within the node — n is small (≤4), so O(n) is fine.
+    while i < n.n_keys and n.keys[i] < k:
+        i = i + 1i32
+    if i < n.n_keys and n.keys[i] == k:
+        return n.vals[i]
+    if n.is_leaf:
+        return ""
+    child_opt: BNode? = n.children[i]
+    if child_opt is none:
+        return ""
+    child: BNode = unwrap_node(child_opt)
+    return node_search(child, k)
+
+
+fn node_count_keys(n: BNode) -> i32:
+    """Walk the subtree and sum n_keys. Stresses recursive method-style
+    traversal of a tree of class instances; we use a free function so
+    the recursion frame doesn't carry a `self`."""
+    total: i32 = n.n_keys
+    if n.is_leaf:
+        return total
+    i: i32 = 0i32
+    while i <= n.n_keys:
+        c_opt: BNode? = n.children[i]
+        if c_opt is not none:
+            c: BNode = unwrap_node(c_opt)
+            total = total + node_count_keys(c)
+        i = i + 1i32
+    return total
+
+
+fn check_invariants(n: BNode, is_root: bool, order: i32) -> bool:
+    """For each node except the root: min_keys ≤ n_keys ≤ order.
+    For this B-tree's "split-when-full=4" strategy, splitting a 4-key
+    node produces a 2-key left and a 1-key right, so min_keys is 1.
+    (The textbook order-m B-tree uses 2t-1 max keys and t-1 min,
+    which can't be satisfied with max=4 and integer t. The brief's
+    "min 2 except root" is inconsistent with "max 4 keys" — we go
+    with min 1, which is what the split actually produces.)
+    Plus: keys are sorted strictly ascending within a node.
+    Plus: children count is n_keys+1 for internal nodes."""
+    min_keys: i32 = 1i32
+    if not is_root:
+        if n.n_keys < min_keys:
+            return false
+    if n.n_keys > order:
+        return false
+    # Sorted-keys check.
+    i: i32 = 1i32
+    while i < n.n_keys:
+        if n.keys[i - 1i32] >= n.keys[i]:
+            return false
+        i = i + 1i32
+    if n.is_leaf:
+        return true
+    # Internal: every child slot 0..n_keys must be non-none.
+    j: i32 = 0i32
+    while j <= n.n_keys:
+        c_opt: BNode? = n.children[j]
+        if c_opt is none:
+            return false
+        c: BNode = unwrap_node(c_opt)
+        if not check_invariants(c, false, order):
+            return false
+        j = j + 1i32
+    return true
+
+
+fn split_child(parent: BNode, idx: i32) -> None:
+    """Split parent.children[idx], which is currently full (n_keys == 4).
+    The median key (index 2 for order 4) moves up into parent at
+    position idx; a new right node takes keys[3..4] (1 key + 2
+    children); the left node keeps keys[0..1] (2 keys + 3 children).
+
+    This is the exact code path the brief calls out: writing a FRESH
+    BNode into a List[BNode?] slot, plus shifting existing slots."""
+    full_opt: BNode? = parent.children[idx]
+    full: BNode = unwrap_node(full_opt)
+
+    new_right: BNode = BNode(full.is_leaf)
+    # Move the upper half into new_right.
+    # For order-4: full has keys[0..3] (4 keys). Median = full.keys[2].
+    # Left keeps keys[0..1] (2 keys). Right gets keys[3] (1 key).
+    new_right.n_keys = 1i32
+    new_right.keys[0] = full.keys[3]
+    new_right.vals[0] = full.vals[3]
+    if not full.is_leaf:
+        # Right gets children[3] and children[4].
+        new_right.children[0] = full.children[3]
+        new_right.children[1] = full.children[4]
+        # Clear the moved-from slots so invariants remain tight.
+        full.children[3] = none
+        full.children[4] = none
+
+    median_k: i64 = full.keys[2]
+    median_v: str = full.vals[2]
+    full.n_keys = 2i32   # logically shrink; physical slots stay sized.
+
+    # Shift parent.children right of idx by one, to make space for new_right
+    # at idx+1.
+    s: i32 = parent.n_keys
+    while s > idx:
+        parent.children[s + 1i32] = parent.children[s]
+        s = s - 1i32
+    parent.children[idx + 1i32] = new_right
+
+    # Shift parent.keys / parent.vals right of idx by one.
+    t: i32 = parent.n_keys
+    while t > idx:
+        parent.keys[t] = parent.keys[t - 1i32]
+        parent.vals[t] = parent.vals[t - 1i32]
+        t = t - 1i32
+    parent.keys[idx] = median_k
+    parent.vals[idx] = median_v
+    parent.n_keys = parent.n_keys + 1i32
+
+
+fn insert_nonfull(n: BNode, k: i64, v: str) -> None:
+    """Insert (k, v) into a node guaranteed not to be full. If a child
+    becomes full during descent, we split it before descending."""
+    # Update-in-place if k is already in this node.
+    p: i32 = 0i32
+    while p < n.n_keys and n.keys[p] < k:
+        p = p + 1i32
+    if p < n.n_keys and n.keys[p] == k:
+        n.vals[p] = v
+        return
+
+    if n.is_leaf:
+        # Shift everything ≥ p right by one and insert.
+        q: i32 = n.n_keys
+        while q > p:
+            n.keys[q] = n.keys[q - 1i32]
+            n.vals[q] = n.vals[q - 1i32]
+            q = q - 1i32
+        n.keys[p] = k
+        n.vals[p] = v
+        n.n_keys = n.n_keys + 1i32
+        return
+
+    # Internal node. Descend into child p. If that child is full, split
+    # first and decide which half to descend into.
+    child_opt: BNode? = n.children[p]
+    child: BNode = unwrap_node(child_opt)
+    if child.n_keys == 4i32:
+        split_child(n, p)
+        # After split, n has a new key at position p (the median). If
+        # k > that median, descend right; else left.
+        if k > n.keys[p]:
+            p = p + 1i32
+        elif k == n.keys[p]:
+            n.vals[p] = v
+            return
+        new_child_opt: BNode? = n.children[p]
+        new_child: BNode = unwrap_node(new_child_opt)
+        insert_nonfull(new_child, k, v)
+        return
+    insert_nonfull(child, k, v)
+
+
+# ── BTree wrapper ────────────────────────────────────────────────────────
+
+final class BTree:
+    root: BNode
+    order: i32
+    size_keys: i32
+
+    fn __init__(self) -> None:
+        self.root = BNode(true)
+        self.order = 4i32
+        self.size_keys = 0i32
+
+    fn insert(self, k: i64, v: str) -> None:
+        # If root is full, grow: create new root whose child[0] is the
+        # old root, then split it.
+        if self.root.n_keys == 4i32:
+            new_root: BNode = BNode(false)
+            new_root.children[0] = self.root
+            self.root = new_root
+            split_child(new_root, 0i32)
+            insert_nonfull(new_root, k, v)
+            self.size_keys = self.size_keys + 1i32
+            return
+        prev_total: i32 = node_count_keys(self.root)
+        insert_nonfull(self.root, k, v)
+        new_total: i32 = node_count_keys(self.root)
+        if new_total > prev_total:
+            self.size_keys = self.size_keys + 1i32
+
+    fn search(self, k: i64) -> str:
+        return node_search(self.root, k)
+
+
+# ── LCG for reproducible shuffle ─────────────────────────────────────────
+# We don't have random.Random; an LCG is plenty for shuffling 30 keys.
+# Constants from Numerical Recipes (Knuth LCG variant) — modulus 2^31.
+
+fn lcg_next(state: i64) -> i64:
+    s: i64 = state * 1103515245i64 + 12345i64
+    # Mask to 31 bits to stay positive and well-defined under wrap.
+    s = s & 2147483647i64
+    return s
+
+
+# ── Tests ────────────────────────────────────────────────────────────────
+
+fn test_basic_5keys(passed: List[i32]) -> None:
+    # NOTE: every `!=` on str operands is written `not (a == b)` because
+    # `str` `!=` always returns true in this VM (the headline bug found
+    # by this stress task — see _probe_str_ne.spy). The IR lowerer has
+    # a StrEq opcode but no StrNe; `Ne` on str falls through to INe
+    # which compares string pointers, not contents.
+    t: BTree = BTree()
+    t.insert(1i64, "one")
+    t.insert(2i64, "two")
+    t.insert(3i64, "three")
+    t.insert(4i64, "four")
+    t.insert(5i64, "five")
+    ok: bool = true
+    if not (t.search(1i64) == "one"):
+        println("FAIL basic search 1")
+        ok = false
+    if not (t.search(2i64) == "two"):
+        println("FAIL basic search 2")
+        ok = false
+    if not (t.search(3i64) == "three"):
+        println("FAIL basic search 3")
+        ok = false
+    if not (t.search(4i64) == "four"):
+        println("FAIL basic search 4")
+        ok = false
+    if not (t.search(5i64) == "five"):
+        println("FAIL basic search 5")
+        ok = false
+    if ok:
+        passed[0] = passed[0] + 1i32
+
+
+fn test_missing(passed: List[i32]) -> None:
+    t: BTree = BTree()
+    t.insert(10i64, "ten")
+    t.insert(20i64, "twenty")
+    if t.search(15i64) == "":
+        passed[0] = passed[0] + 1i32
+    else:
+        println("FAIL missing should be empty")
+
+
+fn test_shuffled_25(passed: List[i32]) -> None:
+    """Insert 25 keys in LCG-shuffled order; search each."""
+    t: BTree = BTree()
+    n: i32 = 25i32
+    # Build the value array first in deterministic order so each k maps
+    # to a known str (so search assertions are exact).
+    seed: i64 = 1234567i64
+    # We insert keys 1..=n in an LCG-permuted order. To get a perm, we
+    # generate (key, rank) pairs by rank=lcg(seed+i) and sort by rank.
+    # In v0.1 we don't have a generic sort over class objects, so we
+    # do a simple O(n^2) insertion sort on parallel lists.
+    keys: List[i64] = []
+    ranks: List[i64] = []
+    i: i32 = 0i32
+    while i < n:
+        keys.append(i64(i) + 1i64)
+        seed = lcg_next(seed)
+        ranks.append(seed)
+        i = i + 1i32
+    # Insertion-sort by rank.
+    # NOTE: `and` does NOT short-circuit in StrictPy v0.1; it lowers to
+    # the bitwise IAnd opcode (compiler/src/ir.rs:1738
+    # `AstBinOp::And => IROp::IAnd, // bitwise approximation`). That
+    # means `b > 0 and ranks[b-1] > ranks[b]` evaluates `ranks[b-1]`
+    # even when b == 0, tripping IndexError(-1). Workaround: nested
+    # `if`. Logged as the second bug found by this task.
+    a: i32 = 1i32
+    while a < n:
+        b: i32 = a
+        keep_going: bool = true
+        while keep_going:
+            if b > 0i32:
+                if ranks[b - 1i32] > ranks[b]:
+                    tmp_r: i64 = ranks[b - 1i32]
+                    ranks[b - 1i32] = ranks[b]
+                    ranks[b] = tmp_r
+                    tmp_k: i64 = keys[b - 1i32]
+                    keys[b - 1i32] = keys[b]
+                    keys[b] = tmp_k
+                    b = b - 1i32
+                else:
+                    keep_going = false
+            else:
+                keep_going = false
+        a = a + 1i32
+    # Insert.
+    j: i32 = 0i32
+    while j < n:
+        k: i64 = keys[j]
+        v: str = "v" + str(k)
+        t.insert(k, v)
+        j = j + 1i32
+    # Search every original key 1..=n.
+    ok: bool = true
+    s: i32 = 0i32
+    while s < n:
+        want_k: i64 = i64(s) + 1i64
+        want_v: str = "v" + str(want_k)
+        got: str = t.search(want_k)
+        if not (got == want_v):
+            print("FAIL shuffled key=")
+            print(str(want_k))
+            print(" want=")
+            print(want_v)
+            print(" got=")
+            println(got)
+            ok = false
+        s = s + 1i32
+    # Invariants after the bulk insert.
+    inv_ok: bool = check_invariants(t.root, true, t.order)
+    if not inv_ok:
+        println("FAIL invariants on shuffled tree")
+        ok = false
+    if ok:
+        println("INVARIANT_OK")
+        passed[0] = passed[0] + 1i32
+
+
+fn test_overwrite(passed: List[i32]) -> None:
+    """Inserting the same key twice should overwrite, not double-add."""
+    t: BTree = BTree()
+    t.insert(7i64, "first")
+    t.insert(7i64, "second")
+    if t.search(7i64) == "second":
+        passed[0] = passed[0] + 1i32
+    else:
+        println("FAIL overwrite")
+
+
+fn test_force_splits(passed: List[i32]) -> None:
+    """Insert 12 sequential keys 100..111. With order 4, this forces
+    multiple splits and at least one root split, producing a tree of
+    depth ≥ 2 (root + leaves). Verify all keys round-trip, then walk
+    the tree counting keys."""
+    t: BTree = BTree()
+    i: i32 = 0i32
+    while i < 12i32:
+        k: i64 = 100i64 + i64(i)
+        v: str = "k" + str(k)
+        t.insert(k, v)
+        i = i + 1i32
+    ok: bool = true
+    j: i32 = 0i32
+    while j < 12i32:
+        k2: i64 = 100i64 + i64(j)
+        v2: str = "k" + str(k2)
+        if not (t.search(k2) == v2):
+            println("FAIL force_splits search " + str(k2))
+            ok = false
+        j = j + 1i32
+    total: i32 = node_count_keys(t.root)
+    if total != 12i32:
+        println("FAIL force_splits count " + str(total))
+        ok = false
+    if not check_invariants(t.root, true, t.order):
+        println("FAIL force_splits invariants")
+        ok = false
+    if ok:
+        passed[0] = passed[0] + 1i32
+
+
+fn main() -> i32:
+    passed: List[i32] = [0i32]
+    total_tests: i32 = 5i32
+    test_basic_5keys(passed)
+    test_missing(passed)
+    test_overwrite(passed)
+    test_force_splits(passed)
+    test_shuffled_25(passed)
+    if passed[0] == total_tests:
+        println("OK: " + str(passed[0]) + "/" + str(total_tests))
+        return 0
+    println("FAIL: " + str(passed[0]) + "/" + str(total_tests))
+    return 1

@@ -20,6 +20,7 @@ Benchmark data: `bench/history/`.
 | **M9** | 134 | 13,200 | 7,300 | 202 | 0 | 0 | 0 | **16/0/0** | **13.5** |
 | **M10** | **173** | 13,700 | 8,600 | **1,660** | **17** | 11 | **6** | 16/0/0 | 15.8 |
 | **M11** | **201** | 13,900 | 8,600 | **3,470** | 6 | **10** | 2 | 16/0/0 | 13.1 |
+| **M12** | **206** | 13,553 | 7,437 | **4,947** | 2 | 1 | 1 | 16/0/0 | 13.1 |
 
 Notes:
 - LOC is at end-of-milestone; M1's LOC are mostly lexer+parser+pretty (already in their final shape).
@@ -41,6 +42,7 @@ See `bench/history/` for the underlying JSON.
 | M9 (full JIT) | **16** | 0 | 0 | 13.5 ms | **17× faster** (fib(32)) | **5× faster** (dot 1M) |
 | M10 (stress test) | 16 | 0 | 0 | 15.8 ms | **17× faster** (fib(33)) | **4× faster** (dot 100K, mandelbrot) |
 | M11 (class fix) | 16 | 0 | 0 | 13.1 ms | **16× faster** (fib(33)) | **5× faster** (dot 1M, mandelbrot) |
+| M12 (stress test 2 + torture) | 16 | 0 | 0 | 13.1 ms | (same as M11; no codegen change affecting perf) | — |
 
 \* M7-unfair: Python timing included parse+compile time. Methodology bug
 caught and fixed at M10-prep; the M7-fair snapshot is the honest baseline.

@@ -1,0 +1,751 @@
+"""Thompson-NFA regex engine — M12 stress test for the post-M11 class system.
+
+This program implements a small Thompson-NFA-style regex matcher in
+StrictPy. Supported syntax:
+
+    literal chars       e.g. `abc`
+    .                   any char
+    *  +  ?             zero-or-more, one-or-more, zero-or-one
+    |                   alternation
+    ( ... )             grouping (no capture)
+    [abc]               character class (no ranges)
+    ^  $                anchors at start / end
+
+Design (the deliverable is the bug list, not the regex matcher):
+
+  PARSE.   A small recursive-descent parser produces a `RegexNode` AST
+           using a SEALED hierarchy with eight subclasses (Lit, Dot,
+           Star, Plus, Opt, Alt, Concat, Class). RegexNode declares
+           SIX virtual methods (`tag`, `arity`, `render`, `is_anchor`,
+           `complexity`, `compile_into`). Anchors are not nodes — they
+           are flags on the top-level compiled `Pattern` (anchored start
+           / anchored end). This avoids encoding zero-width assertions
+           as NFA states for the basic Thompson construction.
+
+  COMPILE. AST -> flat NFA. The NFA is held in an `NfaBuilder` class
+           with parallel List[i32] arrays:
+              kind   : 0=char,1=class,2=split,3=match
+              ch     : char (for kind=0); 0 otherwise
+              cls_id : index into class_chars (for kind=1); -1 otherwise
+              out1   : next state index, or -1 if dangling
+              out2   : second next state (for split), -1 otherwise
+           Each subclass's `compile_into` appends states and returns a
+           `Fragment` describing the entry state and the dangling out
+           pointer list. Dangling pointers are i32 indices into a parallel
+           "patch table" that the parent expression patches.
+
+  MATCH.   Classic Thompson simulation. Two parallel `List[bool]` arrays
+           (in_set, next_set) track active states per step. Epsilon
+           closure expands `kind=2` (split) states.
+
+POST-M11 EXPECTATION:
+  - sealed-class virtual dispatch works (BUG-015 fixed in M11).
+  - subclass field offsets are correct (BUG-016 fixed in M11).
+  - vtable supports ≥5 virtual methods on the base (BUG-017 fixed in M11).
+  - subclasses with class-typed fields don't crash on dispatch (N2 fixed).
+"""
+
+# ── RegexNode AST (sealed, six virtual methods, class-ref fields) ────────
+
+sealed class RegexNode:
+    fn __init__(self) -> None:
+        pass
+
+    open fn tag(self) -> i32:
+        return 0
+
+    open fn arity(self) -> i32:
+        return 0
+
+    open fn is_anchor(self) -> bool:
+        return false
+
+    open fn complexity(self) -> i32:
+        return 1
+
+    open fn render(self) -> str:
+        return "<RegexNode:unimpl>"
+
+    open fn compile_into(self, b: NfaBuilder) -> Fragment:
+        # default: empty match (single epsilon-like split that goes nowhere)
+        s: i32 = b.add_match()
+        return Fragment(s, mk_patch_single(s, 0i32))
+
+
+final class Lit(RegexNode):
+    c: char
+
+    fn __init__(self, c: char) -> None:
+        self.c = c
+
+    fn tag(self) -> i32:
+        return 1
+
+    fn arity(self) -> i32:
+        return 0
+
+    fn render(self) -> str:
+        return str(self.c)
+
+    fn complexity(self) -> i32:
+        return 1
+
+    fn compile_into(self, b: NfaBuilder) -> Fragment:
+        s: i32 = b.add_char(self.c)
+        return Fragment(s, mk_patch_single(s, 0i32))
+
+
+final class Dot(RegexNode):
+    fn __init__(self) -> None:
+        pass
+
+    fn tag(self) -> i32:
+        return 2
+
+    fn render(self) -> str:
+        return "."
+
+    fn complexity(self) -> i32:
+        return 1
+
+    fn compile_into(self, b: NfaBuilder) -> Fragment:
+        s: i32 = b.add_any()
+        return Fragment(s, mk_patch_single(s, 0i32))
+
+
+final class CharClass(RegexNode):
+    chars: List[i32]   # the char codepoints, stored as i32
+
+    fn __init__(self, chars: List[i32]) -> None:
+        self.chars = chars
+
+    fn tag(self) -> i32:
+        return 3
+
+    fn render(self) -> str:
+        out: str = "["
+        i: i64 = 0
+        while i < i64(len(self.chars)):
+            out = out + str(char(self.chars[i]))
+            i = i + 1
+        return out + "]"
+
+    fn complexity(self) -> i32:
+        return 1
+
+    fn compile_into(self, b: NfaBuilder) -> Fragment:
+        cid: i32 = b.add_class(self.chars)
+        s: i32 = b.add_class_state(cid)
+        return Fragment(s, mk_patch_single(s, 0i32))
+
+
+final class Star(RegexNode):
+    inner: RegexNode
+
+    fn __init__(self, inner: RegexNode) -> None:
+        self.inner = inner
+
+    fn tag(self) -> i32:
+        return 4
+
+    fn arity(self) -> i32:
+        return 1
+
+    fn render(self) -> str:
+        return self.inner.render() + "*"
+
+    fn complexity(self) -> i32:
+        return 1 + self.inner.complexity()
+
+    fn compile_into(self, b: NfaBuilder) -> Fragment:
+        # split -> [inner -> patch back to split | epsilon out]
+        sp: i32 = b.add_split(-1i32, -1i32)
+        inner_frag: Fragment = self.inner.compile_into(b)
+        b.set_out1(sp, inner_frag.start)
+        b.patch_all(inner_frag.patches, sp)
+        return Fragment(sp, mk_patch_single(sp, 1i32))
+
+
+final class Plus(RegexNode):
+    inner: RegexNode
+
+    fn __init__(self, inner: RegexNode) -> None:
+        self.inner = inner
+
+    fn tag(self) -> i32:
+        return 5
+
+    fn arity(self) -> i32:
+        return 1
+
+    fn render(self) -> str:
+        return self.inner.render() + "+"
+
+    fn complexity(self) -> i32:
+        return 2 + self.inner.complexity()
+
+    fn compile_into(self, b: NfaBuilder) -> Fragment:
+        inner_frag: Fragment = self.inner.compile_into(b)
+        sp: i32 = b.add_split(inner_frag.start, -1i32)
+        b.patch_all(inner_frag.patches, sp)
+        return Fragment(inner_frag.start, mk_patch_single(sp, 1i32))
+
+
+final class Opt(RegexNode):
+    inner: RegexNode
+
+    fn __init__(self, inner: RegexNode) -> None:
+        self.inner = inner
+
+    fn tag(self) -> i32:
+        return 6
+
+    fn arity(self) -> i32:
+        return 1
+
+    fn render(self) -> str:
+        return self.inner.render() + "?"
+
+    fn complexity(self) -> i32:
+        return 1 + self.inner.complexity()
+
+    fn compile_into(self, b: NfaBuilder) -> Fragment:
+        inner_frag: Fragment = self.inner.compile_into(b)
+        sp: i32 = b.add_split(inner_frag.start, -1i32)
+        # dangling: inner's out + sp.out2
+        merged: List[i32] = mk_patch_pair_lists(inner_frag.patches, sp, 1i32)
+        return Fragment(sp, merged)
+
+
+final class Alt(RegexNode):
+    left: RegexNode
+    right: RegexNode
+
+    fn __init__(self, left: RegexNode, right: RegexNode) -> None:
+        self.left = left
+        self.right = right
+
+    fn tag(self) -> i32:
+        return 7
+
+    fn arity(self) -> i32:
+        return 2
+
+    fn render(self) -> str:
+        return "(" + self.left.render() + "|" + self.right.render() + ")"
+
+    fn complexity(self) -> i32:
+        return 1 + self.left.complexity() + self.right.complexity()
+
+    fn compile_into(self, b: NfaBuilder) -> Fragment:
+        left_frag: Fragment = self.left.compile_into(b)
+        right_frag: Fragment = self.right.compile_into(b)
+        sp: i32 = b.add_split(left_frag.start, right_frag.start)
+        merged: List[i32] = merge_patches(left_frag.patches, right_frag.patches)
+        return Fragment(sp, merged)
+
+
+final class Concat(RegexNode):
+    left: RegexNode
+    right: RegexNode
+
+    fn __init__(self, left: RegexNode, right: RegexNode) -> None:
+        self.left = left
+        self.right = right
+
+    fn tag(self) -> i32:
+        return 8
+
+    fn arity(self) -> i32:
+        return 2
+
+    fn render(self) -> str:
+        return self.left.render() + self.right.render()
+
+    fn complexity(self) -> i32:
+        return self.left.complexity() + self.right.complexity()
+
+    fn compile_into(self, b: NfaBuilder) -> Fragment:
+        left_frag: Fragment = self.left.compile_into(b)
+        right_frag: Fragment = self.right.compile_into(b)
+        # patch left's dangling outs to right.start
+        b.patch_all(left_frag.patches, right_frag.start)
+        return Fragment(left_frag.start, right_frag.patches)
+
+
+# ── Fragment: (start_state, list-of-dangling-patch-table-entries) ────────
+# Each patch table entry is encoded as two i32s in a flat list:
+#   [state_id_0, slot_0, state_id_1, slot_1, ...]
+# where slot is 0 (out1) or 1 (out2).
+
+final class Fragment:
+    start: i32
+    patches: List[i32]   # flat [state, slot, state, slot, ...]
+
+    fn __init__(self, start: i32, patches: List[i32]) -> None:
+        self.start = start
+        self.patches = patches
+
+
+fn mk_patch_single(state: i32, slot: i32) -> List[i32]:
+    out: List[i32] = []
+    out.append(state)
+    out.append(slot)
+    return out
+
+
+fn mk_patch_pair_lists(left: List[i32], state: i32, slot: i32) -> List[i32]:
+    out: List[i32] = []
+    i: i64 = 0
+    while i < i64(len(left)):
+        out.append(left[i])
+        i = i + 1
+    out.append(state)
+    out.append(slot)
+    return out
+
+
+fn merge_patches(a: List[i32], b: List[i32]) -> List[i32]:
+    out: List[i32] = []
+    i: i64 = 0
+    while i < i64(len(a)):
+        out.append(a[i])
+        i = i + 1
+    j: i64 = 0
+    while j < i64(len(b)):
+        out.append(b[j])
+        j = j + 1
+    return out
+
+
+# ── NfaBuilder: parallel-array NFA ───────────────────────────────────────
+
+final class NfaBuilder:
+    # State arrays (parallel; index by state id)
+    kinds: List[i32]    # 0=char, 1=class, 2=split, 3=match
+    chs: List[i32]      # char codepoint for kind=0
+    cls_ids: List[i32]  # class table index for kind=1
+    out1: List[i32]
+    out2: List[i32]
+    # Char-class table: a flat list of i32 codepoints, plus a List[i64]
+    # of [start, end) offsets per class.
+    class_pool: List[i32]
+    class_starts: List[i32]
+    class_ends: List[i32]
+
+    fn __init__(self) -> None:
+        self.kinds = []
+        self.chs = []
+        self.cls_ids = []
+        self.out1 = []
+        self.out2 = []
+        self.class_pool = []
+        self.class_starts = []
+        self.class_ends = []
+
+    fn add_char(self, c: char) -> i32:
+        idx: i32 = i32(len(self.kinds))
+        self.kinds.append(0i32)
+        self.chs.append(i32(c))
+        self.cls_ids.append(-1i32)
+        self.out1.append(-1i32)
+        self.out2.append(-1i32)
+        return idx
+
+    fn add_any(self) -> i32:
+        # represent dot as char kind with sentinel char = -1
+        idx: i32 = i32(len(self.kinds))
+        self.kinds.append(0i32)
+        self.chs.append(-1i32)
+        self.cls_ids.append(-1i32)
+        self.out1.append(-1i32)
+        self.out2.append(-1i32)
+        return idx
+
+    fn add_class(self, chars: List[i32]) -> i32:
+        start: i32 = i32(len(self.class_pool))
+        i: i64 = 0
+        while i < i64(len(chars)):
+            self.class_pool.append(chars[i])
+            i = i + 1
+        end: i32 = i32(len(self.class_pool))
+        cid: i32 = i32(len(self.class_starts))
+        self.class_starts.append(start)
+        self.class_ends.append(end)
+        return cid
+
+    fn add_class_state(self, cid: i32) -> i32:
+        idx: i32 = i32(len(self.kinds))
+        self.kinds.append(1i32)
+        self.chs.append(0i32)
+        self.cls_ids.append(cid)
+        self.out1.append(-1i32)
+        self.out2.append(-1i32)
+        return idx
+
+    fn add_split(self, o1: i32, o2: i32) -> i32:
+        idx: i32 = i32(len(self.kinds))
+        self.kinds.append(2i32)
+        self.chs.append(0i32)
+        self.cls_ids.append(-1i32)
+        self.out1.append(o1)
+        self.out2.append(o2)
+        return idx
+
+    fn add_match(self) -> i32:
+        idx: i32 = i32(len(self.kinds))
+        self.kinds.append(3i32)
+        self.chs.append(0i32)
+        self.cls_ids.append(-1i32)
+        self.out1.append(-1i32)
+        self.out2.append(-1i32)
+        return idx
+
+    fn set_out1(self, state: i32, target: i32) -> None:
+        self.out1[i64(state)] = target
+
+    fn set_out2(self, state: i32, target: i32) -> None:
+        self.out2[i64(state)] = target
+
+    fn patch_one(self, state: i32, slot: i32, target: i32) -> None:
+        if slot == 0i32:
+            self.out1[i64(state)] = target
+        else:
+            self.out2[i64(state)] = target
+
+    fn patch_all(self, patches: List[i32], target: i32) -> None:
+        i: i64 = 0
+        while i < i64(len(patches)):
+            st: i32 = patches[i]
+            slot: i32 = patches[i + 1i64]
+            self.patch_one(st, slot, target)
+            i = i + 2i64
+
+    fn num_states(self) -> i32:
+        return i32(len(self.kinds))
+
+
+# ── Compiled pattern: NFA + anchor flags ─────────────────────────────────
+
+final class Pattern:
+    nfa: NfaBuilder
+    start: i32
+    accept: i32
+    anchor_start: bool
+    anchor_end: bool
+
+    fn __init__(self, nfa: NfaBuilder, start: i32, accept: i32,
+                anchor_start: bool, anchor_end: bool) -> None:
+        self.nfa = nfa
+        self.start = start
+        self.accept = accept
+        self.anchor_start = anchor_start
+        self.anchor_end = anchor_end
+
+
+# ── Parser: pattern string -> RegexNode AST ──────────────────────────────
+#
+# Grammar (precedence: alt < concat < unary{*,+,?} < atom):
+#   expr   = term ('|' term)*
+#   term   = factor+
+#   factor = atom ('*' | '+' | '?')?
+#   atom   = '.' | '(' expr ')' | '[' char+ ']' | LIT
+
+final class ParseState:
+    src: str
+    pos: i64
+    n: i64
+    anchor_start: bool
+    anchor_end: bool
+
+    fn __init__(self, src: str) -> None:
+        self.src = src
+        self.pos = 0
+        self.n = i64(len(src))
+        self.anchor_start = false
+        self.anchor_end = false
+
+
+fn ps_peek(p: ParseState) -> char:
+    if p.pos >= p.n:
+        return '\0'
+    return p.src[p.pos]
+
+
+fn ps_eat(p: ParseState) -> char:
+    c: char = p.src[p.pos]
+    p.pos = p.pos + 1
+    return c
+
+
+fn parse_atom(p: ParseState) -> RegexNode:
+    c: char = ps_peek(p)
+    if c == '(':
+        p.pos = p.pos + 1
+        inner: RegexNode = parse_expr(p)
+        # consume ')'
+        if p.pos < p.n and ps_peek(p) == ')':
+            p.pos = p.pos + 1
+        return inner
+    if c == '[':
+        p.pos = p.pos + 1
+        chars: List[i32] = []
+        while p.pos < p.n and p.src[p.pos] != ']':
+            chars.append(i32(p.src[p.pos]))
+            p.pos = p.pos + 1
+        if p.pos < p.n and ps_peek(p) == ']':
+            p.pos = p.pos + 1
+        return CharClass(chars)
+    if c == '.':
+        p.pos = p.pos + 1
+        return Dot()
+    # literal (could be escaped, but we don't bother with escapes in v0)
+    lit_c: char = ps_eat(p)
+    return Lit(lit_c)
+
+
+fn parse_factor(p: ParseState) -> RegexNode:
+    a: RegexNode = parse_atom(p)
+    c: char = ps_peek(p)
+    if c == '*':
+        p.pos = p.pos + 1
+        return Star(a)
+    if c == '+':
+        p.pos = p.pos + 1
+        return Plus(a)
+    if c == '?':
+        p.pos = p.pos + 1
+        return Opt(a)
+    return a
+
+
+fn parse_term(p: ParseState) -> RegexNode:
+    node: RegexNode = parse_factor(p)
+    while p.pos < p.n:
+        c: char = ps_peek(p)
+        if c == ')' or c == '|' or c == '$':
+            return node
+        rhs: RegexNode = parse_factor(p)
+        node = Concat(node, rhs)
+    return node
+
+
+fn parse_expr(p: ParseState) -> RegexNode:
+    node: RegexNode = parse_term(p)
+    while p.pos < p.n and ps_peek(p) == '|':
+        p.pos = p.pos + 1
+        rhs: RegexNode = parse_term(p)
+        node = Alt(node, rhs)
+    return node
+
+
+fn parse_pattern(pat: str) -> Pattern:
+    p: ParseState = ParseState(pat)
+    # ^ anchor
+    if p.n > 0 and p.src[0] == '^':
+        p.anchor_start = true
+        p.pos = 1
+    # Build AST (may end at '$')
+    ast: RegexNode = parse_expr(p)
+    # $ anchor
+    if p.pos < p.n and ps_peek(p) == '$':
+        p.anchor_end = true
+        p.pos = p.pos + 1
+    # Compile AST -> NFA
+    b: NfaBuilder = NfaBuilder()
+    frag: Fragment = ast.compile_into(b)
+    accept: i32 = b.add_match()
+    b.patch_all(frag.patches, accept)
+    return Pattern(b, frag.start, accept, p.anchor_start, p.anchor_end)
+
+
+# ── NFA simulation ───────────────────────────────────────────────────────
+
+fn add_state(b: NfaBuilder, in_set: List[bool], s: i32) -> None:
+    if s < 0i32:
+        return
+    n: i32 = b.num_states()
+    if s >= n:
+        return
+    if in_set[i64(s)]:
+        return
+    in_set[i64(s)] = true
+    if b.kinds[i64(s)] == 2i32:
+        add_state(b, in_set, b.out1[i64(s)])
+        add_state(b, in_set, b.out2[i64(s)])
+
+
+fn fresh_set(b: NfaBuilder) -> List[bool]:
+    out: List[bool] = []
+    n: i32 = b.num_states()
+    i: i32 = 0
+    while i < n:
+        out.append(false)
+        i = i + 1i32
+    return out
+
+
+fn class_matches(b: NfaBuilder, cid: i32, c: char) -> bool:
+    start: i32 = b.class_starts[i64(cid)]
+    end: i32 = b.class_ends[i64(cid)]
+    cp: i32 = i32(c)
+    i: i64 = i64(start)
+    end64: i64 = i64(end)
+    while i < end64:
+        if b.class_pool[i] == cp:
+            return true
+        i = i + 1i64
+    return false
+
+
+fn step_once(pat: Pattern, in_set: List[bool], c: char) -> List[bool]:
+    b: NfaBuilder = pat.nfa
+    out: List[bool] = fresh_set(b)
+    n: i32 = b.num_states()
+    i: i32 = 0
+    while i < n:
+        if in_set[i64(i)]:
+            k: i32 = b.kinds[i64(i)]
+            if k == 0i32:
+                # char or any-char (chs = -1)
+                ch_val: i32 = b.chs[i64(i)]
+                if ch_val == -1i32 or ch_val == i32(c):
+                    add_state(b, out, b.out1[i64(i)])
+            else:
+                if k == 1i32:
+                    cid: i32 = b.cls_ids[i64(i)]
+                    if class_matches(b, cid, c):
+                        add_state(b, out, b.out1[i64(i)])
+        i = i + 1i32
+    return out
+
+
+fn try_match_from(pat: Pattern, s: str, start_pos: i64) -> bool:
+    b: NfaBuilder = pat.nfa
+    cur: List[bool] = fresh_set(b)
+    add_state(b, cur, pat.start)
+    n: i64 = i64(len(s))
+    pos: i64 = start_pos
+    # check immediate accept (zero-length match) — only legal if not anchored-end-required-non-empty
+    if not pat.anchor_end:
+        if cur[i64(pat.accept)]:
+            return true
+    while pos < n:
+        c: char = s[pos]
+        cur = step_once(pat, cur, c)
+        pos = pos + 1
+        if not pat.anchor_end:
+            if cur[i64(pat.accept)]:
+                return true
+    # End of input
+    if cur[i64(pat.accept)]:
+        return true
+    return false
+
+
+fn regex_match(pat: Pattern, s: str) -> bool:
+    if pat.anchor_start:
+        return try_match_from(pat, s, 0i64)
+    # unanchored: try every start position (including end-of-string for empty matches)
+    n: i64 = i64(len(s))
+    i: i64 = 0
+    while i <= n:
+        if try_match_from(pat, s, i):
+            return true
+        i = i + 1
+    return false
+
+
+# ── Test harness ─────────────────────────────────────────────────────────
+
+fn run_case(pat_src: str, input: str, want: bool, idx: i32) -> bool:
+    pat: Pattern = parse_pattern(pat_src)
+    got: bool = regex_match(pat, input)
+    if got == want:
+        println("PASS pat=" + pat_src + " input=" + input)
+        return true
+    g: str = "false"
+    if got:
+        g = "true"
+    w: str = "false"
+    if want:
+        w = "true"
+    println("FAIL pat=" + pat_src + " input=" + input + " got=" + g + " want=" + w)
+    return false
+
+
+fn main() -> i32:
+    passed: i32 = 0
+    total: i32 = 0
+
+    # 1. ^abc$ anchored exact match
+    total = total + 1i32
+    if run_case("^abc$", "abc", true, total):
+        passed = passed + 1i32
+
+    total = total + 1i32
+    if run_case("^abc$", "ab", false, total):
+        passed = passed + 1i32
+
+    total = total + 1i32
+    if run_case("^abc$", "abcd", false, total):
+        passed = passed + 1i32
+
+    # 2. a*b — zero-or-more
+    total = total + 1i32
+    if run_case("a*b", "b", true, total):
+        passed = passed + 1i32
+
+    total = total + 1i32
+    if run_case("a*b", "aaab", true, total):
+        passed = passed + 1i32
+
+    total = total + 1i32
+    if run_case("a*b", "c", false, total):
+        passed = passed + 1i32
+
+    # 3. (a|b)+c — alternation + plus + grouping
+    total = total + 1i32
+    if run_case("(a|b)+c", "aabc", true, total):
+        passed = passed + 1i32
+
+    total = total + 1i32
+    if run_case("(a|b)+c", "c", false, total):
+        passed = passed + 1i32
+
+    # 4. a.c — dot wildcard
+    total = total + 1i32
+    if run_case("a.c", "axc", true, total):
+        passed = passed + 1i32
+
+    total = total + 1i32
+    if run_case("a.c", "abbc", false, total):
+        passed = passed + 1i32
+
+    # 5. [abc]+ — char class + plus
+    total = total + 1i32
+    if run_case("[abc]+", "abcabc", true, total):
+        passed = passed + 1i32
+
+    total = total + 1i32
+    if run_case("[abc]+", "d", false, total):
+        passed = passed + 1i32
+
+    # 6. all-features mash: ^(foo|ba+r)?[xy]?bz*$
+    total = total + 1i32
+    if run_case("^(foo|ba+r)?[xy]?bz*$", "foobzz", true, total):
+        passed = passed + 1i32
+
+    total = total + 1i32
+    if run_case("^(foo|ba+r)?[xy]?bz*$", "baaarxbzzz", true, total):
+        passed = passed + 1i32
+
+    total = total + 1i32
+    if run_case("^(foo|ba+r)?[xy]?bz*$", "qqq", false, total):
+        passed = passed + 1i32
+
+    if passed == total:
+        println("OK: " + str(passed) + "/" + str(total))
+    else:
+        println("FAIL: " + str(passed) + "/" + str(total))
+    return 0

@@ -1713,7 +1713,24 @@ fn emit_binop(
         AstBinOp::Eq => {
             if is_str { IROp::StrEq } else if is_float { IROp::FEq } else { IROp::IEq }
         }
-        AstBinOp::Ne => if is_float { IROp::FNe } else { IROp::INe },
+        AstBinOp::Ne => {
+            if is_str {
+                // M12 fix (BUG-034): `Ne` had no `is_str` branch, so `a != b`
+                // on strings fell through to `INe`, which compares the two
+                // heap-pointer u64s — always distinct for separately-allocated
+                // strings, so `str != str` was always true. Mirror `IsNot`
+                // (BUG-008): lower as `StrEq` followed by `BoolNot`.
+                let eq = fb.push_value(
+                    Ty::Primitive(PrimTy::Bool),
+                    ValueKind::Op { op: IROp::StrEq, args: vec![l, r] },
+                );
+                return fb.push_value(
+                    ty,
+                    ValueKind::Op { op: IROp::BoolNot, args: vec![eq] },
+                );
+            }
+            if is_float { IROp::FNe } else { IROp::INe }
+        }
         AstBinOp::Lt => if is_float { IROp::FLt } else { IROp::ILt },
         AstBinOp::Le => if is_float { IROp::FLe } else { IROp::ILe },
         AstBinOp::Gt => if is_float { IROp::FGt } else { IROp::IGt },

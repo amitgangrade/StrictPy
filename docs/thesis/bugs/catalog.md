@@ -8,26 +8,33 @@ discovered, milestone fixed (or "deferred" with pointer to
 
 | Category | Found | Fixed | Deferred |
 |---|---:|---:|---:|
-| Silent miscompile (codegen) | 6 | 6 | 0 |
+| Silent miscompile (codegen) | 7 | 7 | 0 |
 | Vacuous output (IR lowering punt) | 3 | 3 | 0 |
 | Vtable / inheritance | 7 | 7 | 0 |
 | Typechecker rejects valid code | 3 | 3 | 0 |
-| Frontend operator semantics | 1 | 1 | 0 |
-| Runtime memory / GC | 2 | 2* | 0 |
+| Frontend operator semantics | 2 | 1 | 1 |
+| Runtime memory / GC | 2 | 2 | 0 |
 | Stdlib missing | 5 | 4 | 1 |
 | Parser / lexer | 1 | 0 | 1 |
 | Formatting / spec consistency | 1 | 1 | 0 |
-| **Total** | **29** | **27** | **2** |
+| **Total** | **31** | **28** | **3** |
 
-\* BUG-026 and BUG-027 (non-deterministic heap corruption + position-
-sensitive crash) are **provisionally** fixed by M11 — calculator + json_parse
-now run 5/5 cleanly where pre-M11 they were 0/3 each. Strong empirical
-evidence they were manifestations of BUG-016. Needs a torture test
-(running each example 100× in CI) to upgrade to "confirmed fixed."
+Post-M12 state (2026-05-18):
 
-The two truly-deferred bugs after M11 are BUG-025 (no fallible `open()`,
-needs exception handling work) and BUG-028 (no implicit line continuation
-across infix operators, needs lexer enhancement).
+- BUG-026 / BUG-027 (non-deterministic heap corruption + position-
+  sensitive crash) are now **CONFIRMED FIXED**. M12's torture test
+  (`compiler/tests/heap_corruption_torture.rs`) ran 250 consecutive
+  invocations of the canonical repros (100× calculator + 100× json_parse
+  + 50× lisp) with zero failures. Pre-M11 these were 0/3 clean.
+- BUG-034 (M12 find: `str != str` always true — silent miscompile of
+  the same shape as BUG-008 `is not`) was fixed inline in M12.
+
+Truly-deferred bugs after M12 are:
+- BUG-025: no fallible `open()` (needs exception handling).
+- BUG-028: no implicit line continuation across infix operators
+  (needs lexer enhancement).
+- BUG-035: `and` / `or` do not short-circuit (needs IR basic-block
+  branching for `a and b → if a: b else: false`).
 
 ## Full catalog
 
@@ -191,21 +198,22 @@ across infix operators, needs lexer enhancement).
 
 ### Medium: runtime memory
 
-#### BUG-026 — Non-deterministic VM heap corruption (JSON program) — provisionally closed in M11
+#### BUG-026 — Non-deterministic VM heap corruption (JSON program) — confirmed fixed in M12
 - **Found**: M10 (C2 JSON parser)
 - **Symptom**: STATUS_HEAP_CORRUPTION on Windows during teardown of programs with ~6 nested heap allocations. Crash is intermittent. Depends on:
   - Subclass declaration order in source (reordering classes changes crash behavior)
   - Function declaration order (probe 63: adding a free function between two unrelated functions toggles the crash)
 - **Sharpened in M11**: C4 calculator agent confirmed the crash can happen BEFORE the first println reaches the OS — not just at teardown. C6 lisp agent found N2 (BUG-030), the *deterministic* sibling.
-- **Root cause (post-M11 hypothesis)**: same as BUG-016. Subclass field aliasing overwrites the vtable pointer at offset 0; the GC then walks corrupted pointers. Non-determinism is heap layout varying across runs; trigger is always the same offset-aliasing.
-- **Verification**: ran `examples/calculator.spy` and `examples/json_parse.spy` 5 times each after the M11 BUG-016 fix. Both completed cleanly all 5/5 runs, where pre-M11 they were 0/3 each.
-- **Status**: provisionally closed in M11. Needs a torture test (100× runs in CI) to upgrade to "confirmed fixed."
+- **Root cause**: same as BUG-016. Subclass field aliasing overwrites the vtable pointer at offset 0; the GC then walks corrupted pointers. Non-determinism is heap layout varying across runs; trigger is always the same offset-aliasing.
+- **Verification (M11, provisional)**: ran `examples/calculator.spy` and `examples/json_parse.spy` 5 times each after the M11 BUG-016 fix. Both completed cleanly all 5/5 runs, where pre-M11 they were 0/3 each.
+- **Verification (M12, confirmed)**: `compiler/tests/heap_corruption_torture.rs` ran 100× calculator + 100× json_parse + 50× lisp — **250/250 clean**, zero crashes, ~3.12s total. Pre-M11 these were 0/3.
+- **Status**: confirmed fixed in M12.
 
-#### BUG-027 — Position-sensitive crash from function ordering — provisionally closed in M11
+#### BUG-027 — Position-sensitive crash from function ordering — confirmed fixed in M12
 - **Found**: M10 (C2 — same bisect as BUG-026)
 - **Symptom**: defining an unrelated `fn parse_num(x: i32) -> i32: return 0` between two other functions toggles whether the program crashes.
-- **Root cause (post-M11 hypothesis)**: same as BUG-026 — the M3-era `op_new` class_id ↔ type_id collision (BUG-029) also flips under declaration-order changes. Pentagon as 4th vs 5th subclass triggered different fallback resolutions.
-- **Status**: provisionally closed in M11 (alongside BUG-026 and BUG-029).
+- **Root cause**: same as BUG-026 — the M3-era `op_new` class_id ↔ type_id collision (BUG-029) also flips under declaration-order changes. Pentagon as 4th vs 5th subclass triggered different fallback resolutions.
+- **Status**: confirmed fixed in M12 by the same torture test as BUG-026.
 
 ### Frontend semantics
 
@@ -250,6 +258,23 @@ across infix operators, needs lexer enhancement).
 - **Root cause**: same as BUG-017 sub-bug (a) — subclass vtables didn't inherit parent method slots, so slots ≥4 were unallocated.
 - **Fix**: subsumed by BUG-017 fix in M11.
 - **Status**: fixed in M11. Tests: `vtable_supports_six_virtual_methods_with_override`.
+
+### M12-only finds
+
+#### BUG-034 — `str != str` always returns true
+- **Found**: M12 (C9 B-tree stress test — every search-result FAIL line printed even when the value matched).
+- **Symptom**: For two `str` operands `a, b`, `a != b` always evaluates to `true`, including when `a == b` also evaluates to `true`. Programs using `s != ""` as a "missing" sentinel silently went through the missing branch every time. Programs using positive `==` form were unaffected; this is why it took until M12 to surface.
+- **Root cause**: `compiler/src/ir.rs::emit_binop` had a `StrEq` branch for `Eq` (added when strings became first-class) but no matching branch for `Ne`. `Ne` on str fell through to `INe`, which compared the two heap-pointer u64s — distinct allocations always have distinct pointers, so `INe` returned `true` for every string compare. Exact same shape as BUG-008 (`is not` had been emitting `RefEq` not `not RefEq`).
+- **Fix**: lower `AstBinOp::Ne` on str operands as `StrEq` followed by `BoolNot`, mirroring the `IsNot` precedent. ~4 lines.
+- **Status**: fixed in M12. Test: `compiler/tests/btree_runs.rs::str_ne_returns_false_for_equal_strings`. Minimal repro preserved at `examples/_probe_str_ne.spy`.
+- **Severity**: medium. Every program comparing strings for inequality was wrong. Manifested in M12 only because btree was the first stress test that built fail/pass output lines from a string compare; calculator/lisp/json_parse all used numeric or virtual-method discrimination.
+
+#### BUG-035 — `and` / `or` do not short-circuit ⚠️ DEFERRED
+- **Found**: M12 (C9 B-tree stress test — `while b > 0 and ranks[b-1] > ranks[b]` traps with `IndexError: index -1` after one iteration of an insertion sort).
+- **Symptom**: `a and b` and `a or b` evaluate both operands unconditionally. Programs that use the standard guard idiom (`if bounds_ok and xs[i] > ...`) trap when the right operand is only safe under the left guard.
+- **Root cause**: `compiler/src/ir.rs::emit_binop` lowers `AstBinOp::And` to `IROp::IAnd` (bitwise) and `AstBinOp::Or` to `IROp::IOr`. The source comment is honest: "bitwise approximation". Was load-bearing-correct for pure-operand uses, broke for guarded indexing.
+- **Fix sketch**: lower `a and b` to `if a: b else: false` and `a or b` to `if a: a else: b` at the IR level. This is the first language feature that requires emitting NEW basic blocks mid-expression — every prior bool op was single-block. Mechanically tractable but bigger than M12's confirm-M11 scope.
+- **Status**: deferred. Documented in `BUGS_KNOWN.md §7`.
 
 ## Lessons from the catalog
 
@@ -299,6 +324,34 @@ across infix operators, needs lexer enhancement).
    leaving a load-bearing correctness bug "deferred" is paid by every
    subsequent program that has to work around it OR that hits its
    manifestations.**
-   deferred because the fixes are non-trivial, not because the bugs are
-   tolerable. The risk of leaving these unfixed is that any future real
-   program with serious class hierarchies will hit them.
+
+8. **Confirmation results are valuable.** The M12 round added 3 stress
+   programs (regex, dijkstra, btree). Two found zero bugs — and that
+   was the headline. Pre-M11, every class-heavy program (json_parse,
+   calculator, lisp) was a bug catalogue with extensive workaround
+   sections. The regex agent's report — "sealed hierarchy with 8
+   subclasses, 6 virtual methods, class-ref subclass fields, ran first
+   try without a single workaround" — is empirical evidence that the
+   M11 class-system overhaul actually landed. **Stress tests without
+   workarounds are themselves a quantitative measurement of language
+   maturity.**
+
+9. **Torture tests are how provisional fixes become confirmed fixes.**
+   BUG-026 and BUG-027 were marked "provisionally closed" at end-of-M11
+   with the empirical evidence 5/5 clean runs. The M12 torture test
+   (`heap_corruption_torture.rs`) ran 250 sequential invocations across
+   three canonical repros in 3.12s — and produced zero failures. The
+   marginal cost of "provisional → confirmed" was ~20 minutes of agent
+   time and ~5 lines of regression-test wall-clock per CI run. That
+   trade is almost always worth making.
+
+10. **Silent miscompiles can hide behind positive-form code conventions.**
+    BUG-034 (`str != str` always true) sat in the codebase from the
+    moment strings became first-class, but no program tripped it until
+    M12 because every prior example happened to use `==` for string
+    compares (positive form). The B-tree was the first program that
+    built `FAIL got=X want=Y` output via inequality compare, which
+    rendered the bug visible. Same shape as BUG-008 (`is not` was
+    `RefEq` not `not RefEq`) — both stayed hidden until a program
+    organically used the negative form. Lesson: write tests that
+    exercise BOTH equality forms for any new comparison operator.
