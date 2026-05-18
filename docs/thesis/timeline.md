@@ -594,6 +594,151 @@ to spec).
 
 ---
 
+## M19–M21 — Stdlib sprint (2026-05-19)
+
+Five milestones over one orchestrator session shipped the import system
+plus a usable Phase 1 stdlib: **sys, os, path, io, time, random, math,
+json, re**. The language went from "everything is a bare-name native"
+to "import json; json.parse(s)" — a real Python-shaped surface.
+
+### M19 — Import machinery + sys (foundation)
+
+The bulk of the load-bearing infrastructure. AST already had
+`Import { path, items, alias }`; the parser already accepted both
+`import x` and `from x import y, z`; the lexer had `KwImport` / `KwFrom`.
+The lift was the resolver → typecheck → IR → VM plumbing plus the
+stdlib registration table.
+
+Design choices:
+- **Stdlib modules are built-in** (registered in `seed_stdlib_modules`),
+  not parsed from `.spy` files. User-defined modules and submodules
+  (`import os.path`) are explicitly v0.3.
+- **`VmError::Exit(i32)` is non-catchable** — `propagate_exception` only
+  matches `UncaughtException`, so `sys.exit(0)` flows past any active
+  try/except. Mirrors Python's `SystemExit ⊄ Exception`.
+- **`sys.argv` lazy-materialises**: the heap `List[str]` is built on
+  first access and cached in `Interpreter::sys_argv_cache`. Most
+  programs that import sys don't actually read argv.
+
+Hardest piece: the parser folds `Attr + (` into `MethodCall`, so
+`sys.exit(0)` is NOT a `Call(Attr, [...])` — required four intercept
+points (Ident-read, Attr-read, Call-with-Attr-callee, MethodCall-on-Ident)
+instead of two. Documented in the M19 report for the M20 agents.
+
+Three examples shipped: `echo.spy`, `sum_args.spy`, `print_env.spy`.
+
+### M20a — os, path, io
+
+23 new NativeFns (ids 140-174). `os` for env vars + filesystem
+operations; `path` for pure-StrictPy path manipulation (Python's
+`os.path` surface, ported as a sibling module since submodules aren't
+in v0.2); `io` for stdin/stdout/stderr line-based IO (filling the gap
+M19 left when sys.stdin/stdout/stderr were deferred).
+
+New VM infrastructure: `Interpreter::alloc_tuple_obj` — a native
+function can now return a tuple. `path.splitext` was the first user;
+the IR's tuple `Load(offset)` doesn't consult the type pointer, so
+allocating with a null type pointer works.
+
+Cross-platform: `path.sep` via `cfg!(windows)`; `io.input()` strips
+both `\r\n` and `\n`; env var case-sensitivity follows OS conventions.
+
+**Incidentally found BUG-037**: `x ?? fallback` always returned
+`fallback`. IR placeholder lowering. Same pattern as BUG-008 (`is not`
+inverted) and BUG-034 (`str !=` always true). Worked around in M20a
+tests; fixed inline in M21.
+
+Four examples: `list_dir`, `env_dump`, `file_stats`, `echo_interactive`.
+
+### M20b — time, random, math (module wrapper)
+
+31 new NativeFns (175-212). `time` for clocks + sleep; `random` for
+seeded LCG; `math` as a NEW module wrapping the existing prelude bare
+names AND adding constants (`pi`, `e`, `tau`, `inf`, `nan`) plus new
+functions (`log2`, `log10`, `gcd`, `factorial`, `is_nan`, `is_inf`).
+
+`time.format_iso` hand-rolls Howard Hinnant's `civil_from_days`
+(12 LOC, public domain) instead of pulling in `chrono` for one
+function. Saved ~400KB binary size.
+
+`random.choice` / `shuffle` / `sample` shipped as **monomorphic
+per-type variants** (`_i64`, `_f64`, `_str`) rather than M17 generics —
+integrating stdlib-registered functions with the M17 worklist would
+have been deeper than M20b warranted. Generic stdlib functions are
+v0.3.
+
+Cross-platform `time.sleep_ms` granularity: ~1ms on Linux, ~15.6ms on
+Windows (documented; test assertions are lenient ≥50ms).
+
+Four examples: `fizzbuzz_v2`, `timer_demo`, `math_demo`, `sleep_test`.
+
+### M20c — json, re (Phase 1 complete)
+
+12 new NativeFns (213-217 + 220-226). `json` for JSON validation +
+formatting; `re` for regex matching/search/replace/split. Used
+Strategy A (native Rust re-implementation) via `serde_json` and
+`regex` crates added only to `vm/Cargo.toml`.
+
+`json` shipped the **validation-focused surface** (`parse_to_string`,
+`minify`, `is_valid`, `pretty`, `escape`) — the typed `JsonValue`
+surface would have needed stdlib-class registration infrastructure
+that doesn't yet exist. M18's `examples/json_parse_v2.spy` remains the
+canonical typed-parser demo.
+
+`re.match` was renamed `re.fullmatch` because `match` is a hard
+keyword in StrictPy (since M16 match/case) and the parser doesn't
+allow keywords as attribute names. Contextual-keyword treatment is a
+v0.3 candidate.
+
+Two examples: `json_demo`, `regex_demo`. **Zero incidental bugs** —
+the first M20-batch sub-milestone with no incidental finding.
+
+### M21 — BUG-037 fix + integration example
+
+Closed BUG-037 (`x ?? fallback` always-fallback) using the M13
+`lower_short_circuit` pattern: pre-seed result slot with `lhs`, test
+`RefEq(lhs, none)`, branch, evaluate `rhs` only in the is-none block,
+slot-based phi merge. Critically, `rhs` is now evaluated ONLY when
+`lhs IS none` (short-circuit), matching Python's `or`-fallback
+expectation. 6 regression tests including rhs-must-not-trap and
+rhs-must-execute paths.
+
+Integration program: `examples/minigrep.spy` (~110 LOC) — a small
+grep-like CLI tool exercising `sys + os + io + re + time + try/except
++ tuples` together. 5 integration tests (subprocess) covering: pattern
+match on a file, missing-file recovery via IOError catch, bad-pattern
+ValueError, usage on no args, line counting. **The strongest single
+piece of evidence that the Phase 1 stdlib composes ergonomically.**
+
+### Sprint totals
+
+- **Tests**: 267 → 379 (+112 over 6 commits).
+- **Examples**: 32 → 46 (+14: echo / sum_args / print_env / list_dir /
+  env_dump / file_stats / echo_interactive / fizzbuzz_v2 / timer_demo /
+  math_demo / sleep_test / json_demo / regex_demo / minigrep).
+- **Bugs**: 32 → 33 found, 31 → 32 fixed, 1 → 1 deferred (still only
+  BUG-028 lexer line-continuation).
+- **NativeFn IDs used in sprint**: 130-249 (a contiguous block of 120
+  added across 5 milestones).
+- **Stdlib modules**: 8 (sys / os / path / io / time / random / math /
+  json / re).
+- **New crate deps**: `serde_json` and `regex`, both in `vm/Cargo.toml`
+  only.
+
+The "placeholder-lowering" pattern hit a third instance (BUG-037,
+after BUG-008 and BUG-034). All three were silent miscompiles where a
+binary operator's IR lowering shipped as a placeholder that the
+typechecker accepted and no test had hit the non-trivial path.
+Recurring lesson: audit `ir.rs` for `// placeholder` comments and
+operators that just `Copy(operand)`.
+
+The language is now **demonstrably usable** for CLI tools and
+data-processing scripts: `minigrep.spy` opens files, handles missing
+ones gracefully, runs regexes, writes formatted output with timing — a
+real script in a Python-shaped language with no dynamism.
+
+---
+
 ## What this trajectory shows
 
 - **Bugs found scales with running real programs, not with writing tests.**

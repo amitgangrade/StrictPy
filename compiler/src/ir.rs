@@ -2343,10 +2343,43 @@ fn lower_expr(fb: &mut FuncBuilder, ctx: &mut LowerCtx, e: &Expr) -> ValueId {
             }
         }
         Expr::NullCoalesce { lhs, rhs, span } => {
-            let _ = lower_expr(fb, ctx, lhs);
-            let r = lower_expr(fb, ctx, rhs);
+            // M21 fix (BUG-037): the old lowering was a placeholder that
+            // returned the rhs unconditionally — `x ?? fallback` always
+            // produced `fallback` regardless of `x`. The correct lowering
+            // is `if x is none: rhs else: x`, with rhs evaluated only when
+            // x IS none (short-circuit). Mirrors the M13 short-circuit
+            // pattern (slot pre-seed + CondBranch + phi via slot read).
             let ty = ctx.expr_ty(*span);
-            fb.push_value(ty, ValueKind::Op { op: IROp::Copy, args: vec![r] })
+            let l = lower_expr(fb, ctx, lhs);
+
+            // Pre-seed result slot with `l` (the "not-none" path value).
+            let slot_name = format!("__nc_{}", fb.slot_ty.len());
+            let slot = fb.alloc_slot(&slot_name, ty.clone());
+            fb.emit_write_local(slot, l);
+
+            // Test if l is none.
+            let none_val = fb.push_value(
+                Ty::Primitive(PrimTy::Null),
+                ValueKind::Const(IRConst::None),
+            );
+            let is_none = fb.push_value(
+                Ty::Primitive(PrimTy::Bool),
+                ValueKind::Op { op: IROp::RefEq, args: vec![l, none_val] },
+            );
+
+            let rhs_b = fb.new_block();
+            let merge = fb.new_block();
+            // If is_none → evaluate rhs; else → slot already has l, jump to merge.
+            fb.terminate(Terminator::CondBranch { cond: is_none, t: rhs_b, f: merge });
+
+            // Evaluate the rhs only in the "l was none" branch, then overwrite.
+            fb.switch_to(rhs_b);
+            let r = lower_expr(fb, ctx, rhs);
+            fb.emit_write_local(slot, r);
+            fb.terminate(Terminator::Branch { target: merge });
+
+            fb.switch_to(merge);
+            fb.emit_read_local(slot)
         }
         Expr::Ternary { cond, then_expr, else_expr, span } => {
             let c = lower_expr(fb, ctx, cond);

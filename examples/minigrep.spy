@@ -1,0 +1,108 @@
+"""minigrep — multi-stdlib integration example for M19-M20.
+
+A small grep-like CLI tool that:
+  - Reads `sys.argv` for a regex pattern and an optional file path
+  - Uses `re.search` to match each line
+  - Reads from `io.input()` (stdin) OR from a file via `os.exists` + open()
+  - Writes matching lines to stdout via `io.write_stdout`
+  - Catches IOError on missing files via `try/except`
+  - Times the operation with `time.monotonic`
+  - Prints a summary with line/match counts and elapsed time
+
+Demonstrates: sys + os + io + re + time + try/except + tuples + classes.
+
+Usage:
+    spy minigrep.spyc <pattern>            # reads from stdin
+    spy minigrep.spyc <pattern> <file>     # reads from file
+"""
+
+import sys
+import os
+import io
+import re
+import time
+
+fn die(msg: str) -> None:
+    io.write_stderr("minigrep: " + msg + "\n")
+    sys.exit(2)
+    return
+
+# Read all lines from stdin (until empty line on plain echo; we use a
+# small heuristic — read until a sentinel line). The io.input() native
+# strips trailing \r\n. We stop at the first ":END:" sentinel for test
+# determinism, since stdin EOF detection is not in the v0.2 io surface.
+fn read_stdin_lines() -> List[str]:
+    lines: List[str] = []
+    while true:
+        line: str = io.input()
+        if line == ":END:":
+            return lines
+        lines.append(line)
+    return lines
+
+fn read_file_lines(path: str) -> List[str]:
+    if not os.exists(path):
+        raise IOError("no such file: " + path)
+    if not os.is_file(path):
+        raise IOError("not a regular file: " + path)
+    # Use the M5 open() / file.read() API plus M10's str.split on newlines.
+    # We don't have a line-iterator yet in v0.2; read whole file and split.
+    f: io.File = open(path, "r")
+    content: str = f.read()
+    f.close()
+    raw: List[str] = content.split("\n")
+    # Drop a trailing empty produced by a file ending in \n.
+    n: i32 = i32(i64(len(raw)))
+    if n > 0i32 and raw[n - 1i32] == "":
+        raw.pop()
+    return raw
+
+fn main() -> i32:
+    argv: List[str] = sys.argv
+    n: i32 = i32(i64(len(argv)))
+    if n < 2i32:
+        die("usage: minigrep <pattern> [file]")
+        return 2
+
+    pattern: str = argv[1i32]
+
+    # Validate the pattern before we waste any I/O.
+    if not re.is_valid(pattern):
+        die("bad regex: " + pattern)
+        return 2
+
+    start: f64 = time.monotonic()
+    lines: List[str] = []
+
+    if n >= 3i32:
+        path: str = argv[2i32]
+        try:
+            lines = read_file_lines(path)
+        except IOError as e:
+            die(e.message)
+            return 2
+    else:
+        lines = read_stdin_lines()
+
+    matches: i32 = 0i32
+    nlines: i32 = i32(i64(len(lines)))
+    i: i32 = 0i32
+    while i < nlines:
+        line: str = lines[i]
+        if re.search(pattern, line):
+            io.write_stdout(line)
+            io.write_stdout("\n")
+            matches = matches + 1i32
+        i = i + 1i32
+
+    io.flush_stdout()
+
+    elapsed_ms: f64 = (time.monotonic() - start) * 1000.0
+    # Summary on stderr so it doesn't pollute grep-pipeline stdout.
+    summary: str = "[" + str(matches) + "/" + str(nlines) + " matched in "
+    # Format elapsed_ms as integer ms to avoid float-formatting variability
+    # across platforms (Linux can show "1.0", Windows "1.0"; we want ints).
+    elapsed_int: i64 = i64(elapsed_ms)
+    summary = summary + str(elapsed_int) + "ms]\n"
+    io.write_stderr(summary)
+    return 0

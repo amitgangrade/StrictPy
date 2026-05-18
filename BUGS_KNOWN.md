@@ -414,3 +414,31 @@ combination. Three found zero new bugs. R3 found exactly one — fixed inline.
   inner identifiers; match-scrutinee-throws propagates correctly; `raise
   e` re-raise from a caught variable works despite being out-of-scope in
   §7.5.6 (could be promoted to spec).
+
+---
+
+## Fixed in M19-M20-M21 (stdlib sprint)
+
+Five milestones shipped the import system + Phase 1 stdlib. Eight modules
+(sys / os / path / io / time / random / math / json / re — note path is
+sibling to os not submodule), 70+ NativeFn variants. The integration
+example `examples/minigrep.spy` exercises sys + os + io + re + time +
+try/except + tuples in one program.
+
+One incidental bug found and fixed during the sprint:
+
+| # | Bug | Fix location | Regression test |
+|---|-----|--------------|-----------------|
+| BUG-037 | `x ?? fallback` always returned `fallback` — IR lowering for `Expr::NullCoalesce` was a placeholder that lowered both operands then emitted `IROp::Copy(rhs)` only. Same shape as BUG-008 (`is not` inverted) and BUG-034 (`str !=` always true): placeholder lowering for a binary operator that silently shipped the wrong value. | `compiler/src/ir.rs::lower_expr` Expr::NullCoalesce arm rewritten to mirror M13 `lower_short_circuit`: pre-seed result slot with lhs, test `RefEq(lhs, none)`, branch, evaluate rhs only in the "lhs was none" block, slot-based phi merge. Short-circuit semantics: rhs runs only when lhs is none. | `vm/tests/m21_null_coalesce.rs` (6 tests: returns lhs when not-none, returns rhs when none, doesn't evaluate rhs when lhs not-none, does evaluate rhs when lhs is none, works for str, chained `a ?? b ?? c`) |
+
+### Notes for the next round
+
+- After M21, **the only deferred bug is still BUG-028** (no implicit line
+  continuation across infix `+`). One bug at the start of the stdlib
+  sprint; one bug at the end. The Phase 1 stdlib bulk-add did not
+  destabilise the language.
+- The "placeholder IR lowering" pattern has now been hit three times
+  (BUG-008, BUG-034, BUG-037). All three were silent miscompiles
+  surfaced by stress-test programs organically using the operator.
+  Mechanical lesson: audit `compiler/src/ir.rs` for `// placeholder`
+  comments and Copy/passthrough lowerings for operators.

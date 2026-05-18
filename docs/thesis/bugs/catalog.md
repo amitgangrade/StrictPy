@@ -8,7 +8,7 @@ discovered, milestone fixed (or "deferred" with pointer to
 
 | Category | Found | Fixed | Deferred |
 |---|---:|---:|---:|
-| Silent miscompile (codegen) | 7 | 7 | 0 |
+| Silent miscompile (codegen) | 8 | 8 | 0 |
 | Vacuous output (IR lowering punt) | 3 | 3 | 0 |
 | Vtable / inheritance | 7 | 7 | 0 |
 | Typechecker rejects valid code | 3 | 3 | 0 |
@@ -18,7 +18,7 @@ discovered, milestone fixed (or "deferred" with pointer to
 | Parser / lexer | 1 | 0 | 1 |
 | Formatting / spec consistency | 1 | 1 | 0 |
 | Spec/runtime drift | 1 | 1 | 0 |
-| **Total** | **32** | **31** | **1** |
+| **Total** | **33** | **32** | **1** |
 
 Post-M12 state (2026-05-18):
 
@@ -384,6 +384,16 @@ Post-M17 state (2026-05-18 even later):
 - **Status**: fixed in M18. Tests: `vm/tests/m18_divzero_alias.rs` (3 tests — canonical name catches, legacy name still catches via alias, i32 path also emits canonical). The pre-existing `vm/tests/m15_try_except.rs::division_by_zero_catchable` already used `||` to accept either name; preserved.
 - **Severity**: medium. Every program intending Python-compatible exception handling silently fell through `except ZeroDivisionError` and was either caught by `except Exception` or escaped uncaught. Manifested in M18 because the R3 agent's expression interpreter was the first program to deliberately test the canonical name.
 - **Why this is a "spec/runtime drift" category, not silent miscompile**: the spec was honest about the legacy name; the failure was that the runtime never followed through on emitting the canonical one. Same class of failure as `with`-doesn't-route-through-try (M15 known follow-up). Pattern lesson: when introducing a Python-compat alias, update BOTH the registration table AND the runtime emit side.
+
+### M20a-only finds
+
+#### BUG-037 — `x ?? fallback` (null-coalesce) always returns fallback
+- **Found**: M20a (os/path/io stdlib agent — workaround used in tests when `Option<T>` returns from `os.env` were involved).
+- **Symptom**: `x ?? fallback` evaluates and discards `x`, then returns `fallback`. So `let y: i32 = some_value_or_none ?? 0` always produced `0`, regardless of `some_value_or_none`'s value. Programs using `??` as a defaulting operator silently went through the default branch every time.
+- **Root cause**: `compiler/src/ir.rs::lower_expr`'s `Expr::NullCoalesce` arm was a placeholder. It lowered both `lhs` and `rhs` but then emitted `IROp::Copy { args: [rhs] }` — the lhs value was eagerly evaluated (for any side effects) but completely thrown away. The placeholder predated the M13 mid-expression CFG infrastructure that would have made it tractable.
+- **Fix**: M21 rewrote the lowering to mirror the M13 `lower_short_circuit` pattern: pre-seed a result slot with `lhs`, test `RefEq(lhs, none)`, branch on the test, evaluate `rhs` only in the "lhs was none" block, overwrite the slot, merge. Slot-based phi via ReadLocal/WriteLocal — no new IR ops or VM opcodes. **Critical correctness**: `rhs` is now evaluated ONLY when `lhs IS none` (short-circuit semantics), matching Python's `or`-fallback expectation.
+- **Status**: fixed in M21. Tests: `vm/tests/m21_null_coalesce.rs` (6 tests including the rhs-must-not-trap and rhs-must-execute cases).
+- **Severity**: medium — every program using `??` was silently wrong. Pattern lesson (now three instances in the catalog): **placeholder IR lowerings for new operators silently miscompile until a stress test organically uses them**. BUG-008 (`is not` was `RefEq` not `not RefEq`), BUG-034 (`str !=` had no `is_str` branch, fell to pointer compare), BUG-037 (`??` was Copy(rhs) only). All three: the parser accepted the operator, the typechecker accepted it, the lowering shipped a placeholder, no test had hit the non-trivial path.
 
 ## Lessons from the catalog
 

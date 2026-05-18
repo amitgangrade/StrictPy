@@ -16,6 +16,26 @@ values. The post-M11 narrative below is retained because the M12
 chapter is mostly a confirmation of M11, plus the new "negative-form
 silent miscompiles" lesson.
 
+**M19–M21 update (2026-05-19)**: a 6-milestone stdlib sprint shipped
+the import system + Phase 1 stdlib (sys/os/path/io/time/random/math/
+json/re). The language went from "every native is a bare-name prelude
+entry" to "import json; json.parse(s)" — a real Python-shaped surface.
+
+M19 added the import machinery (resolver module table; non-catchable
+VmError::Exit for sys.exit; argv plumbed through CLI). M20a (os/path/
+io) found BUG-037 incidentally (?? null-coalesce always returns
+fallback — third instance of the placeholder-lowering pattern after
+BUG-008 and BUG-034). M20b (time/random/math) hand-rolled
+civil_from_days to skip chrono. M20c (json/re) added serde_json +
+regex deps to vm/Cargo.toml only. M21 closed BUG-037 and shipped
+examples/minigrep.spy as the integration demo (sys+os+io+re+time+
+try/except+tuples in one 110-LOC program).
+
+Post-M21: 379 tests, 8 stdlib modules, 46 example programs, 33 bugs
+found, 32 fixed, 1 deferred (BUG-028 — the last remaining open bug).
+The language is now demonstrably usable for CLI tools and data
+processing.
+
 **M13–M17 update (2026-05-18)**: a 5-milestone language-completeness
 sprint shipped after M12. Each milestone is a feature-sized chapter
 in the rewrite. Sequenced because every feature touched ir.rs /
@@ -44,10 +64,10 @@ v0.2.
 
 ## Headline numbers that need updating
 
-| Field | Old (M9) | New (post-M17) | Source |
+| Field | Old (M9) | New (post-M21) | Source |
 |---|---|---|---|
-| Examples | 7 | **28** | `examples/*.spy` count |
-| Tests passing | 134 | **255** | `docs/thesis/stats/per_milestone.csv` last row |
+| Examples | 7 | **46** | `examples/*.spy` count |
+| Tests passing | 134 | **379** | `docs/thesis/stats/per_milestone.csv` last row |
 | Benchmark wins | 16/0/0 | 16/0/0 (still) | `bench/history/m11_class_fix.json` |
 | fib(30) | 13.5ms (12× CPython) | 13.1ms (~11× CPython) | M11/M12 bench (unchanged through M17) |
 | Quicksort 100K | 18.6ms (13× CPython) | 18.6ms (12× CPython) | M11 bench |

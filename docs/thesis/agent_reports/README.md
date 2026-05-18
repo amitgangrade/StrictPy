@@ -51,3 +51,7 @@ the time it lands.
 | `m18_json_parse_v2.md` | M18 | R2 — JSON parser rewritten with M13-M17 surface. All 8 M10 workarounds eliminated. **Zero new bugs.** |
 | `m18_expr_interp.md` | M18 | R3 — Expression interpreter. Found **BUG-036** (divzero name mismatch). Plus 7 archived edge-case probes. |
 | `m18_graph_lib.md` | M18 | R4 — Generic graph algorithms. M17 worklist verified: 8 monomorphic instantiations drained to fixpoint, 2 discovered transitively. **Zero new bugs.** |
+| `m19_import_sys.md` | M19 | Import machinery + sys module. First real module system. Non-catchable VmError::Exit. argv plumbed end-to-end. |
+| `m20a_os_path_io.md` | M20a | os + path + io stdlib (23 NativeFns). Found **BUG-037** incidentally (?? null-coalesce always-fallback). |
+| `m20b_time_random_math.md` | M20b | time + random + math stdlib (31 NativeFns). Numerical Recipes LCG; hand-rolled civil_from_days for ISO formatting. |
+| `m20c_json_re.md` | M20c | json + re stdlib (12 NativeFns). serde_json + regex crates added only to vm/Cargo.toml. **Phase 1 stdlib complete.** |

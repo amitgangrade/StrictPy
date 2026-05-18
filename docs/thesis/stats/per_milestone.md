@@ -27,6 +27,11 @@ Benchmark data: `bench/history/`.
 | **M16** | 245 | 15,000 | 8,000 | 5,400 | 0 | 0 | 0 | 16/0/0 | 13.1 |
 | **M17** | **255** | **15,631** | **7,780** | **5,517** | 0 | 0 | 0 | 16/0/0 | 13.1 |
 | **M18** | **267** | 15,700 | 7,820 | **7,400** | 1 | 1 | 0 | 16/0/0 | 13.1 |
+| **M19** | 285 | 16,100 | 7,950 | 7,600 | 0 | 0 | 0 | 16/0/0 | 13.1 |
+| **M20a** | 314 | 16,300 | 8,050 | 8,000 | 1 | 0 | 1 | 16/0/0 | 13.1 |
+| **M20b** | 348 | 16,500 | 8,200 | 8,200 | 0 | 0 | 0 | 16/0/0 | 13.1 |
+| **M20c** | 370 | 16,650 | 8,400 | 8,350 | 0 | 0 | 0 | 16/0/0 | 13.1 |
+| **M21** | **379** | **16,823** | **8,789** | **8,467** | 0 | **1** | 0 | 16/0/0 | 13.1 |
 
 Notes:
 - LOC is at end-of-milestone; M1's LOC are mostly lexer+parser+pretty (already in their final shape).
@@ -51,6 +56,7 @@ See `bench/history/` for the underlying JSON.
 | M12 (stress test 2 + torture) | 16 | 0 | 0 | 13.1 ms | (same as M11; no codegen change affecting perf) | — |
 | M13–M17 (language completeness) | 16 | 0 | 0 | 13.1 ms | (no benchmark cells touch the new surface yet) | — |
 | M18 (round 4 stress test) | 16 | 0 | 0 | 13.1 ms | (correctness round; no perf delta) | — |
+| M19–M21 (stdlib sprint) | 16 | 0 | 0 | 13.1 ms | (8 new stdlib modules; no codegen affecting perf) | — |
 
 \* M7-unfair: Python timing included parse+compile time. Methodology bug
 caught and fixed at M10-prep; the M7-fair snapshot is the honest baseline.
