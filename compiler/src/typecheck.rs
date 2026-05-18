@@ -221,6 +221,40 @@ impl TypeChecker {
                     }
                 }
             }
+            Stmt::LetDestructure { names, tys, init, span } => {
+                // M14 tuples. Synthesize the RHS first to learn its element
+                // types, then verify each per-name annotation (if any) and
+                // bind each local in env at the correct elem type.
+                let got = self.check_or_synth(init, None, env, ctx, r)?;
+                let elem_tys: Vec<Ty> = match &got {
+                    Ty::Tuple(ts) => ts.clone(),
+                    _ => return Err(type_err(*span, codes::TYPE_MISMATCH,
+                        format!("destructuring let requires a tuple RHS, got {}", got.display()))),
+                };
+                if elem_tys.len() != names.len() {
+                    return Err(type_err(*span, codes::TYPE_MISMATCH,
+                        format!("destructuring let: RHS has {} elements but {} names",
+                            elem_tys.len(), names.len())));
+                }
+                for (i, n) in names.iter().enumerate() {
+                    let elem_ty = &elem_tys[i];
+                    if let Some(ast_t) = &tys[i] {
+                        let expected = r.ast_type_to_ty.get(&ast_type_span(ast_t))
+                            .cloned().unwrap_or(Ty::Never);
+                        if !is_subtype(elem_ty, &expected, &ctx.ty_ctx()) {
+                            return Err(type_err(*span, codes::TYPE_MISMATCH,
+                                format!("destructure `{}`: expected {}, got {}",
+                                    n, expected.display(), elem_ty.display())));
+                        }
+                    }
+                    if let Some(sym) = r.symbols.symbols.iter()
+                        .find(|s| s.name == *n && s.def_span.start == span.start
+                                  && s.def_span.end == span.end)
+                    {
+                        env.types.insert(sym.id, elem_ty.clone());
+                    }
+                }
+            }
             Stmt::Assign { target, value, span } => {
                 let lhs_ty = self.lvalue_type(target, env, ctx, r)?;
                 let rhs = self.check_or_synth(value, Some(&lhs_ty), env, ctx, r)?;
@@ -668,6 +702,11 @@ impl TypeChecker {
                             }
                             tyargs.push(self.synth_expr(i, env, ctx, r)?);
                         }
+                        // M14: normalize `Tuple[T1, T2, ...]` written as an
+                        // index-on-ident to Ty::Tuple, mirroring the resolver.
+                        if matches!(base, TypeCtor::Tuple) {
+                            return Ok(Ty::Tuple(tyargs));
+                        }
                         return Ok(Ty::Generic { base: base.clone(), args: tyargs });
                     }
                 }
@@ -1113,6 +1152,16 @@ impl TypeChecker {
         if name == "__dict__" {
             return Err(type_err(span, codes::TYPE_DUNDER_DICT,
                 "__dict__ access is not allowed".into()));
+        }
+        // M14 tuples: `t.0`, `t.1`, ... — numeric attr on a tuple type.
+        if let Ty::Tuple(elems) = obj_ty {
+            if let Ok(idx) = name.parse::<usize>() {
+                if idx < elems.len() {
+                    return Ok(elems[idx].clone());
+                }
+                return Err(type_err(span, codes::TYPE_NO_FIELD,
+                    format!("tuple index {} out of bounds (arity {})", idx, elems.len())));
+            }
         }
         let cid = match obj_ty {
             Ty::Class(c) => Some(*c),

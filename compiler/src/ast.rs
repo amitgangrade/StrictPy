@@ -163,6 +163,12 @@ pub struct Block {
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Let { name: String, ty: Type, init: Expr, span: Span },
+    /// Tuple destructuring let:
+    ///   `x: T1, y: T2 = pair()`              — fully annotated
+    ///   `x, y = pair()`                       — types inferred from RHS
+    /// Per-name `Option<Type>` lets each binding optionally annotate.
+    /// Added in M14 (tuples). See spec §5.X.
+    LetDestructure { names: Vec<String>, tys: Vec<Option<Type>>, init: Expr, span: Span },
     Assign { target: Lvalue, value: Expr, span: Span },
     AugAssign { target: Lvalue, op: BinOp, value: Expr, span: Span },
     Return { value: Option<Expr>, span: Span },

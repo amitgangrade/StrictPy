@@ -921,6 +921,23 @@ impl Resolver {
                 self.resolve_expr(init, scope)?;
                 self.make_symbol(scope, name, SymbolKind::Local, *span, Some(t));
             }
+            Stmt::LetDestructure { names, tys, init, span } => {
+                // M14 tuples. Each name becomes its own local symbol. If a
+                // per-name annotation is present we resolve it here; otherwise
+                // the typechecker fills in the slot from the RHS tuple type.
+                self.resolve_expr(init, scope)?;
+                for (n, t) in names.iter().zip(tys.iter()) {
+                    if self.table.lookup_local(scope, n).is_some() {
+                        return Err(Self::err_at(*span, codes::RESOLVE_DUPLICATE_LET,
+                            format!("duplicate `let` of `{}`", n)));
+                    }
+                    let ty = match t {
+                        Some(ast_t) => Some(self.lower_ast_type(ast_t, scope)?),
+                        None => None,
+                    };
+                    self.make_symbol(scope, n, SymbolKind::Local, *span, ty);
+                }
+            }
             Stmt::Assign { target, value, .. } => {
                 self.resolve_lvalue_for_assign(target, scope)?;
                 self.resolve_expr(value, scope)?;
@@ -1251,6 +1268,13 @@ impl Resolver {
                         let mut lowered_args = Vec::new();
                         for a in args {
                             lowered_args.push(this.lower_ast_type_with_class(a, scope, cls)?);
+                        }
+                        // M14: normalize `Tuple[T1, T2, ...]` → `Ty::Tuple(...)`
+                        // so all downstream passes can match on a single shape.
+                        // (The tuple-type AST sugar `(T1, T2)` already lowers
+                        // straight to Ty::Tuple in the ast::Type::Tuple arm.)
+                        if matches!(ctor, TypeCtor::Tuple) {
+                            return Ok(Ty::Tuple(lowered_args));
                         }
                         return Ok(Ty::Generic { base: ctor, args: lowered_args });
                     }

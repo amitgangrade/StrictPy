@@ -21,7 +21,7 @@ use crate::ast::{
 };
 use crate::resolver::{SymbolId, SymbolKind};
 use crate::typecheck::TypedModule;
-use crate::types::{ClassId, ClassLayout, PrimTy, Ty, TypeCtor};
+use crate::types::{display_ty, ClassId, ClassLayout, PrimTy, Ty, TypeCtor};
 
 // ─────────────────────────────────────────────────────────────────────────
 //  IR node types
@@ -230,6 +230,12 @@ struct Lowerer {
     fn_id_by_name: HashMap<String, FuncId>,
     /// Class id → assigned type-table type_id.
     class_type_id: HashMap<u32, u32>,
+    /// M14: synthetic type-table id per tuple shape, keyed by
+    /// `display_ty(Ty::Tuple(elems))` (a stable, structural string).
+    /// The shape's field offsets are always `8 * i` (one 8-byte slot per
+    /// element) so the same tid can serve every element-type permutation
+    /// that displays identically. See `register_tuple_type`.
+    tuple_type_id: HashMap<String, u32>,
     /// Top-level `final` const declarations folded to their literal value.
     /// Used at every reference site (see `Expr::Ident` lowering).
     module_consts: HashMap<String, (IRConst, Ty)>,
@@ -247,6 +253,7 @@ impl Lowerer {
             str_intern: HashMap::new(),
             fn_id_by_name: HashMap::new(),
             class_type_id: HashMap::new(),
+            tuple_type_id: HashMap::new(),
             module_consts: HashMap::new(),
             next_fn_id: 0,
             next_type_id: 16,
@@ -408,6 +415,14 @@ impl Lowerer {
             });
         }
 
+        // Pass 2.5 (M14): scan the typed module for every distinct tuple
+        // shape and emit a synthetic type-table entry per shape.  The
+        // resulting type ids are stashed in `tuple_type_id` and used by
+        // `Expr::Tuple` lowering to pick the right Alloc operand.  Layout
+        // is uniform 8-byte-per-element so equality / field access can be
+        // computed purely from arity + index.
+        self.register_tuple_types();
+
         // Pass 3: lower function bodies.
         for d in &decls {
             match d {
@@ -440,6 +455,84 @@ impl Lowerer {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Walk every expression / param / return / field / local type observed
+    /// during type-checking and register a synthetic class-style type-table
+    /// entry per distinct `Ty::Tuple` shape.  Each shape gets a uniform
+    /// 8-byte-per-element layout so `t.N` lowers to `Load(offset=8*N)` and
+    /// `Expr::Tuple` lowers to `Alloc(tid)` followed by N `Store(offset=8*i)`s.
+    /// Idempotent — re-running is a no-op once registered.
+    fn register_tuple_types(&mut self) {
+        // Collect tuple shapes from expr types and from class/function/etc.
+        let mut shapes: Vec<Vec<Ty>> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let visit = |ty: &Ty, shapes: &mut Vec<Vec<Ty>>, seen: &mut std::collections::HashSet<String>| {
+            fn walk(ty: &Ty, shapes: &mut Vec<Vec<Ty>>, seen: &mut std::collections::HashSet<String>) {
+                match ty {
+                    Ty::Tuple(elems) => {
+                        let key = display_ty(ty);
+                        if seen.insert(key) {
+                            shapes.push(elems.clone());
+                        }
+                        for e in elems { walk(e, shapes, seen); }
+                    }
+                    Ty::Generic { args, .. } => for a in args { walk(a, shapes, seen); }
+                    Ty::Function { params, ret } => {
+                        for p in params { walk(p, shapes, seen); }
+                        walk(ret, shapes, seen);
+                    }
+                    Ty::Nullable(inner) => walk(inner, shapes, seen),
+                    _ => {}
+                }
+            }
+            walk(ty, shapes, seen);
+        };
+
+        // expr_types from typechecker
+        for ty in self.typed.expr_types.values() {
+            visit(ty, &mut shapes, &mut seen);
+        }
+        // function param/return types via resolver-tracked AST types
+        for ty in self.typed.resolved.ast_type_to_ty.values() {
+            visit(ty, &mut shapes, &mut seen);
+        }
+        // class field types
+        for layout in self.typed.resolved.class_layouts.values() {
+            for f in &layout.fields { visit(&f.ty, &mut shapes, &mut seen); }
+            for m in &layout.methods {
+                for p in &m.params { visit(p, &mut shapes, &mut seen); }
+                visit(&m.ret, &mut shapes, &mut seen);
+            }
+        }
+
+        for shape in shapes {
+            let key = display_ty(&Ty::Tuple(shape.clone()));
+            if self.tuple_type_id.contains_key(&key) { continue; }
+            let tid = self.fresh_type_id();
+            let name_idx = self.intern_str(&format!("__Tuple{}__", shape.len()));
+            // Each element occupies one 8-byte slot (header excluded).
+            let mut fields = Vec::new();
+            for (i, elem) in shape.iter().enumerate() {
+                let fname = self.intern_str(&format!("{}", i));
+                fields.push(TypeFieldEntry {
+                    name_idx: fname,
+                    type_id: self.type_id_of_ty(elem),
+                    offset: (i as u32) * 8,
+                });
+            }
+            let size = 16 + (shape.len() as u32) * 8;
+            self.out.type_table.push(TypeTableEntry {
+                type_id: tid,
+                kind: 3, // tuple per file_format spec
+                name_idx,
+                size,
+                base_type: strictpy_shared::file_format::NO_BASE_TYPE,
+                fields,
+                vtable: Vec::new(),
+            });
+            self.tuple_type_id.insert(key, tid);
         }
     }
 
@@ -489,6 +582,10 @@ impl Lowerer {
             },
             Ty::Class(cid) => self.class_type_id.get(&cid.0).copied().unwrap_or(u32::MAX),
             Ty::Nullable(inner) => self.type_id_of_ty(inner),
+            Ty::Tuple(_) => {
+                let key = display_ty(t);
+                self.tuple_type_id.get(&key).copied().unwrap_or(u32::MAX)
+            }
             _ => u32::MAX,
         }
     }
@@ -550,6 +647,7 @@ impl Lowerer {
             fn_id_by_name: &self.fn_id_by_name,
             class_layouts: &self.typed.resolved.class_layouts,
             class_type_id: &self.class_type_id,
+            tuple_type_id: &self.tuple_type_id,
             module_consts: &self.module_consts,
             next_fn_id: &mut self.next_fn_id,
             lifted_functions: &mut lifted,
@@ -731,6 +829,9 @@ struct LowerCtx<'a> {
     class_layouts: &'a HashMap<ClassId, ClassLayout>,
     #[allow(dead_code)]
     class_type_id: &'a HashMap<u32, u32>,
+    /// M14: tuple-shape → synthetic type-table id, set up in Pass 2 and
+    /// consulted when lowering `Expr::Tuple` to pick the right Alloc tid.
+    tuple_type_id: &'a HashMap<String, u32>,
     /// Top-level `final` consts folded to their literal IR value.
     module_consts: &'a HashMap<String, (IRConst, Ty)>,
     /// Mutable handle to the lowerer's fn-id allocator so lifted lambdas
@@ -787,6 +888,33 @@ fn lower_stmt(fb: &mut FuncBuilder, ctx: &mut LowerCtx, s: &Stmt) -> Option<()> 
                 .unwrap_or(Ty::Primitive(PrimTy::Unit));
             let slot = fb.alloc_slot(name, slot_ty);
             fb.emit_write_local(slot, v);
+            Some(())
+        }
+        Stmt::LetDestructure { names, init, .. } => {
+            // M14 tuples: evaluate the RHS once into a hidden tuple value,
+            // then materialise each name as a Load(8*i) followed by a slot
+            // write.  Element types are pulled from the RHS tuple's static
+            // type (which the typechecker already verified against any
+            // per-name annotations).
+            let tup = lower_expr(fb, ctx, init);
+            let tup_ty = find_value_ty(fb, tup).unwrap_or(Ty::Primitive(PrimTy::Unit));
+            let elem_tys: Vec<Ty> = match &tup_ty {
+                Ty::Tuple(ts) => ts.clone(),
+                _ => vec![Ty::Primitive(PrimTy::Unit); names.len()],
+            };
+            for (i, n) in names.iter().enumerate() {
+                let elem_ty = elem_tys.get(i).cloned()
+                    .unwrap_or(Ty::Primitive(PrimTy::Unit));
+                let v = fb.push_value(
+                    elem_ty.clone(),
+                    ValueKind::Op {
+                        op: IROp::Load { offset: (i as u32) * 8 },
+                        args: vec![tup],
+                    },
+                );
+                let slot = fb.alloc_slot(n, elem_ty);
+                fb.emit_write_local(slot, v);
+            }
             Some(())
         }
         Stmt::Assign { target, value, .. } => {
@@ -1002,7 +1130,17 @@ fn lower_stmt(fb: &mut FuncBuilder, ctx: &mut LowerCtx, s: &Stmt) -> Option<()> 
             Some(())
         }
         Stmt::Assert { cond, .. } => {
-            let _ = lower_expr(fb, ctx, cond);
+            // M14 quirk: the typechecker unwraps `assert(cond, msg)` (parsed as
+            // `assert <2-tuple>`) into `(cond, msg)`, so the inner Eq is what
+            // got typed — the outer Tuple has no entry in expr_types and would
+            // now wrongly allocate a tuple with tid=u32::MAX.  Mirror that
+            // unwrap here so we lower the real condition expression.
+            let real_cond: &Expr = match cond {
+                Expr::Tuple { elems, .. } if elems.len() == 2 => &elems[0],
+                Expr::Tuple { elems, .. } if elems.len() == 1 => &elems[0],
+                other => other,
+            };
+            let _ = lower_expr(fb, ctx, real_cond);
             // Skip the call to assert() for now — codegen will see the discarded value.
             Some(())
         }
@@ -1258,11 +1396,28 @@ fn lower_expr(fb: &mut FuncBuilder, ctx: &mut LowerCtx, e: &Expr) -> ValueId {
             fb.push_value(ty, ValueKind::Const(IRConst::None))
         }
         Expr::Tuple { elems, span } => {
-            for elt in elems {
-                let _ = lower_expr(fb, ctx, elt);
-            }
+            // M14: tuples are heap objects whose layout mirrors a synthetic
+            // class (one 8-byte slot per element).  Allocate via IROp::Alloc
+            // using the type-table id registered in `register_tuple_types`,
+            // then store each element at offset `8 * i`.
             let ty = ctx.expr_ty(*span);
-            fb.push_value(ty, ValueKind::Const(IRConst::None))
+            let elem_vs: Vec<ValueId> = elems.iter().map(|e| lower_expr(fb, ctx, e)).collect();
+            let key = display_ty(&ty);
+            let tid = ctx.tuple_type_id.get(&key).copied().unwrap_or(u32::MAX);
+            let alloc = fb.push_value(
+                ty.clone(),
+                ValueKind::Op { op: IROp::Alloc { class_id: tid }, args: vec![] },
+            );
+            for (i, ev) in elem_vs.into_iter().enumerate() {
+                fb.push_value(
+                    Ty::Primitive(PrimTy::Unit),
+                    ValueKind::Op {
+                        op: IROp::Store { offset: (i as u32) * 8 },
+                        args: vec![alloc, ev],
+                    },
+                );
+            }
+            alloc
         }
         Expr::List { elems, span } => {
             let ty = ctx.expr_ty(*span);
@@ -1351,6 +1506,16 @@ fn lower_expr(fb: &mut FuncBuilder, ctx: &mut LowerCtx, e: &Expr) -> ValueId {
             if matches!(op, AstBinOp::And | AstBinOp::Or) {
                 return lower_short_circuit(fb, ctx, *op, lhs, rhs, ty);
             }
+            // M14 tuples: `t == u` / `t != u` lowers to element-wise compares.
+            // We must inspect the operand type (not the result type) — the
+            // result is always bool.  Fall back to the generic path for
+            // non-tuple operands.
+            if matches!(op, AstBinOp::Eq | AstBinOp::Ne) {
+                let lhs_ty = ctx.expr_ty(expr_span(lhs));
+                if let Ty::Tuple(elem_tys) = lhs_ty.clone() {
+                    return lower_tuple_eq(fb, ctx, *op, lhs, rhs, &elem_tys);
+                }
+            }
             let l = lower_expr(fb, ctx, lhs);
             let r = lower_expr(fb, ctx, rhs);
             emit_binop(fb, *op, l, r, ty)
@@ -1362,7 +1527,13 @@ fn lower_expr(fb: &mut FuncBuilder, ctx: &mut LowerCtx, e: &Expr) -> ValueId {
         Expr::Attr { obj, name, span } => {
             let recv = lower_expr(fb, ctx, obj);
             let obj_ty = ctx.expr_ty(expr_span(obj));
-            let offset = field_offset(ctx.class_layouts, &obj_ty, name).unwrap_or(0);
+            // M14 tuples: `t.N` — numeric attr on Ty::Tuple maps directly
+            // to a Load at the synthetic 8-byte-per-elem offset.
+            let offset = if let Ty::Tuple(_) = &obj_ty {
+                name.parse::<u32>().map(|i| i * 8).unwrap_or(0)
+            } else {
+                field_offset(ctx.class_layouts, &obj_ty, name).unwrap_or(0)
+            };
             let ty = ctx.expr_ty(*span);
             fb.push_value(ty, ValueKind::Op { op: IROp::Load { offset }, args: vec![recv] })
         }
@@ -1804,6 +1975,164 @@ fn emit_binop(
 /// rest of the codebase uses for cross-block values (see M3.5's
 /// loop-carried locals fix). The slot name is uniquified by current slot
 /// count so nested `and`/`or` don't alias.
+/// M14 tuples: lower `str((e0, e1, ..., eN))` to:
+///   "(" + str(e0) + ", " + str(e1) + ... + ")"
+///
+/// Each element load is dispatched through the per-primitive-type
+/// `str(...)` native (StrFromI32 / StrFromI64 / StrFromF64 / StrFromBool /
+/// StrFromChar / identity-copy for str / StrFromAny fallback for class /
+/// recursive lower_str_of_tuple for nested tuples).
+fn lower_str_of_tuple(
+    fb: &mut FuncBuilder,
+    ctx: &mut LowerCtx,
+    tup: ValueId,
+    elem_tys: &[Ty],
+) -> ValueId {
+    let str_ty = Ty::Primitive(PrimTy::Str);
+    let mut acc = fb.push_value(str_ty.clone(), ValueKind::Const(IRConst::Str("(".into())));
+    for (i, et) in elem_tys.iter().enumerate() {
+        if i > 0 {
+            let sep = fb.push_value(str_ty.clone(), ValueKind::Const(IRConst::Str(", ".into())));
+            acc = fb.push_value(
+                str_ty.clone(),
+                ValueKind::Op {
+                    op: IROp::NativeCall { native_id: NativeFn::StrConcat as u32 },
+                    args: vec![acc, sep],
+                },
+            );
+        }
+        let elem = fb.push_value(
+            et.clone(),
+            ValueKind::Op { op: IROp::Load { offset: (i as u32) * 8 }, args: vec![tup] },
+        );
+        let s = str_of_value(fb, ctx, elem, et);
+        acc = fb.push_value(
+            str_ty.clone(),
+            ValueKind::Op {
+                op: IROp::NativeCall { native_id: NativeFn::StrConcat as u32 },
+                args: vec![acc, s],
+            },
+        );
+    }
+    let close = fb.push_value(str_ty.clone(), ValueKind::Const(IRConst::Str(")".into())));
+    fb.push_value(
+        str_ty,
+        ValueKind::Op {
+            op: IROp::NativeCall { native_id: NativeFn::StrConcat as u32 },
+            args: vec![acc, close],
+        },
+    )
+}
+
+/// Stringify a single value at IR time, dispatching on its static type.
+/// Mirrors the `str(...)` PrimType-call dispatch above; broken out so
+/// `lower_str_of_tuple` can recurse on nested tuple elements.
+fn str_of_value(fb: &mut FuncBuilder, ctx: &mut LowerCtx, v: ValueId, ty: &Ty) -> ValueId {
+    let str_ty = Ty::Primitive(PrimTy::Str);
+    match ty {
+        Ty::Primitive(PrimTy::Str) => v,
+        Ty::Primitive(PrimTy::I32) | Ty::Primitive(PrimTy::U32)
+        | Ty::Primitive(PrimTy::I8)  | Ty::Primitive(PrimTy::I16)
+        | Ty::Primitive(PrimTy::U8)  | Ty::Primitive(PrimTy::U16) => fb.push_value(
+            str_ty,
+            ValueKind::Op {
+                op: IROp::NativeCall { native_id: NativeFn::StrFromI32 as u32 },
+                args: vec![v],
+            },
+        ),
+        Ty::Primitive(PrimTy::I64) | Ty::Primitive(PrimTy::U64) => fb.push_value(
+            str_ty,
+            ValueKind::Op {
+                op: IROp::NativeCall { native_id: NativeFn::StrFromI64 as u32 },
+                args: vec![v],
+            },
+        ),
+        Ty::Primitive(PrimTy::F32) | Ty::Primitive(PrimTy::F64) => fb.push_value(
+            str_ty,
+            ValueKind::Op {
+                op: IROp::NativeCall { native_id: NativeFn::StrFromF64 as u32 },
+                args: vec![v],
+            },
+        ),
+        Ty::Primitive(PrimTy::Bool) => fb.push_value(
+            str_ty,
+            ValueKind::Op {
+                op: IROp::NativeCall { native_id: NativeFn::StrFromBool as u32 },
+                args: vec![v],
+            },
+        ),
+        Ty::Primitive(PrimTy::Char) => fb.push_value(
+            str_ty,
+            ValueKind::Op {
+                op: IROp::NativeCall { native_id: NativeFn::StrFromChar as u32 },
+                args: vec![v],
+            },
+        ),
+        Ty::Tuple(inner) => lower_str_of_tuple(fb, ctx, v, inner),
+        _ => fb.push_value(
+            str_ty,
+            ValueKind::Op {
+                op: IROp::NativeCall { native_id: NativeFn::StrFromAny as u32 },
+                args: vec![v],
+            },
+        ),
+    }
+}
+
+/// M14 tuples: lower `t == u` / `t != u` for `Ty::Tuple` operands.
+/// Strategy: lower both sides once, then for each element index `i`
+/// emit a Load(8*i) on each side, compare element-wise via the
+/// per-element-type `emit_binop` (which already handles str/float/int),
+/// and AND the results.  `!=` is `not (a == a)`.
+fn lower_tuple_eq(
+    fb: &mut FuncBuilder,
+    ctx: &mut LowerCtx,
+    op: AstBinOp,
+    lhs: &Expr,
+    rhs: &Expr,
+    elem_tys: &[Ty],
+) -> ValueId {
+    let l = lower_expr(fb, ctx, lhs);
+    let r = lower_expr(fb, ctx, rhs);
+    // Empty tuple: trivially equal.
+    if elem_tys.is_empty() {
+        let lit = fb.push_value(
+            Ty::Primitive(PrimTy::Bool),
+            ValueKind::Const(IRConst::Bool(matches!(op, AstBinOp::Eq))),
+        );
+        return lit;
+    }
+    let mut acc: Option<ValueId> = None;
+    for (i, et) in elem_tys.iter().enumerate() {
+        let lv = fb.push_value(
+            et.clone(),
+            ValueKind::Op { op: IROp::Load { offset: (i as u32) * 8 }, args: vec![l] },
+        );
+        let rv = fb.push_value(
+            et.clone(),
+            ValueKind::Op { op: IROp::Load { offset: (i as u32) * 8 }, args: vec![r] },
+        );
+        // Always compare-equal here; the != case inverts the final acc.
+        let cmp = emit_binop(fb, AstBinOp::Eq, lv, rv, Ty::Primitive(PrimTy::Bool));
+        acc = Some(match acc {
+            None => cmp,
+            Some(prev) => fb.push_value(
+                Ty::Primitive(PrimTy::Bool),
+                ValueKind::Op { op: IROp::IAnd, args: vec![prev, cmp] },
+            ),
+        });
+    }
+    let eq = acc.unwrap();
+    match op {
+        AstBinOp::Eq => eq,
+        AstBinOp::Ne => fb.push_value(
+            Ty::Primitive(PrimTy::Bool),
+            ValueKind::Op { op: IROp::BoolNot, args: vec![eq] },
+        ),
+        _ => eq,
+    }
+}
+
 fn lower_short_circuit(
     fb: &mut FuncBuilder,
     ctx: &mut LowerCtx,
@@ -2027,6 +2356,18 @@ fn lower_call(
                     // reinterpreted the i64 bit pattern as f64 (tiny ints
                     // look like denormal f64s and truncate to 0).
                     let arg_ty = args.first().map(|a| ctx.expr_ty(expr_span(&a.value)));
+                    // M14 tuples: `str((a, b, ...))` builds `"(a, b, ...)"`
+                    // by element-wise `str(...)` then `+`-concat with ", "
+                    // separators.  We emit this entirely at IR time so the
+                    // VM doesn't need a new native — each element dispatches
+                    // through the existing per-type str(...) handler we're
+                    // sitting inside.
+                    if name == "str" {
+                        if let Some(Ty::Tuple(elem_tys)) = arg_ty.clone() {
+                            let tup = arg_vs[0];
+                            return lower_str_of_tuple(fb, ctx, tup, &elem_tys);
+                        }
+                    }
                     let nid = if name == "str" {
                         match arg_ty {
                             Some(Ty::Primitive(PrimTy::I32))

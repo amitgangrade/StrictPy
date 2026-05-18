@@ -129,6 +129,12 @@ pub struct Lexer<'src> {
     /// If `Some`, the next call should emit this queued kind (used to break
     /// the f-string state machine across calls).
     queued: std::collections::VecDeque<Token>,
+
+    /// M14 (tuples): track whether the previously emitted token was the kind
+    /// that ends a postfix-expression (Ident, RParen, RBracket, IntLit, ...).
+    /// If so, a subsequent `.<digit>` MUST lex as `Dot IntLit` (a tuple field
+    /// access like `t.0`), not as a `.5`-style float literal.
+    prev_was_postfix_terminator: bool,
 }
 
 impl<'src> Lexer<'src> {
@@ -149,12 +155,31 @@ impl<'src> Lexer<'src> {
             done: false,
             fstring_stack: Vec::new(),
             queued: std::collections::VecDeque::new(),
+            prev_was_postfix_terminator: false,
         }
     }
 
     /// Advance the lexer and return the next token. Returns `Eof` repeatedly
     /// once the input is exhausted.
     pub fn next_token(&mut self) -> Result<Token, CompileError> {
+        let tok = self.next_token_inner()?;
+        // M14 tuples: remember whether the emitted token is one of the kinds
+        // that can be followed by `.<digit>` to mean a tuple field access.
+        // Idents, closing parens/brackets and IntLit/FloatLit (rare but
+        // arithmetic like `1.2 .0 …` doesn't appear in normal code) all
+        // qualify. Anything else means the next `.<digit>` should still
+        // lex as a `.5`-style float.
+        self.prev_was_postfix_terminator = matches!(
+            tok.kind,
+            TokenKind::Ident(_)
+                | TokenKind::RParen
+                | TokenKind::RBracket
+                | TokenKind::IntLit { .. }
+        );
+        Ok(tok)
+    }
+
+    fn next_token_inner(&mut self) -> Result<Token, CompileError> {
         // Drain anything queued from a previous call (e.g. multi-token
         // f-string transitions).
         if let Some(t) = self.queued.pop_front() {
@@ -240,7 +265,7 @@ impl<'src> Lexer<'src> {
                 return Ok(Token { kind: TokenKind::Newline, span: sp });
             } else {
                 // Inside parens: newline is whitespace.
-                return self.next_token();
+                return self.next_token_inner();
             }
         }
 
@@ -446,8 +471,14 @@ impl<'src> Lexer<'src> {
         if b.is_ascii_digit() {
             return self.lex_number(start, line, col);
         }
-        // `.` followed by digit is a float (e.g. `.5`).
-        if b == b'.' && self.peek_at(1).map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        // `.` followed by digit is normally a float (e.g. `.5`), but if the
+        // previous token closed a postfix expression (Ident, RParen, ...)
+        // then `.<digit>` is a tuple field access — let it lex as Dot then
+        // IntLit. M14 tuples (see spec §5.X).
+        if b == b'.'
+            && self.peek_at(1).map(|c| c.is_ascii_digit()).unwrap_or(false)
+            && !self.prev_was_postfix_terminator
+        {
             return self.lex_number(start, line, col);
         }
 

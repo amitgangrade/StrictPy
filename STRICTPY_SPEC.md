@@ -481,7 +481,72 @@ Type **inference is permitted** for:
 - Generic type argument inference at call sites (Hindley-Milner-lite — see §10.4)
 - Literal types when assigned to a typed binding (`x: i64 = 0` makes `0` an `i64`)
 
-### 5.5 Forbidden constructs
+### 5.5 Tuples (v0.1 — M14)
+
+Tuples are **heterogeneous fixed-size product types**. The runtime
+representation is a heap object with one 8-byte slot per element; the
+type system enforces arity and per-element types at every use site.
+
+**Type annotation.** Two equivalent forms:
+
+```python
+t: Tuple[i32, str]            # subscript form (preferred)
+t: (i32, str)                 # parenthesised form (also legal)
+```
+
+**Literal.** Parenthesised, at least one comma. A single value in
+parens is just parenthesisation — there is **no `(x,)` 1-tuple
+shorthand** in v0.1.
+
+```python
+t: Tuple[i32, str] = (42i32, "hi")
+```
+
+**Field access.** Bare integer index with attr syntax:
+
+```python
+println(t.0)   # → 42
+println(t.1)   # → "hi"
+```
+
+**Destructuring let.** Both annotated and inferred forms:
+
+```python
+x: i32, y: str = pair()       # all annotated
+x, y = pair()                  # element types inferred from RHS
+```
+
+Per-name annotations must agree element-wise with the RHS tuple type;
+mismatches raise `E_TYPE_MISMATCH`. Arity must match exactly.
+
+**Return-position tuples.** A function may declare `Tuple[T1, ..., Tn]`
+as its return type and `return (e1, ..., en)`.
+
+**Equality.** `t == u` is element-wise (`!=` is `not (eq)`). Defined
+when both operands have the same `Ty::Tuple` shape; strings compare by
+value (per M12 BUG-034 fix), floats use IEEE semantics, classes use
+reference equality.
+
+**`str(t)`.** Returns `"(e0, e1, ..., eN)"`. Bare-element form: string
+elements have no surrounding quotes, separator is `", "`. Mirrors the
+informal Python repr but without the type-decoration.
+
+**v0.1 limits.**
+
+- Arity must be in `2..=8`. Smaller (0/1) and larger (9+) tuples are
+  not supported in v0.1.
+- Tuples are immutable after creation: there is no `t.0 = x`. Build a
+  new tuple instead.
+- Tuples are not iterable (no `for x in t:` over a tuple). Use static
+  indexing: `t.0`, `t.1`, ...
+- `len(t)` is not defined (the arity is part of the type).
+- Tuples cannot be `Dict` keys in v0.1 (no `Hash` impl).
+- Pattern matching on tuples in `match`/`case` is deferred.
+
+**Subtyping.** `Tuple[T1, ..., Tn] <: Tuple[U1, ..., Un]` iff
+`Ti <: Ui` pointwise (covariant per §5.2).
+
+### 5.6 Forbidden constructs
 
 The following are compile errors:
 

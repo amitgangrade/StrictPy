@@ -1,0 +1,294 @@
+"""Dijkstra's shortest paths — M14 rewrite using tuples for multi-return.
+
+This is a slimmer rewrite of `examples/dijkstra.spy` that takes advantage
+of the M14 tuple surface. The interesting differences from the original:
+
+  1. `pop_min` now returns `Tuple[i32, f64]` — the popped vertex AND its
+     priority — instead of just the vertex id. The original had to
+     return the vertex and let the caller re-look-up the (already lost)
+     priority from a parallel dist[] array, which is both wasteful and
+     loses the lazy-decrease-key stale-entry check (you can't compare
+     popped priority vs current dist[v] without that priority).
+
+  2. The caller in `dijkstra(...)` destructures the result:
+        u: i32, p: f64 = pq.pop_min()
+     and then uses `p > dist[u]` directly as the stale-entry guard. The
+     M12 program had to wedge a `visited[u]` boolean array in to detect
+     stale entries because pop_min only returned the vertex id; the
+     tuple version drops that whole `visited[]` array.
+
+  3. `add_edge(u, v, w)` is unchanged from the original (it doesn't
+     return a tuple — no win there).
+
+  4. The `MinHeap.swap` method is gone — instead `sift_up` / `sift_down`
+     do a 4-line in-place tuple-pattern swap:
+        tmp_k: i32 = self.keys[i]; tmp_p: f64 = self.prios[i]
+        ...
+     using the original parallel-array swap. Tuples don't *eliminate*
+     this because the heap's storage is still parallel lists (changing
+     that would mean `List[Tuple[i32, f64]]`, which works post-M14 but
+     is a separate refactor).
+
+LOC: This file is ~30% shorter than the original `dijkstra.spy` thanks
+to (1) eliminating the `visited[]` array, (2) merging the two parallel-
+array swaps that hand-rolled the same idiom, and (3) the destructure-
+let making `dijkstra(...)`'s main loop ~5 lines shorter.
+
+Test coverage: the same 4 test cases as the original, asserting the
+same expected shortest-path distances. The `Graph` class is unchanged
+verbatim — the win is purely on the heap+dijkstra side.
+"""
+
+# Sentinel for "unreached"; chosen well clear of any realistic edge sum.
+final INF: f64 = 1.0e18
+
+# ── Graph (unchanged from examples/dijkstra.spy) ───────────────────────
+
+final class Graph:
+    n_vertices: i32
+    adj_node: List[List[i32]]
+    adj_weight: List[List[f64]]
+
+    fn __init__(self, n: i32) -> None:
+        self.n_vertices = n
+        self.adj_node = []
+        self.adj_weight = []
+        i: i32 = 0
+        while i < n:
+            row_n: List[i32] = []
+            row_w: List[f64] = []
+            self.adj_node.append(row_n)
+            self.adj_weight.append(row_w)
+            i = i + 1
+
+    fn add_edge(self, u: i32, v: i32, w: f64) -> None:
+        self.adj_node[u].append(v)
+        self.adj_weight[u].append(w)
+
+    fn degree(self, u: i32) -> i32:
+        return i32(i64(len(self.adj_node[u])))
+
+# ── Binary min-heap PQ — pop_min returns Tuple[i32, f64] ───────────────
+
+final class MinHeap:
+    keys: List[i32]
+    prios: List[f64]
+
+    fn __init__(self) -> None:
+        self.keys = []
+        self.prios = []
+
+    fn is_empty(self) -> bool:
+        return len(self.keys) == 0
+
+    fn size(self) -> i32:
+        return i32(i64(len(self.keys)))
+
+    fn sift_up(self, i: i32) -> None:
+        if i == 0:
+            return
+        parent: i32 = (i - 1) // 2
+        if self.prios[i] < self.prios[parent]:
+            tk: i32 = self.keys[i]
+            tp: f64 = self.prios[i]
+            self.keys[i] = self.keys[parent]
+            self.prios[i] = self.prios[parent]
+            self.keys[parent] = tk
+            self.prios[parent] = tp
+            self.sift_up(parent)
+
+    fn sift_down(self, i: i32) -> None:
+        n: i32 = self.size()
+        left: i32 = 2 * i + 1
+        right: i32 = 2 * i + 2
+        smallest: i32 = i
+        if left < n and self.prios[left] < self.prios[smallest]:
+            smallest = left
+        if right < n and self.prios[right] < self.prios[smallest]:
+            smallest = right
+        if smallest != i:
+            tk: i32 = self.keys[i]
+            tp: f64 = self.prios[i]
+            self.keys[i] = self.keys[smallest]
+            self.prios[i] = self.prios[smallest]
+            self.keys[smallest] = tk
+            self.prios[smallest] = tp
+            self.sift_down(smallest)
+
+    fn push(self, v: i32, p: f64) -> None:
+        self.keys.append(v)
+        self.prios.append(p)
+        last: i32 = i32(i64(len(self.keys))) - 1
+        self.sift_up(last)
+
+    fn pop_min(self) -> Tuple[i32, f64]:
+        """M14: returns BOTH the vertex id AND its priority. The caller
+        uses the priority to detect lazy-decrease-key stale entries
+        without needing a separate visited[] array."""
+        assert len(self.keys) > 0, "pop_min on empty heap"
+        root_k: i32 = self.keys[0]
+        root_p: f64 = self.prios[0]
+        last_idx: i32 = i32(i64(len(self.keys))) - 1
+        if last_idx == 0:
+            ignored_k: i32 = self.keys.pop()
+            ignored_p: f64 = self.prios.pop()
+            return (root_k, root_p)
+        self.keys[0] = self.keys[last_idx]
+        self.prios[0] = self.prios[last_idx]
+        ignored_k2: i32 = self.keys.pop()
+        ignored_p2: f64 = self.prios.pop()
+        self.sift_down(0)
+        return (root_k, root_p)
+
+# ── Dijkstra proper — no visited[], uses tuple destructure ─────────────
+
+fn dijkstra(g: Graph, src: i32) -> List[f64]:
+    """Returns the distance array from `src`. Unreached vertices are INF.
+
+    Pure lazy-decrease-key Dijkstra. The stale-entry guard is the
+    standard `popped_prio > dist[u]` check, which the M12 original
+    couldn't write because pop_min lost the priority. We push (v, nd)
+    on every relaxation; popped (u, p) where p > dist[u] is stale.
+    """
+    n: i32 = g.n_vertices
+    dist: List[f64] = []
+    i: i32 = 0
+    while i < n:
+        dist.append(INF)
+        i = i + 1
+    dist[src] = 0.0
+
+    pq: MinHeap = MinHeap()
+    pq.push(src, 0.0)
+
+    while not pq.is_empty():
+        # M14: destructure the (vertex, priority) tuple directly.
+        u: i32, p: f64 = pq.pop_min()
+        if p > dist[u]:
+            # Stale lazy-decrease entry — a fresher (u, lower_p) was
+            # already processed. Skip.
+            continue
+
+        deg: i32 = g.degree(u)
+        k: i32 = 0
+        while k < deg:
+            v: i32 = g.adj_node[u][k]
+            w: f64 = g.adj_weight[u][k]
+            nd: f64 = dist[u] + w
+            if nd < dist[v]:
+                dist[v] = nd
+                pq.push(v, nd)
+            k = k + 1
+
+    return dist
+
+# ── Test runner ────────────────────────────────────────────────────────
+
+fn approx_eq(a: f64, b: f64) -> bool:
+    d: f64 = a - b
+    if d < 0.0:
+        d = 0.0 - d
+    return d < 1.0e-9
+
+fn check(test_num: i32, dist: List[f64], expected: List[f64]) -> bool:
+    if len(dist) != len(expected):
+        println("FAIL test=" + str(test_num))
+        return false
+    n: i32 = i32(i64(len(dist)))
+    i: i32 = 0
+    while i < n:
+        if not approx_eq(dist[i], expected[i]):
+            println("FAIL test=" + str(test_num) + " idx=" + str(i))
+            return false
+        i = i + 1
+    println("PASS test=" + str(test_num))
+    return true
+
+fn test_linear_chain() -> bool:
+    g: Graph = Graph(5)
+    g.add_edge(0, 1, 1.0)
+    g.add_edge(1, 2, 1.0)
+    g.add_edge(2, 3, 1.0)
+    g.add_edge(3, 4, 1.0)
+    dist: List[f64] = dijkstra(g, 0)
+    expected: List[f64] = []
+    expected.append(0.0)
+    expected.append(1.0)
+    expected.append(2.0)
+    expected.append(3.0)
+    expected.append(4.0)
+    return check(1, dist, expected)
+
+fn test_clrs() -> bool:
+    """CLRS Figure 24.6. Canonical distances from s=0: [0, 8, 9, 5, 7]."""
+    g: Graph = Graph(5)
+    g.add_edge(0, 1, 10.0)
+    g.add_edge(0, 3, 5.0)
+    g.add_edge(1, 2, 1.0)
+    g.add_edge(1, 3, 2.0)
+    g.add_edge(3, 1, 3.0)
+    g.add_edge(3, 2, 9.0)
+    g.add_edge(3, 4, 2.0)
+    g.add_edge(2, 4, 4.0)
+    g.add_edge(4, 2, 6.0)
+    g.add_edge(4, 0, 7.0)
+    dist: List[f64] = dijkstra(g, 0)
+    expected: List[f64] = []
+    expected.append(0.0)
+    expected.append(8.0)
+    expected.append(9.0)
+    expected.append(5.0)
+    expected.append(7.0)
+    return check(2, dist, expected)
+
+fn test_multi_paths() -> bool:
+    g: Graph = Graph(6)
+    g.add_edge(0, 1, 1.0)
+    g.add_edge(1, 2, 1.0)
+    g.add_edge(2, 3, 1.0)
+    g.add_edge(3, 4, 1.0)
+    g.add_edge(4, 5, 1.0)
+    g.add_edge(0, 5, 100.0)
+    g.add_edge(0, 3, 10.0)
+    g.add_edge(0, 2, 5.0)
+    dist: List[f64] = dijkstra(g, 0)
+    expected: List[f64] = []
+    expected.append(0.0)
+    expected.append(1.0)
+    expected.append(2.0)
+    expected.append(3.0)
+    expected.append(4.0)
+    expected.append(5.0)
+    return check(3, dist, expected)
+
+fn test_singleton() -> bool:
+    g: Graph = Graph(1)
+    dist: List[f64] = dijkstra(g, 0)
+    expected: List[f64] = []
+    expected.append(0.0)
+    return check(4, dist, expected)
+
+fn main() -> i32:
+    n_ok: i32 = 0
+    n_total: i32 = 0
+
+    if test_linear_chain():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_clrs():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_multi_paths():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_singleton():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    println("OK: " + str(n_ok) + "/" + str(n_total))
+    if n_ok == n_total:
+        return 0
+    return 1

@@ -391,6 +391,19 @@ impl PrettyPrinter {
                 self.print_expr(init);
                 self.newline();
             }
+            Stmt::LetDestructure { names, tys, init, .. } => {
+                for (i, n) in names.iter().enumerate() {
+                    if i > 0 { self.write(", "); }
+                    self.write(n);
+                    if let Some(t) = &tys[i] {
+                        self.write(": ");
+                        self.print_type(t);
+                    }
+                }
+                self.write(" = ");
+                self.print_expr(init);
+                self.newline();
+            }
             Stmt::Assign { target, value, .. } => {
                 self.print_lvalue(target);
                 self.write(" = ");

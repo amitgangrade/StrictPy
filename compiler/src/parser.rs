@@ -708,19 +708,90 @@ impl Parser {
             }
             // Let-stmt vs assign vs expr-stmt: decide with lookahead.
             // `IDENT : TYPE = EXPR` → Let.
+            // `IDENT : TYPE , IDENT (: TYPE)? (...) = EXPR` → LetDestructure
+            // (annotated form, possibly mixed).  Disambiguation happens after
+            // parsing the first type: if a Comma follows where `=` was
+            // expected, switch tracks.
             TokenKind::Ident(_)
                 if matches!(self.peek_at(1), TokenKind::Colon) =>
             {
                 let name = self.expect_ident()?;
                 self.bump(); // colon
                 let ty = self.parse_type()?;
-                self.expect(&TokenKind::Assign, "'='")?;
-                let init = self.parse_expr()?;
-                Stmt::Let {
-                    name,
-                    ty,
-                    init,
-                    span: merge_spans(start, self.prev_span()),
+                if matches!(self.peek_kind(), TokenKind::Comma) {
+                    // Annotated tuple destructuring: `x: T1, y[: T2], ... = EXPR`.
+                    // M14 tuples. See spec §5.X. The first (name, ty) is
+                    // pushed; the rest are parsed in a loop. Each subsequent
+                    // element may or may not carry an annotation.
+                    let mut names = vec![name];
+                    let mut tys: Vec<Option<Type>> = vec![Some(ty)];
+                    while self.eat(&TokenKind::Comma) {
+                        let n = self.expect_ident()?;
+                        let t = if self.eat(&TokenKind::Colon) {
+                            Some(self.parse_type()?)
+                        } else {
+                            None
+                        };
+                        names.push(n);
+                        tys.push(t);
+                    }
+                    self.expect(&TokenKind::Assign, "'='")?;
+                    let init = self.parse_expr()?;
+                    Stmt::LetDestructure {
+                        names,
+                        tys,
+                        init,
+                        span: merge_spans(start, self.prev_span()),
+                    }
+                } else {
+                    self.expect(&TokenKind::Assign, "'='")?;
+                    let init = self.parse_expr()?;
+                    Stmt::Let {
+                        name,
+                        ty,
+                        init,
+                        span: merge_spans(start, self.prev_span()),
+                    }
+                }
+            }
+            // `IDENT , IDENT (, IDENT)* = EXPR` → unannotated tuple destructure.
+            // Per spec §5.X, types are inferred from the RHS tuple.
+            TokenKind::Ident(_)
+                if matches!(self.peek_at(1), TokenKind::Comma)
+                    && matches!(self.peek_at(2), TokenKind::Ident(_)) =>
+            {
+                // Walk forward to confirm this is `IDENT (, IDENT)+ =`. If we
+                // ever fail to see `IDENT` after a comma we fall through to
+                // the generic expr parser (which would treat `a, b` as an
+                // expression — currently a tuple literal). We re-check the
+                // assignment by snapshotting the position.
+                let snap = self.pos;
+                let first = self.expect_ident()?;
+                let mut names = vec![first];
+                let mut ok = true;
+                while self.eat(&TokenKind::Comma) {
+                    if let TokenKind::Ident(_) = self.peek_kind() {
+                        names.push(self.expect_ident()?);
+                    } else {
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok && matches!(self.peek_kind(), TokenKind::Assign) {
+                    self.bump(); // '='
+                    let init = self.parse_expr()?;
+                    let tys = vec![None; names.len()];
+                    Stmt::LetDestructure {
+                        names,
+                        tys,
+                        init,
+                        span: merge_spans(start, self.prev_span()),
+                    }
+                } else {
+                    // Roll back and fall through.
+                    self.pos = snap;
+                    let expr = self.parse_expr()?;
+                    self.parse_assign_or_expr_tail(expr, start)?
                 }
             }
             _ => {
@@ -1377,7 +1448,21 @@ impl Parser {
                 }
                 TokenKind::Dot => {
                     self.bump();
-                    let name = self.expect_ident()?;
+                    // M14 tuples: allow `t.0`, `t.1`, ... — a bare integer
+                    // literal after `.` is a tuple field index. We materialize
+                    // it as Expr::Attr with `name = "<digit>"` so downstream
+                    // typecheck/IR can dispatch on Ty::Tuple. Negative or
+                    // non-decimal indices aren't legal — `IntLit` already
+                    // excludes the sign (handled by unary minus) and the
+                    // lexer doesn't emit hex here because `.0xff` wouldn't
+                    // parse as a number after `.`.
+                    let name = match self.peek_kind().clone() {
+                        TokenKind::IntLit { value, .. } => {
+                            self.bump();
+                            value.to_string()
+                        }
+                        _ => self.expect_ident()?,
+                    };
                     let span = merge_spans(start, self.prev_span());
                     expr = Expr::Attr {
                         obj: Box::new(expr),
