@@ -1,0 +1,69 @@
+"""stats_demo.spy — exercise the M22 P2C `statistics` module.
+
+Computes mean / median / stdev / variance / sum / quantile / min_max
+on a hardcoded dataset and asserts on known-correct values.  Also
+exercises `mode_str` on a small categorical input.
+
+Hardcoded dataset: [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0].
+Known-correct values (from Python's `statistics`):
+  * mean      = 5.0
+  * median    = 4.5
+  * variance  = 32 / 7 ≈ 4.571428... (sample, n-1 denominator)
+  * stdev     = sqrt(32/7) ≈ 2.138089...
+  * sum       = 40.0
+  * min       = 2.0,  max = 9.0
+  * quantile(0.5) = 4.5 (= median)
+  * quantile(0.25) ~ 3.5
+  * quantile(0.75) ~ 5.5
+
+Tests:
+  * `compiler/tests/stats_demo_runs.rs` — subprocess assertion.
+"""
+
+import statistics
+
+fn main() -> i32:
+    xs: List[f64] = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]
+    println("n=" + str(i64(len(xs))))
+    println("sum=" + str(statistics.sum(xs)))
+    println("mean=" + str(statistics.mean(xs)))
+    println("median=" + str(statistics.median(xs)))
+    println("variance=" + str(statistics.variance(xs)))
+    println("stdev=" + str(statistics.stdev(xs)))
+
+    mm: Tuple[f64, f64] = statistics.min_max(xs)
+    println("min=" + str(mm.0))
+    println("max=" + str(mm.1))
+
+    println("q0.5=" + str(statistics.quantile(xs, 0.5)))
+    println("q0.25=" + str(statistics.quantile(xs, 0.25)))
+    println("q0.75=" + str(statistics.quantile(xs, 0.75)))
+
+    # Mode over a categorical input.  "red" appears 3 times; first
+    # tied count wins, so we don't have a tie-breaking ambiguity.
+    colours: List[str] = ["red", "blue", "red", "green", "red", "blue"]
+    println("mode=" + statistics.mode_str(colours))
+
+    # Sanity asserts on the exact-arithmetic values.  Float comparisons
+    # use a tight tolerance because the inputs are small integers cast
+    # to f64 (no rounding error in the data, only in the computation).
+    if not approx_eq(statistics.mean(xs), 5.0, 0.0000001):
+        println("FAIL: mean")
+        return 1
+    if not approx_eq(statistics.median(xs), 4.5, 0.0000001):
+        println("FAIL: median")
+        return 1
+    if not approx_eq(statistics.sum(xs), 40.0, 0.0000001):
+        println("FAIL: sum")
+        return 1
+    if not approx_eq(statistics.variance(xs), 32.0 / 7.0, 0.000001):
+        println("FAIL: variance")
+        return 1
+    println("OK: all stats correct")
+    return 0
+
+fn approx_eq(a: f64, b: f64, tol: f64) -> bool:
+    d: f64 = a - b
+    if d < 0.0:
+        d = 0.0 - d
+    return d <= tol

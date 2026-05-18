@@ -1518,6 +1518,135 @@ What v0.2 does **not** ship:
   `https://docs.rs/regex/latest/regex/#syntax` — by and large it's a
   superset of `re` minus catastrophic-backtracking constructs.
 
+### 9.15 Module `itertools` (v0.2 — M22 P2C)
+
+Iteration helpers.  All functions take and return concrete `List[T]` /
+`List[Tuple[U, V]]` values; lazy iterators (yielding generators) are
+v0.3 work.
+
+```
+fn range_step(start: i64, stop: i64, step: i64) -> List[i64]
+fn enumerate_str(xs: List[str]) -> List[Tuple[i32, str]]
+fn enumerate_i64(xs: List[i64]) -> List[Tuple[i32, i64]]
+fn zip_str_str(xs: List[str], ys: List[str]) -> List[Tuple[str, str]]
+fn zip_i64_i64(xs: List[i64], ys: List[i64]) -> List[Tuple[i64, i64]]
+fn chain_str(xs: List[str], ys: List[str]) -> List[str]
+fn chain_i64(xs: List[i64], ys: List[i64]) -> List[i64]
+fn take_str(xs: List[str], n: i32) -> List[str]
+fn drop_str(xs: List[str], n: i32) -> List[str]
+fn pairwise_str(xs: List[str]) -> List[Tuple[str, str]]
+fn accumulate_i64(xs: List[i64]) -> List[i64]
+fn flatten_str(xs: List[List[str]]) -> List[str]
+```
+
+Semantics:
+
+* `range_step(start, stop, step)` materialises an `i64` list of values
+  from `start` (inclusive) to `stop` (exclusive) by `step`.  `step`
+  may be negative.  Raises `ValueError` on `step == 0`.  Traps on
+  attempts to materialise more than 1 000 000 elements (a soft guard
+  against user bugs; v0.3 will add lazy iteration).
+* `enumerate_str` / `enumerate_i64` walk `xs` and produce a parallel
+  list of `(i32, T)` tuples — `[(0, xs[0]), (1, xs[1]), ...]`.  The
+  index slot is `i32` to match Python's idiomatic small-index use.
+* `zip_str_str` / `zip_i64_i64` pair elements from two lists,
+  truncating to the shorter input length (no padding, no error on
+  unequal lengths).
+* `chain_str` / `chain_i64` return a new list that is `xs ++ ys`.
+* `take_str(xs, n)` returns the first `min(n, len(xs))` elements;
+  negative `n` is treated as 0.  `drop_str(xs, n)` skips the first
+  `min(n, len(xs))` elements and returns the rest.
+* `pairwise_str(xs)` returns `[(xs[0], xs[1]), (xs[1], xs[2]), ...]`;
+  empty input or single-element input returns the empty list.
+* `accumulate_i64([x0, x1, x2, ...])` returns
+  `[x0, x0+x1, x0+x1+x2, ...]` — Python's `itertools.accumulate`.
+  Empty input returns the empty list.  Overflow wraps (i64 modular
+  arithmetic).
+* `flatten_str(xs)` concatenates a `List[List[str]]` into a single
+  `List[str]`.
+
+Why monomorphic per-type variants (`enumerate_str` vs `enumerate_i64`)?
+Stdlib functions aren't generic in v0.2: the M17 generic-fn worklist
+only sees user-defined `.spy` functions, not stdlib-registered
+NativeFns.  M20b shipped `random.choice_i64/_f64/_str` for the same
+reason.  Generic stdlib functions are a v0.3 milestone ("stdlib +
+M17 integration").  Functions whose element type doesn't affect the
+return shape (`range_step` is always `List[i64]`; `flatten_str` is
+always `List[List[str]] -> List[str]`) ship as single non-generic
+entries.
+
+What v0.2 does **not** ship:
+
+* Lazy iterators / generators.  `itertools.product`, `combinations`,
+  `cycle`, `tee` etc. all require a yielding-iterator type StrictPy
+  doesn't have.  v0.3 work.
+* `f64` element variants of zip / chain / take / drop / pairwise /
+  flatten.  Easy to add — same body, different typecheck signature —
+  but not currently needed by any program.  Scope-down for v0.2.
+* `group_consecutive` and the `accumulate_str` reducer — both touch
+  custom-comparator / reduce machinery that wants closures from
+  user code.  Defer to v0.3.
+
+### 9.16 Module `statistics` (v0.2 — M22 P2C)
+
+Descriptive statistics over `List[f64]` and `List[str]`.  Pure-Rust
+math — no external crate.
+
+```
+fn mean(xs: List[f64]) -> f64
+fn median(xs: List[f64]) -> f64
+fn stdev(xs: List[f64]) -> f64
+fn variance(xs: List[f64]) -> f64
+fn min_max(xs: List[f64]) -> Tuple[f64, f64]
+fn sum(xs: List[f64]) -> f64
+fn quantile(xs: List[f64], q: f64) -> f64
+fn mode_str(xs: List[str]) -> str
+```
+
+Semantics:
+
+* `mean(xs)` returns the arithmetic mean.  Raises `ValueError` on
+  empty input.
+* `median(xs)` returns the median (middle value of a sorted copy; for
+  even-length input, the average of the two centre values).  Raises
+  `ValueError` on empty input.  NaN-tolerant in the sort comparator
+  (NaN is treated as the greatest value).
+* `variance(xs)` and `stdev(xs)` are the **sample** (Bessel-corrected,
+  n-1 denominator) variance and standard deviation.  Both raise
+  `ValueError` when `len(xs) < 2`.  v0.2 does not ship population
+  variants (`pvariance` / `pstdev`); they're a one-line denominator
+  change and slated for v0.3.
+* `min_max(xs)` is a single-pass min+max returning a
+  `Tuple[f64, f64]`.  Equivalent to `(min(xs), max(xs))` but walks the
+  list once.  Raises `ValueError` on empty input.
+* `sum(xs)` is the f64 total.  Empty input returns `0.0` (matches
+  Python's built-in `sum`).  Naïve left-fold; no Kahan compensation
+  (a v0.3 improvement for ill-conditioned inputs).
+* `quantile(xs, q)` returns the `q`-quantile by linear interpolation
+  between order statistics (Python's `statistics.quantiles` "exclusive"
+  method 7).  `q == 0.5` is the median; `q == 0.0` and `q == 1.0` are
+  the min and max respectively.  Raises `ValueError` when `q` is NaN
+  or outside `[0.0, 1.0]`.
+* `mode_str(xs)` returns the most frequent string.  Ties broken by
+  first-seen order (the earlier-seen value wins).  Raises
+  `ValueError` on empty input.  This is `mode_str` (not `mode`)
+  because v0.2 doesn't yet ship the f64 / i64 variants — `mode_i64`
+  is straightforward and slated for v0.3.
+
+What v0.2 does **not** ship:
+
+* `pvariance` / `pstdev` (population denominators) and `harmonic_mean`
+  / `geometric_mean`.  All single-formula changes; deferred to v0.3.
+* `mode_i64` / `mode_f64`.  Same shape as `mode_str` with a
+  different HashMap key type; deferred to v0.3 alongside generic
+  stdlib.
+* `correlation` / `covariance` / `linear_regression`.  Two-input
+  statistics; want a richer typed surface and may benefit from a
+  matrix/dataset type.  v0.3 or later.
+* Online / streaming variants (Welford's algorithm for variance,
+  reservoir sampling).  Need mutable accumulator types that v0.2's
+  builtin-class machinery doesn't yet expose.
+
 ---
 
 ## 10. Compiler Architecture

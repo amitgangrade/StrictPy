@@ -1457,6 +1457,430 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             Ok(if regex::Regex::new(&pattern).is_ok() { 1 } else { 0 })
         }
 
+        // ── M22 P2C: `itertools` module ────────────────────────────────
+        // All handlers treat list element slots as opaque u64 — the
+        // physical layout is identical for str / i64 / f64.  The
+        // monomorphic NativeFn variants exist purely so the typechecker
+        // can pin the element type at the source level.
+        NativeFn::ItertoolsRangeStep => {
+            let start = arg_i64(args, 0);
+            let stop = arg_i64(args, 1);
+            let step = arg_i64(args, 2);
+            if step == 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: "range_step: step must not be zero".into(),
+                });
+            }
+            // Count up the elements before allocating to avoid pathological
+            // growth from a user bug.  Cap at 1M like the prelude `range`.
+            let count: i64 = if (step > 0 && stop > start) || (step < 0 && stop < start) {
+                let diff = (stop - start).abs();
+                let s = step.unsigned_abs() as i64;
+                (diff + s - 1) / s
+            } else {
+                0
+            };
+            if count > 1_000_000 {
+                return Err(VmError::Trap(format!(
+                    "range_step({start}, {stop}, {step}): more than 1M elements"
+                )));
+            }
+            let lst = interp.alloc_list(count as usize);
+            let mut v = start;
+            for _ in 0..count {
+                // SAFETY: lst freshly allocated.
+                unsafe { interp.list_push(lst, v as u64) };
+                v = v.wrapping_add(step);
+            }
+            Ok(lst as u64)
+        }
+        NativeFn::ItertoolsEnumerateStr | NativeFn::ItertoolsEnumerateI64 => {
+            // Walk the source list, build a parallel list of
+            // (i32, element) tuples.  Both NativeFn variants share this
+            // body — the element slot is opaque u64 either way.
+            let src = arg_u64(args, 0) as *const crate::object::ListRepr;
+            if src.is_null() {
+                let lst = interp.alloc_list(0);
+                return Ok(lst as u64);
+            }
+            let elems = unsafe {
+                let len = (*src).length;
+                let data = (*src).data as *const u64;
+                let mut v: Vec<u64> = Vec::with_capacity(len);
+                for j in 0..len {
+                    v.push(std::ptr::read_unaligned(data.add(j)));
+                }
+                v
+            };
+            let out = interp.alloc_list(elems.len());
+            for (idx, e) in elems.iter().enumerate() {
+                // First slot: i32 zero-extended into a u64.  Tuple-load
+                // emits Load(offset) and the IR knows it's i32.
+                let i_slot = (idx as i32 as u32) as u64;
+                let tup = interp.alloc_tuple_obj(&[i_slot, *e]);
+                // SAFETY: out freshly allocated.
+                unsafe { interp.list_push(out, tup as u64) };
+            }
+            Ok(out as u64)
+        }
+        NativeFn::ItertoolsZipStrStr | NativeFn::ItertoolsZipI64I64 => {
+            let a = arg_u64(args, 0) as *const crate::object::ListRepr;
+            let b = arg_u64(args, 1) as *const crate::object::ListRepr;
+            if a.is_null() || b.is_null() {
+                let lst = interp.alloc_list(0);
+                return Ok(lst as u64);
+            }
+            let (la, lb, va, vb) = unsafe {
+                let la = (*a).length;
+                let lb = (*b).length;
+                let da = (*a).data as *const u64;
+                let db = (*b).data as *const u64;
+                let mut va: Vec<u64> = Vec::with_capacity(la);
+                let mut vb: Vec<u64> = Vec::with_capacity(lb);
+                for j in 0..la { va.push(std::ptr::read_unaligned(da.add(j))); }
+                for j in 0..lb { vb.push(std::ptr::read_unaligned(db.add(j))); }
+                (la, lb, va, vb)
+            };
+            let n = la.min(lb);
+            let out = interp.alloc_list(n);
+            for k in 0..n {
+                let tup = interp.alloc_tuple_obj(&[va[k], vb[k]]);
+                unsafe { interp.list_push(out, tup as u64) };
+            }
+            Ok(out as u64)
+        }
+        NativeFn::ItertoolsChainStr | NativeFn::ItertoolsChainI64 => {
+            let a = arg_u64(args, 0) as *const crate::object::ListRepr;
+            let b = arg_u64(args, 1) as *const crate::object::ListRepr;
+            let (va, vb) = unsafe {
+                let mut va: Vec<u64> = Vec::new();
+                let mut vb: Vec<u64> = Vec::new();
+                if !a.is_null() {
+                    let la = (*a).length;
+                    let da = (*a).data as *const u64;
+                    va.reserve(la);
+                    for j in 0..la { va.push(std::ptr::read_unaligned(da.add(j))); }
+                }
+                if !b.is_null() {
+                    let lb = (*b).length;
+                    let db = (*b).data as *const u64;
+                    vb.reserve(lb);
+                    for j in 0..lb { vb.push(std::ptr::read_unaligned(db.add(j))); }
+                }
+                (va, vb)
+            };
+            let out = interp.alloc_list(va.len() + vb.len());
+            for v in va.into_iter().chain(vb.into_iter()) {
+                unsafe { interp.list_push(out, v) };
+            }
+            Ok(out as u64)
+        }
+        NativeFn::ItertoolsTakeStr => {
+            let src = arg_u64(args, 0) as *const crate::object::ListRepr;
+            let n = arg_i64(args, 1);
+            let take = if n <= 0 { 0 } else { n as usize };
+            if src.is_null() {
+                let lst = interp.alloc_list(0);
+                return Ok(lst as u64);
+            }
+            let elems = unsafe {
+                let len = (*src).length;
+                let real = len.min(take);
+                let data = (*src).data as *const u64;
+                let mut v: Vec<u64> = Vec::with_capacity(real);
+                for j in 0..real {
+                    v.push(std::ptr::read_unaligned(data.add(j)));
+                }
+                v
+            };
+            let out = interp.alloc_list(elems.len());
+            for e in elems {
+                unsafe { interp.list_push(out, e) };
+            }
+            Ok(out as u64)
+        }
+        NativeFn::ItertoolsDropStr => {
+            let src = arg_u64(args, 0) as *const crate::object::ListRepr;
+            let n = arg_i64(args, 1);
+            let drop = if n <= 0 { 0 } else { n as usize };
+            if src.is_null() {
+                let lst = interp.alloc_list(0);
+                return Ok(lst as u64);
+            }
+            let elems = unsafe {
+                let len = (*src).length;
+                let start = drop.min(len);
+                let data = (*src).data as *const u64;
+                let mut v: Vec<u64> = Vec::with_capacity(len - start);
+                for j in start..len {
+                    v.push(std::ptr::read_unaligned(data.add(j)));
+                }
+                v
+            };
+            let out = interp.alloc_list(elems.len());
+            for e in elems {
+                unsafe { interp.list_push(out, e) };
+            }
+            Ok(out as u64)
+        }
+        NativeFn::ItertoolsPairwiseStr => {
+            let src = arg_u64(args, 0) as *const crate::object::ListRepr;
+            if src.is_null() {
+                let lst = interp.alloc_list(0);
+                return Ok(lst as u64);
+            }
+            let elems = unsafe {
+                let len = (*src).length;
+                let data = (*src).data as *const u64;
+                let mut v: Vec<u64> = Vec::with_capacity(len);
+                for j in 0..len {
+                    v.push(std::ptr::read_unaligned(data.add(j)));
+                }
+                v
+            };
+            let pair_count = if elems.len() < 2 { 0 } else { elems.len() - 1 };
+            let out = interp.alloc_list(pair_count);
+            for k in 0..pair_count {
+                let tup = interp.alloc_tuple_obj(&[elems[k], elems[k + 1]]);
+                unsafe { interp.list_push(out, tup as u64) };
+            }
+            Ok(out as u64)
+        }
+        NativeFn::ItertoolsAccumulateI64 => {
+            let src = arg_u64(args, 0) as *const crate::object::ListRepr;
+            if src.is_null() {
+                let lst = interp.alloc_list(0);
+                return Ok(lst as u64);
+            }
+            let elems = unsafe {
+                let len = (*src).length;
+                let data = (*src).data as *const u64;
+                let mut v: Vec<i64> = Vec::with_capacity(len);
+                for j in 0..len {
+                    v.push(std::ptr::read_unaligned(data.add(j)) as i64);
+                }
+                v
+            };
+            let out = interp.alloc_list(elems.len());
+            let mut acc: i64 = 0;
+            for (i, x) in elems.iter().enumerate() {
+                if i == 0 {
+                    acc = *x;
+                } else {
+                    acc = acc.wrapping_add(*x);
+                }
+                unsafe { interp.list_push(out, acc as u64) };
+            }
+            Ok(out as u64)
+        }
+        NativeFn::ItertoolsFlattenStr => {
+            // Outer list of List[str] handles.  Each inner pointer is
+            // itself a ListRepr.  We materialise the concatenation as a
+            // fresh List[str].
+            let src = arg_u64(args, 0) as *const crate::object::ListRepr;
+            if src.is_null() {
+                let lst = interp.alloc_list(0);
+                return Ok(lst as u64);
+            }
+            // First collect all the inner-list handles so we can release
+            // the outer borrow before allocating new strings.
+            let inner_handles: Vec<u64> = unsafe {
+                let len = (*src).length;
+                let data = (*src).data as *const u64;
+                (0..len)
+                    .map(|j| std::ptr::read_unaligned(data.add(j)))
+                    .collect()
+            };
+            // Collect all inner element slots up front.
+            let mut total: Vec<u64> = Vec::new();
+            for h in &inner_handles {
+                let inner = *h as *const crate::object::ListRepr;
+                if inner.is_null() {
+                    continue;
+                }
+                unsafe {
+                    let len = (*inner).length;
+                    let data = (*inner).data as *const u64;
+                    total.reserve(len);
+                    for j in 0..len {
+                        total.push(std::ptr::read_unaligned(data.add(j)));
+                    }
+                }
+            }
+            let out = interp.alloc_list(total.len());
+            for v in total {
+                unsafe { interp.list_push(out, v) };
+            }
+            Ok(out as u64)
+        }
+
+        // ── M22 P2C: `statistics` module ───────────────────────────────
+        // All handlers read `List[f64]` (or `List[str]` for mode_str) and
+        // do pure-Rust math.  Empty / short inputs raise ValueError.
+        NativeFn::StatsMean => {
+            let xs = read_list_f64(args, 0)?;
+            if xs.is_empty() {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: "mean: empty input".into(),
+                });
+            }
+            let total: f64 = xs.iter().sum();
+            Ok((total / xs.len() as f64).to_bits())
+        }
+        NativeFn::StatsMedian => {
+            let mut xs = read_list_f64(args, 0)?;
+            if xs.is_empty() {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: "median: empty input".into(),
+                });
+            }
+            // NaN-aware comparator: treats NaN as the greatest (so it
+            // never appears in the middle of a sorted run unless the
+            // entire input is NaN).
+            xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Greater));
+            let n = xs.len();
+            let med = if n % 2 == 1 {
+                xs[n / 2]
+            } else {
+                (xs[n / 2 - 1] + xs[n / 2]) / 2.0
+            };
+            Ok(med.to_bits())
+        }
+        NativeFn::StatsVariance | NativeFn::StatsStdev => {
+            let xs = read_list_f64(args, 0)?;
+            if xs.len() < 2 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "{}: requires at least 2 values (got {})",
+                        if matches!(nf, NativeFn::StatsStdev) { "stdev" } else { "variance" },
+                        xs.len()
+                    ),
+                });
+            }
+            let n = xs.len() as f64;
+            let mean = xs.iter().sum::<f64>() / n;
+            let sq: f64 = xs.iter().map(|v| (v - mean) * (v - mean)).sum();
+            let variance = sq / (n - 1.0);
+            let v = if matches!(nf, NativeFn::StatsStdev) {
+                variance.sqrt()
+            } else {
+                variance
+            };
+            Ok(v.to_bits())
+        }
+        NativeFn::StatsMinMax => {
+            let xs = read_list_f64(args, 0)?;
+            if xs.is_empty() {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: "min_max: empty input".into(),
+                });
+            }
+            let mut mn = xs[0];
+            let mut mx = xs[0];
+            for &v in &xs[1..] {
+                // NaN-tolerant: NaN-input passes through but doesn't
+                // displace a real value.
+                if v < mn {
+                    mn = v;
+                }
+                if v > mx {
+                    mx = v;
+                }
+            }
+            let s0 = mn.to_bits();
+            let s1 = mx.to_bits();
+            let tup = interp.alloc_tuple_obj(&[s0, s1]);
+            Ok(tup as u64)
+        }
+        NativeFn::StatsSum => {
+            let xs = read_list_f64(args, 0)?;
+            let total: f64 = xs.iter().sum();
+            Ok(total.to_bits())
+        }
+        NativeFn::StatsQuantile => {
+            let mut xs = read_list_f64(args, 0)?;
+            let q = arg_f64(args, 1);
+            if xs.is_empty() {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: "quantile: empty input".into(),
+                });
+            }
+            if !(0.0..=1.0).contains(&q) || q.is_nan() {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("quantile: q must be in [0.0, 1.0] (got {q})"),
+                });
+            }
+            xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Greater));
+            let n = xs.len();
+            if n == 1 {
+                return Ok(xs[0].to_bits());
+            }
+            // Linear interpolation between order statistics (Python's
+            // `statistics.quantiles` default = exclusive method 7).
+            let h = q * (n as f64 - 1.0);
+            let lo = h.floor() as usize;
+            let hi = (lo + 1).min(n - 1);
+            let frac = h - lo as f64;
+            let v = xs[lo] + frac * (xs[hi] - xs[lo]);
+            Ok(v.to_bits())
+        }
+        NativeFn::StatsModeStr => {
+            let src = arg_u64(args, 0) as *const crate::object::ListRepr;
+            if src.is_null() {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: "mode_str: empty input".into(),
+                });
+            }
+            let strs: Vec<String> = unsafe {
+                let len = (*src).length;
+                if len == 0 {
+                    return Err(VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: "mode_str: empty input".into(),
+                    });
+                }
+                let data = (*src).data as *const u64;
+                let mut v: Vec<String> = Vec::with_capacity(len);
+                for j in 0..len {
+                    let p = std::ptr::read_unaligned(data.add(j))
+                        as *const crate::object::StringRepr;
+                    v.push(read_str(p));
+                }
+                v
+            };
+            // Count frequencies; remember first-seen index so ties go to
+            // the earliest element (matches Python's `statistics.mode`).
+            use std::collections::HashMap;
+            let mut counts: HashMap<&str, (u32, usize)> = HashMap::new();
+            for (i, s) in strs.iter().enumerate() {
+                let e = counts.entry(s.as_str()).or_insert((0, i));
+                e.0 += 1;
+            }
+            // Pick the highest count; ties broken by first-seen index.
+            let (best, _) = counts
+                .iter()
+                .max_by(|a, b| {
+                    a.1.0
+                        .cmp(&b.1.0)
+                        .then_with(|| b.1.1.cmp(&a.1.1)) // earlier index wins
+                })
+                .map(|(k, v)| (k.to_string(), *v))
+                .ok_or_else(|| VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: "mode_str: empty input".into(),
+                })?;
+            let p = interp.alloc_string(&best);
+            Ok(p as u64)
+        }
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
@@ -2006,6 +2430,27 @@ fn arg_str(args: &[u64], i: usize) -> String {
     // SAFETY: any pointer here came from our heap (or null). `read_str`
     // tolerates both.
     unsafe { read_str(p) }
+}
+
+/// M22 P2C: read a `List[f64]` argument into a `Vec<f64>`.  The slot
+/// contains a u64 bit-pattern of an f64; we reinterpret each slot via
+/// `f64::from_bits`.  Returns an empty Vec for a null pointer.
+fn read_list_f64(args: &[u64], i: usize) -> Result<Vec<f64>, VmError> {
+    let src = arg_u64(args, i) as *const crate::object::ListRepr;
+    if src.is_null() {
+        return Ok(Vec::new());
+    }
+    // SAFETY: src is a heap-allocated ListRepr.
+    unsafe {
+        let len = (*src).length;
+        let data = (*src).data as *const u64;
+        let mut v: Vec<f64> = Vec::with_capacity(len);
+        for j in 0..len {
+            let bits = std::ptr::read_unaligned(data.add(j));
+            v.push(f64::from_bits(bits));
+        }
+        Ok(v)
+    }
 }
 
 /// Sort a `ListRepr` in place. Element bytes are interpreted by `tag`:

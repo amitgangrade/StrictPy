@@ -1,0 +1,115 @@
+"""itertools_demo.spy — exercise the M22 P2C `itertools` module.
+
+Exercises 8 of the 12 functions shipped:
+
+  * `itertools.range_step(start, stop, step) -> List[i64]` — Python's
+    3-arg `range`.
+  * `itertools.enumerate_str(xs)` — index-value pairs.
+  * `itertools.zip_str_str(xs, ys)` — parallel pairs, truncates to the
+    shorter input.
+  * `itertools.chain_str(xs, ys)` — concatenation of two lists.
+  * `itertools.take_str(xs, n)` / `drop_str(xs, n)` — first-N / skip-N.
+  * `itertools.pairwise_str(xs)` — adjacent pairs.
+  * `itertools.accumulate_i64(xs)` — running prefix sum.
+  * `itertools.flatten_str(xs)` — concat of List[List[str]].
+
+Monomorphic per-type variants are the design choice — see the M22 P2C
+report for why generic stdlib is deferred to v0.3.
+
+Tests:
+  * `compiler/tests/itertools_demo_runs.rs` — subprocess assertion.
+"""
+
+import itertools
+
+fn main() -> i32:
+    # ── range_step ────────────────────────────────────────────────
+    # Like Python's range(2, 11, 3) → [2, 5, 8].
+    rng: List[i64] = itertools.range_step(2i64, 11i64, 3i64)
+    println("range_step=" + format_i64_list(rng))
+
+    # ── enumerate_str ─────────────────────────────────────────────
+    names: List[str] = ["alpha", "beta", "gamma"]
+    pairs: List[Tuple[i32, str]] = itertools.enumerate_str(names)
+    n: i64 = i64(len(pairs))
+    i: i64 = 0
+    enum_out: str = "enumerate="
+    while i < n:
+        p: Tuple[i32, str] = pairs[i]
+        enum_out = enum_out + "(" + str(p.0) + "," + p.1 + ")"
+        i = i + 1
+    println(enum_out)
+
+    # ── zip_str_str ───────────────────────────────────────────────
+    a: List[str] = ["a", "b", "c", "d"]
+    b: List[str] = ["1", "2", "3"]
+    zipped: List[Tuple[str, str]] = itertools.zip_str_str(a, b)
+    zn: i64 = i64(len(zipped))
+    zi: i64 = 0
+    zip_out: str = "zip="
+    while zi < zn:
+        z: Tuple[str, str] = zipped[zi]
+        zip_out = zip_out + "(" + z.0 + "," + z.1 + ")"
+        zi = zi + 1
+    println(zip_out)
+
+    # ── chain_str ─────────────────────────────────────────────────
+    c1: List[str] = ["x", "y"]
+    c2: List[str] = ["z", "w"]
+    chained: List[str] = itertools.chain_str(c1, c2)
+    println("chain=" + format_str_list(chained))
+
+    # ── take_str / drop_str ───────────────────────────────────────
+    fruits: List[str] = ["apple", "banana", "cherry", "date", "elder"]
+    head: List[str] = itertools.take_str(fruits, 2)
+    tail: List[str] = itertools.drop_str(fruits, 3)
+    println("take=" + format_str_list(head))
+    println("drop=" + format_str_list(tail))
+
+    # ── pairwise_str ──────────────────────────────────────────────
+    seq: List[str] = ["a", "b", "c", "d"]
+    pw: List[Tuple[str, str]] = itertools.pairwise_str(seq)
+    pn: i64 = i64(len(pw))
+    pi: i64 = 0
+    pw_out: str = "pairwise="
+    while pi < pn:
+        q: Tuple[str, str] = pw[pi]
+        pw_out = pw_out + "(" + q.0 + "," + q.1 + ")"
+        pi = pi + 1
+    println(pw_out)
+
+    # ── accumulate_i64 ────────────────────────────────────────────
+    nums: List[i64] = [1i64, 2i64, 3i64, 4i64]
+    sums: List[i64] = itertools.accumulate_i64(nums)
+    println("accumulate=" + format_i64_list(sums))
+
+    # ── flatten_str ───────────────────────────────────────────────
+    nested: List[List[str]] = [["a", "b"], ["c"], ["d", "e", "f"]]
+    flat: List[str] = itertools.flatten_str(nested)
+    println("flatten=" + format_str_list(flat))
+
+    return 0
+
+fn format_i64_list(xs: List[i64]) -> str:
+    n: i64 = i64(len(xs))
+    i: i64 = 0
+    out: str = "["
+    while i < n:
+        if i > 0i64:
+            out = out + ","
+        out = out + str(xs[i])
+        i = i + 1
+    out = out + "]"
+    return out
+
+fn format_str_list(xs: List[str]) -> str:
+    n: i64 = i64(len(xs))
+    i: i64 = 0
+    out: str = "["
+    while i < n:
+        if i > 0i64:
+            out = out + ","
+        out = out + xs[i]
+        i = i + 1
+    out = out + "]"
+    return out

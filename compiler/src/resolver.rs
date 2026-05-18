@@ -1095,6 +1095,238 @@ impl Resolver {
             ],
         };
         self.stdlib_modules.insert("re".into(), re_mod);
+
+        // ── M22 P2C: `itertools` module ────────────────────────────────
+        // Iteration helpers.  Stdlib functions aren't generic in v0.2 —
+        // the M17 generic-fn worklist only sees user-defined .spy fns —
+        // so we ship monomorphic per-element-type variants the same way
+        // M20b's `random.choice_*` does.  Per-type duplication is
+        // verbose but consistent.  Generic stdlib is a v0.3 milestone
+        // ("stdlib + M17 integration").
+        const ITERTOOLS_RANGE_STEP: u32       = 310;
+        const ITERTOOLS_ENUMERATE_STR: u32    = 311;
+        const ITERTOOLS_ENUMERATE_I64: u32    = 312;
+        const ITERTOOLS_ZIP_STR_STR: u32      = 313;
+        const ITERTOOLS_ZIP_I64_I64: u32      = 314;
+        const ITERTOOLS_CHAIN_STR: u32        = 315;
+        const ITERTOOLS_CHAIN_I64: u32        = 316;
+        const ITERTOOLS_TAKE_STR: u32         = 317;
+        const ITERTOOLS_DROP_STR: u32         = 318;
+        const ITERTOOLS_PAIRWISE_STR: u32     = 319;
+        const ITERTOOLS_ACCUMULATE_I64: u32   = 320;
+        const ITERTOOLS_FLATTEN_STR: u32      = 321;
+
+        let tuple_i32_str_ty = Ty::Tuple(vec![i32_ty.clone(), str_ty.clone()]);
+        let tuple_i32_i64_ty = Ty::Tuple(vec![i32_ty.clone(), i64_ty.clone()]);
+        let tuple_str_str_ty = Ty::Tuple(vec![str_ty.clone(), str_ty.clone()]);
+        let tuple_i64_i64_ty = Ty::Tuple(vec![i64_ty.clone(), i64_ty.clone()]);
+        let list_enum_str_ty = Ty::Generic {
+            base: TypeCtor::List,
+            args: vec![tuple_i32_str_ty.clone()],
+        };
+        let list_enum_i64_ty = Ty::Generic {
+            base: TypeCtor::List,
+            args: vec![tuple_i32_i64_ty.clone()],
+        };
+        let list_zip_str_str_ty = Ty::Generic {
+            base: TypeCtor::List,
+            args: vec![tuple_str_str_ty.clone()],
+        };
+        let list_zip_i64_i64_ty = Ty::Generic {
+            base: TypeCtor::List,
+            args: vec![tuple_i64_i64_ty.clone()],
+        };
+        let list_i64_ty_it = Ty::Generic {
+            base: TypeCtor::List,
+            args: vec![i64_ty.clone()],
+        };
+        let list_str_ty_it = Ty::Generic {
+            base: TypeCtor::List,
+            args: vec![str_ty.clone()],
+        };
+        let list_list_str_ty = Ty::Generic {
+            base: TypeCtor::List,
+            args: vec![list_str_ty_it.clone()],
+        };
+
+        let itertools_mod = StdlibModule {
+            name: "itertools".into(),
+            items: vec![
+                StdlibItem {
+                    name: "range_step".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![i64_ty.clone(), i64_ty.clone(), i64_ty.clone()],
+                        list_i64_ty_it.clone(),
+                    ),
+                    native_id: ITERTOOLS_RANGE_STEP,
+                },
+                StdlibItem {
+                    name: "enumerate_str".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![list_str_ty_it.clone()], list_enum_str_ty.clone()),
+                    native_id: ITERTOOLS_ENUMERATE_STR,
+                },
+                StdlibItem {
+                    name: "enumerate_i64".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![list_i64_ty_it.clone()], list_enum_i64_ty.clone()),
+                    native_id: ITERTOOLS_ENUMERATE_I64,
+                },
+                StdlibItem {
+                    name: "zip_str_str".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![list_str_ty_it.clone(), list_str_ty_it.clone()],
+                        list_zip_str_str_ty.clone(),
+                    ),
+                    native_id: ITERTOOLS_ZIP_STR_STR,
+                },
+                StdlibItem {
+                    name: "zip_i64_i64".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![list_i64_ty_it.clone(), list_i64_ty_it.clone()],
+                        list_zip_i64_i64_ty.clone(),
+                    ),
+                    native_id: ITERTOOLS_ZIP_I64_I64,
+                },
+                StdlibItem {
+                    name: "chain_str".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![list_str_ty_it.clone(), list_str_ty_it.clone()],
+                        list_str_ty_it.clone(),
+                    ),
+                    native_id: ITERTOOLS_CHAIN_STR,
+                },
+                StdlibItem {
+                    name: "chain_i64".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![list_i64_ty_it.clone(), list_i64_ty_it.clone()],
+                        list_i64_ty_it.clone(),
+                    ),
+                    native_id: ITERTOOLS_CHAIN_I64,
+                },
+                StdlibItem {
+                    name: "take_str".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![list_str_ty_it.clone(), i32_ty.clone()],
+                        list_str_ty_it.clone(),
+                    ),
+                    native_id: ITERTOOLS_TAKE_STR,
+                },
+                StdlibItem {
+                    name: "drop_str".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![list_str_ty_it.clone(), i32_ty.clone()],
+                        list_str_ty_it.clone(),
+                    ),
+                    native_id: ITERTOOLS_DROP_STR,
+                },
+                StdlibItem {
+                    name: "pairwise_str".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![list_str_ty_it.clone()],
+                        list_zip_str_str_ty.clone(),
+                    ),
+                    native_id: ITERTOOLS_PAIRWISE_STR,
+                },
+                StdlibItem {
+                    name: "accumulate_i64".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![list_i64_ty_it.clone()], list_i64_ty_it.clone()),
+                    native_id: ITERTOOLS_ACCUMULATE_I64,
+                },
+                StdlibItem {
+                    name: "flatten_str".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![list_list_str_ty.clone()], list_str_ty_it.clone()),
+                    native_id: ITERTOOLS_FLATTEN_STR,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("itertools".into(), itertools_mod);
+
+        // ── M22 P2C: `statistics` module ───────────────────────────────
+        // Descriptive stats over `List[f64]`.  Pure Rust f64 arithmetic;
+        // empty/short inputs raise ValueError via M15 machinery.
+        const STATS_MEAN: u32      = 322;
+        const STATS_MEDIAN: u32    = 323;
+        const STATS_STDEV: u32     = 324;
+        const STATS_VARIANCE: u32  = 325;
+        const STATS_MIN_MAX: u32   = 326;
+        const STATS_SUM: u32       = 327;
+        const STATS_QUANTILE: u32  = 328;
+        const STATS_MODE_STR: u32  = 329;
+
+        let list_f64_ty_stat = Ty::Generic {
+            base: TypeCtor::List,
+            args: vec![f64_ty.clone()],
+        };
+        let tuple_f64_f64_ty = Ty::Tuple(vec![f64_ty.clone(), f64_ty.clone()]);
+
+        let statistics_mod = StdlibModule {
+            name: "statistics".into(),
+            items: vec![
+                StdlibItem {
+                    name: "mean".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![list_f64_ty_stat.clone()], f64_ty.clone()),
+                    native_id: STATS_MEAN,
+                },
+                StdlibItem {
+                    name: "median".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![list_f64_ty_stat.clone()], f64_ty.clone()),
+                    native_id: STATS_MEDIAN,
+                },
+                StdlibItem {
+                    name: "stdev".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![list_f64_ty_stat.clone()], f64_ty.clone()),
+                    native_id: STATS_STDEV,
+                },
+                StdlibItem {
+                    name: "variance".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![list_f64_ty_stat.clone()], f64_ty.clone()),
+                    native_id: STATS_VARIANCE,
+                },
+                StdlibItem {
+                    name: "min_max".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![list_f64_ty_stat.clone()], tuple_f64_f64_ty.clone()),
+                    native_id: STATS_MIN_MAX,
+                },
+                StdlibItem {
+                    name: "sum".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![list_f64_ty_stat.clone()], f64_ty.clone()),
+                    native_id: STATS_SUM,
+                },
+                StdlibItem {
+                    name: "quantile".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![list_f64_ty_stat.clone(), f64_ty.clone()],
+                        f64_ty.clone(),
+                    ),
+                    native_id: STATS_QUANTILE,
+                },
+                StdlibItem {
+                    name: "mode_str".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![list_str_ty_it.clone()], str_ty.clone()),
+                    native_id: STATS_MODE_STR,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("statistics".into(), statistics_mod);
     }
 
     // ─────────────────────────────────────────────────────────────────────

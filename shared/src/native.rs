@@ -340,6 +340,86 @@ pub enum NativeFn {
     /// compiles.  Doesn't raise.
     ReIsValid  = 226,
 
+    // ── 310–321: `itertools` module (M22 P2C) ───────────────────────────
+    // Iteration helpers. Stdlib functions aren't generic in v0.2 (the M17
+    // generic-fn worklist only sees user-defined .spy fns), so we ship
+    // monomorphic per-element-type variants the same way M20b's
+    // `random.choice_i64/_f64/_str` does. Functions whose element type
+    // doesn't influence the IR layout (e.g. `range_step` always returns
+    // `List[i64]`) ship as a single non-generic variant.
+    //
+    // The runtime data layout for List/Tuple is type-erased u64 slots, so
+    // many of these handlers are physically identical — the variants exist
+    // only to pin static typecheck signatures and to allow the IR to emit
+    // `Load(offset)` against the right shape.
+    /// `itertools.range_step(start, stop, step) -> List[i64]` — like
+    /// Python's three-arg `range()`.  Raises `ValueError` on `step == 0`.
+    ItertoolsRangeStep      = 310,
+    /// `itertools.enumerate_str(xs: List[str]) -> List[Tuple[i32, str]]`.
+    /// Returns `[(0, xs[0]), (1, xs[1]), ...]`.
+    ItertoolsEnumerateStr   = 311,
+    /// `itertools.enumerate_i64(xs: List[i64]) -> List[Tuple[i32, i64]]`.
+    ItertoolsEnumerateI64   = 312,
+    /// `itertools.zip_str_str(xs: List[str], ys: List[str]) -> List[Tuple[str, str]]`.
+    /// Truncates to the shorter input — like Python's `zip()`.
+    ItertoolsZipStrStr      = 313,
+    /// `itertools.zip_i64_i64(xs: List[i64], ys: List[i64]) -> List[Tuple[i64, i64]]`.
+    ItertoolsZipI64I64      = 314,
+    /// `itertools.chain_str(xs: List[str], ys: List[str]) -> List[str]`.
+    ItertoolsChainStr       = 315,
+    /// `itertools.chain_i64(xs: List[i64], ys: List[i64]) -> List[i64]`.
+    ItertoolsChainI64       = 316,
+    /// `itertools.take_str(xs: List[str], n: i32) -> List[str]` — first N
+    /// elements (clamped to length).  Two variants for str/i64 because the
+    /// typecheck signature differs; runtime is identical.
+    ItertoolsTakeStr        = 317,
+    /// `itertools.drop_str(xs: List[str], n: i32) -> List[str]` — skip
+    /// first N elements.
+    ItertoolsDropStr        = 318,
+    /// `itertools.pairwise_str(xs: List[str]) -> List[Tuple[str, str]]` —
+    /// adjacent pairs.  `[a, b, c]` → `[(a, b), (b, c)]`.
+    ItertoolsPairwiseStr    = 319,
+    /// `itertools.accumulate_i64(xs: List[i64]) -> List[i64]` — running
+    /// prefix sum. `[1, 2, 3]` → `[1, 3, 6]`.  Empty input → empty output.
+    ItertoolsAccumulateI64  = 320,
+    /// `itertools.flatten_str(xs: List[List[str]]) -> List[str]` — list
+    /// concatenation.  v0.2 only ships the str shape; i64/f64 variants
+    /// are v0.3 work.
+    ItertoolsFlattenStr     = 321,
+
+    // ── 322–329: `statistics` module (M22 P2C) ──────────────────────────
+    // Descriptive statistics over `List[f64]`.  All math is plain Rust
+    // f64 arithmetic — no external crate.  Empty/short input raises
+    // `ValueError` via the M15 UncaughtException path.
+    /// `statistics.mean(xs: List[f64]) -> f64` — arithmetic mean.
+    /// Raises `ValueError` on empty input.
+    StatsMean      = 322,
+    /// `statistics.median(xs: List[f64]) -> f64` — middle value of a
+    /// sorted copy; for even-length input, average of the two centre
+    /// values.  Raises `ValueError` on empty input.
+    StatsMedian    = 323,
+    /// `statistics.stdev(xs: List[f64]) -> f64` — sample standard
+    /// deviation (n-1 denominator, Bessel-corrected).  Raises
+    /// `ValueError` when `len(xs) < 2`.
+    StatsStdev     = 324,
+    /// `statistics.variance(xs: List[f64]) -> f64` — sample variance
+    /// (n-1 denominator).  Raises `ValueError` when `len(xs) < 2`.
+    StatsVariance  = 325,
+    /// `statistics.min_max(xs: List[f64]) -> Tuple[f64, f64]` — single
+    /// pass.  Raises `ValueError` on empty input.
+    StatsMinMax    = 326,
+    /// `statistics.sum(xs: List[f64]) -> f64` — total.  Empty input
+    /// returns 0.0 (matches Python's `sum`).
+    StatsSum       = 327,
+    /// `statistics.quantile(xs: List[f64], q: f64) -> f64` — linear-
+    /// interpolation quantile.  `q` is clamped to `[0.0, 1.0]`; values
+    /// outside that range raise `ValueError`.  `q == 0.5` is the median.
+    StatsQuantile  = 328,
+    /// `statistics.mode_str(xs: List[str]) -> str` — most frequent
+    /// element.  Ties broken by first-seen order.  Raises `ValueError`
+    /// on empty input.
+    StatsModeStr   = 329,
+
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
     /// encounters. The VM treats this as a runtime error.
@@ -501,6 +581,28 @@ impl NativeFn {
             224 => Some(Self::ReReplace),
             225 => Some(Self::ReSplit),
             226 => Some(Self::ReIsValid),
+            // M22 P2C: itertools module.
+            310 => Some(Self::ItertoolsRangeStep),
+            311 => Some(Self::ItertoolsEnumerateStr),
+            312 => Some(Self::ItertoolsEnumerateI64),
+            313 => Some(Self::ItertoolsZipStrStr),
+            314 => Some(Self::ItertoolsZipI64I64),
+            315 => Some(Self::ItertoolsChainStr),
+            316 => Some(Self::ItertoolsChainI64),
+            317 => Some(Self::ItertoolsTakeStr),
+            318 => Some(Self::ItertoolsDropStr),
+            319 => Some(Self::ItertoolsPairwiseStr),
+            320 => Some(Self::ItertoolsAccumulateI64),
+            321 => Some(Self::ItertoolsFlattenStr),
+            // M22 P2C: statistics module.
+            322 => Some(Self::StatsMean),
+            323 => Some(Self::StatsMedian),
+            324 => Some(Self::StatsStdev),
+            325 => Some(Self::StatsVariance),
+            326 => Some(Self::StatsMinMax),
+            327 => Some(Self::StatsSum),
+            328 => Some(Self::StatsQuantile),
+            329 => Some(Self::StatsModeStr),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }
