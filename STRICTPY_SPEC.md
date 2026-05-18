@@ -1842,6 +1842,132 @@ What v0.2 does **not** ship:
 * `pbkdf2_hmac` / `scrypt` / `argon2`.  Password-hashing primitives
   are deferred to v0.3.
 
+### 9.21 Module `argparse` (v0.2 — M22 P2A)
+
+Declarative CLI argument parsing.  Builder-style API for the common
+"flag + positional + option" shape.  Replaces the hand-walked
+`sys.argv` parsing in pre-M22 example programs.
+
+```
+fn new(prog: str) -> Dict[str, str]
+fn add_flag(p: Dict[str, str], name: str, default: bool) -> None
+fn add_arg(p: Dict[str, str], name: str) -> None
+fn add_opt(p: Dict[str, str], name: str, default: str) -> None
+fn parse(p: Dict[str, str], argv: List[str]) -> Dict[str, str]
+fn get_flag(a: Dict[str, str], name: str) -> bool
+fn get_arg(a: Dict[str, str], name: str) -> str
+fn get_opt(a: Dict[str, str], name: str) -> str
+fn help_text(p: Dict[str, str]) -> str
+fn help_requested(argv: List[str]) -> bool
+```
+
+Semantics:
+
+* `new(prog)` returns an opaque parser handle, internally a
+  `Dict[str, str]`.  v0.2 lacks stdlib-class registration (deferred
+  to v0.3), so the dict-of-strings shim stands in for a typed
+  `ArgParser`.
+* `add_flag(p, name, default)` registers a boolean flag.  Both
+  `--verbose` and short forms (`-v`) are accepted at parse time.
+* `add_arg(p, name)` registers a required positional in declaration
+  order.  No default values for positionals in v0.2.
+* `add_opt(p, name, default)` registers `--key VALUE`.  Both
+  `--key value` and `--key=value` parse correctly.
+* `parse(p, argv)` walks `argv[1..]` (skipping the `.spyc` path at
+  index 0). Returns the populated args dict.  Raises `ValueError`
+  on unknown flag/option, option-without-value, missing required
+  positional, or unexpected positional.
+* `get_flag` / `get_arg` / `get_opt` look up values by name, returning
+  the registered default if absent.
+* `help_text(p)` returns the multi-line `usage: <prog> [options]
+  <positionals>` block plus per-option lines.
+* `help_requested(argv)` is true iff `argv` contains `-h` or `--help`.
+  Idiomatic use: check before `parse`, print `help_text(p)`, then
+  `sys.exit(0)`.
+
+What v0.2 does **not** ship: typed `ArgParser`/`Args` sealed classes
+(v0.3 stdlib-class work); subparsers/subcommands; type coercion
+(`type=int`); variadic positionals; mutually-exclusive groups;
+per-arg help strings.
+
+### 9.22 Module `collections` (v0.2 — M22 P2A)
+
+Counter (multiset) and deque (double-ended queue), built on the M7
+`Dict[K, V]` and `List[T]` heap types.  Both are typed aliases:
+Counter is `Dict[str, i64]`, Deque is `List[i64]`.
+
+```
+# Counter — multiset over str keys.
+fn counter_new() -> Dict[str, i64]
+fn counter_increment(c: Dict[str, i64], key: str) -> None
+fn counter_add(c: Dict[str, i64], key: str, n: i64) -> None
+fn counter_get(c: Dict[str, i64], key: str) -> i64
+fn counter_top_keys(c: Dict[str, i64], n: i32) -> List[str]
+
+# Deque — double-ended queue over i64.
+fn deque_new() -> List[i64]
+fn deque_push_back(d: List[i64], v: i64) -> None
+fn deque_pop_front(d: List[i64]) -> i64
+fn deque_len(d: List[i64]) -> i32
+fn deque_is_empty(d: List[i64]) -> bool
+```
+
+Semantics:
+
+* `counter_get` returns `0` for absent keys (Python `Counter.get`
+  parity).
+* `counter_top_keys(c, n)` returns up to `n` keys with the highest
+  counts, descending; alphabetical tie-break.  `n <= 0` returns the
+  empty list.
+* `deque_pop_front` raises `IndexError` on empty.  v0.2 uses an O(n)
+  shift over the underlying `List[i64]`; a real ring-buffer deque is
+  v0.3 work.
+
+What v0.2 does **not** ship: generic `Counter[K]` / `Deque[T]`
+(deferred to v0.3 generic-class story); `Counter.subtract` /
+`update` / `elements`; `defaultdict` (use `counter_get`'s "default 0"
+or wrap a `Dict` manually).
+
+### 9.23 Module `csv` (v0.2 — M22 P2A)
+
+RFC 4180-ish CSV parser and writer.  Quoting rules match Python's
+`csv` module with the default dialect (`,` separator, `"` quote
+char, `\n` row terminator).
+
+```
+fn parse_line(line: str) -> List[str]
+fn parse(text: str) -> List[List[str]]
+fn read_file(path: str) -> List[List[str]]
+fn write_file(path: str, rows: List[List[str]]) -> None
+fn escape(field: str) -> str
+fn format_row(row: List[str]) -> str
+```
+
+Semantics:
+
+* `parse_line` parses one CSV line; the input must not contain a
+  trailing newline.  Embedded newlines inside quoted fields are
+  not honoured — use `parse` for that.
+* `parse` parses multi-line CSV.  Quoted fields may span multiple
+  lines.  Recognises both `\n` and `\r\n` as row separators outside
+  quotes.
+* `read_file(path)` reads UTF-8 text and runs `parse`.  Raises
+  `IOError` on filesystem errors.
+* `write_file(path, rows)` writes CSV with a single trailing `\n`
+  after the last row.  Raises `IOError` on filesystem errors.
+* `escape(s)` quotes `s` (doubling internal `"`) iff it contains
+  `,`, `"`, `\n`, or `\r`; otherwise returns `s` unchanged.
+* `format_row(row)` joins fields with `,` after per-field `escape`.
+
+Quoting (Python default dialect): fields starting with `"` are
+quoted (opening quote stripped); `""` inside a quoted field is a
+literal `"`; unquoted fields cannot contain `,`, `\n`, or `\r`.
+
+What v0.2 does **not** ship: dialect configuration; `DictReader` /
+`DictWriter` (build on top of `parse` + index lookups); streaming
+reading (`parse` buffers the whole file); `QUOTE_ALL` /
+`QUOTE_NONNUMERIC` policies.
+
 ---
 
 ## 10. Compiler Architecture

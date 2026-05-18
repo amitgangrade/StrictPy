@@ -1,0 +1,81 @@
+"""word_count.spy — top-N word frequencies via `collections.counter_*` (M22 P2A).
+
+Replaces M10's hand-rolled wordcount with the M22 Counter stdlib.
+Reads lines from stdin until a `:END:` sentinel (the v0.2 `io.input()`
+raises on EOF rather than returning none, so user code uses an
+explicit sentinel for test determinism — same trick `minigrep.spy`
+uses).  Counts case-folded whitespace-separated words and prints the
+top 10 by descending count.
+
+Usage:
+    echo "the cat sat on the mat\\nthe cat\\n:END:" | spy word_count.spyc
+
+Tests:
+  * `compiler/tests/word_count_runs.rs` — subprocess assertion that
+    a small canned input produces the expected ranked output.
+"""
+
+import io
+import collections
+
+
+fn read_lines() -> List[str]:
+    lines: List[str] = []
+    while true:
+        line: str = io.input()
+        if line == ":END:":
+            return lines
+        lines.append(line)
+    return lines
+
+
+fn lowercase(s: str) -> str:
+    # v0.2 stdlib doesn't have `str.lower()`; we hand-fold ASCII so the
+    # test is portable.  Unicode case-folding is v0.3 (would need a real
+    # case-mapping table).
+    #
+    # `s[i]` returns u32, but `char(...)` is declared on i32 — cast on
+    # the way out.  This is the same pattern `examples/regex.spy` uses.
+    out: str = ""
+    n: i32 = i32(i64(len(s)))
+    i: i32 = 0i32
+    while i < n:
+        cp: i32 = i32(i64(s[i]))
+        if cp >= 65i32 and cp <= 90i32:
+            cp = cp + 32i32
+        out = out + str(char(cp))
+        i = i + 1i32
+    return out
+
+
+fn count_words(lines: List[str], counter: Dict[str, i64]) -> None:
+    n: i32 = i32(i64(len(lines)))
+    i: i32 = 0i32
+    while i < n:
+        # Split on whitespace via str.split on " " — this won't fold
+        # tabs into spaces, but for the canned test input it's enough.
+        parts: List[str] = lines[i].split(" ")
+        m: i32 = i32(i64(len(parts)))
+        j: i32 = 0i32
+        while j < m:
+            w: str = lowercase(parts[j])
+            if i64(len(w)) > 0i64:
+                collections.counter_increment(counter, w)
+            j = j + 1i32
+        i = i + 1i32
+    return
+
+
+fn main() -> i32:
+    counter: Dict[str, i64] = collections.counter_new()
+    lines: List[str] = read_lines()
+    count_words(lines, counter)
+    top: List[str] = collections.counter_top_keys(counter, 10i32)
+    n: i32 = i32(i64(len(top)))
+    i: i32 = 0i32
+    while i < n:
+        k: str = top[i]
+        v: i64 = collections.counter_get(counter, k)
+        println(k + ": " + str(v))
+        i = i + 1i32
+    return 0

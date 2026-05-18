@@ -2202,6 +2202,623 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             Ok(p as u64)
         }
 
+        // ── M22 P2A: `argparse` module ─────────────────────────────────
+        // Storage convention:
+        //   parser["_prog_"]   = program name
+        //   parser["_order_"]  = "\u{1F}"-separated positional names
+        //   parser["flag:NAME"] = "true" | "false" (default)
+        //   parser["opt:NAME"]  = default value
+        //   parser["arg:NAME"]  = "" (just records the declaration)
+        // The args dict (returned by `parse`) uses the same prefixed
+        // keys, with values being the *resolved* runtime value (so
+        // get_flag reads "flag:NAME" and parses bool).
+        //
+        // Why a dict-of-strings instead of a sealed `ArgParser` /
+        // `Args` class:  v0.2 lacks stdlib-class registration (M20c
+        // flags this as v0.3 work).  A dict-of-strings is the
+        // mechanical-but-portable scope-down.
+        NativeFn::ArgparseNew => {
+            // Build the parser dict, seed with `_prog_` and an empty
+            // `_order_` slot.
+            let prog = arg_str(args, 0);
+            let dict = interp.alloc_dict(0);
+            argparse_dict_set(interp, dict, "_prog_", &prog)?;
+            argparse_dict_set(interp, dict, "_order_", "")?;
+            Ok(dict as u64)
+        }
+        NativeFn::ArgparseAddFlag => {
+            let dict = arg_u64(args, 0) as *mut DictRepr;
+            let name = arg_str(args, 1);
+            let default = arg_u64(args, 2) != 0;
+            argparse_check_name(&name)?;
+            let key = format!("flag:{}", name);
+            argparse_dict_set(interp, dict, &key, if default { "true" } else { "false" })?;
+            Ok(0)
+        }
+        NativeFn::ArgparseAddArg => {
+            let dict = arg_u64(args, 0) as *mut DictRepr;
+            let name = arg_str(args, 1);
+            argparse_check_name(&name)?;
+            // Append to the `_order_` list, separated by US (0x1F).
+            let prev_order = argparse_dict_get(interp, dict, "_order_")?
+                .unwrap_or_default();
+            let new_order = if prev_order.is_empty() {
+                name.clone()
+            } else {
+                format!("{}\u{1F}{}", prev_order, name)
+            };
+            argparse_dict_set(interp, dict, "_order_", &new_order)?;
+            argparse_dict_set(interp, dict, &format!("arg:{}", name), "")?;
+            Ok(0)
+        }
+        NativeFn::ArgparseAddOpt => {
+            let dict = arg_u64(args, 0) as *mut DictRepr;
+            let name = arg_str(args, 1);
+            let default = arg_str(args, 2);
+            argparse_check_name(&name)?;
+            argparse_dict_set(interp, dict, &format!("opt:{}", name), &default)?;
+            Ok(0)
+        }
+        NativeFn::ArgparseParse => {
+            let parser = arg_u64(args, 0) as *mut DictRepr;
+            let argv = arg_u64(args, 1) as *const crate::object::ListRepr;
+            if parser.is_null() || argv.is_null() {
+                return Err(VmError::UncaughtException {
+                    type_name: "NullPointerError".into(),
+                    message: "argparse.parse: null parser or argv".into(),
+                });
+            }
+            // Collect argv into a Vec<String>.
+            let raw_argv: Vec<String> = unsafe {
+                let n = (*argv).length;
+                let data = (*argv).data as *const u64;
+                (0..n)
+                    .map(|i| {
+                        let sp = std::ptr::read_unaligned(data.add(i))
+                            as *const StringRepr;
+                        read_str(sp)
+                    })
+                    .collect()
+            };
+            // Collect parser declarations into a fresh HashMap so we
+            // don't hold the dict lock while we allocate the result.
+            let parser_handle = unsafe { (*parser).handle } as usize;
+            let parser_decls: std::collections::HashMap<String, String> =
+                with_dict_slot(interp, parser_handle, |slot| {
+                    slot.data
+                        .iter()
+                        .map(|(k, v)| {
+                            // SAFETY: values we store in the argparse
+                            // dict are always valid StringRepr pointers
+                            // (set via `argparse_dict_set` → alloc_string).
+                            let s = unsafe { read_str(*v as *const StringRepr) };
+                            (k.clone(), s)
+                        })
+                        .collect()
+                })?;
+
+            let order_field = parser_decls
+                .get("_order_")
+                .cloned()
+                .unwrap_or_default();
+            let positional_names: Vec<String> = if order_field.is_empty() {
+                Vec::new()
+            } else {
+                order_field.split('\u{1F}').map(|s| s.to_string()).collect()
+            };
+
+            // Allocate the result args dict and seed with defaults so
+            // get_flag / get_opt see them when the user doesn't pass
+            // an override.
+            let result = interp.alloc_dict(0);
+            for (k, v) in &parser_decls {
+                if k.starts_with("flag:") || k.starts_with("opt:") {
+                    argparse_dict_set(interp, result, k, v)?;
+                }
+            }
+
+            // Walk argv (skipping argv[0] which by convention is the
+            // program path — same as Python's argparse).
+            let mut positional_idx = 0usize;
+            let mut i = 1usize;
+            while i < raw_argv.len() {
+                let tok = &raw_argv[i];
+                if tok == "-h" || tok == "--help" {
+                    // Caller is expected to check `help_requested(argv)`
+                    // before calling parse; if they didn't, we still
+                    // continue and ignore --help (it's not a registered
+                    // arg so we'd otherwise error).
+                    i += 1;
+                    continue;
+                }
+                if tok.starts_with("--") || tok.starts_with('-') {
+                    // First check if it's a flag.
+                    let flag_key = format!("flag:{}", tok);
+                    if parser_decls.contains_key(&flag_key) {
+                        argparse_dict_set(interp, result, &flag_key, "true")?;
+                        i += 1;
+                        continue;
+                    }
+                    // Then check if it's an option (with separate value).
+                    let opt_key = format!("opt:{}", tok);
+                    if parser_decls.contains_key(&opt_key) {
+                        if i + 1 >= raw_argv.len() {
+                            return Err(VmError::UncaughtException {
+                                type_name: "ValueError".into(),
+                                message: format!(
+                                    "argparse: option {} requires a value",
+                                    tok
+                                ),
+                            });
+                        }
+                        argparse_dict_set(
+                            interp,
+                            result,
+                            &opt_key,
+                            &raw_argv[i + 1],
+                        )?;
+                        i += 2;
+                        continue;
+                    }
+                    // Also support `--key=value` form.
+                    if let Some(eq_pos) = tok.find('=') {
+                        let key = &tok[..eq_pos];
+                        let val = &tok[eq_pos + 1..];
+                        let opt_key = format!("opt:{}", key);
+                        if parser_decls.contains_key(&opt_key) {
+                            argparse_dict_set(interp, result, &opt_key, val)?;
+                            i += 1;
+                            continue;
+                        }
+                    }
+                    return Err(VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!("argparse: unknown flag/option {}", tok),
+                    });
+                }
+                // Positional argument.
+                if positional_idx >= positional_names.len() {
+                    return Err(VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!("argparse: unexpected positional {:?}", tok),
+                    });
+                }
+                let pname = &positional_names[positional_idx];
+                argparse_dict_set(
+                    interp,
+                    result,
+                    &format!("arg:{}", pname),
+                    tok,
+                )?;
+                positional_idx += 1;
+                i += 1;
+            }
+            // Verify every positional got a value.
+            if positional_idx < positional_names.len() {
+                let missing = &positional_names[positional_idx];
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "argparse: missing required positional argument {:?}",
+                        missing
+                    ),
+                });
+            }
+            Ok(result as u64)
+        }
+        NativeFn::ArgparseGetFlag => {
+            let dict = arg_u64(args, 0) as *mut DictRepr;
+            let name = arg_str(args, 1);
+            let key = format!("flag:{}", name);
+            let v = argparse_dict_get(interp, dict, &key)?;
+            Ok(if matches!(v.as_deref(), Some("true")) { 1 } else { 0 })
+        }
+        NativeFn::ArgparseGetArg => {
+            let dict = arg_u64(args, 0) as *mut DictRepr;
+            let name = arg_str(args, 1);
+            let key = format!("arg:{}", name);
+            let v = argparse_dict_get(interp, dict, &key)?.unwrap_or_default();
+            let p = interp.alloc_string(&v);
+            Ok(p as u64)
+        }
+        NativeFn::ArgparseGetOpt => {
+            let dict = arg_u64(args, 0) as *mut DictRepr;
+            let name = arg_str(args, 1);
+            let key = format!("opt:{}", name);
+            let v = argparse_dict_get(interp, dict, &key)?.unwrap_or_default();
+            let p = interp.alloc_string(&v);
+            Ok(p as u64)
+        }
+        NativeFn::ArgparseHelpText => {
+            let dict = arg_u64(args, 0) as *mut DictRepr;
+            if dict.is_null() {
+                return Err(VmError::UncaughtException {
+                    type_name: "NullPointerError".into(),
+                    message: "argparse.help_text: null parser".into(),
+                });
+            }
+            let parser_handle = unsafe { (*dict).handle } as usize;
+            let decls: std::collections::BTreeMap<String, String> =
+                with_dict_slot(interp, parser_handle, |slot| {
+                    slot.data
+                        .iter()
+                        .map(|(k, v)| {
+                            // SAFETY: argparse always stores StringRepr ptrs.
+                            let s = unsafe { read_str(*v as *const StringRepr) };
+                            (k.clone(), s)
+                        })
+                        .collect()
+                })?;
+            let prog = decls
+                .get("_prog_")
+                .cloned()
+                .unwrap_or_else(|| "<prog>".into());
+            let order_field = decls.get("_order_").cloned().unwrap_or_default();
+            let positionals: Vec<&str> = if order_field.is_empty() {
+                Vec::new()
+            } else {
+                order_field.split('\u{1F}').collect()
+            };
+            let mut out = String::new();
+            out.push_str("usage: ");
+            out.push_str(&prog);
+            // Any flags/opts → indicate `[options]`.
+            let has_flags = decls.keys().any(|k| k.starts_with("flag:"));
+            let has_opts = decls.keys().any(|k| k.starts_with("opt:"));
+            if has_flags || has_opts {
+                out.push_str(" [options]");
+            }
+            for p in &positionals {
+                out.push(' ');
+                out.push_str("<");
+                out.push_str(p);
+                out.push_str(">");
+            }
+            out.push('\n');
+            if !positionals.is_empty() {
+                out.push_str("\npositional arguments:\n");
+                for p in &positionals {
+                    out.push_str("  ");
+                    out.push_str(p);
+                    out.push('\n');
+                }
+            }
+            if has_flags || has_opts {
+                out.push_str("\noptions:\n");
+                out.push_str("  -h, --help    show this help message\n");
+                for (k, default) in &decls {
+                    if let Some(name) = k.strip_prefix("flag:") {
+                        out.push_str("  ");
+                        out.push_str(name);
+                        out.push_str("    (flag; default=");
+                        out.push_str(default);
+                        out.push_str(")\n");
+                    }
+                }
+                for (k, default) in &decls {
+                    if let Some(name) = k.strip_prefix("opt:") {
+                        out.push_str("  ");
+                        out.push_str(name);
+                        out.push_str(" VALUE  (default=");
+                        out.push_str(default);
+                        out.push_str(")\n");
+                    }
+                }
+            }
+            let p = interp.alloc_string(&out);
+            Ok(p as u64)
+        }
+        NativeFn::ArgparseHelpRequested => {
+            let argv = arg_u64(args, 0) as *const crate::object::ListRepr;
+            if argv.is_null() {
+                return Ok(0);
+            }
+            let found = unsafe {
+                let n = (*argv).length;
+                let data = (*argv).data as *const u64;
+                (0..n).any(|i| {
+                    let sp = std::ptr::read_unaligned(data.add(i))
+                        as *const StringRepr;
+                    let s = read_str(sp);
+                    s == "-h" || s == "--help"
+                })
+            };
+            Ok(if found { 1 } else { 0 })
+        }
+
+        // ── M22 P2A: `collections` module ──────────────────────────────
+        NativeFn::CollCounterNew => {
+            let dp = interp.alloc_dict(0);
+            Ok(dp as u64)
+        }
+        NativeFn::CollCounterIncrement => {
+            let dp = arg_u64(args, 0) as *const DictRepr;
+            if dp.is_null() {
+                return Err(VmError::UncaughtException {
+                    type_name: "NullPointerError".into(),
+                    message: "counter_increment on null counter".into(),
+                });
+            }
+            let key = arg_str(args, 1);
+            let handle = unsafe { (*dp).handle } as usize;
+            with_dict_slot_mut(interp, handle, |slot| {
+                let cur = slot
+                    .data
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(0u64) as i64;
+                slot.data.insert(key, (cur + 1) as u64);
+            })?;
+            Ok(0)
+        }
+        NativeFn::CollCounterAdd => {
+            let dp = arg_u64(args, 0) as *const DictRepr;
+            if dp.is_null() {
+                return Err(VmError::UncaughtException {
+                    type_name: "NullPointerError".into(),
+                    message: "counter_add on null counter".into(),
+                });
+            }
+            let key = arg_str(args, 1);
+            let n = arg_i64(args, 2);
+            let handle = unsafe { (*dp).handle } as usize;
+            with_dict_slot_mut(interp, handle, |slot| {
+                let cur = slot
+                    .data
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(0u64) as i64;
+                slot.data.insert(key, (cur + n) as u64);
+            })?;
+            Ok(0)
+        }
+        NativeFn::CollCounterGet => {
+            let dp = arg_u64(args, 0) as *const DictRepr;
+            if dp.is_null() {
+                return Ok(0);
+            }
+            let key = arg_str(args, 1);
+            let handle = unsafe { (*dp).handle } as usize;
+            with_dict_slot(interp, handle, |slot| {
+                slot.data.get(&key).copied().unwrap_or(0u64)
+            })
+        }
+        NativeFn::CollCounterTopKeys => {
+            let dp = arg_u64(args, 0) as *const DictRepr;
+            let n = arg_i64(args, 1);
+            if dp.is_null() {
+                let lst = interp.alloc_list(0);
+                return Ok(lst as u64);
+            }
+            let handle = unsafe { (*dp).handle } as usize;
+            // Snapshot all (key, count) pairs.
+            let mut pairs: Vec<(String, i64)> =
+                with_dict_slot(interp, handle, |slot| {
+                    slot.data
+                        .iter()
+                        .map(|(k, v)| (k.clone(), *v as i64))
+                        .collect()
+                })?;
+            // Descending by count, ties broken alphabetically.
+            pairs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            let take = if n <= 0 {
+                0
+            } else {
+                std::cmp::min(n as usize, pairs.len())
+            };
+            let lst = interp.alloc_list(take);
+            for (k, _) in pairs.into_iter().take(take) {
+                let sp = interp.alloc_string(&k) as u64;
+                // SAFETY: lst freshly allocated and owned by us.
+                unsafe { interp.list_push(lst, sp) };
+            }
+            Ok(lst as u64)
+        }
+        NativeFn::CollDequeNew => {
+            // Deque is just a fresh List[i64].  pop_front is O(n)
+            // until v0.3 ships a real ring-buffer deque.
+            let lst = interp.alloc_list(0);
+            Ok(lst as u64)
+        }
+        NativeFn::CollDequePushBack => {
+            let lst = arg_u64(args, 0) as *mut crate::object::ListRepr;
+            let v = arg_u64(args, 1);
+            if lst.is_null() {
+                return Err(VmError::UncaughtException {
+                    type_name: "NullPointerError".into(),
+                    message: "push_back on null deque".into(),
+                });
+            }
+            // SAFETY: lst is a heap pointer.
+            unsafe { interp.list_push(lst, v) };
+            Ok(0)
+        }
+        NativeFn::CollDequePopFront => {
+            let lst = arg_u64(args, 0) as *mut crate::object::ListRepr;
+            if lst.is_null() {
+                return Err(VmError::UncaughtException {
+                    type_name: "NullPointerError".into(),
+                    message: "pop_front on null deque".into(),
+                });
+            }
+            unsafe {
+                let len = (*lst).length;
+                if len == 0 {
+                    return Err(VmError::UncaughtException {
+                        type_name: "IndexError".into(),
+                        message: "pop_front from empty deque".into(),
+                    });
+                }
+                let data = (*lst).data as *mut u64;
+                let v = std::ptr::read_unaligned(data);
+                // Shift everything down one slot.  O(n); a real
+                // ring-buffer deque is v0.3 work.
+                for i in 1..len {
+                    let from = std::ptr::read_unaligned(data.add(i));
+                    std::ptr::write_unaligned(data.add(i - 1), from);
+                }
+                (*lst).length = len - 1;
+                Ok(v)
+            }
+        }
+        NativeFn::CollDequeLen => {
+            let lst = arg_u64(args, 0) as *const crate::object::ListRepr;
+            if lst.is_null() {
+                return Ok(0);
+            }
+            // SAFETY: lst is a heap pointer.
+            unsafe { Ok((*lst).length as u64) }
+        }
+        NativeFn::CollDequeIsEmpty => {
+            let lst = arg_u64(args, 0) as *const crate::object::ListRepr;
+            if lst.is_null() {
+                return Ok(1);
+            }
+            // SAFETY: lst is a heap pointer.
+            unsafe { Ok(if (*lst).length == 0 { 1 } else { 0 }) }
+        }
+
+        // ── M22 P2A: `csv` module ──────────────────────────────────────
+        NativeFn::CsvParseLine => {
+            let line = arg_str(args, 0);
+            let fields = csv_parse_one_line(&line);
+            let lst = interp.alloc_list(fields.len());
+            for f in fields {
+                let sp = interp.alloc_string(&f) as u64;
+                // SAFETY: lst freshly allocated.
+                unsafe { interp.list_push(lst, sp) };
+            }
+            Ok(lst as u64)
+        }
+        NativeFn::CsvParse => {
+            let text = arg_str(args, 0);
+            let rows = csv_parse_multiline(&text);
+            let outer = interp.alloc_list(rows.len());
+            for row in rows {
+                let inner = interp.alloc_list(row.len());
+                for f in row {
+                    let sp = interp.alloc_string(&f) as u64;
+                    // SAFETY: inner freshly allocated.
+                    unsafe { interp.list_push(inner, sp) };
+                }
+                // SAFETY: outer freshly allocated.
+                unsafe { interp.list_push(outer, inner as u64) };
+            }
+            Ok(outer as u64)
+        }
+        NativeFn::CsvReadFile => {
+            let path = arg_str(args, 0);
+            let text = std::fs::read_to_string(&path).map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!("csv.read_file({:?}): {}", path, e),
+                }
+            })?;
+            let rows = csv_parse_multiline(&text);
+            let outer = interp.alloc_list(rows.len());
+            for row in rows {
+                let inner = interp.alloc_list(row.len());
+                for f in row {
+                    let sp = interp.alloc_string(&f) as u64;
+                    // SAFETY: inner freshly allocated.
+                    unsafe { interp.list_push(inner, sp) };
+                }
+                // SAFETY: outer freshly allocated.
+                unsafe { interp.list_push(outer, inner as u64) };
+            }
+            Ok(outer as u64)
+        }
+        NativeFn::CsvWriteFile => {
+            let path = arg_str(args, 0);
+            let rows_ptr = arg_u64(args, 1) as *const crate::object::ListRepr;
+            if rows_ptr.is_null() {
+                return Err(VmError::UncaughtException {
+                    type_name: "NullPointerError".into(),
+                    message: "csv.write_file: null rows".into(),
+                });
+            }
+            // Collect into Vec<Vec<String>> so the write isn't holding
+            // any heap references mid-flight.
+            let rows: Vec<Vec<String>> = unsafe {
+                let n_rows = (*rows_ptr).length;
+                let row_data = (*rows_ptr).data as *const u64;
+                (0..n_rows)
+                    .map(|i| {
+                        let inner_ptr = std::ptr::read_unaligned(row_data.add(i))
+                            as *const crate::object::ListRepr;
+                        if inner_ptr.is_null() {
+                            return Vec::new();
+                        }
+                        let m = (*inner_ptr).length;
+                        let field_data = (*inner_ptr).data as *const u64;
+                        (0..m)
+                            .map(|j| {
+                                let sp =
+                                    std::ptr::read_unaligned(field_data.add(j))
+                                        as *const StringRepr;
+                                read_str(sp)
+                            })
+                            .collect()
+                    })
+                    .collect()
+            };
+            let mut buf = String::new();
+            for (i, row) in rows.iter().enumerate() {
+                if i > 0 {
+                    buf.push('\n');
+                }
+                for (j, field) in row.iter().enumerate() {
+                    if j > 0 {
+                        buf.push(',');
+                    }
+                    buf.push_str(&csv_escape_field(field));
+                }
+            }
+            // Trailing newline is conventional; matches Python's
+            // `csv.writer` with default dialect (excluding lineterminator).
+            if !rows.is_empty() {
+                buf.push('\n');
+            }
+            std::fs::write(&path, &buf).map_err(|e| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("csv.write_file({:?}): {}", path, e),
+            })?;
+            Ok(0)
+        }
+        NativeFn::CsvEscape => {
+            let s = arg_str(args, 0);
+            let out = csv_escape_field(&s);
+            let p = interp.alloc_string(&out);
+            Ok(p as u64)
+        }
+        NativeFn::CsvFormatRow => {
+            let row_ptr = arg_u64(args, 0) as *const crate::object::ListRepr;
+            if row_ptr.is_null() {
+                let p = interp.alloc_string("");
+                return Ok(p as u64);
+            }
+            let fields: Vec<String> = unsafe {
+                let n = (*row_ptr).length;
+                let data = (*row_ptr).data as *const u64;
+                (0..n)
+                    .map(|i| {
+                        let sp = std::ptr::read_unaligned(data.add(i))
+                            as *const StringRepr;
+                        read_str(sp)
+                    })
+                    .collect()
+            };
+            let mut buf = String::new();
+            for (i, f) in fields.iter().enumerate() {
+                if i > 0 {
+                    buf.push(',');
+                }
+                buf.push_str(&csv_escape_field(f));
+            }
+            let p = interp.alloc_string(&buf);
+            Ok(p as u64)
+        }
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
@@ -2896,6 +3513,274 @@ fn join_thread(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     }
     result?;
     Ok(0)
+}
+
+// ─── M22 P2A: argparse helpers ─────────────────────────────────────────
+
+/// Reject `argparse` argument names that would collide with our internal
+/// `_prog_` / `_order_` / prefix-key bookkeeping.  These checks are
+/// defensive: in normal use the user picks names like `--verbose` or
+/// `input` and never trips them.
+fn argparse_check_name(name: &str) -> Result<(), VmError> {
+    if name.is_empty() {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "argparse: empty argument name".into(),
+        });
+    }
+    if name == "_prog_" || name == "_order_" {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("argparse: reserved name {:?}", name),
+        });
+    }
+    if name.contains(':') || name.contains('\u{1F}') {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "argparse: argument name {:?} contains a reserved char (':' or U+001F)",
+                name
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Set `dict[key] = val` (allocating a fresh StringRepr for `val`).  The
+/// helper exists so the M22 argparse code reads almost like a normal
+/// HashMap update — without it every set turns into 6 lines of unsafe
+/// pointer manipulation.
+fn argparse_dict_set(
+    interp: &mut Interpreter,
+    dict: *mut DictRepr,
+    key: &str,
+    val: &str,
+) -> Result<(), VmError> {
+    if dict.is_null() {
+        return Err(VmError::UncaughtException {
+            type_name: "NullPointerError".into(),
+            message: "argparse: null parser/args dict".into(),
+        });
+    }
+    let sp = interp.alloc_string(val) as u64;
+    // SAFETY: dict is a heap pointer.
+    let handle = unsafe { (*dict).handle } as usize;
+    with_dict_slot_mut(interp, handle, |slot| {
+        slot.data.insert(key.to_string(), sp);
+    })?;
+    Ok(())
+}
+
+/// `dict.get(key)` returning the contained string (or None if absent).
+/// The dict's stored u64 is a StringRepr pointer — we read it through
+/// `read_str` like any other native consumer.
+fn argparse_dict_get(
+    interp: &Interpreter,
+    dict: *mut DictRepr,
+    key: &str,
+) -> Result<Option<String>, VmError> {
+    if dict.is_null() {
+        return Ok(None);
+    }
+    // SAFETY: dict is a heap pointer.
+    let handle = unsafe { (*dict).handle } as usize;
+    let raw = with_dict_slot(interp, handle, |slot| slot.data.get(key).copied())?;
+    Ok(raw.map(|v| {
+        let sp = v as *const StringRepr;
+        // SAFETY: every value we store via `argparse_dict_set` is a
+        // valid StringRepr pointer; `read_str` tolerates null/dangling
+        // by returning "".
+        unsafe { read_str(sp) }
+    }))
+}
+
+// ─── M22 P2A: csv helpers ──────────────────────────────────────────────
+
+/// Parse a single line of CSV (no embedded newlines).  The line should
+/// NOT contain a trailing `\n`.
+///
+/// State machine:
+///   - StartField: at the start of a new field (after a delimiter or
+///     beginning of line).
+///   - InUnquoted: reading an unquoted field.
+///   - InQuoted: inside a `"..."` field.
+///   - QuoteInQuoted: just saw `"` inside a quoted field — either we
+///     close (next char is `,` or EOL) or we re-enter quoted mode
+///     (next char is `"`, which is a literal `"`).
+fn csv_parse_one_line(line: &str) -> Vec<String> {
+    let mut fields: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut state = CsvState::StartField;
+    for c in line.chars() {
+        match state {
+            CsvState::StartField => {
+                if c == '"' {
+                    state = CsvState::InQuoted;
+                } else if c == ',' {
+                    fields.push(std::mem::take(&mut cur));
+                } else {
+                    cur.push(c);
+                    state = CsvState::InUnquoted;
+                }
+            }
+            CsvState::InUnquoted => {
+                if c == ',' {
+                    fields.push(std::mem::take(&mut cur));
+                    state = CsvState::StartField;
+                } else {
+                    cur.push(c);
+                }
+            }
+            CsvState::InQuoted => {
+                if c == '"' {
+                    state = CsvState::QuoteInQuoted;
+                } else {
+                    cur.push(c);
+                }
+            }
+            CsvState::QuoteInQuoted => {
+                if c == '"' {
+                    cur.push('"');
+                    state = CsvState::InQuoted;
+                } else if c == ',' {
+                    fields.push(std::mem::take(&mut cur));
+                    state = CsvState::StartField;
+                } else {
+                    // Defensive: malformed CSV (closing quote followed
+                    // by something other than `,` or EOL).  Just treat
+                    // the stray char as literal.
+                    cur.push(c);
+                    state = CsvState::InUnquoted;
+                }
+            }
+        }
+    }
+    fields.push(cur);
+    fields
+}
+
+/// Parse multi-line CSV with proper handling of embedded newlines
+/// inside quoted fields.  Treats `\r\n` and `\n` as row separators
+/// when *outside* a quoted field; preserves them when *inside*.
+fn csv_parse_multiline(text: &str) -> Vec<Vec<String>> {
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut cur_row: Vec<String> = Vec::new();
+    let mut cur_field = String::new();
+    let mut state = CsvState::StartField;
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        match state {
+            CsvState::StartField => {
+                if c == '"' {
+                    state = CsvState::InQuoted;
+                } else if c == ',' {
+                    cur_row.push(std::mem::take(&mut cur_field));
+                } else if c == '\n' {
+                    cur_row.push(std::mem::take(&mut cur_field));
+                    rows.push(std::mem::take(&mut cur_row));
+                } else if c == '\r' {
+                    // Look ahead for \n.
+                    if i + 1 < chars.len() && chars[i + 1] == '\n' {
+                        i += 1;
+                    }
+                    cur_row.push(std::mem::take(&mut cur_field));
+                    rows.push(std::mem::take(&mut cur_row));
+                } else {
+                    cur_field.push(c);
+                    state = CsvState::InUnquoted;
+                }
+            }
+            CsvState::InUnquoted => {
+                if c == ',' {
+                    cur_row.push(std::mem::take(&mut cur_field));
+                    state = CsvState::StartField;
+                } else if c == '\n' {
+                    cur_row.push(std::mem::take(&mut cur_field));
+                    rows.push(std::mem::take(&mut cur_row));
+                    state = CsvState::StartField;
+                } else if c == '\r' {
+                    if i + 1 < chars.len() && chars[i + 1] == '\n' {
+                        i += 1;
+                    }
+                    cur_row.push(std::mem::take(&mut cur_field));
+                    rows.push(std::mem::take(&mut cur_row));
+                    state = CsvState::StartField;
+                } else {
+                    cur_field.push(c);
+                }
+            }
+            CsvState::InQuoted => {
+                if c == '"' {
+                    state = CsvState::QuoteInQuoted;
+                } else {
+                    cur_field.push(c);
+                }
+            }
+            CsvState::QuoteInQuoted => {
+                if c == '"' {
+                    cur_field.push('"');
+                    state = CsvState::InQuoted;
+                } else if c == ',' {
+                    cur_row.push(std::mem::take(&mut cur_field));
+                    state = CsvState::StartField;
+                } else if c == '\n' {
+                    cur_row.push(std::mem::take(&mut cur_field));
+                    rows.push(std::mem::take(&mut cur_row));
+                    state = CsvState::StartField;
+                } else if c == '\r' {
+                    if i + 1 < chars.len() && chars[i + 1] == '\n' {
+                        i += 1;
+                    }
+                    cur_row.push(std::mem::take(&mut cur_field));
+                    rows.push(std::mem::take(&mut cur_row));
+                    state = CsvState::StartField;
+                } else {
+                    cur_field.push(c);
+                    state = CsvState::InUnquoted;
+                }
+            }
+        }
+        i += 1;
+    }
+    // Flush trailing field/row only if we read at least one character
+    // OR we're mid-field — this preserves the behaviour that an empty
+    // input yields zero rows (matches Python's csv.reader on empty).
+    if !cur_field.is_empty() || !cur_row.is_empty() {
+        cur_row.push(cur_field);
+        rows.push(cur_row);
+    }
+    rows
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum CsvState {
+    StartField,
+    InUnquoted,
+    InQuoted,
+    QuoteInQuoted,
+}
+
+/// Quote a CSV field if it contains `,`, `"`, `\n`, or `\r`; double
+/// internal quotes.  Empty fields are left as-is (not quoted).
+fn csv_escape_field(s: &str) -> String {
+    let needs_quote = s.chars().any(|c| matches!(c, ',' | '"' | '\n' | '\r'));
+    if !needs_quote {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        if c == '"' {
+            out.push('"');
+            out.push('"');
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('"');
+    out
 }
 
 // ─── Argument decoding helpers ─────────────────────────────────────────

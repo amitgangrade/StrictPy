@@ -1,0 +1,54 @@
+"""argparse_demo.spy — declarative CLI argument parsing (M22 P2A).
+
+Demonstrates the M22 `argparse` module on a small CLI tool that takes:
+  * one required positional `input` (a string),
+  * an optional `--verbose` flag (default false),
+  * an optional `--output FOO` option (default `out.txt`).
+
+Compared to `echo.spy` / `sum_args.spy` (which hand-walk `sys.argv`),
+this is significantly shorter and produces a real `--help` block.
+
+Usage:
+    spy argparse_demo.spyc INPUT [--verbose] [--output PATH]
+    spy argparse_demo.spyc --help
+
+Tests:
+  * `compiler/tests/argparse_demo_runs.rs` — subprocess assertions.
+"""
+
+import sys
+import argparse
+
+
+fn build_parser() -> Dict[str, str]:
+    p: Dict[str, str] = argparse.new("argparse_demo")
+    argparse.add_arg(p, "input")
+    argparse.add_flag(p, "--verbose", false)
+    argparse.add_opt(p, "--output", "out.txt")
+    return p
+
+
+fn main() -> i32:
+    parser: Dict[str, str] = build_parser()
+
+    # Canonical --help handling: detect early so we don't try to parse.
+    if argparse.help_requested(sys.argv):
+        println(argparse.help_text(parser))
+        return 0
+
+    try:
+        a: Dict[str, str] = argparse.parse(parser, sys.argv)
+        input_path: str = argparse.get_arg(a, "input")
+        verbose: bool = argparse.get_flag(a, "--verbose")
+        output_path: str = argparse.get_opt(a, "--output")
+        println("input = " + input_path)
+        println("output = " + output_path)
+        if verbose:
+            println("verbose = true")
+        else:
+            println("verbose = false")
+        return 0
+    except ValueError as e:
+        println("error: " + e.message)
+        println(argparse.help_text(parser))
+        return 2

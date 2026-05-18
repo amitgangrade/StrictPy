@@ -508,6 +508,87 @@ pub enum NativeFn {
     /// digest of HMAC-SHA256(key, data).  Backed by the `hmac` crate.
     HashlibHmacSha256 = 304,
 
+    // ── 250–289: M22 P2A (argparse + collections + csv) ─────────────────
+    // Phase 2 starts here.  P2A's job is to bring three high-ROI stdlib
+    // modules online on top of the M19 stdlib-module-table:
+    //   - argparse — declarative CLI arg parsing.  Currently every CLI
+    //     tool (`echo.spy`, `sum_args.spy`, `minigrep.spy`) hand-parses
+    //     `sys.argv`; this is the ergonomic upgrade.
+    //   - collections — Counter / deque.  M10's `wordcount.spy` rolled
+    //     a hand-built freq table; `collections.counter_*` replaces it.
+    //   - csv — parser/writer.  M10's `csv_aggregate.spy` had a one-pass
+    //     scanner; this module packages it as named natives.
+    //
+    // Storage choices (documented in detail in spec §9.15-§9.17):
+    //   - argparse uses `Dict[str, str]` as both parser-handle and args.
+    //     A v0.3 typed `ArgParser` / `Args` class would be cleaner but
+    //     needs stdlib-class registration that we don't have yet.
+    //   - Counter is `Dict[str, i64]` (typed alias).  No new heap shape.
+    //   - Deque is `List[i64]` (typed alias).  `pop_front` is O(n) until
+    //     v0.3 ships a real deque.
+    /// `argparse.new(prog: str) -> Dict[str, str]` — fresh parser handle.
+    ArgparseNew         = 250,
+    /// `argparse.add_flag(p, name: str, default: bool) -> None`.
+    ArgparseAddFlag     = 251,
+    /// `argparse.add_arg(p, name: str) -> None` — positional argument.
+    ArgparseAddArg      = 252,
+    /// `argparse.add_opt(p, name: str, default: str) -> None` — `--key VAL`.
+    ArgparseAddOpt      = 253,
+    /// `argparse.parse(p, argv: List[str]) -> Dict[str, str]`.  Raises
+    /// `ValueError` on unknown flag/opt, missing positional, or option-
+    /// without-value.  `argv[0]` is treated as program name and skipped.
+    ArgparseParse       = 254,
+    /// `argparse.get_flag(a, name) -> bool` — read parsed flag.  Returns
+    /// false if not present.
+    ArgparseGetFlag     = 255,
+    /// `argparse.get_arg(a, name) -> str` — read parsed positional.
+    ArgparseGetArg      = 256,
+    /// `argparse.get_opt(a, name) -> str` — read parsed option value.
+    ArgparseGetOpt      = 257,
+    /// `argparse.help_text(p) -> str` — render a human-readable usage
+    /// line + per-arg block (`USAGE: <prog> [flags] <positionals>`...).
+    ArgparseHelpText    = 258,
+    /// `argparse.help_requested(argv) -> bool` — true iff `argv` contains
+    /// `-h` or `--help`.  Pair with `help_text` + `sys.exit(0)`.
+    ArgparseHelpRequested = 259,
+    /// `collections.counter_new() -> Dict[str, i64]`.
+    CollCounterNew      = 265,
+    /// `collections.counter_increment(c, key) -> None` — `c[key] += 1`.
+    CollCounterIncrement = 266,
+    /// `collections.counter_add(c, key, n) -> None` — `c[key] += n`.
+    CollCounterAdd      = 267,
+    /// `collections.counter_get(c, key) -> i64` — 0 if absent.
+    CollCounterGet      = 268,
+    /// `collections.counter_top_keys(c, n: i32) -> List[str]` — top-N
+    /// keys by descending count, ties broken alphabetically.
+    CollCounterTopKeys  = 269,
+    /// `collections.deque_new() -> List[i64]` — fresh empty deque.
+    CollDequeNew        = 270,
+    /// `collections.deque_push_back(d, v: i64) -> None`.
+    CollDequePushBack   = 271,
+    /// `collections.deque_pop_front(d) -> i64`.  Raises IndexError on
+    /// empty.  O(n) shift in v0.2 — a real deque is v0.3 work.
+    CollDequePopFront   = 272,
+    /// `collections.deque_len(d) -> i32`.
+    CollDequeLen        = 273,
+    /// `collections.deque_is_empty(d) -> bool`.
+    CollDequeIsEmpty    = 274,
+    /// `csv.parse_line(line: str) -> List[str]` — parse one CSV line,
+    /// honouring quoted fields and `""` escapes.  Does not handle
+    /// embedded newlines (use `parse` for multi-line).
+    CsvParseLine        = 275,
+    /// `csv.parse(text: str) -> List[List[str]]` — parse multi-line
+    /// CSV; quoted fields may contain newlines.
+    CsvParse            = 276,
+    /// `csv.read_file(path: str) -> List[List[str]]`.  Raises IOError.
+    CsvReadFile         = 277,
+    /// `csv.write_file(path: str, rows: List[List[str]]) -> None`.
+    CsvWriteFile        = 278,
+    /// `csv.escape(field: str) -> str` — quote if needed.
+    CsvEscape           = 279,
+    /// `csv.format_row(row: List[str]) -> str` — comma-joined, escaped.
+    CsvFormatRow        = 280,
+
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
     /// encounters. The VM treats this as a runtime error.
@@ -669,6 +750,35 @@ impl NativeFn {
             224 => Some(Self::ReReplace),
             225 => Some(Self::ReSplit),
             226 => Some(Self::ReIsValid),
+            // M22 P2A: argparse module.
+            250 => Some(Self::ArgparseNew),
+            251 => Some(Self::ArgparseAddFlag),
+            252 => Some(Self::ArgparseAddArg),
+            253 => Some(Self::ArgparseAddOpt),
+            254 => Some(Self::ArgparseParse),
+            255 => Some(Self::ArgparseGetFlag),
+            256 => Some(Self::ArgparseGetArg),
+            257 => Some(Self::ArgparseGetOpt),
+            258 => Some(Self::ArgparseHelpText),
+            259 => Some(Self::ArgparseHelpRequested),
+            // M22 P2A: collections module.
+            265 => Some(Self::CollCounterNew),
+            266 => Some(Self::CollCounterIncrement),
+            267 => Some(Self::CollCounterAdd),
+            268 => Some(Self::CollCounterGet),
+            269 => Some(Self::CollCounterTopKeys),
+            270 => Some(Self::CollDequeNew),
+            271 => Some(Self::CollDequePushBack),
+            272 => Some(Self::CollDequePopFront),
+            273 => Some(Self::CollDequeLen),
+            274 => Some(Self::CollDequeIsEmpty),
+            // M22 P2A: csv module.
+            275 => Some(Self::CsvParseLine),
+            276 => Some(Self::CsvParse),
+            277 => Some(Self::CsvReadFile),
+            278 => Some(Self::CsvWriteFile),
+            279 => Some(Self::CsvEscape),
+            280 => Some(Self::CsvFormatRow),
             // M22 P2B: base64 module.
             290 => Some(Self::Base64Encode),
             291 => Some(Self::Base64Decode),

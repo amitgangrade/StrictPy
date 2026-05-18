@@ -1583,6 +1583,351 @@ impl Resolver {
             ],
         };
         self.stdlib_modules.insert("hashlib".into(), hashlib_mod);
+
+        // ── M22 (P2A): `argparse` module ───────────────────────────────
+        // Builder-style CLI argument parser.  Phase 2's highest-ROI module:
+        // every CLI tool (`echo.spy`, `sum_args.spy`, `minigrep.spy`)
+        // currently hand-parses `sys.argv`; argparse moves that into a
+        // declarative API.
+        //
+        // Design: v0.2 doesn't have user-defined stdlib classes, and
+        // registering a sealed `ArgParser` class through the prelude
+        // table requires resolver-side surface area we don't have budget
+        // for in M22 (M20c's report flags this as v0.3 work).  Instead
+        // we use a Dict[str, str] as the opaque "parser handle" and a
+        // second Dict[str, str] as the parsed "args".  All public
+        // functions take these dicts by value (they're heap pointers
+        // under the hood, so mutation is observable).
+        //
+        // Storage convention inside the parser dict:
+        //   "_prog_"      → program name (set by `argparse.new`)
+        //   "_order_"     → "\u{1F}"-separated list of positional names
+        //                   in declaration order (the unit-separator
+        //                   char is unlikely to appear in real arg names)
+        //   "flag:NAME"   → default value ("true" / "false")
+        //   "opt:NAME"    → default value
+        //   "arg:NAME"    → "" (just records the declaration)
+        //
+        // Storage convention inside the args dict:
+        //   "flag:NAME"   → "true" / "false"
+        //   "opt:NAME"    → resolved value
+        //   "arg:NAME"    → resolved value
+        //
+        // `argparse.parse` raises ValueError on missing required arg,
+        // unknown flag/opt, or option-without-value.
+        const ARGPARSE_NEW: u32             = 250;
+        const ARGPARSE_ADD_FLAG: u32        = 251;
+        const ARGPARSE_ADD_ARG: u32         = 252;
+        const ARGPARSE_ADD_OPT: u32         = 253;
+        const ARGPARSE_PARSE: u32           = 254;
+        const ARGPARSE_GET_FLAG: u32        = 255;
+        const ARGPARSE_GET_ARG: u32         = 256;
+        const ARGPARSE_GET_OPT: u32         = 257;
+        const ARGPARSE_HELP_TEXT: u32       = 258;
+        const ARGPARSE_HELP_REQUESTED: u32  = 259;
+
+        let dict_str_str_ty = Ty::Generic {
+            base: TypeCtor::Dict,
+            args: vec![str_ty.clone(), str_ty.clone()],
+        };
+
+        let argparse_mod = StdlibModule {
+            name: "argparse".into(),
+            items: vec![
+                // `argparse.new(prog: str) -> Dict[str, str]` — fresh parser.
+                StdlibItem {
+                    name: "new".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], dict_str_str_ty.clone()),
+                    native_id: ARGPARSE_NEW,
+                },
+                // `argparse.add_flag(p, name, default) -> None`
+                StdlibItem {
+                    name: "add_flag".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![
+                            dict_str_str_ty.clone(),
+                            str_ty.clone(),
+                            bool_ty.clone(),
+                        ],
+                        unit_ty.clone(),
+                    ),
+                    native_id: ARGPARSE_ADD_FLAG,
+                },
+                // `argparse.add_arg(p, name) -> None`
+                StdlibItem {
+                    name: "add_arg".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![dict_str_str_ty.clone(), str_ty.clone()],
+                        unit_ty.clone(),
+                    ),
+                    native_id: ARGPARSE_ADD_ARG,
+                },
+                // `argparse.add_opt(p, name, default) -> None`
+                StdlibItem {
+                    name: "add_opt".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![
+                            dict_str_str_ty.clone(),
+                            str_ty.clone(),
+                            str_ty.clone(),
+                        ],
+                        unit_ty.clone(),
+                    ),
+                    native_id: ARGPARSE_ADD_OPT,
+                },
+                // `argparse.parse(p, argv: List[str]) -> Dict[str, str]`
+                StdlibItem {
+                    name: "parse".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![dict_str_str_ty.clone(), list_str_ty.clone()],
+                        dict_str_str_ty.clone(),
+                    ),
+                    native_id: ARGPARSE_PARSE,
+                },
+                // `argparse.get_flag(a, name) -> bool`
+                StdlibItem {
+                    name: "get_flag".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![dict_str_str_ty.clone(), str_ty.clone()],
+                        bool_ty.clone(),
+                    ),
+                    native_id: ARGPARSE_GET_FLAG,
+                },
+                // `argparse.get_arg(a, name) -> str`
+                StdlibItem {
+                    name: "get_arg".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![dict_str_str_ty.clone(), str_ty.clone()],
+                        str_ty.clone(),
+                    ),
+                    native_id: ARGPARSE_GET_ARG,
+                },
+                // `argparse.get_opt(a, name) -> str`
+                StdlibItem {
+                    name: "get_opt".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![dict_str_str_ty.clone(), str_ty.clone()],
+                        str_ty.clone(),
+                    ),
+                    native_id: ARGPARSE_GET_OPT,
+                },
+                // `argparse.help_text(p) -> str`
+                StdlibItem {
+                    name: "help_text".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![dict_str_str_ty.clone()], str_ty.clone()),
+                    native_id: ARGPARSE_HELP_TEXT,
+                },
+                // `argparse.help_requested(argv) -> bool` — true iff
+                // `argv` contains `-h` or `--help`.  User code combines
+                // it with `help_text` and `sys.exit(0)` for the canonical
+                // --help handling.
+                StdlibItem {
+                    name: "help_requested".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![list_str_ty.clone()], bool_ty.clone()),
+                    native_id: ARGPARSE_HELP_REQUESTED,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("argparse".into(), argparse_mod);
+
+        // ── M22 (P2A): `collections` module ────────────────────────────
+        // Counter (multiset) + deque (FIFO/LIFO double-ended queue).
+        // Both backed by existing M7 Dict / List types — Counter is a
+        // typed alias of `Dict[str, i64]`, deque is a typed alias of
+        // `List[i64]` with pop_front via index-0 shift (O(n); the brief
+        // calls this out as a v0.3 generic-class limitation).
+        const COLL_COUNTER_NEW: u32           = 265;
+        const COLL_COUNTER_INC: u32           = 266;
+        const COLL_COUNTER_ADD: u32           = 267;
+        const COLL_COUNTER_GET: u32           = 268;
+        const COLL_COUNTER_TOP_KEYS: u32      = 269;
+        const COLL_DEQUE_NEW: u32             = 270;
+        const COLL_DEQUE_PUSH_BACK: u32       = 271;
+        const COLL_DEQUE_POP_FRONT: u32       = 272;
+        const COLL_DEQUE_LEN: u32             = 273;
+        const COLL_DEQUE_IS_EMPTY: u32        = 274;
+
+        let dict_str_i64_ty = Ty::Generic {
+            base: TypeCtor::Dict,
+            args: vec![str_ty.clone(), i64_ty.clone()],
+        };
+
+        let collections_mod = StdlibModule {
+            name: "collections".into(),
+            items: vec![
+                // Counter
+                StdlibItem {
+                    name: "counter_new".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], dict_str_i64_ty.clone()),
+                    native_id: COLL_COUNTER_NEW,
+                },
+                // `counter_increment(c, key)` — c[key] += 1
+                StdlibItem {
+                    name: "counter_increment".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![dict_str_i64_ty.clone(), str_ty.clone()],
+                        unit_ty.clone(),
+                    ),
+                    native_id: COLL_COUNTER_INC,
+                },
+                // `counter_add(c, key, n)` — c[key] += n
+                StdlibItem {
+                    name: "counter_add".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![
+                            dict_str_i64_ty.clone(),
+                            str_ty.clone(),
+                            i64_ty.clone(),
+                        ],
+                        unit_ty.clone(),
+                    ),
+                    native_id: COLL_COUNTER_ADD,
+                },
+                // `counter_get(c, key) -> i64` — 0 if absent.
+                StdlibItem {
+                    name: "counter_get".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![dict_str_i64_ty.clone(), str_ty.clone()],
+                        i64_ty.clone(),
+                    ),
+                    native_id: COLL_COUNTER_GET,
+                },
+                // `counter_top_keys(c, n) -> List[str]` — keys sorted by
+                // count descending, then alphabetically; return top N.
+                // We don't ship `most_common` as List[Tuple[str, i64]]
+                // because v0.2's tuple-in-list path is rough; pair this
+                // with `counter_get` for the values.
+                StdlibItem {
+                    name: "counter_top_keys".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![dict_str_i64_ty.clone(), i32_ty.clone()],
+                        list_str_ty.clone(),
+                    ),
+                    native_id: COLL_COUNTER_TOP_KEYS,
+                },
+                // Deque (typed as List[i64]; pop_front is O(n))
+                StdlibItem {
+                    name: "deque_new".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], list_i64_ty.clone()),
+                    native_id: COLL_DEQUE_NEW,
+                },
+                StdlibItem {
+                    name: "deque_push_back".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![list_i64_ty.clone(), i64_ty.clone()],
+                        unit_ty.clone(),
+                    ),
+                    native_id: COLL_DEQUE_PUSH_BACK,
+                },
+                StdlibItem {
+                    name: "deque_pop_front".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![list_i64_ty.clone()], i64_ty.clone()),
+                    native_id: COLL_DEQUE_POP_FRONT,
+                },
+                StdlibItem {
+                    name: "deque_len".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![list_i64_ty.clone()], i32_ty.clone()),
+                    native_id: COLL_DEQUE_LEN,
+                },
+                StdlibItem {
+                    name: "deque_is_empty".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![list_i64_ty.clone()], bool_ty.clone()),
+                    native_id: COLL_DEQUE_IS_EMPTY,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("collections".into(), collections_mod);
+
+        // ── M22 (P2A): `csv` module ────────────────────────────────────
+        // Hand-rolled RFC 4180-ish parser/writer.  M10's csv_aggregate.spy
+        // had a single-pass scanner; this module packages it as named
+        // natives so user programs don't reinvent it.
+        //
+        // Quoting rules (matches Python's `csv` with default dialect):
+        //   * A field starting with `"` is quoted; the quote is stripped.
+        //   * Inside a quoted field, `""` is a literal `"`.
+        //   * Newlines inside quoted fields are preserved (so `parse` over
+        //     multi-line CSV honours embedded line breaks).
+        //   * Unquoted fields don't allow `,` or `\n` inside.
+        //   * `escape` quotes a field iff it contains `,`, `"`, `\n`, or
+        //     `\r`; doubles internal quotes.
+        const CSV_PARSE_LINE: u32   = 275;
+        const CSV_PARSE: u32        = 276;
+        const CSV_READ_FILE: u32    = 277;
+        const CSV_WRITE_FILE: u32   = 278;
+        const CSV_ESCAPE: u32       = 279;
+        const CSV_FORMAT_ROW: u32   = 280;
+
+        let list_list_str_ty = Ty::Generic {
+            base: TypeCtor::List,
+            args: vec![list_str_ty.clone()],
+        };
+
+        let csv_mod = StdlibModule {
+            name: "csv".into(),
+            items: vec![
+                StdlibItem {
+                    name: "parse_line".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], list_str_ty.clone()),
+                    native_id: CSV_PARSE_LINE,
+                },
+                StdlibItem {
+                    name: "parse".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], list_list_str_ty.clone()),
+                    native_id: CSV_PARSE,
+                },
+                StdlibItem {
+                    name: "read_file".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], list_list_str_ty.clone()),
+                    native_id: CSV_READ_FILE,
+                },
+                StdlibItem {
+                    name: "write_file".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), list_list_str_ty.clone()],
+                        unit_ty.clone(),
+                    ),
+                    native_id: CSV_WRITE_FILE,
+                },
+                StdlibItem {
+                    name: "escape".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: CSV_ESCAPE,
+                },
+                StdlibItem {
+                    name: "format_row".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![list_str_ty.clone()], str_ty.clone()),
+                    native_id: CSV_FORMAT_ROW,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("csv".into(), csv_mod);
     }
 
     // ─────────────────────────────────────────────────────────────────────

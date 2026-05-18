@@ -1,0 +1,99 @@
+"""csv_demo.spy — round-trip a small CSV file via the M22 `csv` module.
+
+Exercises the stdlib `csv` parser/writer:
+  * `csv.write_file` to produce a tiny CSV with quoted fields.
+  * `csv.read_file` to parse it back.
+  * `csv.parse_line` on an embedded sample line.
+  * `csv.escape` + `csv.format_row` for hand-built output.
+
+Asserts via println-then-assert pattern (no `assert` keyword in v0.2
+beyond the `assert` native, which is fine here).
+
+Usage:
+    spy csv_demo.spyc <out.csv>
+    (default path: ./csv_demo_tmp.csv if no arg passed)
+
+Tests:
+  * `compiler/tests/csv_demo_runs.rs` — subprocess assertion that
+    the round-trip prints the expected line count and a sample field.
+"""
+
+import sys
+import csv
+
+
+fn build_rows() -> List[List[str]]:
+    rows: List[List[str]] = []
+
+    header: List[str] = []
+    header.append("name")
+    header.append("city")
+    header.append("note")
+    rows.append(header)
+
+    row1: List[str] = []
+    row1.append("Alice")
+    row1.append("Berlin")
+    row1.append("hello, world")
+    rows.append(row1)
+
+    row2: List[str] = []
+    row2.append("Bob")
+    row2.append("Tokyo")
+    row2.append("quote \"inside\"")
+    rows.append(row2)
+
+    row3: List[str] = []
+    row3.append("Carol")
+    row3.append("Lima")
+    row3.append("ordinary")
+    rows.append(row3)
+
+    return rows
+
+
+fn main() -> i32:
+    # Pick output path from argv[1] if given, else a default.  This
+    # makes the subprocess test hermetic — the harness picks a
+    # tempfile path and asserts on the round-trip.
+    out_path: str = "csv_demo_tmp.csv"
+    n: i64 = i64(len(sys.argv))
+    if n > 1i64:
+        out_path = sys.argv[1]
+
+    rows: List[List[str]] = build_rows()
+
+    # Format a single row manually to sanity-check the escape path.
+    sample: List[str] = []
+    sample.append("a,b")
+    sample.append("plain")
+    sample.append("quote\"here")
+    formatted: str = csv.format_row(sample)
+    println("formatted: " + formatted)
+
+    # Write the rows to disk.
+    csv.write_file(out_path, rows)
+
+    # Read them back and confirm the round-trip.
+    parsed: List[List[str]] = csv.read_file(out_path)
+    rc: i32 = i32(i64(len(parsed)))
+    println("rows: " + str(rc))
+
+    # Spot-check row 1 column 2 (the `hello, world` field) survived the
+    # quoted-comma escape.
+    if rc >= 2i32:
+        r1: List[str] = parsed[1i32]
+        if i32(i64(len(r1))) >= 3i32:
+            println("r1c2: " + r1[2i32])
+
+    # Try the per-line parser on an explicit line.
+    line: str = "foo,\"bar,baz\",\"q\"\"x\""
+    pieces: List[str] = csv.parse_line(line)
+    pc: i32 = i32(i64(len(pieces)))
+    println("pieces: " + str(pc))
+    if pc >= 3i32:
+        println("p0: " + pieces[0i32])
+        println("p1: " + pieces[1i32])
+        println("p2: " + pieces[2i32])
+
+    return 0
