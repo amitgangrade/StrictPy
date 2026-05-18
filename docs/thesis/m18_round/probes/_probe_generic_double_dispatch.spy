@@ -1,0 +1,33 @@
+"""Probe: same generic called from inside another generic with two
+DIFFERENT type vars threaded through. Exercises substitution
+propagation when one generic body calls another at two distinct
+instantiations.
+
+`pair_thread[A, B]` calls `id[T]` twice — once with `A`, once with `B`.
+At lower-time, the lowerer is monomorphising `pair_thread__i32_str`
+under `subst = {A -> i32, B -> str}`. The two `id(...)` call-sites
+should produce instantiations `id__i32` and `id__str` from the SAME
+source line region — distinct mangled FuncIds, dispatched correctly.
+
+Expected: prints `7\nhello\n`. Confirms that the substitution propagates
+through transitive generic calls with non-identical type vars.
+"""
+
+fn id[T](x: T) -> T:
+    return x
+
+fn pair_thread[A, B](a: A, b: B) -> None:
+    pa: A = id(a)
+    pb: B = id(b)
+    println(str(pa))
+    if true:
+        # Indirect to confirm B is threaded through correctly.
+        pass
+    pb2: B = id(pb)
+    # Print pb2 via str() — works for str (identity) and i32.
+    # We rely on the call-site using B's instantiation of str().
+    println(str(pb2))
+
+fn main() -> i32:
+    pair_thread(7, "hello")
+    return 0

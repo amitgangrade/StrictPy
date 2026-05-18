@@ -1,0 +1,50 @@
+# M18 probe: combine M17 generic free function + M15 raise + M16 match.
+# Spec §5.1.5 says per-instantiation re-typecheck catches operator
+# failures at instantiation. Probe whether a generic helper that
+# `raise`s and is called from a function body containing a `match`
+# arm body monomorphises correctly per (i64, str).
+#
+# Expected: both instantiations compile (raise inside generic body
+# is fine; it doesn't depend on T), and the test runs.
+
+sealed class V:
+    fn __init__(self) -> None: pass
+
+final class IV(V):
+    n: i64
+    fn __init__(self, n: i64) -> None: self.n = n
+
+final class SV(V):
+    s: str
+    fn __init__(self, s: str) -> None: self.s = s
+
+# Generic over T — returns xs[i] if i is in range; otherwise raises.
+fn lookup[T](xs: List[T], i: i64) -> T:
+    if i < 0i64 or i >= i64(len(xs)):
+        raise IndexError("oob: " + str(i))
+    return xs[i]
+
+fn main() -> i32:
+    ks: List[str] = ["a", "b"]
+    vs: List[i64] = [10i64, 20i64]
+    try:
+        # Call generic over str then over i64 — two distinct instantiations
+        # in one program.
+        k0: str = lookup(ks, 0i64)
+        v1: i64 = lookup(vs, 1i64)
+        println("k0=" + k0 + " v1=" + str(v1))
+        # Now trigger the raise from inside the generic body.
+        oob: i64 = lookup(vs, 99i64)
+        println("never: " + str(oob))
+    except IndexError as e:
+        println("caught: " + e.message)
+    # Now use match on a V to confirm interplay (no need for actual
+    # generic+match here; the issue would be generic+match inside the
+    # generic body itself, which is M17 territory we won't push).
+    val: V = IV(42i64)
+    match val:
+        case IV(n):
+            println("match IV: " + str(n))
+        case SV(s):
+            println("match SV: " + s)
+    return 0

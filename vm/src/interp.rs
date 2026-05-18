@@ -453,7 +453,11 @@ impl Interpreter {
                     let matched = hf
                         .arms
                         .iter()
-                        .find(|arm| arm.filter == "Exception" || arm.filter == type_name)
+                        .find(|arm| {
+                            arm.filter == "Exception"
+                                || arm.filter == type_name
+                                || exception_name_alias(&arm.filter) == type_name
+                        })
                         .cloned();
                     (hf.frame_depth, matched, hf.finally_pc)
                 }
@@ -908,7 +912,7 @@ impl Interpreter {
         let bv = self.read_reg(b) as i32;
         if bv == 0 {
             return Err(VmError::UncaughtException {
-                type_name: "DivisionByZeroError".into(),
+                type_name: "ZeroDivisionError".into(),
                 message: "division by zero".into(),
             });
         }
@@ -940,7 +944,7 @@ impl Interpreter {
         let bv = self.read_reg(b) as i64;
         if bv == 0 {
             return Err(VmError::UncaughtException {
-                type_name: "DivisionByZeroError".into(),
+                type_name: "ZeroDivisionError".into(),
                 message: "division by zero".into(),
             });
         }
@@ -971,7 +975,7 @@ impl Interpreter {
         let bv = self.read_reg(b) as u32;
         if bv == 0 {
             return Err(VmError::UncaughtException {
-                type_name: "DivisionByZeroError".into(),
+                type_name: "ZeroDivisionError".into(),
                 message: "division by zero".into(),
             });
         }
@@ -1001,7 +1005,7 @@ impl Interpreter {
         let bv = self.read_reg(b);
         if bv == 0 {
             return Err(VmError::UncaughtException {
-                type_name: "DivisionByZeroError".into(),
+                type_name: "ZeroDivisionError".into(),
                 message: "division by zero".into(),
             });
         }
@@ -2301,6 +2305,19 @@ fn build_type_registry(
 // Keep `NativeFn` / `loader::Module` imports live for now even if unused.
 #[allow(dead_code)]
 fn _keep_alive(_: NativeFn, _: &loader::Module) {}
+
+/// Map a handler-arm filter name to its canonical alias for exception-match
+/// purposes. M18 fix (BUG-036): runtime emits `ZeroDivisionError` as the
+/// canonical (Python-compatible) name, but historical code and the M15
+/// implementation accepted `DivisionByZeroError` as a synonym. Keep both
+/// working: if a user writes `except DivisionByZeroError`, this returns
+/// `"ZeroDivisionError"`, which then matches the emitted type_name.
+fn exception_name_alias(filter: &str) -> &str {
+    match filter {
+        "DivisionByZeroError" => "ZeroDivisionError",
+        other => other,
+    }
+}
 
 #[cfg(test)]
 mod tests {

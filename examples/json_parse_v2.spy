@@ -1,0 +1,508 @@
+"""M18 rewrite of `examples/json_parse.spy` against the M13-M17 surface.
+
+The M10 original (kept verbatim at `examples/json_parse.spy`) carries a
+top-of-file docstring enumerating EIGHT bugs the v0.1 language forced it
+to work around. By end-of-M17 every single one is gone:
+
+  Bug                                                  M10 workaround       This file uses
+  ─────────────────────────────────────────────────────────────────────────────────────────
+  1. `sealed` dropped virtual dispatch          (M11)   open class           sealed class
+  2. Subclass fields aliased parent fields      (M11)   empty parent         (n/a — sealed)
+  3. Vtable wraps at 4 entries                  (M11)   3 classes + tag      6 classes
+  4. `str`-arg methods destabilised the heap    (M11)   free fns w/ p:Parser instance methods
+  5. Declaration order flipped crash outcome    (M12)   JsonObject first     natural order
+  6. `Dict[K, V]` only allowed primitive V      (—)     parallel keys+vals   List[Tuple[str, JsonValue]]
+  7. No isinstance / working match              (M16)   virtual render()     match v: case Foo(): ...
+  8. Errors had no way to propagate             (M15)   "return JsonNull"    raise ValueError(...)
+
+Two M10 limitations that AREN'T language bugs and so remain:
+
+  * `str(f64)` always prints `3.0` for `3` — JSON would prefer `3` for
+    integer-valued numbers. Workaround: render JsonNumber by inspecting
+    whether the f64 has a non-zero fractional part and dropping the
+    `.0` suffix when not. (Same trick csv_aggregate used.)
+
+  * No string-escape decoding. The headline inputs below contain no
+    escape sequences inside string literals, so round-trip is faithful.
+
+WHAT THIS PROGRAM EXERCISES BEYOND THE M10 SHAPE:
+
+  - 6-arm `match v: case JsonFoo(...):` over a sealed hierarchy. The
+    M16 brief said this works; the calculator-match demo only had 3
+    arms. This is the first program to drive the 6-arm path.
+
+  - `case JsonObject(pairs):` where `pairs: List[Tuple[str, JsonValue]]`
+    — a Constructor pattern binding a List-of-Tuple-of-class-ref field.
+
+  - Recursive Parser instance methods crossing 5-7 levels deep on
+    realistic JSON inputs. The M12 torture test only nested 2-3 deep.
+
+  - `try/except ValueError` around a deeply-recursive parse — handler
+    frame must unwind cleanly through many call frames. The M15
+    regressions only went 2-3 levels deep.
+
+  - `try/except` with `finally`, demonstrating cleanup runs on both
+    the success and the failure path of the parser.
+
+  - `isinstance(v, JsonObject)` for an external variant-discrimination
+    helper.
+"""
+
+# ── AST ────────────────────────────────────────────────────────────────────
+#
+# Sealed hierarchy, 6 final subclasses, natural declaration order.
+
+sealed class JsonValue:
+    fn __init__(self) -> None:
+        pass
+
+final class JsonNull(JsonValue):
+    fn __init__(self) -> None:
+        pass
+
+final class JsonBool(JsonValue):
+    value: bool
+
+    fn __init__(self, value: bool) -> None:
+        self.value = value
+
+final class JsonNumber(JsonValue):
+    value: f64
+
+    fn __init__(self, value: f64) -> None:
+        self.value = value
+
+final class JsonString(JsonValue):
+    value: str
+
+    fn __init__(self, value: str) -> None:
+        self.value = value
+
+final class JsonArray(JsonValue):
+    items: List[JsonValue]
+
+    fn __init__(self, items: List[JsonValue]) -> None:
+        self.items = items
+
+final class JsonObject(JsonValue):
+    # M14: tuple-of-(str, class-ref) inside a List. Replaces M10's
+    # parallel `List[str] keys` + `List[JsonValue] vals` arrays.
+    pairs: List[Tuple[str, JsonValue]]
+
+    fn __init__(self, pairs: List[Tuple[str, JsonValue]]) -> None:
+        self.pairs = pairs
+
+# ── Number rendering: prefer "3" over "3.0" for integer-valued f64 ─────────
+
+fn render_number(n: f64) -> str:
+    # Trick: cast to i64, cast back, compare bit-for-bit at the f64 level.
+    # If equal, the value was integer-valued and within i64 range, so print
+    # without the ".0". Outside that range we fall back to the default f64
+    # printer, which is correct (large floats need full precision anyway).
+    big: f64 = 9.0e18
+    if n > big or n < 0.0 - big:
+        return str(n)
+    as_int: i64 = i64(n)
+    if f64(as_int) == n:
+        return str(as_int)
+    return str(n)
+
+# ── Rendering via match / case (replaces M10's virtual render()) ───────────
+#
+# Six-arm Constructor pattern over the sealed JsonValue hierarchy. With
+# all six variants enumerated the M16 exhaustiveness warning does NOT
+# fire — the trailing `return ""` after the match is just for the type
+# system's "every path returns" rule.
+
+fn render(v: JsonValue) -> str:
+    match v:
+        case JsonNull():
+            return "null"
+        case JsonBool(b):
+            if b:
+                return "true"
+            return "false"
+        case JsonNumber(n):
+            return render_number(n)
+        case JsonString(s):
+            return "\"" + s + "\""
+        case JsonArray(items):
+            return render_array(items)
+        case JsonObject(pairs):
+            return render_object(pairs)
+    return ""
+
+fn render_array(items: List[JsonValue]) -> str:
+    out: str = "["
+    n: i64 = i64(len(items))
+    i: i64 = 0
+    while i < n:
+        if i > 0:
+            out = out + ", "
+        out = out + render(items[i])
+        i = i + 1
+    return out + "]"
+
+fn render_object(pairs: List[Tuple[str, JsonValue]]) -> str:
+    out: str = "{"
+    n: i64 = i64(len(pairs))
+    i: i64 = 0
+    while i < n:
+        if i > 0:
+            out = out + ", "
+        # Tuple field access: pairs[i].0 is the key, .1 is the value.
+        out = out + "\"" + pairs[i].0 + "\": " + render(pairs[i].1)
+        i = i + 1
+    return out + "}"
+
+# ── isinstance helpers (replaces M10's "no way to externally discriminate") ─
+
+fn is_object(v: JsonValue) -> bool:
+    return isinstance(v, JsonObject)
+
+fn is_array(v: JsonValue) -> bool:
+    return isinstance(v, JsonArray)
+
+# ── Character helpers ─────────────────────────────────────────────────────
+
+fn is_ws(c: char) -> bool:
+    return c == ' ' or c == '\t' or c == '\n' or c == '\r'
+
+fn is_digit(c: char) -> bool:
+    return c >= '0' and c <= '9'
+
+# ── Parser ────────────────────────────────────────────────────────────────
+#
+# M11 BUG-026 fix: instance methods on a class that takes a `str` arg used
+# to destabilise the heap. The M12 torture test ran calculator + json + lisp
+# 250x with zero crashes; this brings JSON back to the natural OO shape.
+
+final class Parser:
+    src: str
+    pos: i64
+    n: i64
+
+    fn __init__(self, src: str) -> None:
+        self.src = src
+        self.pos = 0
+        self.n = i64(len(src))
+
+    fn at_end(self) -> bool:
+        return self.pos >= self.n
+
+    fn peek(self) -> char:
+        if self.pos >= self.n:
+            return '\0'
+        return self.src[self.pos]
+
+    fn skip_ws(self) -> None:
+        # M13 short-circuit `and`: without it, `self.src[self.pos]` would
+        # trip IndexError when pos >= n. With it, the bounds check guards.
+        while self.pos < self.n and is_ws(self.src[self.pos]):
+            self.pos = self.pos + 1
+
+    fn starts_with(self, s: str) -> bool:
+        slen: i64 = i64(len(s))
+        if self.pos + slen > self.n:
+            return false
+        i: i64 = 0
+        while i < slen:
+            if self.src[self.pos + i] != s[i]:
+                return false
+            i = i + 1
+        return true
+
+    fn consume(self, s: str) -> bool:
+        if self.starts_with(s):
+            self.pos = self.pos + i64(len(s))
+            return true
+        return false
+
+    fn expect(self, c: char) -> None:
+        # M15: raise ValueError on parse failure, caught at top level.
+        if self.pos >= self.n:
+            raise ValueError("unexpected end of input, expected '" + str(c) + "'")
+        if self.src[self.pos] != c:
+            raise ValueError("expected '" + str(c) + "' at position " + str(self.pos))
+        self.pos = self.pos + 1
+
+    # ── Grammar rules ───────────────────────────────────────────────────
+
+    fn parse_value(self) -> JsonValue:
+        self.skip_ws()
+        if self.at_end():
+            raise ValueError("unexpected end of input")
+        c: char = self.peek()
+        if c == '{':
+            return self.parse_object()
+        if c == '[':
+            return self.parse_array()
+        if c == '"':
+            return self.parse_string_value()
+        if c == 't' or c == 'f':
+            return self.parse_bool()
+        if c == 'n':
+            return self.parse_null_lit()
+        if c == '-' or is_digit(c):
+            return self.parse_number()
+        raise ValueError("unexpected character at position " + str(self.pos))
+
+    fn parse_null_lit(self) -> JsonValue:
+        if self.consume("null"):
+            v: JsonValue = JsonNull()
+            return v
+        raise ValueError("expected 'null' at position " + str(self.pos))
+
+    fn parse_bool(self) -> JsonValue:
+        if self.consume("true"):
+            t: JsonValue = JsonBool(true)
+            return t
+        if self.consume("false"):
+            f: JsonValue = JsonBool(false)
+            return f
+        raise ValueError("expected 'true' or 'false' at position " + str(self.pos))
+
+    fn parse_number(self) -> JsonValue:
+        start: i64 = self.pos
+        if self.peek() == '-':
+            self.pos = self.pos + 1
+        while self.pos < self.n and is_digit(self.src[self.pos]):
+            self.pos = self.pos + 1
+        # Optional fraction.
+        if self.pos < self.n and self.src[self.pos] == '.':
+            self.pos = self.pos + 1
+            while self.pos < self.n and is_digit(self.src[self.pos]):
+                self.pos = self.pos + 1
+        # Optional exponent.
+        if self.pos < self.n:
+            c: char = self.src[self.pos]
+            if c == 'e' or c == 'E':
+                self.pos = self.pos + 1
+                if self.pos < self.n:
+                    sgn: char = self.src[self.pos]
+                    if sgn == '+' or sgn == '-':
+                        self.pos = self.pos + 1
+                while self.pos < self.n and is_digit(self.src[self.pos]):
+                    self.pos = self.pos + 1
+        if self.pos == start:
+            raise ValueError("expected number at position " + str(start))
+        lex: str = self.src.slice(start, self.pos)
+        v: JsonValue = JsonNumber(parse_f64(lex))
+        return v
+
+    fn parse_string_raw(self) -> str:
+        self.expect('"')
+        start: i64 = self.pos
+        while self.pos < self.n and self.src[self.pos] != '"':
+            self.pos = self.pos + 1
+        if self.pos >= self.n:
+            raise ValueError("unterminated string literal starting at " + str(start - 1))
+        body: str = self.src.slice(start, self.pos)
+        self.pos = self.pos + 1
+        return body
+
+    fn parse_string_value(self) -> JsonValue:
+        body: str = self.parse_string_raw()
+        v: JsonValue = JsonString(body)
+        return v
+
+    fn parse_array(self) -> JsonValue:
+        self.expect('[')
+        items: List[JsonValue] = []
+        self.skip_ws()
+        if self.pos < self.n and self.src[self.pos] == ']':
+            self.pos = self.pos + 1
+            arr0: JsonValue = JsonArray(items)
+            return arr0
+        # First element.
+        items.append(self.parse_value())
+        self.skip_ws()
+        while self.pos < self.n and self.src[self.pos] == ',':
+            self.pos = self.pos + 1
+            self.skip_ws()
+            items.append(self.parse_value())
+            self.skip_ws()
+        self.expect(']')
+        arr: JsonValue = JsonArray(items)
+        return arr
+
+    fn parse_member(self, pairs: List[Tuple[str, JsonValue]]) -> None:
+        self.skip_ws()
+        k: str = self.parse_string_raw()
+        self.skip_ws()
+        self.expect(':')
+        self.skip_ws()
+        v: JsonValue = self.parse_value()
+        # M14: build the (key, value) tuple inline; .append it to the list.
+        pairs.append((k, v))
+
+    fn parse_object(self) -> JsonValue:
+        self.expect('{')
+        pairs: List[Tuple[str, JsonValue]] = []
+        self.skip_ws()
+        if self.pos < self.n and self.src[self.pos] == '}':
+            self.pos = self.pos + 1
+            obj0: JsonValue = JsonObject(pairs)
+            return obj0
+        self.parse_member(pairs)
+        self.skip_ws()
+        while self.pos < self.n and self.src[self.pos] == ',':
+            self.pos = self.pos + 1
+            self.parse_member(pairs)
+            self.skip_ws()
+        self.expect('}')
+        obj: JsonValue = JsonObject(pairs)
+        return obj
+
+# ── Entry points ──────────────────────────────────────────────────────────
+
+fn parse(src: str) -> JsonValue:
+    """Parse a JSON string. Propagates ValueError on malformed input."""
+    p: Parser = Parser(src)
+    p.skip_ws()
+    v: JsonValue = p.parse_value()
+    p.skip_ws()
+    if not p.at_end():
+        raise ValueError("trailing garbage at position " + str(p.pos))
+    return v
+
+fn try_parse(src: str) -> JsonValue?:
+    """Catching wrapper: returns `none` on parse failure. Demonstrates
+    a try/except around a deeply-recursive call — the handler frame
+    has to unwind through every Parser method on the stack."""
+    try:
+        v: JsonValue = parse(src)
+        return v
+    except ValueError as e:
+        println("try_parse: " + e.message)
+        return none
+
+# ── Driver ────────────────────────────────────────────────────────────────
+
+fn round_trip(label: str, src: str) -> bool:
+    """Parse, then render, then print both forms. Returns true on success."""
+    try:
+        v: JsonValue = parse(src)
+        out: str = render(v)
+        println(label + ": " + out)
+        return true
+    except ValueError as e:
+        println(label + ": PARSE-ERROR " + e.message)
+        return false
+
+fn main() -> i32:
+    n_ok: i32 = 0
+    n_total: i32 = 0
+
+    # 1. Atom — null.
+    if round_trip("01 atom_null", "null"):
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    # 2. Atom — true.
+    if round_trip("02 atom_true", "true"):
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    # 3. Atom — number.
+    if round_trip("03 atom_num", "42"):
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    # 4. Atom — string.
+    if round_trip("04 atom_str", "\"alice\""):
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    # 5. Flat array of mixed atoms.
+    if round_trip("05 array", "[1, 2, 3, true, null, \"x\"]"):
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    # 6. Flat object — the headline M10 input.
+    if round_trip(
+        "06 flat_obj",
+        "{\"name\": \"alice\", \"age\": 30, \"active\": true, \"score\": null}",
+    ):
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    # 7. Nested object — array-of-objects inside object.
+    if round_trip(
+        "07 nested_obj",
+        "{\"name\": \"alice\", \"tags\": [\"admin\", \"user\"], \"meta\": {\"active\": true, \"age\": 30}}",
+    ):
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    # 8. Deeply nested — exercises recursive method calls + try/except
+    # unwind across many frames. 6+ levels of nesting.
+    if round_trip(
+        "08 deep_nest",
+        "{\"a\": [1, [2, [3, [4, [5, [6, {\"deep\": [7, 8, 9]}]]]]]]}",
+    ):
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    # 9. Malformed input — caught by the try/except in round_trip, prints
+    # PARSE-ERROR. Counts as success (we EXPECT the parse to fail).
+    if not round_trip("09 malformed_obj", "{\"name\": "):
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    # 10. Malformed input — bad token at top level. Same pattern.
+    if not round_trip("10 malformed_atom", "tru"):
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    # 11. Trailing garbage after a valid value.
+    if not round_trip("11 trailing", "null xyz"):
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    # 12. try_parse wrapper — returns none on failure. Demonstrates the
+    # `JsonValue?` nullable shape.
+    bad: JsonValue? = try_parse("[1, 2,")
+    if bad is none:
+        println("12 try_parse: recovered to none")
+        n_ok = n_ok + 1
+    else:
+        println("12 try_parse: unexpectedly produced a value")
+    n_total = n_total + 1
+
+    # 13. isinstance helper on a real result.
+    parsed: JsonValue = parse("{\"k\": 1}")
+    if is_object(parsed):
+        println("13 isinstance: parsed is JsonObject")
+        n_ok = n_ok + 1
+    else:
+        println("13 isinstance: FAIL — not JsonObject")
+    n_total = n_total + 1
+
+    # 14. finally runs on both success and failure. We use a counter
+    # incremented in `finally` and verified after.
+    cleaned: i32 = 0
+    try:
+        unused: JsonValue = parse("[1, 2]")
+    except ValueError as e:
+        cleaned = cleaned - 100
+    finally:
+        cleaned = cleaned + 1
+    # And the failure path:
+    try:
+        unused2: JsonValue = parse("[")
+    except ValueError as e:
+        cleaned = cleaned + 10
+    finally:
+        cleaned = cleaned + 1
+    if cleaned == 12:
+        println("14 finally: cleaned=" + str(cleaned))
+        n_ok = n_ok + 1
+    else:
+        println("14 finally: cleaned=" + str(cleaned) + " (expected 12)")
+    n_total = n_total + 1
+
+    println("OK: " + str(n_ok) + "/" + str(n_total))
+    if n_ok == n_total:
+        return 0
+    return 1

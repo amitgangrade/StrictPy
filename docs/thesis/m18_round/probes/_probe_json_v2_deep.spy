@@ -1,0 +1,110 @@
+"""Probe: push the M18 JSON parser to extreme nesting depth, beyond the
+14-case driver in json_parse_v2.spy. Not part of the test suite; run
+manually to verify the M11/M12 BUG-026 fix holds at depth >>10.
+"""
+
+sealed class JsonValue:
+    fn __init__(self) -> None:
+        pass
+
+final class JsonNull(JsonValue):
+    fn __init__(self) -> None:
+        pass
+
+final class JsonNumber(JsonValue):
+    value: f64
+    fn __init__(self, value: f64) -> None:
+        self.value = value
+
+final class JsonArray(JsonValue):
+    items: List[JsonValue]
+    fn __init__(self, items: List[JsonValue]) -> None:
+        self.items = items
+
+final class Parser:
+    src: str
+    pos: i64
+    n: i64
+
+    fn __init__(self, src: str) -> None:
+        self.src = src
+        self.pos = 0
+        self.n = i64(len(src))
+
+    fn parse_value(self) -> JsonValue:
+        while self.pos < self.n and self.src[self.pos] == ' ':
+            self.pos = self.pos + 1
+        if self.pos >= self.n:
+            raise ValueError("eof")
+        c: char = self.src[self.pos]
+        if c == '[':
+            return self.parse_array()
+        if c >= '0' and c <= '9':
+            start: i64 = self.pos
+            while self.pos < self.n and self.src[self.pos] >= '0' and self.src[self.pos] <= '9':
+                self.pos = self.pos + 1
+            v: JsonValue = JsonNumber(parse_f64(self.src.slice(start, self.pos)))
+            return v
+        raise ValueError("unexpected")
+
+    fn parse_array(self) -> JsonValue:
+        self.pos = self.pos + 1
+        items: List[JsonValue] = []
+        while self.pos < self.n and self.src[self.pos] == ' ':
+            self.pos = self.pos + 1
+        if self.pos < self.n and self.src[self.pos] == ']':
+            self.pos = self.pos + 1
+            a0: JsonValue = JsonArray(items)
+            return a0
+        items.append(self.parse_value())
+        while self.pos < self.n and self.src[self.pos] == ',':
+            self.pos = self.pos + 1
+            items.append(self.parse_value())
+        if self.pos >= self.n or self.src[self.pos] != ']':
+            raise ValueError("expected ]")
+        self.pos = self.pos + 1
+        a: JsonValue = JsonArray(items)
+        return a
+
+fn count_depth(v: JsonValue) -> i32:
+    match v:
+        case JsonArray(items):
+            if len(items) == 0:
+                return 1
+            return 1 + count_depth(items[0])
+        case _:
+            return 0
+
+fn build_deep(d: i32) -> str:
+    # Build "[[[...[42]...]]]" with d open brackets.
+    s: str = ""
+    i: i32 = 0
+    while i < d:
+        s = s + "["
+        i = i + 1
+    s = s + "42"
+    i = 0
+    while i < d:
+        s = s + "]"
+        i = i + 1
+    return s
+
+fn main() -> i32:
+    # Try increasing depth: 5, 10, 20, 40 levels.
+    depths: List[i32] = [5, 10, 20, 40]
+    i: i32 = 0
+    while i < i32(i64(len(depths))) :
+        d: i32 = depths[i]
+        src: str = build_deep(d)
+        p: Parser = Parser(src)
+        try:
+            v: JsonValue = p.parse_value()
+            measured: i32 = count_depth(v)
+            if measured == d:
+                println("depth " + str(d) + ": OK")
+            else:
+                println("depth " + str(d) + ": MISMATCH measured=" + str(measured))
+        except ValueError as e:
+            println("depth " + str(d) + ": EXCEPTION " + e.message)
+        i = i + 1
+    return 0

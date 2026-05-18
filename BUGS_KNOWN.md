@@ -386,3 +386,31 @@ Generic classes deferred to v0.2.
   code (two copies of partition + quicksort + main) — so the generic
   version is roughly 40% shorter at *two* element types and the savings
   scale linearly per added type.
+
+---
+
+## Fixed in M18 (round 4 stress test)
+
+Four parallel C-agents (R1 algorithms_lib, R2 json_parse_v2, R3 expr_interp,
+R4 graph_lib) wrote ~1500 lines of code exercising the M13-M17 surface in
+combination. Three found zero new bugs. R3 found exactly one — fixed inline.
+
+| # | Bug | Fix location | Regression test |
+|---|-----|--------------|-----------------|
+| BUG-036 | `except ZeroDivisionError` did not catch `1/0` — runtime emitted legacy `DivisionByZeroError` and arm-match was exact-string. Spec/runtime drift. | `vm/src/interp.rs` (4 divzero emit sites changed to canonical `ZeroDivisionError`; new `exception_name_alias` maps legacy `DivisionByZeroError` filter to canonical for backward-compat) | `vm/tests/m18_divzero_alias.rs::except_zero_division_error_catches_canonical_name`, `..._legacy_name_still_catches`, `divzero_in_i32_path_emits_canonical_name` |
+
+### Notes for the next round
+
+- After M18 the only deferred bug is **BUG-028** (no implicit line
+  continuation across infix `+`). That's the smallest remaining language
+  gap; a focused agent can land it in <1 hour.
+- M18's "absence of new bugs" finding (R1, R2, R4 all clean) is itself
+  load-bearing thesis material. Stress-test ROI has flattened sharply
+  since M11: M10 found 17 bugs / round, M11 found 6, M12 found 2, M18
+  found 1. The language is settling.
+- M18 R3's other probes (saved under `docs/thesis/m18_round/probes/`)
+  document v0.1 limits the user can grep for: isinstance flow-narrowing
+  doesn't compose through `and`; nested constructor patterns don't bind
+  inner identifiers; match-scrutinee-throws propagates correctly; `raise
+  e` re-raise from a caught variable works despite being out-of-scope in
+  §7.5.6 (could be promoted to spec).

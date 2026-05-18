@@ -1,0 +1,45 @@
+"""Probe: transitive 3-level generic instantiation.
+outer[T] -> middle[T] -> inner[T] with the same T threaded all the way.
+
+Also probes: generic returning Tuple[i32, T]; calling outer with literal
+tuple-arg path; and a recursive generic helper.
+"""
+
+fn inner[T](x: T) -> T:
+    return x
+
+fn middle[T](xs: List[T]) -> T:
+    # Calls inner with the substituted T. Must instantiate inner__T.
+    return inner(xs[0])
+
+fn outer[T](xs: List[T]) -> T:
+    # Calls middle with the substituted T. Must instantiate middle__T,
+    # which in turn instantiates inner__T.
+    return middle(xs)
+
+# Generic returning Tuple[i32, T].
+fn first_with_idx[T](xs: List[T]) -> Tuple[i32, T]:
+    return (0, xs[0])
+
+# Recursive generic — sum a list-of-T as i64 via fold by index.
+fn sum_to_i64(xs: List[i64], i: i64) -> i64:
+    if i >= i64(len(xs)):
+        return 0
+    return xs[i] + sum_to_i64(xs, i + 1)
+
+fn main() -> i32:
+    a: List[i32] = [11, 22, 33]
+    println(str(outer(a)))         # 11 — i32 chain
+
+    b: List[str] = ["hi", "lo"]
+    println(outer(b))              # hi — str chain
+
+    c: List[f64] = [3.5, 4.5]
+    println(str(outer(c)))         # 3.5
+
+    p: Tuple[i32, i32] = first_with_idx(a)
+    println(str(p))                # (0, 11)
+
+    nums: List[i64] = [1, 2, 3, 4, 5]
+    println(str(sum_to_i64(nums, 0)))    # 15
+    return 0

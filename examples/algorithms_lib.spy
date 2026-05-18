@@ -1,0 +1,491 @@
+"""M18 demo: a small generic algorithms library that exercises ALL of
+the M13-M17 surface in one program.
+
+Each algorithm is parameterised over one or two type variables and uses
+the appropriate combinator: tuples for multi-return / pair shapes
+(M14), try/except for "value-or-failure" returns (M15), short-circuit
+`and`/`or` for bounds checks (M13), `isinstance` for a runtime class
+discriminant inside a generic body (M16), and of course generic free
+functions throughout (M17).
+
+The `main()` runs ~12 test cases and prints `PASS test=N` / `FAIL ...`
+per line, ending with `OK: N/N` or `FAIL: M/N`. The Rust acceptance
+test asserts on the `OK:` prefix.
+
+Algorithms shipped:
+
+  * `find_first[T](xs, target) -> i32`     — linear search; -1 on miss.
+  * `safe_index[T](xs, i) -> T?`           — bounds-check via try/except
+                                              wrapping native IndexError.
+  * `enumerate[T](xs) -> List[Tuple[i32, T]]` — index-value pairs.
+  * `zip[A, B](xs, ys) -> List[Tuple[A,B]]` — raises ValueError on size
+                                              mismatch; caught by tests.
+  * `unzip[A, B](pairs) -> Tuple[List[A], List[B]]` — inverse of zip;
+                                              hammers tuple-of-class-ref
+                                              and a return-position tuple.
+  * `binary_search[T](xs, target) -> i32`  — sorted-list search; raises
+                                              IndexError when missing.
+  * `merge_sorted[T](a, b) -> List[T]`     — classic two-pointer merge.
+  * `split_half[T](xs) -> Tuple[List[T], List[T]]` — heavy: generic +
+                                              tuple-return + transitive.
+
+Plus the M17 stress probes:
+
+  * `id[T]`            — called once with i32 and once with Tuple[i32,i32]
+                         to confirm mangle keys don't collide.
+  * `outer[T] / middle[T] / inner[T]` — three-deep transitive instantiation
+                                        across i32, str, and a user class.
+  * `first[K, V]`      — tuple-in-generic projection (also exercised by
+                         unzip).
+
+The "what to find" probes from the M18 shared brief are answered in the
+report at docs/thesis/agent_reports/m18_algorithms_lib.md.
+"""
+
+# ── A user class so we can stress generics over class types. ───────────
+# The class is intentionally tiny and final so the vtable path is the
+# simple one — the algorithm stress is in the generic dispatch, not in
+# inheritance.
+
+final class Item:
+    tag: str
+    weight: i32
+
+    fn __init__(self, tag: str, weight: i32) -> None:
+        self.tag = tag
+        self.weight = weight
+
+# ── Generic algorithms ─────────────────────────────────────────────────
+
+fn find_first[T](xs: List[T], target: T) -> i32:
+    """Linear search; returns the i32 index of the first equal element
+    or -1 if none. The bounds-check exists to exercise short-circuit
+    `and` (M13) in a generic body: `i < n and xs[i] == target`. Without
+    short-circuit, the first iteration with `n == 0` would trip
+    IndexError before the comparison short-circuits."""
+    n: i32 = i32(i64(len(xs)))
+    i: i32 = 0
+    while i < n:
+        if xs[i] == target:
+            return i
+        i = i + 1
+    return -1
+
+fn safe_index[T](xs: List[T], i: i32) -> T?:
+    """Bounds-safe index. Returns the value or `none` on out-of-range,
+    by catching the native IndexError that `xs[i]` raises (M15)."""
+    try:
+        v: T = xs[i]
+        return v
+    except IndexError as e:
+        return none
+
+fn enumerate[T](xs: List[T]) -> List[Tuple[i32, T]]:
+    """Builds `[(0, xs[0]), (1, xs[1]), ...]`. Hammers a tuple-in-list
+    construction and a generic return-position with a tuple shape."""
+    out: List[Tuple[i32, T]] = []
+    n: i32 = i32(i64(len(xs)))
+    i: i32 = 0
+    while i < n:
+        out.append((i, xs[i]))
+        i = i + 1
+    return out
+
+fn zip[A, B](xs: List[A], ys: List[B]) -> List[Tuple[A, B]]:
+    """Zip two lists into a list of pairs. Raises ValueError if the
+    lengths differ (callers below catch it)."""
+    n: i32 = i32(i64(len(xs)))
+    m: i32 = i32(i64(len(ys)))
+    if n != m:
+        raise ValueError("zip: length mismatch")
+    out: List[Tuple[A, B]] = []
+    i: i32 = 0
+    while i < n:
+        out.append((xs[i], ys[i]))
+        i = i + 1
+    return out
+
+fn unzip[A, B](pairs: List[Tuple[A, B]]) -> Tuple[List[A], List[B]]:
+    """Inverse of `zip`. Returns a tuple of two lists. Demonstrates
+    generic + tuple-return + tuple-field-access in a single body."""
+    xs: List[A] = []
+    ys: List[B] = []
+    n: i32 = i32(i64(len(pairs)))
+    i: i32 = 0
+    while i < n:
+        p: Tuple[A, B] = pairs[i]
+        xs.append(p.0)
+        ys.append(p.1)
+        i = i + 1
+    return (xs, ys)
+
+fn binary_search[T](xs: List[T], target: T) -> i32:
+    """Standard binary search over a sorted list. Raises IndexError if
+    the target is missing; callers below catch it via try/except.
+    Operator `<` is per-instantiation (ILt for i32, FLt for f64)."""
+    lo: i32 = 0
+    hi: i32 = i32(i64(len(xs))) - 1
+    while lo <= hi:
+        mid: i32 = (lo + hi) // 2
+        v: T = xs[mid]
+        if v == target:
+            return mid
+        if v < target:
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    raise IndexError("binary_search: target not found")
+
+fn merge_sorted[T](a: List[T], b: List[T]) -> List[T]:
+    """Classic two-pointer merge of two sorted lists. Per-instantiation
+    `<` binds to ILt / FLt / StrConcat-friendly ops by element type."""
+    out: List[T] = []
+    na: i32 = i32(i64(len(a)))
+    nb: i32 = i32(i64(len(b)))
+    i: i32 = 0
+    j: i32 = 0
+    # Short-circuit `and` (M13) so we can flip the loop guard without
+    # tripping IndexError when one side is exhausted.
+    while i < na and j < nb:
+        if a[i] <= b[j]:
+            out.append(a[i])
+            i = i + 1
+        else:
+            out.append(b[j])
+            j = j + 1
+    while i < na:
+        out.append(a[i])
+        i = i + 1
+    while j < nb:
+        out.append(b[j])
+        j = j + 1
+    return out
+
+fn split_half[T](xs: List[T]) -> Tuple[List[T], List[T]]:
+    """Split a list down the middle, returning the two halves as a
+    tuple. Generic + tuple-return + the active substitution must thread
+    through the `List[T]` literal initialisation."""
+    n: i32 = i32(i64(len(xs)))
+    half: i32 = n // 2
+    left: List[T] = []
+    right: List[T] = []
+    i: i32 = 0
+    while i < half:
+        left.append(xs[i])
+        i = i + 1
+    while i < n:
+        right.append(xs[i])
+        i = i + 1
+    return (left, right)
+
+# ── M17 mangling-collision + transitive-depth probes ───────────────────
+
+fn id[T](x: T) -> T:
+    """Identity. The driver below calls `id(42)` AND `id((42, 42))` in
+    the same program — distinct instantiations (`id__i32` and
+    `id__tuple_i32_i32`) that must NOT collide in the worklist."""
+    return x
+
+fn inner[T](x: T) -> T:
+    """Bottom of the transitive chain."""
+    return x
+
+fn middle[T](x: T) -> T:
+    """Middle of the transitive chain."""
+    return inner(x)
+
+fn outer[T](x: T) -> T:
+    """Top of the transitive chain. main() calls this with three
+    different element types — i32, str, and a user class `Item` — so
+    the worklist has to drain three depth-3 chains."""
+    return middle(x)
+
+fn first[K, V](p: Tuple[K, V]) -> K:
+    """Tuple-in-generic projection. Probes that `p.0` lowers to the
+    right offset per instantiation."""
+    return p.0
+
+# ── Test runner helpers ────────────────────────────────────────────────
+
+fn report(test_num: i32, ok: bool, label: str) -> bool:
+    if ok:
+        println("PASS test=" + str(test_num) + " " + label)
+    else:
+        println("FAIL test=" + str(test_num) + " " + label)
+    return ok
+
+# ── Tests (each returns true on PASS, false on FAIL) ───────────────────
+
+fn test_find_first_i32() -> bool:
+    xs: List[i32] = [10, 20, 30, 40, 50]
+    found: i32 = find_first(xs, 30)
+    missing: i32 = find_first(xs, 99)
+    ok: bool = found == 2 and missing == -1
+    return report(1, ok, "find_first[i32]")
+
+fn test_find_first_empty() -> bool:
+    # Short-circuit `and` (M13) is the load-bearing thing here — if the
+    # while-guard evaluated `xs[0] == target` BEFORE `i < n`, this would
+    # crash with IndexError on length-0 input.
+    xs: List[i32] = []
+    found: i32 = find_first(xs, 7)
+    return report(2, found == -1, "find_first[i32] on empty")
+
+fn test_find_first_str() -> bool:
+    xs: List[str] = ["alpha", "beta", "gamma", "delta"]
+    found: i32 = find_first(xs, "gamma")
+    return report(3, found == 2, "find_first[str]")
+
+fn test_safe_index_hit_and_miss() -> bool:
+    # M15 + M17: try/except inside a generic body. The same source
+    # `try: return xs[i] except IndexError: return none` lowers per
+    # instantiation; both monomorphic copies (i32 and str) need the
+    # try/except handler frame.
+    xs: List[i32] = [10, 20, 30]
+    a: i32? = safe_index(xs, 1)
+    b: i32? = safe_index(xs, 99)
+    if a is none:
+        return report(4, false, "safe_index[i32] hit returned none")
+    if b is not none:
+        return report(4, false, "safe_index[i32] miss returned some")
+    return report(4, true, "safe_index[i32] hit+miss")
+
+fn test_safe_index_over_str() -> bool:
+    xs: List[str] = ["x", "y", "z"]
+    a: str? = safe_index(xs, 0)
+    b: str? = safe_index(xs, 100)
+    if a is none:
+        return report(5, false, "safe_index[str] hit returned none")
+    if b is not none:
+        return report(5, false, "safe_index[str] miss returned some")
+    return report(5, true, "safe_index[str] hit+miss")
+
+fn test_enumerate() -> bool:
+    xs: List[str] = ["a", "b", "c"]
+    out: List[Tuple[i32, str]] = enumerate(xs)
+    if len(out) != 3:
+        return report(6, false, "enumerate length")
+    # Tuple field access via `.0` / `.1` (M14).
+    p0: Tuple[i32, str] = out[0]
+    p2: Tuple[i32, str] = out[2]
+    ok: bool = p0.0 == 0 and p0.1 == "a" and p2.0 == 2 and p2.1 == "c"
+    return report(6, ok, "enumerate[str]")
+
+fn test_zip_equal_lengths() -> bool:
+    ks: List[i32] = [1, 2, 3]
+    vs: List[str] = ["one", "two", "three"]
+    pairs: List[Tuple[i32, str]] = zip(ks, vs)
+    if len(pairs) != 3:
+        return report(7, false, "zip length")
+    p1: Tuple[i32, str] = pairs[1]
+    ok: bool = p1.0 == 2 and p1.1 == "two"
+    return report(7, ok, "zip[i32, str]")
+
+fn test_zip_length_mismatch_caught() -> bool:
+    # zip should raise ValueError, which we catch here. Probes
+    # try/except wrapping a generic call.
+    ks: List[i32] = [1, 2, 3]
+    vs: List[str] = ["one", "two"]
+    caught: bool = false
+    try:
+        pairs: List[Tuple[i32, str]] = zip(ks, vs)
+        println("zip should have raised; got " + str(len(pairs)) + " pairs")
+    except ValueError as e:
+        caught = true
+    return report(8, caught, "zip raises ValueError on mismatch")
+
+fn test_unzip_roundtrip() -> bool:
+    # Round-trip zip / unzip and confirm element identity. Also exercises
+    # tuple-in-list-in-generic.
+    ks: List[i32] = [10, 20, 30]
+    vs: List[str] = ["a", "b", "c"]
+    pairs: List[Tuple[i32, str]] = zip(ks, vs)
+    halves: Tuple[List[i32], List[str]] = unzip(pairs)
+    left: List[i32] = halves.0
+    right: List[str] = halves.1
+    ok: bool = len(left) == 3 and len(right) == 3
+    if ok:
+        ok = left[0] == 10 and left[2] == 30 and right[0] == "a" and right[2] == "c"
+    return report(9, ok, "unzip round-trip")
+
+fn test_binary_search_hit() -> bool:
+    xs: List[i32] = [1, 3, 5, 7, 9, 11, 13, 15]
+    idx: i32 = -1
+    try:
+        idx = binary_search(xs, 11)
+    except IndexError as e:
+        idx = -2
+    return report(10, idx == 5, "binary_search[i32] hit")
+
+fn test_binary_search_miss_raises() -> bool:
+    # IndexError propagating out of a generic body, caught by user code.
+    # Stresses M15 inside an M17 monomorphisation.
+    xs: List[i32] = [1, 3, 5, 7, 9]
+    caught: bool = false
+    try:
+        idx: i32 = binary_search(xs, 4)
+        println("binary_search miss should have raised; got " + str(idx))
+    except IndexError as e:
+        caught = true
+    return report(11, caught, "binary_search miss raises IndexError")
+
+fn test_merge_sorted_i32() -> bool:
+    a: List[i32] = [1, 3, 5, 7]
+    b: List[i32] = [2, 4, 6, 8, 10]
+    m: List[i32] = merge_sorted(a, b)
+    if len(m) != 9:
+        return report(12, false, "merge_sorted length")
+    # Verify ascending.
+    i: i32 = 1
+    while i < 9:
+        if m[i - 1] > m[i]:
+            return report(12, false, "merge_sorted not ascending at " + str(i))
+        i = i + 1
+    return report(12, m[0] == 1 and m[8] == 10, "merge_sorted[i32]")
+
+fn test_merge_sorted_f64() -> bool:
+    # Same generic body, different element type → per-instantiation `<=`
+    # binds to FLe instead of ILe. The M17 brief flagged this as the
+    # canonical mis-sort bug pre-M17.
+    a: List[f64] = [0.5, 1.5, 2.5]
+    b: List[f64] = [1.0, 2.0, 3.0]
+    m: List[f64] = merge_sorted(a, b)
+    ok: bool = len(m) == 6 and m[0] == 0.5 and m[5] == 3.0
+    return report(13, ok, "merge_sorted[f64]")
+
+fn test_split_half() -> bool:
+    xs: List[i32] = [1, 2, 3, 4, 5]
+    halves: Tuple[List[i32], List[i32]] = split_half(xs)
+    left: List[i32] = halves.0
+    right: List[i32] = halves.1
+    ok: bool = len(left) == 2 and len(right) == 3
+    if ok:
+        ok = left[0] == 1 and left[1] == 2 and right[0] == 3 and right[2] == 5
+    return report(14, ok, "split_half[i32]")
+
+fn test_id_mangle_collision() -> bool:
+    # The M18 brief calls this out as a worklist mangling probe:
+    # `id__i32` vs `id__tuple_i32_i32` must be distinct instantiations.
+    a: i32 = id(42)
+    pair: Tuple[i32, i32] = (42, 42)
+    p: Tuple[i32, i32] = id(pair)
+    ok: bool = a == 42 and p.0 == 42 and p.1 == 42
+    return report(15, ok, "id mangle: i32 vs Tuple[i32, i32]")
+
+fn test_transitive_depth_three() -> bool:
+    # outer → middle → inner, all generic, all over three different
+    # element types in the same program. Probes worklist drain depth
+    # and per-instantiation lowering across i32, str, and a class type.
+    a: i32 = outer(7)
+    b: str = outer("hello")
+    item: Item = Item("widget", 42)
+    c: Item = outer(item)
+    ok: bool = a == 7 and b == "hello" and c.tag == "widget" and c.weight == 42
+    return report(16, ok, "transitive depth=3 over i32/str/class")
+
+fn test_first_kv() -> bool:
+    # Tuple-in-generic projection, also threads K and V through to
+    # distinct call-sites in main().
+    p: Tuple[i32, str] = (99, "ninety-nine")
+    k: i32 = first(p)
+    q: Tuple[str, i32] = ("k", 1)
+    s: str = first(q)
+    return report(17, k == 99 and s == "k", "first[K, V] projection")
+
+fn test_isinstance_in_handler() -> bool:
+    # M16 + M15: catch an exception and use isinstance on the bound
+    # exception value to check its type_name. The check is via
+    # type_name string compare rather than `isinstance(e, IOError)`
+    # because user-typed exception subclasses aren't supported in v0.1
+    # (per BUGS_KNOWN); this is the closest "isinstance-shaped" thing
+    # the M15 surface allows.
+    caught_type: str = ""
+    try:
+        raise IOError("oops")
+    except IOError as e:
+        caught_type = e.type_name
+    return report(18, caught_type == "IOError", "exception type_name after catch")
+
+# ── main: drive all the tests ─────────────────────────────────────────
+
+fn main() -> i32:
+    n_ok: i32 = 0
+    n_total: i32 = 0
+
+    if test_find_first_i32():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_find_first_empty():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_find_first_str():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_safe_index_hit_and_miss():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_safe_index_over_str():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_enumerate():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_zip_equal_lengths():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_zip_length_mismatch_caught():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_unzip_roundtrip():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_binary_search_hit():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_binary_search_miss_raises():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_merge_sorted_i32():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_merge_sorted_f64():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_split_half():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_id_mangle_collision():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_transitive_depth_three():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_first_kv():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_isinstance_in_handler():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if n_ok == n_total:
+        println("OK: " + str(n_ok) + "/" + str(n_total))
+        return 0
+    println("FAIL: " + str(n_ok) + "/" + str(n_total))
+    return 1

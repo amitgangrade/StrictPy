@@ -1,0 +1,33 @@
+"""Probe: generic function with try/except inside.
+
+Tests:
+  - safe_get[T] using try/except IndexError; instantiated for multiple T.
+  - JIT carve-out must fire per-instantiation (M15 brief said yes).
+  - 4+ distinct instantiations: i32, f64, str, Tuple[i32, f64].
+"""
+
+fn safe_get[T](xs: List[T], i: i32, default: T) -> T:
+    try:
+        return xs[i]
+    except IndexError as e:
+        return default
+
+fn main() -> i32:
+    a: List[i32] = [10, 20, 30]
+    println(str(safe_get(a, 1, -1)))      # 20
+    println(str(safe_get(a, 99, -1)))     # -1
+
+    b: List[f64] = [1.5, 2.5]
+    println(str(safe_get(b, 0, 0.0)))     # 1.5
+    println(str(safe_get(b, 99, -9.0)))   # -9
+
+    c: List[str] = ["hi", "there"]
+    println(safe_get(c, 1, "x"))          # there
+    println(safe_get(c, 99, "x"))         # x
+
+    d: List[Tuple[i32, f64]] = []
+    d.append((1, 2.0))
+    fallback: Tuple[i32, f64] = (-1, -1.0)
+    println(str(safe_get(d, 0, fallback)))    # (1, 2)
+    println(str(safe_get(d, 99, fallback)))   # (-1, -1)
+    return 0

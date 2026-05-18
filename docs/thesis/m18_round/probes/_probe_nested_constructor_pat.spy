@@ -1,0 +1,55 @@
+# M18 probe: spec §6.5.1 says nested Constructor patterns are deferred
+# to v0.2.  Confirmed.
+#
+# The natural code:
+#
+#     match p:
+#         case Pair(IV(a), IV(b)):       # FAILS to compile:
+#             println(str(a) + str(b))   # E1004: unknown name `a`
+#
+# fails with E1004 because the inner `IV(a)` sub-pattern isn't lowered:
+# the lowerer treats inner-position identifiers as scope-references
+# rather than as bindings, so `a` and `b` resolve to nothing and the
+# typechecker reports "unknown name".  Note the *symptom* is a confusing
+# E1004 rather than an explicit "nested constructor patterns are not
+# yet supported" diagnostic.
+#
+# The workaround used in expr_interp.spy is to flatten the pattern:
+# bind the inner Pair fields as Identifier sub-patterns and dispatch
+# them through a nested match.
+
+sealed class V:
+    fn __init__(self) -> None: pass
+
+final class IV(V):
+    n: i64
+    fn __init__(self, n: i64) -> None: self.n = n
+
+final class Pair(V):
+    car: V
+    cdr: V
+    fn __init__(self, car: V, cdr: V) -> None:
+        self.car = car
+        self.cdr = cdr
+
+# Workaround: flat outer pattern + nested match for inner discrimination.
+fn show(p: V) -> str:
+    match p:
+        case Pair(car, cdr):
+            match car:
+                case IV(a):
+                    match cdr:
+                        case IV(b):
+                            return "(" + str(a) + ", " + str(b) + ")"
+                        case _:
+                            return "(int, ?)"
+                case _:
+                    return "(?, ?)"
+        case _:
+            return "<not pair>"
+
+fn main() -> i32:
+    p: V = Pair(IV(1i64), IV(2i64))
+    println(show(p))           # (1, 2)
+    println(show(IV(99i64)))   # <not pair>
+    return 0

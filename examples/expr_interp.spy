@@ -1,0 +1,696 @@
+"""M18 expression interpreter — sealed `Expr` AST + sealed `Value` runtime
+domain, walked entirely through `match` / `case` (M16), with try/except
+(M15) catching the four distinct runtime-error shapes raised by the
+evaluator.
+
+Mini-language grammar:
+
+    e ::= n               (i64 literal)
+        | "s"             (str literal)
+        | x               (identifier)
+        | e + e | e - e | e * e | e / e
+        | e == e | e < e
+        | if e then e else e
+        | let x = e in e
+
+The point of this program is to stress the M15+M16 surface together —
+specifically:
+
+  * A 5-variant sealed `Expr` (Lit / Var / Binop / If / Let) walked by a
+    single `match e:` evaluator. Recursion through Binop and Let means
+    handler frames sit several stack levels deep when a raise fires.
+
+  * A 2-variant sealed `Value` (IntVal / StrVal) discriminated by `match
+    v:` inside every Binop arm. Nested-match (outer `match e: case
+    Binop(...) => match eval(l): case IntVal(a) => match eval(r): case
+    IntVal(b) => ...`) is the load-bearing shape.
+
+  * `raise TypeError("...")` from inside a `match` arm body, propagating
+    through 5+ recursive `eval()` frames to a top-level handler.
+
+  * `ZeroDivisionError` raised natively by the VM's `/` opcode from
+    inside a `match` arm, caught at top level — i.e. handler frames
+    have to unwind correctly across both user `raise` and native traps.
+
+  * `RuntimeError("undefined: " + name)` for env lookups that miss.
+
+  * `finally:` on the top-level driver that runs once per case even if
+    the case raises an unhandled exception in some hypothetical bug.
+
+Parser is hand-rolled recursive descent.  Per `calculator.spy`'s
+post-mortem (BUGS_KNOWN.md #4/#5), it's a `final class Parser` carrying
+state ONLY (NO methods) — every operation is a free function taking
+`p: Parser`.  Without this workaround the same shape destabilises the
+heap on Windows.
+"""
+
+# ── Runtime value domain (sealed Value: IntVal | StrVal) ─────────────────
+
+sealed class Value:
+    fn __init__(self) -> None:
+        pass
+
+final class IntVal(Value):
+    n: i64
+
+    fn __init__(self, n: i64) -> None:
+        self.n = n
+
+final class StrVal(Value):
+    s: str
+
+    fn __init__(self, s: str) -> None:
+        self.s = s
+
+
+fn render_value(v: Value) -> str:
+    match v:
+        case IntVal(n):
+            return str(n)
+        case StrVal(s):
+            return s
+    return "<value>"
+
+
+# ── Expression AST (sealed Expr: Lit | Var | Binop | If | Let) ───────────
+#
+# Five variants.  match e: case Lit/Var/Binop/If/Let exhausts them; no
+# `case _:` so the exhaustiveness warning *should not* fire (spec §6.5).
+
+sealed class Expr:
+    fn __init__(self) -> None:
+        pass
+
+final class Lit(Expr):
+    # `value` is a runtime Value rather than two int/str literal subclasses
+    # — that keeps the Expr hierarchy at 5 variants and pushes literal
+    # typing into the Value domain, where it actually matters at eval
+    # time.
+    value: Value
+
+    fn __init__(self, value: Value) -> None:
+        self.value = value
+
+final class Var(Expr):
+    name: str
+
+    fn __init__(self, name: str) -> None:
+        self.name = name
+
+final class Binop(Expr):
+    # op is one of "+", "-", "*", "/", "==", "<"
+    op: str
+    lhs: Expr
+    rhs: Expr
+
+    fn __init__(self, op: str, lhs: Expr, rhs: Expr) -> None:
+        self.op = op
+        self.lhs = lhs
+        self.rhs = rhs
+
+final class If(Expr):
+    cond: Expr
+    t_branch: Expr
+    e_branch: Expr
+
+    fn __init__(self, cond: Expr, t_branch: Expr, e_branch: Expr) -> None:
+        self.cond = cond
+        self.t_branch = t_branch
+        self.e_branch = e_branch
+
+final class Let(Expr):
+    name: str
+    init: Expr
+    body: Expr
+
+    fn __init__(self, name: str, init: Expr, body: Expr) -> None:
+        self.name = name
+        self.init = init
+        self.body = body
+
+
+# ── Environment ──────────────────────────────────────────────────────────
+#
+# Parallel List[str] + List[Value].  Per `lisp.spy`'s notes Dict[str, V]
+# was unreliable for class-typed V; parallel lists are the established
+# v0.1 workaround.  We push on `let` entry, pop on `let` exit.
+
+final class Env:
+    keys: List[str]
+    vals: List[Value]
+
+    fn __init__(self) -> None:
+        self.keys = []
+        self.vals = []
+
+
+fn env_push(env: Env, name: str, v: Value) -> None:
+    env.keys.append(name)
+    env.vals.append(v)
+
+fn env_pop(env: Env) -> None:
+    # `.pop()` removes the last element.  Used to undo a `let` binding
+    # once the body has been evaluated.
+    n: i64 = i64(len(env.keys))
+    if n > 0i64:
+        env.keys.pop()
+        env.vals.pop()
+
+fn env_lookup(env: Env, name: str) -> Value:
+    # Linear right-to-left scan so that inner `let x = ...` shadows
+    # outer `x`.  Raises RuntimeError if the name is unbound.
+    i: i64 = i64(len(env.keys)) - 1i64
+    while i >= 0i64:
+        if env.keys[i] == name:
+            return env.vals[i]
+        i = i - 1i64
+    raise RuntimeError("undefined: " + name)
+
+
+# ── Parser (state + free functions; NO methods on Parser) ────────────────
+#
+# Tokens are 1- or multi-character punct (`+`, `-`, `*`, `/`, `=`,
+# `==`, `<`, `(`, `)`), keywords (`if`, `then`, `else`, `let`, `in`),
+# integer literals, string literals (`"..."`, no escapes), or identifiers
+# (alpha + `_`).
+#
+# Whitespace is skipped between tokens.  Parser is a recursive descent
+# walker over the source string.
+
+final class Parser:
+    src: str
+    pos: i64
+    n: i64
+
+    fn __init__(self, src: str) -> None:
+        self.src = src
+        self.pos = 0i64
+        self.n = i64(len(src))
+
+
+fn is_digit(c: char) -> bool:
+    return c >= '0' and c <= '9'
+
+fn is_alpha(c: char) -> bool:
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_'
+
+fn is_alnum(c: char) -> bool:
+    return is_digit(c) or is_alpha(c)
+
+fn is_ws(c: char) -> bool:
+    return c == ' ' or c == '\t' or c == '\n' or c == '\r'
+
+
+fn p_skip_ws(p: Parser) -> None:
+    while p.pos < p.n:
+        c: char = p.src[p.pos]
+        if is_ws(c):
+            p.pos = p.pos + 1i64
+        else:
+            return
+
+fn p_at_end(p: Parser) -> bool:
+    p_skip_ws(p)
+    return p.pos >= p.n
+
+fn p_peek(p: Parser) -> char:
+    if p.pos >= p.n:
+        return '\0'
+    return p.src[p.pos]
+
+fn p_starts_with(p: Parser, kw: str) -> bool:
+    # True if source from p.pos starts with `kw` AND is not followed by
+    # an alnum char (so "let" doesn't match the prefix of "letter").
+    k: i64 = i64(len(kw))
+    if p.pos + k > p.n:
+        return false
+    i: i64 = 0i64
+    while i < k:
+        if p.src[p.pos + i] != kw[i]:
+            return false
+        i = i + 1i64
+    if p.pos + k < p.n:
+        nxt: char = p.src[p.pos + k]
+        if is_alnum(nxt):
+            return false
+    return true
+
+fn p_consume_kw(p: Parser, kw: str) -> None:
+    p.pos = p.pos + i64(len(kw))
+
+
+# ── Parser productions ───────────────────────────────────────────────────
+#
+# Grammar (precedence climbing not strictly needed for the test inputs):
+#
+#   expr     = if_or_let | cmp
+#   if_or_let = "if" expr "then" expr "else" expr
+#             | "let" IDENT "=" expr "in" expr
+#   cmp      = addsub (("==" | "<") addsub)?
+#   addsub   = muldiv (("+" | "-") muldiv)*
+#   muldiv   = atom   (("*" | "/") atom)*
+#   atom     = INT | STR | IDENT | "(" expr ")"
+
+fn p_atom(p: Parser) -> Expr:
+    p_skip_ws(p)
+    if p_at_end(p):
+        raise ValueError("unexpected end of input")
+    c: char = p_peek(p)
+    # Parenthesised sub-expression.
+    if c == '(':
+        p.pos = p.pos + 1i64
+        inner: Expr = p_expr(p)
+        p_skip_ws(p)
+        if p.pos >= p.n or p_peek(p) != ')':
+            raise ValueError("expected ')'")
+        p.pos = p.pos + 1i64
+        return inner
+    # String literal — bounded by double quotes, no escapes.
+    if c == '"':
+        p.pos = p.pos + 1i64
+        start: i64 = p.pos
+        while p.pos < p.n and p.src[p.pos] != '"':
+            p.pos = p.pos + 1i64
+        if p.pos >= p.n:
+            raise ValueError("unterminated string literal")
+        body: str = p.src.slice(start, p.pos)
+        p.pos = p.pos + 1i64  # skip closing "
+        sv: Value = StrVal(body)
+        return Lit(sv)
+    # Integer literal.
+    if is_digit(c):
+        start_n: i64 = p.pos
+        while p.pos < p.n and is_digit(p.src[p.pos]):
+            p.pos = p.pos + 1i64
+        lex: str = p.src.slice(start_n, p.pos)
+        nv: Value = IntVal(parse_i64(lex))
+        return Lit(nv)
+    # Identifier.
+    if is_alpha(c):
+        start_i: i64 = p.pos
+        while p.pos < p.n and is_alnum(p.src[p.pos]):
+            p.pos = p.pos + 1i64
+        name: str = p.src.slice(start_i, p.pos)
+        return Var(name)
+    # Anything else is a parse error.
+    bad: str = "unexpected char: "
+    bad = bad + str(c)
+    raise ValueError(bad)
+
+
+fn p_muldiv(p: Parser) -> Expr:
+    p_skip_ws(p)
+    node: Expr = p_atom(p)
+    p_skip_ws(p)
+    while p.pos < p.n:
+        c: char = p_peek(p)
+        if c == '*' or c == '/':
+            p.pos = p.pos + 1i64
+            rhs: Expr = p_atom(p)
+            op: str = "*"
+            if c == '/':
+                op = "/"
+            node = Binop(op, node, rhs)
+            p_skip_ws(p)
+        else:
+            return node
+    return node
+
+
+fn p_addsub(p: Parser) -> Expr:
+    p_skip_ws(p)
+    node: Expr = p_muldiv(p)
+    p_skip_ws(p)
+    while p.pos < p.n:
+        c: char = p_peek(p)
+        if c == '+' or c == '-':
+            p.pos = p.pos + 1i64
+            rhs: Expr = p_muldiv(p)
+            op: str = "+"
+            if c == '-':
+                op = "-"
+            node = Binop(op, node, rhs)
+            p_skip_ws(p)
+        else:
+            return node
+    return node
+
+
+fn p_cmp(p: Parser) -> Expr:
+    lhs: Expr = p_addsub(p)
+    p_skip_ws(p)
+    if p.pos + 2i64 <= p.n and p.src[p.pos] == '=' and p.src[p.pos + 1i64] == '=':
+        p.pos = p.pos + 2i64
+        rhs: Expr = p_addsub(p)
+        return Binop("==", lhs, rhs)
+    if p.pos < p.n and p.src[p.pos] == '<':
+        p.pos = p.pos + 1i64
+        rhs2: Expr = p_addsub(p)
+        return Binop("<", lhs, rhs2)
+    return lhs
+
+
+fn p_expr(p: Parser) -> Expr:
+    p_skip_ws(p)
+    if p_starts_with(p, "if"):
+        p_consume_kw(p, "if")
+        cond: Expr = p_expr(p)
+        p_skip_ws(p)
+        if not p_starts_with(p, "then"):
+            raise ValueError("expected 'then'")
+        p_consume_kw(p, "then")
+        t_b: Expr = p_expr(p)
+        p_skip_ws(p)
+        if not p_starts_with(p, "else"):
+            raise ValueError("expected 'else'")
+        p_consume_kw(p, "else")
+        e_b: Expr = p_expr(p)
+        return If(cond, t_b, e_b)
+    if p_starts_with(p, "let"):
+        p_consume_kw(p, "let")
+        p_skip_ws(p)
+        if p.pos >= p.n or not is_alpha(p_peek(p)):
+            raise ValueError("expected identifier after 'let'")
+        start: i64 = p.pos
+        while p.pos < p.n and is_alnum(p.src[p.pos]):
+            p.pos = p.pos + 1i64
+        name: str = p.src.slice(start, p.pos)
+        p_skip_ws(p)
+        if p.pos >= p.n or p_peek(p) != '=':
+            raise ValueError("expected '=' in let")
+        # bare '=' (not "==").  Reject "==" here.
+        if p.pos + 1i64 < p.n and p.src[p.pos + 1i64] == '=':
+            raise ValueError("expected '=' in let, got '=='")
+        p.pos = p.pos + 1i64
+        init: Expr = p_expr(p)
+        p_skip_ws(p)
+        if not p_starts_with(p, "in"):
+            raise ValueError("expected 'in'")
+        p_consume_kw(p, "in")
+        body: Expr = p_expr(p)
+        return Let(name, init, body)
+    return p_cmp(p)
+
+
+fn parse(src: str) -> Expr:
+    p: Parser = Parser(src)
+    e: Expr = p_expr(p)
+    p_skip_ws(p)
+    if p.pos < p.n:
+        # Trailing garbage.
+        raise ValueError("trailing input after expression")
+    return e
+
+
+# ── Evaluator (the M16 match showcase) ───────────────────────────────────
+#
+# Every Expr variant has exactly one arm.  Every arm either returns a
+# Value directly, or recurses into eval() and then matches on the
+# resulting Value to discriminate IntVal / StrVal.  Type mismatches are
+# turned into TypeError via `raise`.
+
+fn require_int(v: Value, ctx: str) -> i64:
+    # isinstance flow-narrowing probe: post-narrowing field access.
+    if isinstance(v, IntVal):
+        return v.n
+    raise TypeError("expected int in " + ctx)
+
+
+fn eval_expr(env: Env, e: Expr) -> Value:
+    match e:
+        case Lit(value):
+            return value
+        case Var(name):
+            return env_lookup(env, name)
+        case Binop(op, lhs, rhs):
+            # Evaluate children first (strict left-to-right per spec §7.1).
+            a: Value = eval_expr(env, lhs)
+            b: Value = eval_expr(env, rhs)
+            # Nested match on the values: only valid combos for our
+            # ops are (int, int) for arithmetic/compare and (str, str)
+            # for `+` / `==`.  Anything else is a TypeError.
+            if op == "+":
+                match a:
+                    case IntVal(an):
+                        match b:
+                            case IntVal(bn):
+                                return IntVal(an + bn)
+                            case StrVal(bs):
+                                raise TypeError("expected int")
+                    case StrVal(asx):
+                        match b:
+                            case StrVal(bs):
+                                return StrVal(asx + bs)
+                            case IntVal(bn):
+                                raise TypeError("expected str")
+                raise TypeError("unreachable +")
+            if op == "-":
+                an2: i64 = require_int(a, "-")
+                bn2: i64 = require_int(b, "-")
+                return IntVal(an2 - bn2)
+            if op == "*":
+                an3: i64 = require_int(a, "*")
+                bn3: i64 = require_int(b, "*")
+                return IntVal(an3 * bn3)
+            if op == "/":
+                an4: i64 = require_int(a, "/")
+                bn4: i64 = require_int(b, "/")
+                # Native ZeroDivisionError fires here from /; we deliberately
+                # don't pre-check, to exercise the native-trap propagation.
+                return IntVal(an4 / bn4)
+            if op == "<":
+                an5: i64 = require_int(a, "<")
+                bn5: i64 = require_int(b, "<")
+                if an5 < bn5:
+                    return IntVal(1i64)
+                return IntVal(0i64)
+            if op == "==":
+                # Allow int==int and str==str.  Cross-type compares are
+                # always 0 (false), matching Python's "no error but never
+                # equal" for `1 == "1"`.
+                match a:
+                    case IntVal(an6):
+                        match b:
+                            case IntVal(bn6):
+                                if an6 == bn6:
+                                    return IntVal(1i64)
+                                return IntVal(0i64)
+                            case StrVal(bs6):
+                                return IntVal(0i64)
+                    case StrVal(as7):
+                        match b:
+                            case StrVal(bs7):
+                                if as7 == bs7:
+                                    return IntVal(1i64)
+                                return IntVal(0i64)
+                            case IntVal(bn7):
+                                return IntVal(0i64)
+                return IntVal(0i64)
+            raise RuntimeError("unknown op: " + op)
+        case If(cond, t_branch, e_branch):
+            cv: Value = eval_expr(env, cond)
+            # Condition must be IntVal; truthy iff non-zero.
+            match cv:
+                case IntVal(cn):
+                    if cn != 0i64:
+                        return eval_expr(env, t_branch)
+                    return eval_expr(env, e_branch)
+                case StrVal(cs):
+                    raise TypeError("if-condition not boolean")
+            raise TypeError("if-condition not boolean")
+        case Let(name, init, body):
+            iv: Value = eval_expr(env, init)
+            env_push(env, name, iv)
+            # Pop on the way out — but if `body` raises, the pop is
+            # skipped (no `finally` on the eval path for v0.1).  Since
+            # each top-level case rebuilds Env in main(), the leak is
+            # bounded to one frame per uncaught raise, which is fine
+            # for this stress test.
+            result: Value = eval_expr(env, body)
+            env_pop(env)
+            return result
+    # Unreachable — match is exhaustive over the sealed Expr family.
+    raise RuntimeError("unreachable eval")
+
+
+# ── Driver ───────────────────────────────────────────────────────────────
+#
+# Each case is one source string + a small description.  We try-except
+# around (parse + eval) and print PASS/FAIL based on whether the
+# observed outcome matches the expected one.  Expected outcomes:
+#
+#   "int=N"   numeric result expected, value N
+#   "str=S"   string result expected, value S
+#   "raises:T" expected to raise an exception whose type_name is T
+#
+# pass_count / fail_count keep a tally.  At the end we print
+# "OK: PASS/TOTAL".
+
+fn run_int_case(idx: i32, label: str, src: str, want_n: i64) -> bool:
+    try:
+        env: Env = Env()
+        e: Expr = parse(src)
+        v: Value = eval_expr(env, e)
+        match v:
+            case IntVal(n):
+                if n == want_n:
+                    println("PASS test=" + str(idx) + " (" + label + " => " + str(n) + ")")
+                    return true
+                println("FAIL test=" + str(idx) + " (" + label + " => " + str(n) + ", want " + str(want_n) + ")")
+                return false
+            case StrVal(s):
+                println("FAIL test=" + str(idx) + " (" + label + " => str " + s + ", want int)")
+                return false
+    except ValueError as e:
+        println("FAIL test=" + str(idx) + " (" + label + " => parse-err: " + e.message + ")")
+        return false
+    except TypeError as e:
+        println("FAIL test=" + str(idx) + " (" + label + " => TypeError: " + e.message + ")")
+        return false
+    except RuntimeError as e:
+        println("FAIL test=" + str(idx) + " (" + label + " => RuntimeError: " + e.message + ")")
+        return false
+    except Exception as e:
+        # Catches DivisionByZeroError and anything else.
+        println("FAIL test=" + str(idx) + " (" + label + " => " + e.type_name + ": " + e.message + ")")
+        return false
+    return false
+
+fn run_str_case(idx: i32, label: str, src: str, want_s: str) -> bool:
+    try:
+        env: Env = Env()
+        e: Expr = parse(src)
+        v: Value = eval_expr(env, e)
+        match v:
+            case IntVal(n):
+                println("FAIL test=" + str(idx) + " (" + label + " => int " + str(n) + ", want str)")
+                return false
+            case StrVal(s):
+                if s == want_s:
+                    println("PASS test=" + str(idx) + " (" + label + " => \"" + s + "\")")
+                    return true
+                println("FAIL test=" + str(idx) + " (" + label + " => \"" + s + "\", want \"" + want_s + "\")")
+                return false
+    except ValueError as e:
+        println("FAIL test=" + str(idx) + " (" + label + " => parse-err: " + e.message + ")")
+        return false
+    except TypeError as e:
+        println("FAIL test=" + str(idx) + " (" + label + " => TypeError: " + e.message + ")")
+        return false
+    except RuntimeError as e:
+        println("FAIL test=" + str(idx) + " (" + label + " => RuntimeError: " + e.message + ")")
+        return false
+    except Exception as e:
+        println("FAIL test=" + str(idx) + " (" + label + " => " + e.type_name + ": " + e.message + ")")
+        return false
+    return false
+
+fn run_raises_case(idx: i32, label: str, src: str, want_type: str) -> bool:
+    # Specific catches for each exception we expect to recognise.  We
+    # check `e.type_name` against `want_type`.  This exercises §7.5.2.
+    saw_type: str = ""
+    try:
+        env: Env = Env()
+        e: Expr = parse(src)
+        v: Value = eval_expr(env, e)
+        # Falling through here means no exception fired — fail.
+        println("FAIL test=" + str(idx) + " (" + label + " => no exception, want " + want_type + ")")
+        return false
+    except TypeError as te:
+        saw_type = te.type_name
+    except RuntimeError as re:
+        saw_type = re.type_name
+    except ValueError as ve:
+        saw_type = ve.type_name
+    except Exception as ex:
+        # Catch-all picks up DivisionByZeroError (the runtime's chosen
+        # canonical name — spec §7.5.1's "ZeroDivisionError" name does
+        # NOT match the value the / opcode raises; see report).
+        saw_type = ex.type_name
+    if saw_type == want_type:
+        println("PASS test=" + str(idx) + " (" + label + " raised " + saw_type + ")")
+        return true
+    println("FAIL test=" + str(idx) + " (" + label + " raised " + saw_type + ", want " + want_type + ")")
+    return false
+
+
+fn main() -> i32:
+    total: i32 = 0i32
+    passed: i32 = 0i32
+
+    # 1. Pure arithmetic: 1 + 2 → 3.
+    total = total + 1i32
+    if run_int_case(1i32, "1 + 2", "1 + 2", 3i64):
+        passed = passed + 1i32
+
+    # 2. let with multiplication: let x = 10 in x * x → 100.
+    total = total + 1i32
+    if run_int_case(2i32, "let x = 10 in x * x", "let x = 10 in x * x", 100i64):
+        passed = passed + 1i32
+
+    # 3. if/then/else with comparison and string branches → "yes".
+    total = total + 1i32
+    if run_str_case(3i32, "if 1 < 2 then \"yes\" else \"no\"",
+                    "if 1 < 2 then \"yes\" else \"no\"", "yes"):
+        passed = passed + 1i32
+
+    # 4. Division by zero: 1 / 0 — native trap from the `/` opcode
+    #    inside the Binop arm.  Handler frame at top level must unwind
+    #    across the recursive eval frames.
+    #    Note: M18 fixed BUG-036 — runtime now emits the canonical
+    #    `ZeroDivisionError` (Python-compatible). `except DivisionByZeroError`
+    #    still catches via the alias table in vm/src/interp.rs.
+    total = total + 1i32
+    if run_raises_case(4i32, "1 / 0", "1 / 0", "ZeroDivisionError"):
+        passed = passed + 1i32
+
+    # 5. Type error: 1 + "two" — `raise TypeError(...)` from inside a
+    #    nested `match a: case IntVal: match b: case StrVal: raise`.
+    total = total + 1i32
+    if run_raises_case(5i32, "1 + \"two\"", "1 + \"two\"", "TypeError"):
+        passed = passed + 1i32
+
+    # 6. Undefined variable: undefined_var + 1 — `raise RuntimeError`
+    #    from env_lookup, propagating through Binop's eval(lhs).
+    total = total + 1i32
+    if run_raises_case(6i32, "undefined_var + 1", "undefined_var + 1", "RuntimeError"):
+        passed = passed + 1i32
+
+    # 7. Nested let, deeper recursion + env shadow check:
+    #    let x = 1 in let y = x + 1 in y * 2 → 4.
+    total = total + 1i32
+    if run_int_case(7i32, "nested let",
+                    "let x = 1 in let y = x + 1 in y * 2", 4i64):
+        passed = passed + 1i32
+
+    # 8. If with equality and mixed-type branches: if 1 == 1 then 42
+    #    else "no".  Cond is true so runs the then-branch and yields 42.
+    #    Documenting v0.1 behaviour: the typechecker accepts mixed
+    #    branches because both branches have static type Value, so
+    #    eval returns the live branch's Value regardless of the dead
+    #    branch's tag.  No "branches must agree" error fires.
+    total = total + 1i32
+    if run_int_case(8i32, "if 1==1 then 42 else \"no\"",
+                    "if 1 == 1 then 42 else \"no\"", 42i64):
+        passed = passed + 1i32
+
+    # 9. Deeper division-by-zero: nested inside multiplication.  Makes
+    #    sure the handler frame catches across an arithmetic outer:
+    #    2 * (1 / 0) — runtime trap raised 6 frames deep.
+    total = total + 1i32
+    if run_raises_case(9i32, "2 * (1 / 0)", "2 * (1 / 0)", "ZeroDivisionError"):
+        passed = passed + 1i32
+
+    # 10. String concat via the + operator: "hello" + " " + "world"
+    #     → "hello world" — exercises StrVal+StrVal arm and left-assoc
+    #     binop chaining.
+    total = total + 1i32
+    if run_str_case(10i32, "\"hello\" + \" \" + \"world\"",
+                    "\"hello\" + \" \" + \"world\"", "hello world"):
+        passed = passed + 1i32
+
+    # ── Summary line ─────────────────────────────────────────────────
+    println("OK: " + str(passed) + "/" + str(total))
+    if passed == total:
+        return 0
+    return 1

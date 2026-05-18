@@ -1,0 +1,37 @@
+# M18 probe: spec §6.5 says non-exhaustive `match` on a sealed scrutinee
+# emits a *warning* (not error) to stderr. With `_:` wildcard the
+# warning must NOT fire. Without it, exactly one warning fires.
+
+sealed class Shape:
+    fn __init__(self) -> None: pass
+
+final class Circle(Shape):
+    r: i64
+    fn __init__(self, r: i64) -> None: self.r = r
+
+final class Square(Shape):
+    s: i64
+    fn __init__(self, s: i64) -> None: self.s = s
+
+# Non-exhaustive on sealed Shape (Square arm missing) — should warn.
+fn area_circle_only(sh: Shape) -> i64:
+    match sh:
+        case Circle(r):
+            return r * r * 3i64
+    return -1i64
+
+# Exhaustive (Circle + Square + wildcard) — should NOT warn.
+fn area_with_default(sh: Shape) -> i64:
+    match sh:
+        case Circle(r):
+            return r * r * 3i64
+        case Square(s):
+            return s * s
+        case _:
+            return 0i64
+
+fn main() -> i32:
+    c: Shape = Circle(2i64)
+    println(str(area_circle_only(c)))
+    println(str(area_with_default(c)))
+    return 0

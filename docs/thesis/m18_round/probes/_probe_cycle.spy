@@ -1,0 +1,78 @@
+"""Probe: raise from a recursive helper + catch from caller."""
+
+fn dfs(visited: List[bool], on_stack: List[bool], adj: List[List[i32]], u: i32, order: List[i32]) -> None:
+    if on_stack[u]:
+        raise RuntimeError("cycle detected")
+    if visited[u]:
+        return
+    on_stack[u] = true
+    n: i32 = i32(i64(len(adj[u])))
+    k: i32 = 0
+    while k < n:
+        dfs(visited, on_stack, adj, adj[u][k], order)
+        k = k + 1
+    on_stack[u] = false
+    visited[u] = true
+    order.append(u)
+
+fn topo(adj: List[List[i32]]) -> List[i32]:
+    n: i32 = i32(i64(len(adj)))
+    visited: List[bool] = []
+    on_stack: List[bool] = []
+    i: i32 = 0
+    while i < n:
+        visited.append(false)
+        on_stack.append(false)
+        i = i + 1
+    order: List[i32] = []
+    i = 0
+    while i < n:
+        if not visited[i]:
+            dfs(visited, on_stack, adj, i, order)
+        i = i + 1
+    # reverse
+    rev: List[i32] = []
+    j: i32 = i32(i64(len(order))) - 1
+    while j >= 0:
+        rev.append(order[j])
+        j = j - 1
+    return rev
+
+fn main() -> i32:
+    # DAG: 0->1->2, 0->2
+    adj1: List[List[i32]] = []
+    r0: List[i32] = []
+    r0.append(1)
+    r0.append(2)
+    adj1.append(r0)
+    r1: List[i32] = []
+    r1.append(2)
+    adj1.append(r1)
+    r2: List[i32] = []
+    adj1.append(r2)
+
+    try:
+        o: List[i32] = topo(adj1)
+        println("dag order len=" + str(i32(i64(len(o)))))
+        k: i32 = 0
+        while k < 3:
+            println(str(o[k]))
+            k = k + 1
+    except RuntimeError as e:
+        println("FAIL unexpected cycle: " + e.message)
+
+    # Cyclic: 0->1, 1->0
+    adj2: List[List[i32]] = []
+    r0c: List[i32] = []
+    r0c.append(1)
+    adj2.append(r0c)
+    r1c: List[i32] = []
+    r1c.append(0)
+    adj2.append(r1c)
+
+    try:
+        o2: List[i32] = topo(adj2)
+        println("FAIL expected cycle, got order len=" + str(i32(i64(len(o2)))))
+    except RuntimeError as e:
+        println("caught cycle: " + e.message)
+    return 0

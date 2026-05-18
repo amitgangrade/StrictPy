@@ -1,0 +1,46 @@
+"""Probe: M17 brief says `max_of[T]` instantiated with a user class (no
+`<` operator) should give an "instantiation-specific typecheck error".
+
+Current state (as of M17): the brief / spec §5.1.5 v0.1 limits explicitly
+state that bounds are NOT enforced — the body's `<` typechecks against
+`Ty::Var` operands as deferred, and instantiations where `<` is
+unsupported trap at runtime rather than reject at compile time. So this
+probe expects either a compile error OR a runtime trap. Reporting the
+ACTUAL behaviour is the point.
+
+What I observe (orchestrator: please confirm):
+
+  - Compile succeeds (the body typechecks against Ty::Var operands).
+  - At runtime, the `a < b` line inside the class instantiation traps.
+
+The brief's wording ("should give an instantiation-specific typecheck
+error — confirm") is misleading: the M17 README/notes explicitly say
+this surface is deferred to v0.2 bounds. So the answer for v0.1 is
+"runtime trap, not compile error" — which IS what spec §5.1.5's
+deferred-bounds bullet documents.
+"""
+
+final class Box:
+    n: i32
+    fn __init__(self, n: i32) -> None:
+        self.n = n
+
+fn max_of[T](a: T, b: T) -> T:
+    if a < b:
+        return b
+    return a
+
+fn main() -> i32:
+    # i32 — should work.
+    a: i32 = max_of(3, 7)
+    println(str(a))
+    # str — should work too (StrLt is a known M17 gap; expect either
+    # success or a runtime trap on StrLt).
+    s: str = max_of("alpha", "beta")
+    println(s)
+    # Class — no `<`. Should TRAP.
+    p: Box = Box(1)
+    q: Box = Box(2)
+    r: Box = max_of(p, q)
+    println(str(r.n))
+    return 0

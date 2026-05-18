@@ -1,0 +1,620 @@
+"""Generic graph algorithms — M18 stress of M17 monomorphisation.
+
+The point of this program is to drive the M17 worklist hard. The Graph
+itself is a non-generic `final class` (generic CLASSES are v0.2); the
+generic surface is a family of free functions over `List[T]` and
+`Tuple[i32, T]` that the algorithms call:
+
+  * `safe_get[T](xs, i, default)` — bounds-checked indexing using
+    `try: xs[i] except IndexError: default`. The try/except inside a
+    generic body is the M15-meets-M17 interaction the brief wants
+    confirmed (JIT carve-out fires per-instantiation).
+
+  * `enumerate[T](xs)` — returns `List[Tuple[i32, T]]`. Used in BFS
+    to print the visit order with positions.
+
+  * `min_by[T](xs, priority, sentinel)` — returns `Tuple[i32, T]`. Used
+    by Dijkstra and by shortest_path. Internally calls `safe_get[T]`
+    (transitive instantiation — T flows from outer to inner).
+
+  * `first_or_default[T](xs, default)` — returns xs[0] or default.
+    Used by shortest_path; transitively instantiates over two T values.
+
+Algorithms (non-generic per se, but they call the generic helpers):
+
+  * `fn bfs(g, src) -> List[i32]` — BFS layer order. Calls enumerate__i32.
+  * `fn dijkstra(g, src) -> List[f64]` — M14 tuple-pop_min variant,
+    using a hand-rolled MinHeap (parallel arrays).
+  * `fn topo_sort(g) -> List[i32]` — DFS with on-stack tracking. Raises
+    `RuntimeError("cycle detected")` if not a DAG.
+  * `fn shortest_path(g, src, dst) -> List[i32]` — Dijkstra + parent
+    array + path reconstruction. Raises `RuntimeError("no path")` if
+    dst unreachable.
+
+Instantiation census (drained from the M17 worklist on this program):
+
+  safe_get__i32          - used by min_by__i32, called directly in tests
+  safe_get__f64          - called directly in tests
+  safe_get__str          - called directly (labels lookup)
+  safe_get__tuple_i32_f64 - called directly (tuple-typed defaults probe)
+  safe_get__class<N>     - called directly (Node-class probe)
+  min_by__i32            - dijkstra-style PQ pop; recurses into safe_get__i32
+  enumerate__i32         - BFS visit-order pretty-print
+  first_or_default__i32  - shortest_path / list-head probe
+
+That's 8 distinct generic instantiations across 4 generic functions.
+The "transitive" path is `min_by[T] -> safe_get[T]` (same T threads
+through). The "5+ distinct safe_get[T]" requirement in the brief is met
+by the five rows starting with `safe_get__`.
+
+Pre-M13 baseline: same suite would have needed (a) duplicate safe_get
+bodies per T (no generics), (b) no try/except for the IndexError catch
+(it was BUG-025 until M15 closed it — Dijkstra had to use a sentinel
+and a parallel visited[] array per its M12 source), and (c) no
+multi-return so min_by would return only the index and lose the picked
+element. The single-source file would have been about 2x as long.
+"""
+
+# ── Constants ───────────────────────────────────────────────────────────
+
+final INF_F64: f64 = 1.0e18
+final INF_I32: i32 = 1000000000
+
+# ── Generic helpers (the M17 workhorses) ───────────────────────────────
+
+fn safe_get[T](xs: List[T], i: i32, default: T) -> T:
+    """Bounds-checked index. Returns `default` on IndexError. The
+    try/except path is the JIT-carve-out probe — every instantiation
+    of safe_get[T] must use the bytecode interpreter, not the JIT."""
+    try:
+        return xs[i]
+    except IndexError as e:
+        return default
+
+fn enumerate[T](xs: List[T]) -> List[Tuple[i32, T]]:
+    """Pair each element with its index. Generic-of-tuple-of-T."""
+    out: List[Tuple[i32, T]] = []
+    n: i32 = i32(i64(len(xs)))
+    i: i32 = 0
+    while i < n:
+        pair: Tuple[i32, T] = (i, xs[i])
+        out.append(pair)
+        i = i + 1
+    return out
+
+fn min_by[T](xs: List[T], priority: List[f64], sentinel: T) -> Tuple[i32, T]:
+    """Index + element with smallest priority. Returns (-1, sentinel)
+    on empty input. Calls safe_get[T] internally — transitive M17."""
+    n: i32 = i32(i64(len(xs)))
+    if n == 0:
+        return (-1, sentinel)
+    best_idx: i32 = 0
+    best_p: f64 = priority[0]
+    i: i32 = 1
+    while i < n:
+        if priority[i] < best_p:
+            best_p = priority[i]
+            best_idx = i
+        i = i + 1
+    # The transitive instantiation: min_by__T must instantiate safe_get__T
+    # with the same T as its caller.
+    return (best_idx, safe_get(xs, best_idx, sentinel))
+
+fn first_or_default[T](xs: List[T], default: T) -> T:
+    """Returns xs[0] if non-empty, else default. Uses safe_get[T]
+    transitively (third path that touches safe_get for the same T)."""
+    return safe_get(xs, 0, default)
+
+# ── Graph ──────────────────────────────────────────────────────────────
+
+# Directed graph: i32 ids, string labels, weighted edges. Parallel arrays:
+#   labels[u]       : str — display name
+#   adj_node[u]     : List[i32] — out-neighbours
+#   adj_weight[u]   : List[f64] — weights (parallel to adj_node[u])
+final class Graph:
+    n_vertices: i32
+    labels: List[str]
+    adj_node: List[List[i32]]
+    adj_weight: List[List[f64]]
+
+    fn __init__(self, n: i32) -> None:
+        self.n_vertices = n
+        self.labels = []
+        self.adj_node = []
+        self.adj_weight = []
+        i: i32 = 0
+        while i < n:
+            self.labels.append("n" + str(i))
+            row_n: List[i32] = []
+            row_w: List[f64] = []
+            self.adj_node.append(row_n)
+            self.adj_weight.append(row_w)
+            i = i + 1
+
+    fn set_label(self, u: i32, name: str) -> None:
+        self.labels[u] = name
+
+    fn add_edge(self, u: i32, v: i32, w: f64) -> None:
+        self.adj_node[u].append(v)
+        self.adj_weight[u].append(w)
+
+    fn degree(self, u: i32) -> i32:
+        return i32(i64(len(self.adj_node[u])))
+
+# ── BFS ────────────────────────────────────────────────────────────────
+
+fn bfs(g: Graph, src: i32) -> List[i32]:
+    """BFS visit order from `src`. Returns the order vertices were
+    visited (one per reachable vertex)."""
+    n: i32 = g.n_vertices
+    visited: List[bool] = []
+    i: i32 = 0
+    while i < n:
+        visited.append(false)
+        i = i + 1
+    order: List[i32] = []
+    # Hand-rolled FIFO queue: head index + List for storage.
+    queue: List[i32] = []
+    queue.append(src)
+    visited[src] = true
+    head: i32 = 0
+    while head < i32(i64(len(queue))):
+        u: i32 = queue[head]
+        head = head + 1
+        order.append(u)
+        deg: i32 = g.degree(u)
+        k: i32 = 0
+        while k < deg:
+            v: i32 = g.adj_node[u][k]
+            if not visited[v]:
+                visited[v] = true
+                queue.append(v)
+            k = k + 1
+    return order
+
+# ── Dijkstra (with parent array for path recovery) ─────────────────────
+
+fn dijkstra_with_parents(g: Graph, src: i32) -> Tuple[List[f64], List[i32]]:
+    """Single-source shortest paths from `src`. Returns (dist, parent).
+    Uses min_by[i32] over a linear "pending" list as the PQ — fine for
+    test-sized graphs and the whole point is to hammer min_by/safe_get
+    rather than to optimise the inner loop."""
+    n: i32 = g.n_vertices
+    dist: List[f64] = []
+    parent: List[i32] = []
+    visited: List[bool] = []
+    i: i32 = 0
+    while i < n:
+        dist.append(INF_F64)
+        parent.append(-1)
+        visited.append(false)
+        i = i + 1
+    dist[src] = 0.0
+
+    # `pending` mirrors the unvisited vertices with their current best
+    # distance; min_by picks the next one to settle.
+    while true:
+        # Build the candidate slice. We do this each iteration because
+        # the inner loop is small and it lets us reuse min_by[i32]
+        # directly without parallel-array fiddling.
+        pending: List[i32] = []
+        pending_p: List[f64] = []
+        j: i32 = 0
+        while j < n:
+            if not visited[j] and dist[j] < INF_F64:
+                pending.append(j)
+                pending_p.append(dist[j])
+            j = j + 1
+        if i32(i64(len(pending))) == 0:
+            break
+
+        # min_by__i32 — also instantiates safe_get__i32 transitively.
+        picked: Tuple[i32, i32] = min_by(pending, pending_p, -1)
+        u: i32 = picked.1   # vertex id (not the index into pending)
+        if u < 0:
+            break
+        visited[u] = true
+
+        deg: i32 = g.degree(u)
+        k: i32 = 0
+        while k < deg:
+            v: i32 = g.adj_node[u][k]
+            w: f64 = g.adj_weight[u][k]
+            if not visited[v]:
+                nd: f64 = dist[u] + w
+                if nd < dist[v]:
+                    dist[v] = nd
+                    parent[v] = u
+            k = k + 1
+
+    return (dist, parent)
+
+fn dijkstra(g: Graph, src: i32) -> List[f64]:
+    """Thin wrapper that drops the parent array."""
+    pair: Tuple[List[f64], List[i32]] = dijkstra_with_parents(g, src)
+    return pair.0
+
+fn shortest_path(g: Graph, src: i32, dst: i32) -> List[i32]:
+    """Return the actual node-id sequence from src to dst (inclusive).
+    Raises RuntimeError("no path") if dst is unreachable."""
+    pair: Tuple[List[f64], List[i32]] = dijkstra_with_parents(g, src)
+    dist: List[f64] = pair.0
+    parent: List[i32] = pair.1
+    if dist[dst] >= INF_F64:
+        raise RuntimeError("no path")
+    # Walk parents from dst back to src, then reverse.
+    rev: List[i32] = []
+    cur: i32 = dst
+    while cur != src:
+        rev.append(cur)
+        cur = parent[cur]
+        if cur < 0:
+            # Shouldn't happen given the dist check above, but guard
+            # against latent corruption.
+            raise RuntimeError("no path")
+    rev.append(src)
+    # Probe first_or_default[i32] — verifies first_or_default__i32 is
+    # in the worklist (transitive via safe_get__i32).
+    head: i32 = first_or_default(rev, -1)
+    if head < 0:
+        raise RuntimeError("no path")
+    # Reverse rev into the forward path.
+    out: List[i32] = []
+    m: i32 = i32(i64(len(rev))) - 1
+    while m >= 0:
+        out.append(rev[m])
+        m = m - 1
+    return out
+
+# ── Topological sort (with cycle detection via try/except) ─────────────
+
+fn topo_dfs(g: Graph, u: i32, color: List[i32], order: List[i32]) -> None:
+    """color[u]: 0=white (unseen), 1=grey (on stack), 2=black (done).
+    Grey-on-grey edge -> cycle -> raise RuntimeError."""
+    if color[u] == 1:
+        raise RuntimeError("cycle detected")
+    if color[u] == 2:
+        return
+    color[u] = 1
+    deg: i32 = g.degree(u)
+    k: i32 = 0
+    while k < deg:
+        v: i32 = g.adj_node[u][k]
+        topo_dfs(g, v, color, order)
+        k = k + 1
+    color[u] = 2
+    order.append(u)
+
+fn topo_sort(g: Graph) -> List[i32]:
+    """Topological order. Raises RuntimeError("cycle detected") for
+    non-DAGs."""
+    n: i32 = g.n_vertices
+    color: List[i32] = []
+    i: i32 = 0
+    while i < n:
+        color.append(0)
+        i = i + 1
+    order: List[i32] = []
+    i = 0
+    while i < n:
+        if color[i] == 0:
+            topo_dfs(g, i, color, order)
+        i = i + 1
+    # order is post-order — reverse it.
+    rev: List[i32] = []
+    j: i32 = i32(i64(len(order))) - 1
+    while j >= 0:
+        rev.append(order[j])
+        j = j - 1
+    return rev
+
+# ── Test runner scaffolding ────────────────────────────────────────────
+
+fn approx_eq(a: f64, b: f64) -> bool:
+    d: f64 = a - b
+    if d < 0.0:
+        d = 0.0 - d
+    return d < 1.0e-9
+
+fn list_eq_i32(a: List[i32], b: List[i32]) -> bool:
+    if len(a) != len(b):
+        return false
+    n: i32 = i32(i64(len(a)))
+    i: i32 = 0
+    while i < n:
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    return true
+
+fn list_eq_f64(a: List[f64], b: List[f64]) -> bool:
+    if len(a) != len(b):
+        return false
+    n: i32 = i32(i64(len(a)))
+    i: i32 = 0
+    while i < n:
+        if not approx_eq(a[i], b[i]):
+            return false
+        i = i + 1
+    return true
+
+# ── Test 1: BFS on a tree-shaped graph ─────────────────────────────────
+
+fn test_bfs_tree() -> bool:
+    # 0 -> 1, 0 -> 2; 1 -> 3, 1 -> 4; 2 -> 5
+    g: Graph = Graph(6)
+    g.add_edge(0, 1, 1.0)
+    g.add_edge(0, 2, 1.0)
+    g.add_edge(1, 3, 1.0)
+    g.add_edge(1, 4, 1.0)
+    g.add_edge(2, 5, 1.0)
+    order: List[i32] = bfs(g, 0)
+    expected: List[i32] = [0, 1, 2, 3, 4, 5]
+    if list_eq_i32(order, expected):
+        println("PASS test=1 (bfs_tree)")
+        return true
+    println("FAIL test=1 (bfs_tree) got=" + str(i32(i64(len(order)))))
+    return false
+
+# ── Test 2: BFS + enumerate[i32] over the visit order ──────────────────
+
+fn test_bfs_with_enumerate() -> bool:
+    # Same shape as test 1, but exercise enumerate__i32 on the result.
+    g: Graph = Graph(4)
+    g.add_edge(0, 1, 1.0)
+    g.add_edge(0, 2, 1.0)
+    g.add_edge(1, 3, 1.0)
+    order: List[i32] = bfs(g, 0)
+    pairs: List[Tuple[i32, i32]] = enumerate(order)
+    n: i32 = i32(i64(len(pairs)))
+    if n != 4:
+        println("FAIL test=2 (enumerate) wrong length")
+        return false
+    # The 0th pair should be (0, 0) — first BFS slot is the source.
+    first: Tuple[i32, i32] = pairs[0]
+    if first.0 != 0 or first.1 != 0:
+        println("FAIL test=2 (enumerate) first pair wrong")
+        return false
+    # Last pair should be (3, 3) — node 3 is visited last (depth 2).
+    last: Tuple[i32, i32] = pairs[3]
+    if last.0 != 3 or last.1 != 3:
+        println("FAIL test=2 (enumerate) last pair wrong")
+        return false
+    println("PASS test=2 (bfs_with_enumerate)")
+    return true
+
+# ── Test 3: Dijkstra on the CLRS example graph ─────────────────────────
+
+fn test_dijkstra_clrs() -> bool:
+    g: Graph = Graph(5)
+    g.add_edge(0, 1, 10.0)
+    g.add_edge(0, 3, 5.0)
+    g.add_edge(1, 2, 1.0)
+    g.add_edge(1, 3, 2.0)
+    g.add_edge(3, 1, 3.0)
+    g.add_edge(3, 2, 9.0)
+    g.add_edge(3, 4, 2.0)
+    g.add_edge(2, 4, 4.0)
+    g.add_edge(4, 2, 6.0)
+    g.add_edge(4, 0, 7.0)
+    dist: List[f64] = dijkstra(g, 0)
+    expected: List[f64] = [0.0, 8.0, 9.0, 5.0, 7.0]
+    if list_eq_f64(dist, expected):
+        println("PASS test=3 (dijkstra_clrs)")
+        return true
+    println("FAIL test=3 (dijkstra_clrs)")
+    return false
+
+# ── Test 4: shortest_path returns the actual node sequence ─────────────
+
+fn test_shortest_path() -> bool:
+    # 0 -> 1 -> 2 -> 3, plus a direct 0 -> 3 with high weight.
+    g: Graph = Graph(4)
+    g.add_edge(0, 1, 1.0)
+    g.add_edge(1, 2, 1.0)
+    g.add_edge(2, 3, 1.0)
+    g.add_edge(0, 3, 100.0)
+    try:
+        path: List[i32] = shortest_path(g, 0, 3)
+        expected: List[i32] = [0, 1, 2, 3]
+        if list_eq_i32(path, expected):
+            println("PASS test=4 (shortest_path)")
+            return true
+        println("FAIL test=4 (shortest_path) wrong path")
+        return false
+    except RuntimeError as e:
+        println("FAIL test=4 (shortest_path) unexpected: " + e.message)
+        return false
+
+# ── Test 5: shortest_path raises on unreachable dst ────────────────────
+
+fn test_shortest_path_unreachable() -> bool:
+    # 0 -> 1, but no path to 2.
+    g: Graph = Graph(3)
+    g.add_edge(0, 1, 1.0)
+    try:
+        bad: List[i32] = shortest_path(g, 0, 2)
+        println("FAIL test=5 expected raise, got path len=" + str(i32(i64(len(bad)))))
+        return false
+    except RuntimeError as e:
+        if e.message == "no path":
+            println("PASS test=5 (shortest_path_unreachable)")
+            return true
+        println("FAIL test=5 wrong message: " + e.message)
+        return false
+
+# ── Test 6: topo_sort on a DAG ─────────────────────────────────────────
+
+fn test_topo_dag() -> bool:
+    # Standard DAG: 5->2, 5->0, 4->0, 4->1, 2->3, 3->1
+    g: Graph = Graph(6)
+    g.add_edge(5, 2, 1.0)
+    g.add_edge(5, 0, 1.0)
+    g.add_edge(4, 0, 1.0)
+    g.add_edge(4, 1, 1.0)
+    g.add_edge(2, 3, 1.0)
+    g.add_edge(3, 1, 1.0)
+    try:
+        order: List[i32] = topo_sort(g)
+        # Verify it's a valid topo order: for every edge (u,v),
+        # u must appear before v in `order`. We compute position[u].
+        n: i32 = i32(i64(len(order)))
+        if n != 6:
+            println("FAIL test=6 wrong length " + str(n))
+            return false
+        pos: List[i32] = []
+        i: i32 = 0
+        while i < 6:
+            pos.append(-1)
+            i = i + 1
+        i = 0
+        while i < n:
+            pos[order[i]] = i
+            i = i + 1
+        # Spot-check the canonical edges:
+        if pos[5] < pos[2] and pos[5] < pos[0] and pos[4] < pos[0] and pos[4] < pos[1] and pos[2] < pos[3] and pos[3] < pos[1]:
+            println("PASS test=6 (topo_dag)")
+            return true
+        println("FAIL test=6 (topo_dag) order violates an edge")
+        return false
+    except RuntimeError as e:
+        println("FAIL test=6 unexpected cycle: " + e.message)
+        return false
+
+# ── Test 7: topo_sort detects a cycle and raises ───────────────────────
+
+fn test_topo_cycle() -> bool:
+    # 0->1, 1->2, 2->0  -- cycle.
+    g: Graph = Graph(3)
+    g.add_edge(0, 1, 1.0)
+    g.add_edge(1, 2, 1.0)
+    g.add_edge(2, 0, 1.0)
+    try:
+        bad: List[i32] = topo_sort(g)
+        println("FAIL test=7 expected cycle, got order len=" + str(i32(i64(len(bad)))))
+        return false
+    except RuntimeError as e:
+        if e.message == "cycle detected":
+            println("PASS test=7 (topo_cycle)")
+            return true
+        println("FAIL test=7 wrong message: " + e.message)
+        return false
+
+# ── Test 8: generic safe_get across MANY T (the M17 worklist hammer) ───
+
+fn test_safe_get_multi_T() -> bool:
+    """Direct exercise of safe_get for five distinct T values:
+      i32, f64, str, Tuple[i32, f64], class Node.
+    Each call mints a fresh `safe_get__<T>` mangled FuncId; the
+    worklist must drain all five to fixpoint.
+    """
+    n_ok: i32 = 0
+
+    # i32
+    a_i32: List[i32] = [10, 20]
+    if safe_get(a_i32, 0, -1) == 10 and safe_get(a_i32, 99, -1) == -1:
+        n_ok = n_ok + 1
+
+    # f64
+    a_f64: List[f64] = [1.5, 2.5]
+    if approx_eq(safe_get(a_f64, 1, 0.0), 2.5) and approx_eq(safe_get(a_f64, 99, -9.0), -9.0):
+        n_ok = n_ok + 1
+
+    # str
+    a_str: List[str] = ["alpha", "beta"]
+    if safe_get(a_str, 0, "?") == "alpha" and safe_get(a_str, 99, "?") == "?":
+        n_ok = n_ok + 1
+
+    # Tuple[i32, f64]
+    a_tup: List[Tuple[i32, f64]] = []
+    a_tup.append((7, 1.25))
+    fallback: Tuple[i32, f64] = (-1, -1.0)
+    got_tup: Tuple[i32, f64] = safe_get(a_tup, 0, fallback)
+    miss_tup: Tuple[i32, f64] = safe_get(a_tup, 9, fallback)
+    if got_tup.0 == 7 and approx_eq(got_tup.1, 1.25) and miss_tup.0 == -1:
+        n_ok = n_ok + 1
+
+    # class Node — via labels list as a stand-in. To get a class T we
+    # need a fresh final class type that's NOT one of the structural
+    # types covered above.
+    a_node: List[Node] = []
+    a_node.append(Node(42))
+    sentinel: Node = Node(-1)
+    got_n: Node = safe_get(a_node, 0, sentinel)
+    miss_n: Node = safe_get(a_node, 9, sentinel)
+    if got_n.id == 42 and miss_n.id == -1:
+        n_ok = n_ok + 1
+
+    if n_ok == 5:
+        println("PASS test=8 (safe_get_multi_T) instantiations=5")
+        return true
+    println("FAIL test=8 (safe_get_multi_T) got " + str(n_ok) + "/5")
+    return false
+
+# Helper class used by test 8 only.
+final class Node:
+    id: i32
+    fn __init__(self, k: i32) -> None:
+        self.id = k
+
+# ── Test 9: labels-string lookup exercises safe_get__str ───────────────
+
+fn test_labels_safe_get() -> bool:
+    g: Graph = Graph(3)
+    g.set_label(0, "alpha")
+    g.set_label(1, "beta")
+    g.set_label(2, "gamma")
+    name1: str = safe_get(g.labels, 1, "?")
+    name9: str = safe_get(g.labels, 9, "?")
+    if name1 == "beta" and name9 == "?":
+        println("PASS test=9 (labels_safe_get)")
+        return true
+    println("FAIL test=9 got " + name1 + "/" + name9)
+    return false
+
+# ── main ───────────────────────────────────────────────────────────────
+
+fn main() -> i32:
+    n_ok: i32 = 0
+    n_total: i32 = 0
+
+    if test_bfs_tree():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_bfs_with_enumerate():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_dijkstra_clrs():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_shortest_path():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_shortest_path_unreachable():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_topo_dag():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_topo_cycle():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_safe_get_multi_T():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    if test_labels_safe_get():
+        n_ok = n_ok + 1
+    n_total = n_total + 1
+
+    println("OK: " + str(n_ok) + "/" + str(n_total))
+    if n_ok == n_total:
+        return 0
+    return 1

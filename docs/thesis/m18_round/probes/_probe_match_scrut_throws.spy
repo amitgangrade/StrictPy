@@ -1,0 +1,28 @@
+# M18 probe: what happens when the scrutinee of a `match` raises?
+# Spec §6.5.1 says the scrutinee is evaluated exactly once and stashed
+# in a hidden slot.  If that evaluation throws, the spec is silent —
+# but the natural behaviour is "the exception propagates past the
+# match", since the match-arm tests never run.
+#
+# Expected (per author): scrutinee raise propagates to the outer try.
+# We confirm this is in fact what happens.
+
+sealed class V:
+    fn __init__(self) -> None: pass
+
+final class A(V):
+    n: i64
+    fn __init__(self, n: i64) -> None: self.n = n
+
+fn boom() -> V:
+    raise ValueError("scrutinee boom")
+
+fn main() -> i32:
+    try:
+        match boom():
+            case A(n):
+                println("matched A: " + str(n))
+        println("after-match (should NOT print)")
+    except ValueError as e:
+        println("caught: " + e.type_name + " — " + e.message)
+    return 0

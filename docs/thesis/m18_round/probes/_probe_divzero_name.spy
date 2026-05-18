@@ -1,0 +1,33 @@
+# M18 probe: spec §7.5.1 says "Legacy name DivisionByZeroError is also
+# recognised" alongside the canonical ZeroDivisionError. But native
+# `a / 0` for i64 actually raises a value whose type_name is
+# "DivisionByZeroError" — so `except ZeroDivisionError as e:` does NOT
+# catch it. Only `except DivisionByZeroError` (or `except Exception`)
+# catches.
+#
+# Expected: `caught: ZeroDivisionError` per the spec text.
+# Actual: program hits "fell through, type_name=DivisionByZeroError".
+
+fn main() -> i32:
+    # Probe 1 — try canonical name first.
+    saw: str = "<nothing>"
+    try:
+        z: i64 = 1i64 / 0i64
+        println("never: " + str(z))
+    except ZeroDivisionError as e:
+        saw = "ZeroDivisionError-arm: " + e.type_name + " / " + e.message
+    except Exception as e2:
+        saw = "Exception-arm fell-through: " + e2.type_name + " / " + e2.message
+    println(saw)
+
+    # Probe 2 — try legacy name.
+    saw2: str = "<nothing>"
+    try:
+        z2: i64 = 1i64 / 0i64
+        println("never: " + str(z2))
+    except DivisionByZeroError as e3:
+        saw2 = "DivisionByZeroError-arm: " + e3.type_name + " / " + e3.message
+    except Exception as e4:
+        saw2 = "Exception-arm fell-through: " + e4.type_name + " / " + e4.message
+    println(saw2)
+    return 0

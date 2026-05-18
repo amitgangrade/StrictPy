@@ -1,0 +1,33 @@
+"""Probe: enumerate[T] returning List[Tuple[i32, T]].
+Also: calling enumerate over both i32 and str instantiates two distinct
+list-of-tuple shapes, which exercise tuple-list registration with
+generics-derived types.
+"""
+
+fn enumerate[T](xs: List[T]) -> List[Tuple[i32, T]]:
+    out: List[Tuple[i32, T]] = []
+    n: i32 = i32(i64(len(xs)))
+    i: i32 = 0
+    while i < n:
+        pair: Tuple[i32, T] = (i, xs[i])
+        out.append(pair)
+        i = i + 1
+    return out
+
+fn main() -> i32:
+    a: List[i32] = [100, 200, 300]
+    ea: List[Tuple[i32, i32]] = enumerate(a)
+    n: i32 = i32(i64(len(ea)))
+    i: i32 = 0
+    while i < n:
+        println(str(ea[i]))
+        i = i + 1
+
+    b: List[str] = ["x", "y"]
+    eb: List[Tuple[i32, str]] = enumerate(b)
+    n = i32(i64(len(eb)))
+    i = 0
+    while i < n:
+        println(str(eb[i]))
+        i = i + 1
+    return 0

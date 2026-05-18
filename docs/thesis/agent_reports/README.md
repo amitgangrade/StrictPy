@@ -47,3 +47,7 @@ the time it lands.
 | `m15_try_except.md` | M15 | try/except/finally + raise. **BUG-025 closed.** Lazy materialisation of exception objects; per-function JIT carve-out. |
 | `m16_match_isinstance.md` | M16 | `isinstance(x, T)` + `match case Constructor()`. Eliminates the `kind: i32` discriminator workaround. Flow-narrowing for isinstance mirrors is-not-none. |
 | `m17_generics.md` | M17 | Generic free functions with call-site monomorphisation. Lazy worklist (Pass 2.6 seeds; Pass 3.5 drains to fixpoint). Generic classes deferred to v0.2. |
+| `m18_algorithms_lib.md` | M18 | R1 — Generic algorithms library. 8 generic fns × 5 primitive types + Tuple + class. **Zero new bugs.** |
+| `m18_json_parse_v2.md` | M18 | R2 — JSON parser rewritten with M13-M17 surface. All 8 M10 workarounds eliminated. **Zero new bugs.** |
+| `m18_expr_interp.md` | M18 | R3 — Expression interpreter. Found **BUG-036** (divzero name mismatch). Plus 7 archived edge-case probes. |
+| `m18_graph_lib.md` | M18 | R4 — Generic graph algorithms. M17 worklist verified: 8 monomorphic instantiations drained to fixpoint, 2 discovered transitively. **Zero new bugs.** |

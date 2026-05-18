@@ -1,0 +1,28 @@
+"""Probe: generic over a final class type.
+
+Tests safe_get[T] where T = class Node — does the per-instantiation
+mangle 'class<N>' work?  Does field access through generic return type
+work in main?
+"""
+
+final class Node:
+    id: i32
+    fn __init__(self, k: i32) -> None:
+        self.id = k
+
+fn safe_get[T](xs: List[T], i: i32, default: T) -> T:
+    try:
+        return xs[i]
+    except IndexError as e:
+        return default
+
+fn main() -> i32:
+    nodes: List[Node] = []
+    nodes.append(Node(5))
+    nodes.append(Node(7))
+    sentinel: Node = Node(-1)
+    n0: Node = safe_get(nodes, 0, sentinel)
+    println(str(n0.id))      # 5
+    n9: Node = safe_get(nodes, 9, sentinel)
+    println(str(n9.id))      # -1
+    return 0

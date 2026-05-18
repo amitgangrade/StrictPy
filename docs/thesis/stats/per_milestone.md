@@ -26,6 +26,7 @@ Benchmark data: `bench/history/`.
 | **M15** | 234 | 14,600 | 7,900 | 5,300 | 0 | 1 | 0 | 16/0/0 | 13.1 |
 | **M16** | 245 | 15,000 | 8,000 | 5,400 | 0 | 0 | 0 | 16/0/0 | 13.1 |
 | **M17** | **255** | **15,631** | **7,780** | **5,517** | 0 | 0 | 0 | 16/0/0 | 13.1 |
+| **M18** | **267** | 15,700 | 7,820 | **7,400** | 1 | 1 | 0 | 16/0/0 | 13.1 |
 
 Notes:
 - LOC is at end-of-milestone; M1's LOC are mostly lexer+parser+pretty (already in their final shape).
@@ -49,6 +50,7 @@ See `bench/history/` for the underlying JSON.
 | M11 (class fix) | 16 | 0 | 0 | 13.1 ms | **16× faster** (fib(33)) | **5× faster** (dot 1M, mandelbrot) |
 | M12 (stress test 2 + torture) | 16 | 0 | 0 | 13.1 ms | (same as M11; no codegen change affecting perf) | — |
 | M13–M17 (language completeness) | 16 | 0 | 0 | 13.1 ms | (no benchmark cells touch the new surface yet) | — |
+| M18 (round 4 stress test) | 16 | 0 | 0 | 13.1 ms | (correctness round; no perf delta) | — |
 
 \* M7-unfair: Python timing included parse+compile time. Methodology bug
 caught and fixed at M10-prep; the M7-fair snapshot is the honest baseline.

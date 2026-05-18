@@ -17,7 +17,8 @@ discovered, milestone fixed (or "deferred" with pointer to
 | Stdlib missing | 5 | 5 | 0 |
 | Parser / lexer | 1 | 0 | 1 |
 | Formatting / spec consistency | 1 | 1 | 0 |
-| **Total** | **31** | **30** | **1** |
+| Spec/runtime drift | 1 | 1 | 0 |
+| **Total** | **32** | **31** | **1** |
 
 Post-M12 state (2026-05-18):
 
@@ -372,6 +373,17 @@ Post-M17 state (2026-05-18 even later):
 - **Root cause**: `compiler/src/ir.rs::emit_binop` lowered `AstBinOp::And` to `IROp::IAnd` (bitwise) and `AstBinOp::Or` to `IROp::IOr`. The source comment was honest: "bitwise approximation". Load-bearing-correct for pure-operand uses, broke for guarded indexing.
 - **Fix**: `compiler/src/ir.rs::lower_expr` (`Expr::Binary` arm) now intercepts `And`/`Or` BEFORE eagerly lowering both operands and routes them to the new `lower_short_circuit` helper. The helper allocates a result slot, lowers the lhs in the current block, pre-writes the lhs into the slot, emits a `CondBranch` (rhs-block on the "continue-evaluating" side, merge on the "short-circuit" side), evaluates the rhs in its own block and overwrites the slot, then branches to merge. The merge block reads the slot. Phi-merge uses the same slot-based ReadLocal/WriteLocal pattern as the M3.5 loop-carried-locals fix — no new IR ops or VM opcodes needed. **First mid-expression CFG manipulation in the project**; pattern is reusable for future features (try/except inside an expression will use the same shape).
 - **Status**: fixed in M13. Tests: `vm/tests/m13_short_circuit.rs` (6 tests including BOTH value-semantics truth-table cases AND trap-on-rhs cases — `1 / 0` in the rhs of `false and (...)` / `true or (...)` must NOT execute. The trap cases are the load-bearing assertions; pure value-only tests would have passed under the old bitwise lowering too).
+
+### M18-only finds
+
+#### BUG-036 — Division-by-zero exception name mismatch (spec/runtime drift)
+- **Found**: M18 (R3 expression-interpreter stress agent — probe was a deliberate test of the canonical Python name).
+- **Symptom**: `try: 1/0 except ZeroDivisionError as e:` did NOT catch. Only `except DivisionByZeroError` or `except Exception` matched. Spec §7.5.1 advertised `ZeroDivisionError` as canonical (Python-compatible) and `DivisionByZeroError` as a "legacy name also recognised", but the runtime emitted the LEGACY name as the exception's `type_name`, and the handler-frame arm-matcher in `vm/src/interp.rs:456` was exact-string equality. Either the resolver-side registration of both class names was load-bearing for `raise` (it was) AND the runtime should emit the canonical name (it didn't).
+- **Root cause**: four divzero emit sites in `vm/src/interp.rs` (lines 911, 943, 974, 1004; i32 / i64 / u32 / u64 paths) all hardcoded `"DivisionByZeroError"`. The M15 try/except implementation registered BOTH names in the resolver's class table to support `raise DivisionByZeroError(...)` and `raise ZeroDivisionError(...)`, but the runtime emit side was inconsistent with the spec's canonical choice.
+- **Fix**: (a) all four emit sites changed to `"ZeroDivisionError"` (the canonical, Python-compatible name); (b) added `exception_name_alias` helper in `vm/src/interp.rs` that maps `"DivisionByZeroError" → "ZeroDivisionError"`, called from the arm-match loop. Result: programs that wrote `except ZeroDivisionError` (canonical) AND programs that wrote `except DivisionByZeroError` (legacy) both catch.
+- **Status**: fixed in M18. Tests: `vm/tests/m18_divzero_alias.rs` (3 tests — canonical name catches, legacy name still catches via alias, i32 path also emits canonical). The pre-existing `vm/tests/m15_try_except.rs::division_by_zero_catchable` already used `||` to accept either name; preserved.
+- **Severity**: medium. Every program intending Python-compatible exception handling silently fell through `except ZeroDivisionError` and was either caught by `except Exception` or escaped uncaught. Manifested in M18 because the R3 agent's expression interpreter was the first program to deliberately test the canonical name.
+- **Why this is a "spec/runtime drift" category, not silent miscompile**: the spec was honest about the legacy name; the failure was that the runtime never followed through on emitting the canonical one. Same class of failure as `with`-doesn't-route-through-try (M15 known follow-up). Pattern lesson: when introducing a Python-compat alias, update BOTH the registration table AND the runtime emit side.
 
 ## Lessons from the catalog
 

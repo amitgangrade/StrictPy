@@ -1,0 +1,39 @@
+# M18 probe: M16 brief said `isinstance(x, A) and x.field` does NOT
+# narrow on the right side of `and`.  Confirmed.
+#
+# The natural code:
+#
+#     if isinstance(v, IV) and v.n > 0i64:   # FAILS to compile:
+#                                            # E2003: no field `n` on type V
+#         return v.n
+#
+# fails with E2003 because `narrowings_from_cond` in the typechecker
+# only narrows on the *cascading* if, not into the rhs of `and`.  See
+# `docs/thesis/agent_reports/m16_match_isinstance.md` Strategy §3
+# "What I explicitly didn't do: narrow through `and` / `or`".
+#
+# The workaround used in expr_interp.spy is the nested-if shape below.
+
+sealed class V:
+    fn __init__(self) -> None: pass
+
+final class IV(V):
+    n: i64
+    fn __init__(self, n: i64) -> None: self.n = n
+
+final class SV(V):
+    s: str
+    fn __init__(self, s: str) -> None: self.s = s
+
+# Nested-if workaround — narrowing fires inside the outer if's then-block.
+fn check(v: V) -> i64:
+    if isinstance(v, IV):
+        if v.n > 0i64:
+            return v.n
+    return -1i64
+
+fn main() -> i32:
+    println(str(check(IV(42i64))))   # 42
+    println(str(check(IV(-7i64))))   # -1
+    println(str(check(SV("hi"))))    # -1
+    return 0

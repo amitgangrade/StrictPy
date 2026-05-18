@@ -1,0 +1,18 @@
+# M18 probe: spec §7.5.6 says bare `raise` (re-raise) is deferred.
+# But `raise e` where `e` is a bound `as e` binding — is THAT
+# supported? Spec is silent. Probe it.
+
+fn main() -> i32:
+    # If `raise e` works the outer handler should catch and print
+    # "outer caught: inner-msg". If `raise e` is rejected at parse
+    # or typecheck, compile fails. If it silently no-ops, "after
+    # inner" prints and outer doesn't fire.
+    try:
+        try:
+            raise ValueError("inner-msg")
+        except ValueError as e:
+            println("inner caught: " + e.message)
+            raise e
+    except ValueError as e2:
+        println("outer caught: " + e2.message)
+    return 0

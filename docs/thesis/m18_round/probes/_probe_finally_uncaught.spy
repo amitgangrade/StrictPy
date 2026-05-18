@@ -1,0 +1,17 @@
+# M18 probe: spec §7.5.4 promises `finally` runs on every exit path,
+# including uncaught propagation. We confirm this with no `except`
+# at all on the inner try: the finally must run, and the exception
+# must continue propagating.
+
+fn main() -> i32:
+    fin_count: i32 = 0i32
+    try:
+        try:
+            raise ValueError("uncaught-here")
+        finally:
+            fin_count = fin_count + 1i32
+            println("inner finally fired")
+    except ValueError as e:
+        println("outer caught: " + e.message)
+        println("fin_count=" + str(fin_count))
+    return 0

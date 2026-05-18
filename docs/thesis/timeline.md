@@ -529,6 +529,71 @@ proper `with → try/finally` desugaring) are all scoped to v0.2.
 
 ---
 
+## M18 — Round 4 stress test (2026-05-18)
+
+The first stress round to specifically target the M13-M17 surface. Four
+parallel C-agents, file-disjoint, each picking a different combination
+of the new features:
+
+| Agent | Program | Result |
+|---|---|---|
+| R1 / algorithms_lib | Generic free-fn library (find_first, zip, unzip, binary_search, merge_sorted, group_by_first) | **Zero new bugs** |
+| R2 / json_parse_v2 | JSON parser rewritten with M13-M17 surface (sealed + match + try/except + tuples) — direct comparison to M10's json_parse.spy | **Zero new bugs** |
+| R3 / expr_interp | Small expression-language interpreter with sealed Expr/Value, recursive match-based eval, try/except for runtime errors | Found **BUG-036** (divzero name mismatch) |
+| R4 / graph_lib | Generic graph algorithms (BFS, Dijkstra, topo-sort with cycle detection, shortest_path with try/except) — empirical worklist verification | **Zero new bugs**; verified M17 worklist drains 8 instantiations to fixpoint with 2 transitive |
+
+**Headline numbers**:
+
+- M10 (round 1) found 17 bugs in one round.
+- M11 (round 2) found 6.
+- M12 (round 3) found 2.
+- M18 (round 4) found **1**.
+
+The stress-test ROI curve has flattened sharply. This is itself a
+load-bearing thesis result: post-M17 the language has settled to the
+point where 1500 lines of stress-test code surface a single bug, and
+that bug is a spec/runtime drift (the spec was honest about the legacy
+exception name; the runtime never followed through on emitting the
+canonical one) — not a silent miscompile or a heap corruption.
+
+**BUG-036 in one sentence**: `try: 1/0 except ZeroDivisionError:` did
+not catch, because the runtime emitted the legacy `DivisionByZeroError`
+name and the arm-matcher in `vm/src/interp.rs:456` did exact-string
+equality. Fixed by canonicalising the emit (4 sites) AND adding an
+alias-aware match so the legacy filter still works.
+
+**R2 headline (workaround inventory)**: the original M10 `json_parse.spy`
+documented eight language workarounds in its 70-line header. All eight
+are now obsolete. R2's `json_parse_v2.spy` writes the natural form
+(sealed JsonValue with 6 subclasses; instance methods on Parser;
+`List[Tuple[str, JsonValue]]` for objects; try/except for parse errors;
+match for serialisation) and works on first compile. 374 lines → 152
+lines, ~60% reduction. **The strongest single piece of evidence that
+M13-M17 collectively shipped a coherent language.**
+
+**R4 headline (worklist verification)**: the M17 monomorphisation
+worklist is the most algorithmically complex feature added in the
+sprint. R4's graph_lib was deliberately written to hammer it: BFS uses
+`enumerate[T]`, Dijkstra uses `min_by[T]` which uses `safe_get[T]`,
+shortest_path threads everything together. The agent counted **8
+distinct monomorphic instantiations across 4 generic source functions**,
+of which **2 (`safe_get__i32` and dispatch sites inside `min_by`/
+`first_or_default`) were discovered only transitively** from inside
+other generic bodies. Empirically confirms the Pass 2.6 → Pass 3.5
+fixed-point drain.
+
+**Probes archive**: 17 minimal-repro / edge-case probes from the four
+agents are preserved at `docs/thesis/m18_round/probes/`. They document
+v0.1 limits the user can grep for (isinstance flow-narrowing doesn't
+compose through `and`; nested constructor patterns don't bind inner
+identifiers; match-scrutinee-throws propagates correctly; `raise e`
+re-raise works despite being out-of-scope in §7.5.6 — could be promoted
+to spec).
+
+**Tests**: 255 → 267 (+12).
+
+---
+
 ## What this trajectory shows
 
 - **Bugs found scales with running real programs, not with writing tests.**
