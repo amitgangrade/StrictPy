@@ -1339,10 +1339,20 @@ fn lower_expr(fb: &mut FuncBuilder, ctx: &mut LowerCtx, e: &Expr) -> ValueId {
             fb.push_value(ty, ValueKind::Op { op: irop, args: vec![v] })
         }
         Expr::Binary { op, lhs, rhs, span } => {
-            // Short-circuit `and`/`or` left for codegen as plain ops in M3.
+            let ty = ctx.expr_ty(*span);
+            // M13 (BUG-035): `and` / `or` must short-circuit. The right
+            // operand must NOT be evaluated when the left already decides
+            // the result, otherwise the standard guard idiom
+            //     b > 0 and xs[b - 1] > 0
+            // traps. Inspect the AST node BEFORE eagerly lowering both
+            // operands and dispatch to a basic-block-splitting helper for
+            // these two operators. Every other binop preserves the prior
+            // eager-lower-then-emit path.
+            if matches!(op, AstBinOp::And | AstBinOp::Or) {
+                return lower_short_circuit(fb, ctx, *op, lhs, rhs, ty);
+            }
             let l = lower_expr(fb, ctx, lhs);
             let r = lower_expr(fb, ctx, rhs);
-            let ty = ctx.expr_ty(*span);
             emit_binop(fb, *op, l, r, ty)
         }
         Expr::Call { callee, args, span } => lower_call(fb, ctx, callee, args, *span),
@@ -1752,10 +1762,98 @@ fn emit_binop(
         }
         AstBinOp::In => IROp::IEq,      // placeholder
         AstBinOp::NotIn => IROp::INe,   // placeholder
-        AstBinOp::And => IROp::IAnd,    // bitwise approximation
+        // M13 (BUG-035): `and` / `or` are intercepted in `lower_expr` for
+        // `Expr::Binary` (BEFORE both operands get lowered) and routed to
+        // `lower_short_circuit`. The bitwise fallback below is kept only
+        // as a defensive backstop: it preserves the pre-M13 behaviour for
+        // any synthetic caller that constructs `and`/`or` from already-
+        // lowered ValueIds (none today). User-visible programs never hit
+        // this path — short-circuit semantics are guaranteed.
+        AstBinOp::And => IROp::IAnd,
         AstBinOp::Or => IROp::IOr,
     };
     fb.push_value(ty, ValueKind::Op { op: irop, args: vec![l, r] })
+}
+
+/// Lower `a and b` and `a or b` with proper short-circuit semantics by
+/// emitting a basic-block split mid-expression. This is the first place
+/// in the compiler that creates new BlockIds while lowering an
+/// expression; the pattern is intended to be reusable for future
+/// mid-expression CFG features (e.g. try/except inside an expression).
+///
+/// Lowering shape (for `a and b`):
+///
+/// ```text
+///     ; entry block (current)
+///     %l = <lower a>
+///     slot[t] := %l           ; provides the "false" predecessor
+///     if %l then T else MERGE
+///   T:
+///     %r = <lower b>
+///     slot[t] := %r
+///     branch MERGE
+///   MERGE:
+///     %res = ReadLocal slot[t]
+/// ```
+///
+/// For `a or b` the roles flip: the entry block already has `%l == true`
+/// stored, so the truthy branch goes straight to MERGE and the rhs is
+/// only evaluated on the false branch.
+///
+/// Phi-merge uses the slot-based ReadLocal/WriteLocal pattern that the
+/// rest of the codebase uses for cross-block values (see M3.5's
+/// loop-carried locals fix). The slot name is uniquified by current slot
+/// count so nested `and`/`or` don't alias.
+fn lower_short_circuit(
+    fb: &mut FuncBuilder,
+    ctx: &mut LowerCtx,
+    op: AstBinOp,
+    lhs: &Expr,
+    rhs: &Expr,
+    ty: Ty,
+) -> ValueId {
+    debug_assert!(matches!(op, AstBinOp::And | AstBinOp::Or));
+
+    // Lower the left operand in the entry block. CRITICAL invariant:
+    // the right operand must NOT be touched until we're inside the
+    // short-circuit "evaluate rhs" block — that's the whole point.
+    let l = lower_expr(fb, ctx, lhs);
+
+    // Allocate a result slot. Name uniquified by slot count so a nested
+    // short-circuit expression doesn't clobber the outer slot.
+    let slot_name = format!("__sc_{}", fb.slot_ty.len());
+    let slot = fb.alloc_slot(&slot_name, ty.clone());
+
+    // Pre-seed the slot with `l` — this is the "short-circuit value"
+    // that the merge will read when we skip evaluating the rhs.
+    fb.emit_write_local(slot, l);
+
+    let rhs_b = fb.new_block();
+    let merge = fb.new_block();
+
+    // For `and`: evaluate rhs only when l is true; otherwise the slot
+    // already holds the falsey `l`, so go straight to merge.
+    // For `or`:  evaluate rhs only when l is false; otherwise the slot
+    // already holds the truthy `l`, so go straight to merge.
+    let (t_target, f_target) = match op {
+        AstBinOp::And => (rhs_b, merge),
+        AstBinOp::Or => (merge, rhs_b),
+        _ => unreachable!(),
+    };
+    fb.terminate(Terminator::CondBranch { cond: l, t: t_target, f: f_target });
+
+    // Evaluate the rhs in its own block and store into the result slot.
+    fb.switch_to(rhs_b);
+    let r = lower_expr(fb, ctx, rhs);
+    fb.emit_write_local(slot, r);
+    fb.terminate(Terminator::Branch { target: merge });
+
+    // Merge block: read the slot. ReadLocal sees the most recent write
+    // along whichever predecessor edge brought control here, which is
+    // exactly the phi semantics we need (the same pattern that lets
+    // loop-carried locals work across the back-edge in `while`).
+    fb.switch_to(merge);
+    fb.emit_read_local(slot)
 }
 
 fn find_value_ty(fb: &FuncBuilder, v: ValueId) -> Option<Ty> {

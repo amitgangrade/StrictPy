@@ -12,12 +12,12 @@ discovered, milestone fixed (or "deferred" with pointer to
 | Vacuous output (IR lowering punt) | 3 | 3 | 0 |
 | Vtable / inheritance | 7 | 7 | 0 |
 | Typechecker rejects valid code | 3 | 3 | 0 |
-| Frontend operator semantics | 2 | 1 | 1 |
+| Frontend operator semantics | 2 | 2 | 0 |
 | Runtime memory / GC | 2 | 2 | 0 |
 | Stdlib missing | 5 | 4 | 1 |
 | Parser / lexer | 1 | 0 | 1 |
 | Formatting / spec consistency | 1 | 1 | 0 |
-| **Total** | **31** | **28** | **3** |
+| **Total** | **31** | **29** | **2** |
 
 Post-M12 state (2026-05-18):
 
@@ -29,12 +29,21 @@ Post-M12 state (2026-05-18):
 - BUG-034 (M12 find: `str != str` always true — silent miscompile of
   the same shape as BUG-008 `is not`) was fixed inline in M12.
 
-Truly-deferred bugs after M12 are:
+Post-M13 state (2026-05-18):
+
+- BUG-035 (`and` / `or` short-circuit) is now **fixed**. M13's targeted
+  agent landed `compiler/src/ir.rs::lower_short_circuit`, the project's
+  first mid-expression CFG manipulation. The standard guard idiom
+  (`b > 0 and xs[b-1] > 0`) now evaluates correctly without trapping
+  `IndexError`. Regression coverage at `vm/tests/m13_short_circuit.rs`
+  (6 tests including BOTH value-semantics truth-table cases AND
+  trap-on-rhs cases — the latter is what the old bitwise lowering
+  would have failed).
+
+Truly-deferred bugs after M13 are:
 - BUG-025: no fallible `open()` (needs exception handling).
 - BUG-028: no implicit line continuation across infix operators
   (needs lexer enhancement).
-- BUG-035: `and` / `or` do not short-circuit (needs IR basic-block
-  branching for `a and b → if a: b else: false`).
 
 ## Full catalog
 
@@ -269,12 +278,12 @@ Truly-deferred bugs after M12 are:
 - **Status**: fixed in M12. Test: `compiler/tests/btree_runs.rs::str_ne_returns_false_for_equal_strings`. Minimal repro preserved at `examples/_probe_str_ne.spy`.
 - **Severity**: medium. Every program comparing strings for inequality was wrong. Manifested in M12 only because btree was the first stress test that built fail/pass output lines from a string compare; calculator/lisp/json_parse all used numeric or virtual-method discrimination.
 
-#### BUG-035 — `and` / `or` do not short-circuit ⚠️ DEFERRED
+#### BUG-035 — `and` / `or` do not short-circuit
 - **Found**: M12 (C9 B-tree stress test — `while b > 0 and ranks[b-1] > ranks[b]` traps with `IndexError: index -1` after one iteration of an insertion sort).
 - **Symptom**: `a and b` and `a or b` evaluate both operands unconditionally. Programs that use the standard guard idiom (`if bounds_ok and xs[i] > ...`) trap when the right operand is only safe under the left guard.
-- **Root cause**: `compiler/src/ir.rs::emit_binop` lowers `AstBinOp::And` to `IROp::IAnd` (bitwise) and `AstBinOp::Or` to `IROp::IOr`. The source comment is honest: "bitwise approximation". Was load-bearing-correct for pure-operand uses, broke for guarded indexing.
-- **Fix sketch**: lower `a and b` to `if a: b else: false` and `a or b` to `if a: a else: b` at the IR level. This is the first language feature that requires emitting NEW basic blocks mid-expression — every prior bool op was single-block. Mechanically tractable but bigger than M12's confirm-M11 scope.
-- **Status**: deferred. Documented in `BUGS_KNOWN.md §7`.
+- **Root cause**: `compiler/src/ir.rs::emit_binop` lowered `AstBinOp::And` to `IROp::IAnd` (bitwise) and `AstBinOp::Or` to `IROp::IOr`. The source comment was honest: "bitwise approximation". Load-bearing-correct for pure-operand uses, broke for guarded indexing.
+- **Fix**: `compiler/src/ir.rs::lower_expr` (`Expr::Binary` arm) now intercepts `And`/`Or` BEFORE eagerly lowering both operands and routes them to the new `lower_short_circuit` helper. The helper allocates a result slot, lowers the lhs in the current block, pre-writes the lhs into the slot, emits a `CondBranch` (rhs-block on the "continue-evaluating" side, merge on the "short-circuit" side), evaluates the rhs in its own block and overwrites the slot, then branches to merge. The merge block reads the slot. Phi-merge uses the same slot-based ReadLocal/WriteLocal pattern as the M3.5 loop-carried-locals fix — no new IR ops or VM opcodes needed. **First mid-expression CFG manipulation in the project**; pattern is reusable for future features (try/except inside an expression will use the same shape).
+- **Status**: fixed in M13. Tests: `vm/tests/m13_short_circuit.rs` (6 tests including BOTH value-semantics truth-table cases AND trap-on-rhs cases — `1 / 0` in the rhs of `false and (...)` / `true or (...)` must NOT execute. The trap cases are the load-bearing assertions; pure value-only tests would have passed under the old bitwise lowering too).
 
 ## Lessons from the catalog
 

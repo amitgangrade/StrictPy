@@ -68,47 +68,55 @@ repro programs, on a single .spyc each, produced identical clean output.
 
 ---
 
-## 7. `and` / `or` do not short-circuit (M12 find — BUG-035)
+## 7. ~~`and` / `or` do not short-circuit~~ *(Fixed in M13)*
 
-### Repro
-```python
+See "Fixed in M13" section at bottom. `Expr::Binary` now inspects
+`AstBinOp::And`/`Or` BEFORE eagerly lowering both operands and routes
+them to `lower_short_circuit`, which emits a real basic-block split:
+conditional branch on the lhs, evaluate the rhs only in the
+"continue-evaluating" successor, phi-merge via a slot read in the join
+block. The standard guard idiom (`b > 0 and xs[b - 1] > 0`) now
+evaluates correctly without trapping.
+
+~~### Repro~~
+~~```python
 xs: List[i32] = [10, 20, 30]
 b: i32 = 0
 # Goal: only check the comparison when b > 0; protects xs[b-1].
 if b > 0i32 and xs[b - 1i32] > xs[b]:
     pass
 # Currently traps: IndexError: index -1 out of range for length 3
-```
+```~~
 
-### Symptom
-`a and b` evaluates both operands unconditionally. The IR lowering for
+~~### Symptom~~
+~~`a and b` evaluates both operands unconditionally. The IR lowering for
 `AstBinOp::And` is `IROp::IAnd` (bitwise) and `AstBinOp::Or` is
 `IROp::IOr` (bitwise). The comment in `compiler/src/ir.rs:1738` says
 "bitwise approximation" — it's an honest known-limitation, but it
-breaks the standard guard idiom and is non-Python-conformant.
+breaks the standard guard idiom and is non-Python-conformant.~~
 
-Surfaced by m12_btree which used `b > 0 and ranks[b-1] > ranks[b]`
-inside the keys-array insertion sort. Worked around with nested `if`.
+~~Surfaced by m12_btree which used `b > 0 and ranks[b-1] > ranks[b]`
+inside the keys-array insertion sort. Worked around with nested `if`.~~
 
-### Speculation
-`compiler/src/ir.rs::emit_binop` lines 1738-1739. Fix requires lowering
+~~### Speculation~~
+~~`compiler/src/ir.rs::emit_binop` lines 1738-1739. Fix requires lowering
 `a and b` to a basic-block-level `if a: b else: false` (or just `if a:
 b else: a` if `a` is bool-typed) — a real branch, not a bitwise op.
 Same for `or` (lowered to `if a: a else: b`). This is the first
 language change in the project that requires emitting new basic blocks
 mid-expression. Mechanically tractable; not done in M12 because the
-orchestrator decided to keep M12 scoped to confirming M11 holds.
+orchestrator decided to keep M12 scoped to confirming M11 holds.~~
 
-### Fix sketch
-1. In `emit_binop`, special-case `And` and `Or` BEFORE the `is_str` /
+~~### Fix sketch~~
+~~1. In `emit_binop`, special-case `And` and `Or` BEFORE the `is_str` /
    `is_float` dispatch. Allocate two fresh blocks, emit a conditional
    branch on `l`, materialise the right operand in the "true" branch
-   for And (or "false" branch for Or), and phi-merge in a join block.
-2. The current bitwise-approximation behaviour is preserved when both
+   for And (or "false" branch for Or), and phi-merge in a join block.~~
+~~2. The current bitwise-approximation behaviour is preserved when both
    operands are pure (no side effects, no traps), so the optimisation
-   pass could fold short-circuit back to bitwise when safe.
-3. Regression test: `b > 0 and xs[b-1] > 0` with `b == 0` and
-   `xs == []` should evaluate to `false` without trapping.
+   pass could fold short-circuit back to bitwise when safe.~~
+~~3. Regression test: `b > 0 and xs[b-1] > 0` with `b == 0` and
+   `xs == []` should evaluate to `false` without trapping.~~
 
 ---
 
@@ -202,4 +210,34 @@ provisional closures to confirmed.
 
 | # | Bug | Notes |
 |---|-----|-------|
-| BUG-035 | `and` / `or` do not short-circuit | See §7 above. Needs IR basic-block branching for `a and b → if a: b else: false`. Mechanically tractable, deferred to a focused agent task. |
+| ~~BUG-035~~ | ~~`and` / `or` do not short-circuit~~ | Fixed in M13 — see "Fixed in M13" section below. |
+
+---
+
+## Fixed in M13
+
+Targeted, single-agent round that closed BUG-035. Introduces the
+project's first mid-expression CFG manipulation; the pattern is
+intentionally reusable for future features (try/except inside an
+expression will need the same shape).
+
+| # | Bug | Fix location | Regression test |
+|---|-----|--------------|-----------------|
+| BUG-035 | `and` / `or` did not short-circuit — `Expr::Binary` eagerly lowered both operands and `emit_binop` dispatched to `IROp::IAnd`/`IOr` (bitwise). Guard idioms like `b > 0 and xs[b-1] > 0` trapped IndexError when the guard was false. | `compiler/src/ir.rs::lower_expr` (`Expr::Binary` arm now intercepts `And`/`Or` BEFORE lowering operands); new helper `compiler/src/ir.rs::lower_short_circuit` emits a basic-block split with a CondBranch on the lhs, evaluates the rhs only in the "continue-evaluating" successor, and phi-merges via a slot ReadLocal in the join block (same slot-based pattern as the M3.5 loop-carried-locals fix) | `vm/tests/m13_short_circuit.rs` — 6 tests: `and_short_circuits_when_lhs_is_false_protecting_index`, `or_short_circuits_when_lhs_is_true_protecting_index`, `and_both_true_returns_true`, `and_first_false_skips_division_by_zero_in_rhs`, `or_first_true_skips_division_by_zero_in_rhs`, `chained_and_all_eight_truth_combinations` |
+
+### Notes for the next round
+
+- The slot-based phi-merge worked transparently: no IR ops or VM
+  opcodes needed to be added, and the existing `IROp::ReadLocal` /
+  `WriteLocal` already cross basic-block boundaries (the same property
+  that lets `while` loops carry locals across the back-edge). When
+  try/except lands the catch handler will need the same shape:
+  pre-write a sentinel into the result slot in the "normal" path,
+  write the exception value in the catch handler, both predecessors
+  flow into the join, ReadLocal in the join.
+- The bitwise-approximation arm in `emit_binop` is preserved as a
+  defensive backstop. No caller exercises it for user-visible code;
+  removing it is a cleanup for a future agent.
+- The B-tree workaround (nested `if` for the `b > 0 and ranks[b-1] >
+  ranks[b]` insertion-sort condition) is now unnecessary but not
+  actively wrong. Leaving it for a future stress-test refactor pass.
