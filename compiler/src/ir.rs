@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use strictpy_shared::NativeFn;
 
 use crate::ast::{
-    self, BinOp as AstBinOp, Block, Expr, FuncDecl, Literal, Lvalue,
+    self, BinOp as AstBinOp, Block, ExceptHandler, Expr, FuncDecl, Literal, Lvalue,
     Span, Stmt, TopDecl, UnaryOp,
 };
 use crate::resolver::{SymbolId, SymbolKind};
@@ -137,6 +137,45 @@ pub enum IROp {
     BoundsCheck,
     NullCheck,
     TypeCheck,
+
+    // ── Exceptions (M15 try/except) ──────────────────────────────────────
+    /// Push a handler frame onto the interpreter's handler stack at the
+    /// start of a `try` body. The frame describes which exception type
+    /// names to catch and where to dispatch each one, the optional finally
+    /// block, and (per-arm) which local slot receives the bound exception
+    /// value at handler entry. Lowered to `Opcode::EnterTry` in codegen
+    /// (block ids in `arms`/`finally_block` are patched to byte offsets at
+    /// emit time, same machinery as the `Branch` terminator).
+    TryEnter {
+        /// One arm per `except`. Each filter is a constant-pool string
+        /// index whose value is the exception type-name; "Exception"
+        /// matches anything.
+        arms: Vec<TryHandlerArm>,
+        /// Block to run after a normal body completion / handler completion,
+        /// before the join block. `None` if the `try` had no `finally`.
+        finally_block: Option<BlockId>,
+    },
+    /// Pop the topmost handler frame. Emitted at the bottom of the `try`
+    /// body and (when a `finally` exists) at the end of the handler arm
+    /// bodies just before branching into the finally block.
+    TryLeave,
+    /// Marker at the end of a finally block. If the interpreter has a
+    /// pending exception stashed in `pending_exception`, re-raise it;
+    /// otherwise no-op. Lowered to `Opcode::Rethrow`.
+    EndFinally,
+}
+
+/// One arm of a `try ... except ... [except ...]` IR statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TryHandlerArm {
+    /// Constant-pool index of the type-name string this arm catches.
+    /// "Exception" matches any thrown type.
+    pub filter_str_idx: u32,
+    /// Block where this arm's handler body begins.
+    pub handler_block: BlockId,
+    /// Local slot the handler binds the exception value into.
+    /// `u32::MAX` means "no `as e:` binding".
+    pub bind_slot: u32,
 }
 
 /// Terminator at the end of every basic block.
@@ -1111,22 +1150,11 @@ fn lower_stmt(fb: &mut FuncBuilder, ctx: &mut LowerCtx, s: &Stmt) -> Option<()> 
             Some(())
         }
         Stmt::Try { body, handlers, finally_block, .. } => {
-            // Best-effort: lower body in current block, then each handler
-            // body, then finally. Real exception edges are deferred.
-            lower_block(fb, ctx, body);
-            for h in handlers {
-                lower_block(fb, ctx, &h.body);
-            }
-            if let Some(fin) = finally_block {
-                lower_block(fb, ctx, fin);
-            }
+            lower_try(fb, ctx, body, handlers, finally_block.as_ref());
             Some(())
         }
         Stmt::Raise { exc, .. } => {
-            let v = lower_expr(fb, ctx, exc);
-            fb.terminate(Terminator::Throw { exc: v });
-            let nb = fb.new_block();
-            fb.switch_to(nb);
+            lower_raise(fb, ctx, exc);
             Some(())
         }
         Stmt::Assert { cond, .. } => {
@@ -1228,6 +1256,206 @@ fn lower_while(fb: &mut FuncBuilder, ctx: &mut LowerCtx, cond: &Expr, body: &Blo
     fb.terminate(Terminator::Branch { target: header });
 
     fb.switch_to(exit);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  M15: try / except / finally / raise
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Lower `try: B except T1 as e1: H1 except T2: H2 finally: F` to:
+///
+/// ```text
+///   try_body:
+///     IROp::TryEnter { arms=[(T1, h1, e1_slot), (T2, h2, none)], finally=F }
+///     <B>
+///     IROp::TryLeave
+///     Branch <post_body>             (post_body = finally if present, else after)
+///
+///   h1:                              (entered via runtime handler-frame dispatch;
+///     <H1>                            no static predecessor — exception edges
+///     Branch <post_body>              are managed by the VM)
+///   h2:
+///     <H2>
+///     Branch <post_body>
+///
+///   F:  (only if there's a finally clause)
+///     <F>
+///     IROp::EndFinally               (re-raises if pending exception stashed)
+///     Branch <after>
+///
+///   after:                           — successor of normal completion paths.
+/// ```
+///
+/// The handler arms are NOT reachable via static CFG edges — they're entered
+/// only via the VM's handler-frame propagation in `Interpreter::run_until`.
+/// Codegen patches the `arms[i].handler_block` and `finally_block` to byte
+/// offsets inside the EnterTry instruction operand.
+fn lower_try(
+    fb: &mut FuncBuilder,
+    ctx: &mut LowerCtx,
+    body: &Block,
+    handlers: &[ExceptHandler],
+    finally_block: Option<&Block>,
+) {
+    let after = fb.new_block();
+    let finally_b: Option<BlockId> = finally_block.as_ref().map(|_| fb.new_block());
+
+    // Allocate handler blocks AND their bind slots up front, so the TryEnter
+    // operand can reference them.
+    let mut handler_blocks: Vec<BlockId> = Vec::with_capacity(handlers.len());
+    let mut bind_slots: Vec<u32> = Vec::with_capacity(handlers.len());
+    let mut filter_idxs: Vec<u32> = Vec::with_capacity(handlers.len());
+    for h in handlers {
+        handler_blocks.push(fb.new_block());
+        let filter_name = exception_filter_name(&h.exc_ty);
+        let idx = ctx.intern(&filter_name);
+        filter_idxs.push(idx);
+        if let Some(name) = &h.binding {
+            // Bind slot type: the caught exception class (best-effort —
+            // pulled from the AST type via the resolver's type lookup).
+            let slot_ty = exception_filter_ty(ctx, &h.exc_ty);
+            let slot = fb.alloc_slot(name, slot_ty);
+            bind_slots.push(slot as u32);
+        } else {
+            bind_slots.push(u32::MAX);
+        }
+    }
+
+    let arms: Vec<TryHandlerArm> = handlers
+        .iter()
+        .enumerate()
+        .map(|(i, _)| TryHandlerArm {
+            filter_str_idx: filter_idxs[i],
+            handler_block: handler_blocks[i],
+            bind_slot: bind_slots[i],
+        })
+        .collect();
+
+    // Emit the TryEnter as the first instruction of the current block.
+    fb.push_value(
+        Ty::Primitive(PrimTy::Unit),
+        ValueKind::Op {
+            op: IROp::TryEnter { arms, finally_block: finally_b },
+            args: vec![],
+        },
+    );
+
+    // Body.
+    lower_block(fb, ctx, body);
+    // Normal-completion path: pop the handler frame, then branch to finally
+    // (if any) else `after`.
+    fb.push_value(
+        Ty::Primitive(PrimTy::Unit),
+        ValueKind::Op { op: IROp::TryLeave, args: vec![] },
+    );
+    let post_body_target = finally_b.unwrap_or(after);
+    fb.terminate(Terminator::Branch { target: post_body_target });
+
+    // Handler arms — each starts in its own block, entered only via the VM's
+    // exception dispatch. After running, branch to finally (if any) else after.
+    for (i, h) in handlers.iter().enumerate() {
+        fb.switch_to(handler_blocks[i]);
+        lower_block(fb, ctx, &h.body);
+        fb.terminate(Terminator::Branch { target: post_body_target });
+    }
+
+    // Finally block (if present).
+    if let (Some(fb_id), Some(fin)) = (finally_b, finally_block) {
+        fb.switch_to(fb_id);
+        lower_block(fb, ctx, fin);
+        fb.push_value(
+            Ty::Primitive(PrimTy::Unit),
+            ValueKind::Op { op: IROp::EndFinally, args: vec![] },
+        );
+        fb.terminate(Terminator::Branch { target: after });
+    }
+
+    fb.switch_to(after);
+}
+
+/// Lower `raise IOError("msg")` to:
+///   v = Alloc(IOError_type_id)
+///   Store(0)  v, "IOError"          (type_name field)
+///   Store(8)  v, "msg"               (message field)
+///   Throw v
+///
+/// For unrecognised shapes (e.g. raising a bare value), fall back to lowering
+/// the expression and throwing whatever it produced. The runtime will treat
+/// the resulting value as if it were an exception heap object — useful for
+/// re-raise scenarios once those land.
+fn lower_raise(fb: &mut FuncBuilder, ctx: &mut LowerCtx, exc: &Expr) {
+    // Recognise `<ExceptionName>("message")`.
+    if let Expr::Call { callee, args, .. } = exc {
+        if let Expr::Ident { name, .. } = callee.as_ref() {
+            if crate::typecheck::is_builtin_exception_name(name) && args.len() == 1 {
+                // Look up the class id.
+                let scope = ctx.typed.resolved.module_scope;
+                let sid = ctx.typed.resolved.symbols.lookup(scope, name);
+                let cid = sid.and_then(|sid| ctx.typed.resolved.symbols.get(sid).class_id);
+                if let Some(cid) = cid {
+                    let tid = ctx.class_type_id.get(&cid.0).copied().unwrap_or(cid.0);
+                    let alloc = fb.push_value(
+                        Ty::Class(cid),
+                        ValueKind::Op { op: IROp::Alloc { class_id: tid }, args: vec![] },
+                    );
+                    // type_name field (offset 0).
+                    let tname_v = fb.push_value(
+                        Ty::Primitive(PrimTy::Str),
+                        ValueKind::Const(IRConst::Str(name.clone())),
+                    );
+                    fb.push_value(
+                        Ty::Primitive(PrimTy::Unit),
+                        ValueKind::Op {
+                            op: IROp::Store { offset: 0 },
+                            args: vec![alloc, tname_v],
+                        },
+                    );
+                    // message field (offset 8).
+                    let msg_v = lower_expr(fb, ctx, &args[0].value);
+                    fb.push_value(
+                        Ty::Primitive(PrimTy::Unit),
+                        ValueKind::Op {
+                            op: IROp::Store { offset: 8 },
+                            args: vec![alloc, msg_v],
+                        },
+                    );
+                    fb.terminate(Terminator::Throw { exc: alloc });
+                    let nb = fb.new_block();
+                    fb.switch_to(nb);
+                    return;
+                }
+            }
+        }
+    }
+    // Fallback path — lower whatever expression was raised and throw it.
+    let v = lower_expr(fb, ctx, exc);
+    fb.terminate(Terminator::Throw { exc: v });
+    let nb = fb.new_block();
+    fb.switch_to(nb);
+}
+
+/// Extract the filter name from an `except T as e:` clause's AST type.
+/// `Type::Named { name, .. }` → `name.clone()`; everything else maps to
+/// "Exception" (catch-all) — defensive.
+fn exception_filter_name(ty: &ast::Type) -> String {
+    if let ast::Type::Named { name, .. } = ty {
+        name.clone()
+    } else {
+        "Exception".into()
+    }
+}
+
+/// Resolve the static type used for the exception-binding slot. Pulled from
+/// the resolver's `ast_type_to_ty` so the slot's type matches what the
+/// typechecker recorded.
+fn exception_filter_ty(ctx: &LowerCtx, ty: &ast::Type) -> Ty {
+    let key = (ast_type_span(ty).start, ast_type_span(ty).end);
+    ctx.typed
+        .resolved
+        .ast_type_to_ty
+        .get(&key)
+        .cloned()
+        .unwrap_or(Ty::Primitive(PrimTy::Unit))
 }
 
 // ─────────────────────────────────────────────────────────────────────────

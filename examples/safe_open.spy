@@ -1,0 +1,86 @@
+"""Demonstrates M15 try/except for graceful file-not-found handling.
+
+Before M15, `open("missing.txt", "r")` aborted the program with a
+non-zero exit code because no user code could catch the runtime's
+`IOError`. With try/except wired through codegen + interpreter (BUG-025
+closing demo), the same call is recoverable:
+
+    try:
+        f: io.File = open(path, "r")
+        ...
+    except IOError as e:
+        # e.message carries the OS-level diagnostic
+        ...
+
+The program tries to read three files in sequence: the first is created
+on the fly (so opens cleanly), the second is missing (caught and
+reported), the third is created on the fly with different content. The
+test (`compiler/tests/safe_open_runs.rs`) asserts the program exits 0
+and emits the expected lines.
+"""
+
+fn try_read(path: str) -> str:
+    """Open + read + close; on IOError return a sentinel.
+
+    The interesting line is `f: io.File = open(...)` — that's the
+    point that traps before M15 with no recourse for the program.
+    """
+    try:
+        f: io.File = open(path, "r")
+        contents: str = f.read()
+        f.close()
+        return contents
+    except IOError as e:
+        println("safe_open: could not open " + path + " — " + e.message)
+        return ""
+
+fn ensure_written(path: str, contents: str) -> None:
+    """Write `contents` to `path`, replacing whatever was there.
+
+    No try/except here — write errors propagate (intentional; if we
+    can't even prepare the test files, we want the program to abort,
+    not silently mis-test).
+    """
+    f: io.File = open(path, "w")
+    f.write(contents)
+    f.close()
+
+fn main() -> i32:
+    # ── Prepare the two real files ──────────────────────────────────
+    ensure_written("safe_open_a.txt", "alpha-contents\n")
+    ensure_written("safe_open_c.txt", "gamma-contents\n")
+
+    # ── 1. Open a file that exists ──────────────────────────────────
+    a: str = try_read("safe_open_a.txt")
+    if len(a) > 0:
+        println("opened a OK: " + a.slice(0i64, 5i64))
+    else:
+        println("opened a FAIL")
+
+    # ── 2. Open a missing file — must NOT crash; must be caught ─────
+    b: str = try_read("safe_open_b_definitely_missing_m15.txt")
+    if len(b) == 0:
+        println("recovered from missing b")
+    else:
+        println("b unexpectedly returned content")
+
+    # ── 3. Open another file that exists ────────────────────────────
+    c: str = try_read("safe_open_c.txt")
+    if len(c) > 0:
+        println("opened c OK: " + c.slice(0i64, 5i64))
+    else:
+        println("opened c FAIL")
+
+    # ── 4. Demonstrate finally runs after both the success path AND
+    #       the failure path of an inner try. ────────────────────────
+    cleaned: i32 = 0i32
+    try:
+        try:
+            raise IOError("simulated downstream failure")
+        finally:
+            cleaned = cleaned + 1i32
+    except IOError as e:
+        cleaned = cleaned + 1i32
+        println("propagated past finally: " + e.message)
+    println("cleaned=" + str(cleaned))
+    return 0

@@ -14,10 +14,10 @@ discovered, milestone fixed (or "deferred" with pointer to
 | Typechecker rejects valid code | 3 | 3 | 0 |
 | Frontend operator semantics | 2 | 2 | 0 |
 | Runtime memory / GC | 2 | 2 | 0 |
-| Stdlib missing | 5 | 4 | 1 |
+| Stdlib missing | 5 | 5 | 0 |
 | Parser / lexer | 1 | 0 | 1 |
 | Formatting / spec consistency | 1 | 1 | 0 |
-| **Total** | **31** | **29** | **2** |
+| **Total** | **31** | **30** | **1** |
 
 Post-M12 state (2026-05-18):
 
@@ -44,6 +44,23 @@ Truly-deferred bugs after M13 are:
 - BUG-025: no fallible `open()` (needs exception handling).
 - BUG-028: no implicit line continuation across infix operators
   (needs lexer enhancement).
+
+Post-M15 state (2026-05-18):
+
+- BUG-025 (no fallible `open()`) is now **fixed**. M15 landed try/
+  except/finally + `raise` codegen, the synthetic 2-field exception
+  heap object (`type_name: str`, `message: str`), and the interpreter-
+  side handler-frame propagation pass that turns existing native
+  `VmError::UncaughtException` traps into catchable user-visible
+  exceptions. The BUG-025 acceptance test
+  (`vm/tests/m15_try_except.rs::open_of_missing_file_is_catchable_as_io_error`
+  + `examples/safe_open.spy` + `compiler/tests/safe_open_runs.rs`)
+  confirms `open("missing", "r")` no longer aborts the program. The
+  Cranelift JIT carve-out is implicit: `vm/src/decompile.rs::decode_function`
+  rejects any function containing `Throw / EnterTry / LeaveTry /
+  Rethrow` opcodes, so functions using try/raise fall back to the
+  interpreter automatically.
+- Only BUG-028 (lexer line continuation) remains deferred.
 
 ## Full catalog
 
@@ -200,10 +217,17 @@ Truly-deferred bugs after M13 are:
 - **Found**: M10 (every example written so far used `while i < len(xs): … i += 1` manually)
 - **Status**: fixed in M10. IR-level desugaring to indexed while-loop for List[T] receivers.
 
-#### BUG-025 — No fallible `open()` ⚠️ DEFERRED
+#### BUG-025 — No fallible `open()` ✅ FIXED IN M15
 - **Found**: M10 (C3 KV store)
 - **Symptom**: missing file at startup traps; no `Result[File, IOError]` return; can't try/except for file-not-found.
-- **Status**: deferred. Needs exception handling (parser accepts try/except; codegen doesn't lower).
+- **Root cause**: The runtime had been returning `VmError::UncaughtException { type_name: "IOError", ... }` from native `open(missing)` since M5 (see `vm/src/builtins.rs:373`). What was missing was the user-visible plumbing: (a) `Stmt::Raise` and `Stmt::Try` IR lowerings were stubs that dropped handlers and traversed all bodies in source order; (b) the `Throw/EnterTry/LeaveTry/Rethrow` opcodes in `shared/src/opcode.rs` were reserved but unimplemented in `vm/src/interp.rs::step`; (c) exception class layouts in `compiler/src/resolver.rs` had empty `fields`, so `e.message` / `e.type_name` had nothing to read.
+- **Fix (M15)**: Wired the full pipeline.
+  1. **Resolver**: every built-in exception class now carries `type_name: str` (offset 0) + `message: str` (offset 8) fields and `payload_size=16`. Added `ZeroDivisionError`, `AssertionError`, `RuntimeError`, `ChannelClosedError` to the recognised set.
+  2. **Typechecker**: `Stmt::Raise { exc: Call(Ident(ExcName), [msg]) }` now validates `msg` against `str` directly, bypassing the normal class-constructor path (built-in exceptions have no `__init__`).
+  3. **IR**: new `IROp::TryEnter { arms, finally_block }`, `IROp::TryLeave`, `IROp::EndFinally`. `lower_try` emits TryEnter at the start of the body, TryLeave at the end of the body, Branch through finally to the merge block, plus orphan blocks (entered only via VM exception dispatch) for each handler arm and the finally block. `lower_raise` allocates a 2-field heap exception object using the existing `IROp::Alloc` + two `IROp::Store` ops, then emits `Terminator::Throw`.
+  4. **Codegen**: encodes EnterTry as `[opcode, finally_pc:i32, n_arms:u8, (filter_str_idx:u32, handler_pc:i32, bind_reg:u16)*]`. Handler / finally block ids are registered with the existing branch-`patches` table so the finish() pass resolves them to byte offsets.
+  5. **Interpreter**: `Interpreter.handler_frames: Vec<HandlerFrame>` is the per-thread handler stack; `pending_exception: Option<(String, String)>` carries an in-flight exception through a finally block. `run_until` wraps each `step` call in a catch — on `Err(VmError::UncaughtException)`, `propagate_exception` walks `handler_frames` top-down looking for a matching arm (filter == `"Exception"` or filter == `type_name`); on match it pops the requisite call frames + handler frames, materialises the exception heap object only if the arm has a bind register, and jumps to the handler pc. On no-match but with a finally, it stashes the pending exception and jumps to the finally pc; `EndFinally` (`Opcode::Rethrow`) re-raises if pending is set.
+- **Status**: fixed in M15. Tests: `vm/tests/m15_try_except.rs` (10 tests) + `compiler/tests/safe_open_runs.rs` (2 tests) + `examples/safe_open.spy` (the BUG-025 demo).
 
 ### Medium: runtime memory
 

@@ -643,14 +643,98 @@ Raised via `raise`. Caught via `try`/`except`.
 
 ```python
 try:
-    risky()
-except ValueError as e:
-    handle(e)
-except (IOError, OSError) as e:
-    handle(e)
+    f: io.File = open("data.csv", "r")
+    contents: str = f.read()
+except IOError as e:
+    println("missing file: " + e.message)
+except Exception as e:
+    println("other: " + e.type_name + ": " + e.message)
 finally:
     cleanup()
 ```
+
+#### 7.5.1 Built-in exception types (M15 v0.1)
+
+The following exception type names are recognised by both `raise` and
+`except`. Matching is by exact `type_name` string (case-sensitive),
+except for `Exception` which is the catch-all and matches any thrown
+type.
+
+| Name                  | Raised when                                                            |
+|-----------------------|------------------------------------------------------------------------|
+| `Exception`           | Catch-all; never raised directly by the runtime (user code may raise). |
+| `IOError`             | `open()` fails (missing file, permission denied); file read/write fails. |
+| `IndexError`          | `xs[i]` out of range; `list.pop()` on empty list.                       |
+| `KeyError`            | Reserved — emitted from dict-key lookups in future revisions.           |
+| `ValueError`          | Malformed argument to a numeric constructor, etc.                       |
+| `TypeError`           | Reserved — emitted from reflection / FFI mismatches.                    |
+| `ZeroDivisionError`   | `a / 0` for integer `a`. (Legacy name `DivisionByZeroError` is also recognised.) |
+| `AssertionError`      | `assert cond` failed.                                                   |
+| `NullPointerError`    | Dereference of `none` via `.field` or `[i]`.                            |
+| `RuntimeError`        | Reserved — generic catch-all surface for runtime traps.                 |
+| `StopIteration`       | Reserved — for iterator protocols.                                      |
+| `ChannelClosedError`  | `Channel.send` / `recv` after close.                                    |
+
+#### 7.5.2 Exception value surface
+
+When a handler binds via `as e`, the caught exception is a heap object
+with exactly two readable fields:
+
+* `e.type_name: str` — the exception's runtime type name (e.g. `"IOError"`).
+* `e.message: str`   — the message argument passed to the constructor
+                       (or a runtime-supplied diagnostic for native-raised
+                       errors like `"index 10 out of range for length 2"`).
+
+#### 7.5.3 `raise` syntax (v0.1)
+
+```python
+raise IOError("file not found")
+raise IndexError("…")
+```
+
+The single argument MUST be a `str`-typed expression. The exception
+class name must be one of the built-in names in §7.5.1; user-defined
+exception subclasses are deferred (see §7.5.6).
+
+#### 7.5.4 `finally` semantics
+
+A `finally` block runs in every exit path from the `try`:
+
+1. After successful body completion.
+2. After a matched `except` handler completes.
+3. While propagating an unhandled exception (runs first, then the
+   exception continues unwinding past the `finally`).
+
+Early `return` from inside a `try` body is undefined for v0.1 — the
+implementation may or may not run the finally. Programs that need
+guaranteed cleanup should restructure to put cleanup after the `try` or
+use a `finally`-only construct (no `except`) that captures via the
+propagating path.
+
+#### 7.5.5 Catch-all order
+
+Multiple `except` clauses are matched top-to-bottom. The first arm
+whose filter matches the thrown `type_name` runs. Use `except
+Exception as e:` LAST to catch anything not handled by an earlier
+specific arm.
+
+#### 7.5.6 Out of scope for v0.1
+
+These constructs parse but are not lowered (or are deferred entirely):
+
+* `raise X from cause` — `from` clause is parsed and ignored.
+* `except (A, B) as e:` — multi-type tuple in one arm.
+* `else:` clause on `try`.
+* Bare `raise` (re-raise).
+* User-defined exception classes subclassing `Exception` (the
+  parser/resolver accepts the syntax, but the runtime's type-name
+  match doesn't recognise the user name).
+* Exception chaining (`__cause__`, `__context__`), tracebacks.
+
+Functions containing a `try` or `raise` statement fall back to the
+bytecode interpreter — the Cranelift JIT does not compile them in
+v0.1. See `compiler/src/decompile.rs::opcode_name` (the `Throw |
+EnterTry | LeaveTry | Rethrow` arm).
 
 Exception classes must inherit from `Exception`. The compiler tracks declared exception types for documentation but does not enforce checked exceptions (open design question — see §22).
 

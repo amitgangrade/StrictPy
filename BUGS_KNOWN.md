@@ -214,6 +214,27 @@ provisional closures to confirmed.
 
 ---
 
+## Fixed in M15
+
+Try/except/finally + `raise` codegen landed. Native errors (`IndexError`
+from `xs[i]`, `IOError` from `open(missing)`, `DivisionByZeroError` from
+`a / 0`, etc.) are now catchable by user code via Python-style
+`try: ... except T as e: ...`. The `e.message: str` and
+`e.type_name: str` surface is documented in spec §7.5.
+
+| # | Bug | Fix location | Regression test |
+|---|-----|--------------|-----------------|
+| BUG-025 | No fallible `open()` — missing files aborted the program; no `try/except` codegen meant native `IOError` traps were uncatchable. | (1) `compiler/src/resolver.rs::install_prelude` — exception classes now carry `type_name: str` + `message: str` fields and a `payload_size`. (2) `compiler/src/typecheck.rs::Stmt::Raise` — `raise IOError("msg")` validated as `str`-argument constructor call without requiring an `__init__`. (3) `compiler/src/ir.rs::lower_try` + `lower_raise` — new IR ops `TryEnter` / `TryLeave` / `EndFinally` plus the existing `Throw` terminator; `lower_raise` materialises a 2-field heap exception object before throwing. (4) `compiler/src/codegen.rs::IROp::TryEnter` arm — encodes the EnterTry instruction as `[opcode, finally_pc:i32, n_arms:u8, (filter_str_idx:u32, handler_pc:i32, bind_reg:u16)*]` with handler/finally block ids registered with the existing `patches` table so the finish() pass resolves them to byte offsets. (5) `vm/src/interp.rs` — handler-frame stack (`Interpreter.handler_frames`), `pending_exception` slot, and a new `propagate_exception` pass invoked from `run_until` whenever `step` returns `Err(VmError::UncaughtException)`. Lazy materialisation of the exception heap object happens only when a handler arm has a bind register. | `vm/tests/m15_try_except.rs` (10 tests covering pass-through, IOError catch + bound message, native IndexError caught, handler-order matching, finally on normal/caught/propagating paths, nested try, BUG-025 acceptance demo for `open("missing")`, and `1/0` as `ZeroDivisionError`). Plus `examples/safe_open.spy` + `compiler/tests/safe_open_runs.rs` (2 tests) demonstrating the user-facing recovery story. |
+
+### Notes for the next round
+
+- **JIT carve-out is already in place.** `vm/src/decompile.rs::decode_function`'s `_ => return Err(DecodeError::Unsupported(...))` arm rejects any function whose bytecode contains `Opcode::Throw`, `EnterTry`, `LeaveTry`, or `Rethrow`. Those reject paths were dormant before M15 (no codegen emitted those opcodes); now that try/except programs hit them, the JIT correctly falls back to the interpreter per `docs/thesis/design_decisions/per_function_jit_opt_in.md`. Confirmed by running the full m15_try_except suite under the JIT feature.
+- **Native exception type names.** The runtime emits `"DivisionByZeroError"` (legacy from M3) for `a / 0`. The resolver registers both `DivisionByZeroError` AND the Python-conformant alias `ZeroDivisionError` as catchable type names so `except ZeroDivisionError as e:` works on the existing runtime errors. Renaming the runtime emission to `ZeroDivisionError` is a follow-up cosmetic change — would require updating any test that asserts on the legacy name (none ship today besides the M15 div-by-zero test, which intentionally accepts either spelling).
+- **User-defined exception subclasses (`class MyError(Exception):`)** still parse but are not part of the M15 catch dispatch. The runtime matches by exact `type_name` string against the built-in name list. A subsequent round can extend `propagate_exception` to also accept user class names by querying the type bundle.
+- **Early `return` from inside `try`** is not threaded through any active finally. Spec §7.5.6 lists this as "undefined for v0.1"; programs that need a guaranteed finally can structure the try with no early return (the existing `safe_open.spy` example does this). Wiring return-into-finally would need a per-frame "pending return value" slot mirroring `pending_exception`.
+
+---
+
 ## Fixed in M13
 
 Targeted, single-agent round that closed BUG-035. Introduces the

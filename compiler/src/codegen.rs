@@ -20,7 +20,7 @@ use strictpy_shared::{
 };
 
 use crate::ir::{
-    BasicBlock, IRConst, IRFunction, IROp, Terminator, Value, ValueId,
+    BasicBlock, IRConst, IRFunction, IROp, Terminator, TryHandlerArm, Value, ValueId,
     ValueKind,
 };
 use crate::types::{PrimTy, Ty};
@@ -587,6 +587,61 @@ impl<'a, S: ConstSink> Codegen<'a, S> {
                 self.write_u16(dst);
                 self.write_u16(argr.first().copied().unwrap_or(0));
                 self.write_u32(u32::MAX);
+            }
+
+            // M15: exception-handling encoding.
+            //
+            // ENTER_TRY layout:
+            //   u8  opcode
+            //   i32 finally_pc    (target_block-relative; sentinel block id u32::MAX → -1 encoded)
+            //   u8  n_arms
+            //   for each arm:
+            //     u32 filter_str_idx   (constant-pool index of the type-name string)
+            //     i32 handler_pc       (block-id, patched at finish())
+            //     u16 bind_reg         (u16::MAX = no bind)
+            //
+            // `handler_pc` and `finally_pc` are emitted as i32 placeholders
+            // and registered with `self.patches` so the existing branch-patch
+            // pass at finish() resolves them to byte offsets. The
+            // `bind_slot` field of `TryHandlerArm` is an IR slot id and is
+            // translated to its dedicated register via `slot_register`.
+            IROp::TryEnter { arms, finally_block } => {
+                self.write_op(Opcode::EnterTry);
+                // finally_pc: -1 (encoded as block id u32::MAX) if absent.
+                if let Some(fb) = finally_block {
+                    let pos = self.code.len();
+                    self.write_i32(0);
+                    self.patches.push((pos, fb.0));
+                } else {
+                    // Use a sentinel block-id (u32::MAX) so finish()'s patch
+                    // pass sees an unknown id and leaves zero in place; we
+                    // need a value that signals "no finally" to the VM.
+                    // Simpler: write -1 directly without registering a patch.
+                    self.write_i32(-1);
+                }
+                let n_arms = arms.len().min(255) as u8;
+                self.write_u8(n_arms);
+                for a in arms.iter().take(n_arms as usize) {
+                    let TryHandlerArm { filter_str_idx, handler_block, bind_slot } = a;
+                    self.write_u32(*filter_str_idx);
+                    let pos = self.code.len();
+                    self.write_i32(0);
+                    self.patches.push((pos, handler_block.0));
+                    // bind_slot u32::MAX = no binding; otherwise translate
+                    // to the slot's dedicated register.
+                    let bind_reg = if *bind_slot == u32::MAX {
+                        DISCARD_REG
+                    } else {
+                        self.slot_register(*bind_slot as u16)
+                    };
+                    self.write_u16(bind_reg);
+                }
+            }
+            IROp::TryLeave => {
+                self.write_op(Opcode::LeaveTry);
+            }
+            IROp::EndFinally => {
+                self.write_op(Opcode::Rethrow);
             }
         }
     }

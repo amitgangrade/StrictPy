@@ -81,6 +81,9 @@ fn has_side_effect(k: &ValueKind) -> bool {
                 | IROp::TypeCheck
                 | IROp::ClosureNew { .. }
                 | IROp::ClosureCall
+                | IROp::TryEnter { .. }
+                | IROp::TryLeave
+                | IROp::EndFinally
         ),
         // Constants/params/phis are side-effect-free but might still be live;
         // the `used` set already handles that. If a phi has no uses we let DCE

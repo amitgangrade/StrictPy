@@ -370,7 +370,42 @@ impl TypeChecker {
                 let _ = self.check_or_synth(expr, None, env, ctx, r)?;
                 self.check_block(body, ret, env, ctx, r)?;
             }
-            Stmt::Raise { exc, .. } => { let _ = self.check_or_synth(exc, None, env, ctx, r)?; }
+            Stmt::Raise { exc, span, .. } => {
+                // M15: `raise IOError("msg")` is the supported v0.1 shape.
+                // Recognise the (ExceptionName, single-str-arg) pattern and
+                // verify the message argument is `str`-typed — without going
+                // through the normal class-constructor path, which would
+                // demand an __init__ that built-in exception classes don't
+                // carry.  See `IR::Stmt::Raise` for the matching materialise
+                // pattern.
+                if let Expr::Call { callee, args, .. } = exc {
+                    if let Expr::Ident { name, .. } = callee.as_ref() {
+                        if is_builtin_exception_name(name) {
+                            if args.len() != 1 {
+                                return Err(type_err(*span, codes::TYPE_ARITY,
+                                    format!("`raise {}(...)` takes exactly 1 string argument", name)));
+                            }
+                            let _ = self.check_expr(&args[0].value, &Ty::Primitive(PrimTy::Str), env, ctx, r)?;
+                            // Stash the call's type as the exception class so
+                            // IR lowering can find the class id via expr_types.
+                            if let Some(sid) = r.symbols.lookup(r.module_scope, name) {
+                                if let Some(cid) = r.symbols.get(sid).class_id {
+                                    self.expr_types.insert(
+                                        match callee.as_ref() {
+                                            Expr::Ident { span, .. } => (span.start, span.end),
+                                            _ => (0, 0),
+                                        },
+                                        Ty::Class(cid),
+                                    );
+                                }
+                            }
+                            // Note the exception-call span too so IR can identify it.
+                            return Ok(());
+                        }
+                    }
+                }
+                let _ = self.check_or_synth(exc, None, env, ctx, r)?;
+            }
             Stmt::Assert { cond, msg, span } => {
                 // The example syntax `assert(cond, msg)` parses as `assert <tuple>`.
                 // Unpack a 2-tuple into (cond, msg) for ergonomic parity with the spec form.
@@ -1238,6 +1273,30 @@ fn int_suffix_to_prim(s: crate::lexer::IntSuffix) -> PrimTy {
         I8 => PrimTy::I8, I16 => PrimTy::I16, I32 => PrimTy::I32, I64 => PrimTy::I64,
         U8 => PrimTy::U8, U16 => PrimTy::U16, U32 => PrimTy::U32, U64 => PrimTy::U64,
     }
+}
+
+/// M15: built-in exception-class names recognised in `raise` and `except`.
+/// The catch-all `"Exception"` matches any thrown type at runtime; the others
+/// match by exact `type_name` string. Must mirror the resolver's prelude
+/// list (`resolver.rs::install_prelude`).
+pub fn is_builtin_exception_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Exception"
+            | "ValueError"
+            | "IndexError"
+            | "KeyError"
+            | "TypeError"
+            | "OverflowError"
+            | "DivisionByZeroError"
+            | "ZeroDivisionError"
+            | "IOError"
+            | "NullPointerError"
+            | "AssertionError"
+            | "RuntimeError"
+            | "StopIteration"
+            | "ChannelClosedError"
+    )
 }
 
 fn prim_from_name_unchecked(name: &str) -> PrimTy {

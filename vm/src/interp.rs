@@ -240,6 +240,35 @@ impl SharedVm {
     }
 }
 
+/// M15: one entry in the interpreter's exception-handler stack. Pushed by
+/// `EnterTry`, popped by `LeaveTry` (or by exception dispatch when the
+/// matching handler is entered).
+pub struct HandlerFrame {
+    /// Call-frame depth at the time `EnterTry` was executed (i.e.
+    /// `self.frames.len()` after the enter — the function that owns the
+    /// `try`). On an exception we truncate `self.frames` to this depth.
+    pub frame_depth: usize,
+    /// Optional finally-block byte PC. Reached after the body completes
+    /// normally OR after a handler runs OR (with `pending_exception` set)
+    /// when the exception isn't caught by any arm of this try.
+    pub finally_pc: Option<usize>,
+    /// One arm per `except` clause.
+    pub arms: Vec<HandlerArm>,
+}
+
+/// One arm of an `except` clause as seen by the interpreter.
+#[derive(Clone)]
+pub struct HandlerArm {
+    /// Type-name string to match against the raised exception's
+    /// `type_name`. The catch-all `"Exception"` matches any.
+    pub filter: String,
+    /// Byte PC of the handler body.
+    pub handler_pc: usize,
+    /// Register that receives the exception value when this arm fires.
+    /// `DISCARD_REG` for arms without an `as e:` binding.
+    pub bind_reg: u16,
+}
+
 /// The interpreter. Owns its call stack and stdout sink; everything else
 /// (module bytecode, heap, resource tables) lives in [`SharedVm`] and may
 /// be observed concurrently by other interpreter instances running on
@@ -247,6 +276,16 @@ impl SharedVm {
 pub struct Interpreter {
     pub(crate) shared: Arc<SharedVm>,
     pub(crate) frames: Vec<Frame>,
+    /// M15: stack of exception handlers active in the current call chain.
+    /// Pushed by `Opcode::EnterTry`, popped by `Opcode::LeaveTry` or by
+    /// `propagate_exception` on a match. Per-thread state — never shared.
+    pub(crate) handler_frames: Vec<HandlerFrame>,
+    /// M15: exception currently being propagated through a `finally` block.
+    /// Set when `propagate_exception` dispatches to a finally without a
+    /// matching except arm. Cleared on `EnterTry` re-entry into a nested
+    /// try, on `LeaveTry` after the finally pops it (and we re-raise via
+    /// `Rethrow`), or when a handler matches the pending type.
+    pub(crate) pending_exception: Option<(String, String)>,
 }
 
 impl Interpreter {
@@ -270,6 +309,8 @@ impl Interpreter {
         Self {
             shared,
             frames: Vec::with_capacity(64),
+            handler_frames: Vec::new(),
+            pending_exception: None,
         }
     }
 
@@ -361,13 +402,156 @@ impl Interpreter {
                 )));
             }
             let op = self.fetch_opcode()?;
-            match self.step(op)? {
-                StepOutcome::Continue => {}
-                StepOutcome::Returned(v) => {
+            // M15: every step is wrapped in an exception-propagation check.
+            // `step` itself never sees handler frames; on `Err(UncaughtException)`
+            // we route the unwind through `propagate_exception` so any pending
+            // try/except handler (in this frame or an ancestor call frame)
+            // gets a chance to catch.
+            match self.step(op) {
+                Ok(StepOutcome::Continue) => {}
+                Ok(StepOutcome::Returned(v)) => {
                     last_return = v;
+                }
+                Err(err) => {
+                    if let VmError::UncaughtException { type_name, message } = err {
+                        if self.propagate_exception(&type_name, &message, target_depth)? {
+                            // Caught (or a finally has it). Resume.
+                            continue;
+                        }
+                        // Unhandled — propagate up.
+                        return Err(VmError::UncaughtException { type_name, message });
+                    } else {
+                        return Err(err);
+                    }
                 }
             }
         }
+    }
+
+    /// M15: try to deliver `(type_name, message)` to the nearest matching
+    /// handler frame whose owning call frame is at depth `> target_depth`.
+    ///
+    /// Returns `Ok(true)` if a handler (or finally) was reached and execution
+    /// can resume; `Ok(false)` if no handler matched and the exception should
+    /// propagate up the caller chain. `Err(_)` is only used for VM-internal
+    /// trap propagation while materialising the exception value.
+    fn propagate_exception(
+        &mut self,
+        type_name: &str,
+        message: &str,
+        target_depth: usize,
+    ) -> Result<bool, VmError> {
+        loop {
+            // Snapshot the top handler frame's data so we can release the
+            // borrow before mutating `self`.
+            let (frame_depth, matched, finally_pc) = match self.handler_frames.last() {
+                None => break,
+                Some(hf) => {
+                    if hf.frame_depth <= target_depth {
+                        break;
+                    }
+                    let matched = hf
+                        .arms
+                        .iter()
+                        .find(|arm| arm.filter == "Exception" || arm.filter == type_name)
+                        .cloned();
+                    (hf.frame_depth, matched, hf.finally_pc)
+                }
+            };
+            if let Some(arm) = matched {
+                // Pop call frames above this handler's owning frame.
+                while self.frames.len() > frame_depth {
+                    self.frames.pop();
+                }
+                // Pop this handler frame plus anything pushed inside the
+                // try-body (none can outlive it in a well-formed lowering,
+                // but be defensive).
+                while let Some(top) = self.handler_frames.last() {
+                    if top.frame_depth >= frame_depth {
+                        let was_match = top.frame_depth == frame_depth;
+                        self.handler_frames.pop();
+                        if was_match {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                // Materialise the exception value into the bind register
+                // (if the handler asked for one).
+                if arm.bind_reg != DISCARD_REG {
+                    let exc_ptr = self.materialise_exception(type_name, message)?;
+                    self.write_reg(arm.bind_reg, exc_ptr);
+                }
+                // Reset pending-exception state: this exception is now handled.
+                self.pending_exception = None;
+                // Jump to the handler.
+                if let Some(f) = self.frames.last_mut() {
+                    f.pc = arm.handler_pc;
+                }
+                return Ok(true);
+            }
+            // No arm matched. If the try has a finally, route there and
+            // stash the pending exception so EndFinally re-raises it.
+            if let Some(fpc) = finally_pc {
+                while self.frames.len() > frame_depth {
+                    self.frames.pop();
+                }
+                self.pending_exception = Some((type_name.to_string(), message.to_string()));
+                // Pop this handler frame (and anything pushed inside it).
+                while let Some(top) = self.handler_frames.last() {
+                    if top.frame_depth >= frame_depth {
+                        let was_match = top.frame_depth == frame_depth;
+                        self.handler_frames.pop();
+                        if was_match {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                if let Some(f) = self.frames.last_mut() {
+                    f.pc = fpc;
+                }
+                return Ok(true);
+            }
+            // Neither matched nor has finally — drop this frame and keep
+            // searching up.
+            self.handler_frames.pop();
+        }
+        Ok(false)
+    }
+
+    /// M15: lazily allocate a heap exception object with `type_name` and
+    /// `message` fields. Layout matches `__Exception__`-style classes
+    /// registered by the resolver (two `str` fields at offsets 0 and 8 past
+    /// the object header). The type pointer is left null — the GC scans
+    /// only the two 8-byte slots conservatively, which is fine because both
+    /// are heap pointers.
+    fn materialise_exception(
+        &mut self,
+        type_name: &str,
+        message: &str,
+    ) -> Result<u64, VmError> {
+        let tn_ptr = self.alloc_string(type_name) as u64;
+        let msg_ptr = self.alloc_string(message) as u64;
+        // Allocate a plain object: 16-byte header + 16 bytes payload.
+        // We don't have a runtime type for "Exception" wired through the
+        // type bundle; use a null type pointer. The GC scans `GcKind::Class`
+        // as a sequence of 8-byte slots, which is what we want.
+        let size = HDR + 16;
+        let p = self
+            .shared
+            .heap
+            .lock()
+            .unwrap()
+            .alloc(size, std::ptr::null(), GcKind::Class);
+        unsafe {
+            let base = p.add(HDR);
+            std::ptr::write_unaligned(base as *mut u64, tn_ptr);
+            std::ptr::write_unaligned(base.add(8) as *mut u64, msg_ptr);
+        }
+        Ok(p as u64)
     }
 
     fn build_frame(
@@ -663,12 +847,10 @@ impl Interpreter {
             Opcode::JumpIfNot => self.op_jump_if_not()?,
             Opcode::Ret => return self.op_ret(),
             Opcode::RetVoid => return self.op_ret_void(),
-            Opcode::Throw => {
-                return Err(VmError::Trap("THROW not implemented (M5)".into()));
-            }
-            Opcode::EnterTry | Opcode::LeaveTry | Opcode::Rethrow => {
-                return Err(VmError::Trap("exception handling not implemented (M5)".into()));
-            }
+            Opcode::Throw => self.op_throw()?,
+            Opcode::EnterTry => self.op_enter_try()?,
+            Opcode::LeaveTry => self.op_leave_try()?,
+            Opcode::Rethrow => self.op_end_finally()?,
             Opcode::Switch => {
                 return Err(VmError::Trap("SWITCH not implemented (M5)".into()));
             }
@@ -1503,10 +1685,113 @@ impl Interpreter {
         }
         Ok(())
     }
+    // ── M15 try/except ─────────────────────────────────────────────────
+
+    /// `Throw r:u16` — interpret `r` as a heap pointer to an exception
+    /// object whose `type_name` field is at offset 0 and `message` field is
+    /// at offset 8 (past the object header). Read both, return a
+    /// `VmError::UncaughtException` so the `run_until` loop's catch wrapper
+    /// can deliver it to a handler.
+    fn op_throw(&mut self) -> Result<(), VmError> {
+        let r = self.read_u16()?;
+        let p = self.read_reg(r) as *mut u8;
+        let (type_name, message) = if p.is_null() {
+            ("Exception".to_string(), String::new())
+        } else {
+            unsafe {
+                let base = p.add(HDR);
+                let tn_p = std::ptr::read_unaligned(base as *const u64) as *const StringRepr;
+                let msg_p = std::ptr::read_unaligned(base.add(8) as *const u64) as *const StringRepr;
+                let tn = if tn_p.is_null() { String::new() } else { read_str(tn_p).to_string() };
+                let msg = if msg_p.is_null() { String::new() } else { read_str(msg_p).to_string() };
+                (if tn.is_empty() { "Exception".to_string() } else { tn }, msg)
+            }
+        };
+        Err(VmError::UncaughtException { type_name, message })
+    }
+
+    /// `EnterTry` — push a handler frame onto `self.handler_frames`. Layout
+    /// of the operand stream is documented in
+    /// `compiler/src/codegen.rs::emit_op` (search for `IROp::TryEnter`).
+    fn op_enter_try(&mut self) -> Result<(), VmError> {
+        let finally_rel = self.read_i32()?;
+        // The relative offset is `target_block_offset - (pos + 4)`. Compute
+        // the absolute pc; -1 sentinel = no finally.
+        let cur_pc_after = self.frame().pc; // already past the i32 we just read.
+        let finally_pc = if finally_rel == -1 {
+            None
+        } else {
+            Some((cur_pc_after as i64 + finally_rel as i64) as usize)
+        };
+        let n_arms = self.read_u8()? as usize;
+        let mut arms: Vec<HandlerArm> = Vec::with_capacity(n_arms);
+        for _ in 0..n_arms {
+            let filter_idx = self.read_u32()?;
+            let handler_rel = self.read_i32()?;
+            let handler_after = self.frame().pc;
+            let handler_pc = (handler_after as i64 + handler_rel as i64) as usize;
+            let bind_reg = self.read_u16()?;
+            let filter = self
+                .shared
+                .module
+                .strings
+                .get(filter_idx as usize)
+                .cloned()
+                .unwrap_or_else(|| "Exception".to_string());
+            arms.push(HandlerArm { filter, handler_pc, bind_reg });
+        }
+        let frame_depth = self.frames.len();
+        self.handler_frames.push(HandlerFrame {
+            frame_depth,
+            finally_pc,
+            arms,
+        });
+        Ok(())
+    }
+
+    /// `LeaveTry` — pop the topmost handler frame. The current function's
+    /// `try` body completed normally; no handler should fire after this.
+    /// If a pending exception is stored (we're at the end of a try-body
+    /// that immediately preceded a finally), do NOT clear it — the finally
+    /// block's `EndFinally` will pick it up.
+    fn op_leave_try(&mut self) -> Result<(), VmError> {
+        // Pop only the matching frame for this call frame's `try`. There
+        // should be one per body in a well-formed lowering.
+        if let Some(top) = self.handler_frames.last() {
+            if top.frame_depth == self.frames.len() {
+                self.handler_frames.pop();
+            }
+        }
+        Ok(())
+    }
+
+    /// `Rethrow` (alias for END_FINALLY) — if `self.pending_exception` is
+    /// `Some`, re-raise it so any outer handler can catch. Otherwise
+    /// no-op. Emitted at the bottom of a `finally` block.
+    fn op_end_finally(&mut self) -> Result<(), VmError> {
+        if let Some((tn, msg)) = self.pending_exception.take() {
+            return Err(VmError::UncaughtException {
+                type_name: tn,
+                message: msg,
+            });
+        }
+        Ok(())
+    }
+
     fn op_ret(&mut self) -> Result<StepOutcome, VmError> {
         let src = self.read_u16()?;
         let v = self.read_reg(src);
         let popped = self.frames.pop().expect("active frame");
+        // M15: drop any handler frames that were active in the returning
+        // function. They reference a frame depth that no longer exists.
+        let new_depth = self.frames.len();
+        while let Some(top) = self.handler_frames.last() {
+            if top.frame_depth > new_depth {
+                self.handler_frames.pop();
+            } else {
+                break;
+            }
+        }
         if let Some(caller) = self.frames.last_mut() {
             if popped.return_reg != DISCARD_REG {
                 let r = popped.return_reg as usize;
@@ -1520,6 +1805,14 @@ impl Interpreter {
     }
     fn op_ret_void(&mut self) -> Result<StepOutcome, VmError> {
         let _ = self.frames.pop();
+        let new_depth = self.frames.len();
+        while let Some(top) = self.handler_frames.last() {
+            if top.frame_depth > new_depth {
+                self.handler_frames.pop();
+            } else {
+                break;
+            }
+        }
         Ok(StepOutcome::Returned(0))
     }
 

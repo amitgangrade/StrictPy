@@ -376,12 +376,23 @@ impl Resolver {
             self.make_symbol(scope, name, SymbolKind::Function, Span::DUMMY, Some(ty.clone()));
         }
 
-        // ── Exception classes (spec §9.1) ─────────────────────────────
+        // ── Exception classes (spec §9.1, M15 try/except) ─────────────
+        // Every built-in exception has two fields:
+        //   type_name: str  — runtime tag, set by `raise X(msg)` to `"X"`
+        //   message:   str  — the constructor argument
+        // The IR materialises the exception value at `raise` time as a 2-field
+        // heap object using these layouts; the VM dereferences them on field
+        // access from inside an `except X as e:` handler body.  Field offsets
+        // skip the 16-byte object header (the StoreField/LoadField bytecode
+        // already adjusts for HDR).
         let excs = [
             "Exception", "ValueError", "IndexError", "KeyError", "TypeError",
-            "OverflowError", "DivisionByZeroError", "IOError", "NullPointerError",
+            "OverflowError", "DivisionByZeroError", "ZeroDivisionError",
+            "IOError", "NullPointerError", "AssertionError", "RuntimeError",
             // stdlib: §9.1 — used in spec examples
             "StopIteration",
+            // M6 native dispatch
+            "ChannelClosedError",
         ];
         for name in &excs {
             let cid = self.fresh_class();
@@ -393,13 +404,16 @@ impl Resolver {
             self.class_layouts.insert(cid, ClassLayout {
                 id: cid, name: (*name).into(), base: None,
                 is_open: true, is_sealed: false,
-                fields: vec![],
+                fields: vec![
+                    FieldInfo { name: "type_name".into(), ty: Ty::Primitive(PrimTy::Str), offset: 0 },
+                    FieldInfo { name: "message".into(),   ty: Ty::Primitive(PrimTy::Str), offset: 8 },
+                ],
                 methods: vec![],
                 generics: vec![],
                 // stdlib: exception classes carry no methods of their own and
                 // are raised/caught by name; not handle-backed, so not native.
                 is_native: false,
-                payload_size: 0,
+                payload_size: 16,
             });
         }
 

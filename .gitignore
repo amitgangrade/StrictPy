@@ -13,3 +13,9 @@
 __pycache__/
 *.pyc
 
+# Transient artifacts produced by examples/safe_open.spy when the test
+# runs the example from the compiler crate's cwd. The example creates
+# these as input data; they're not part of the source tree.
+/compiler/safe_open_a.txt
+/compiler/safe_open_c.txt
+
