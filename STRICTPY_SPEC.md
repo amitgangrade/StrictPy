@@ -725,6 +725,49 @@ The scrutinee expression is evaluated **exactly once**, regardless of how many a
 
 Functions marked `@pure` are checked to have no observable side effects. The compiler may freely reorder, cache, or eliminate calls to pure functions.
 
+### 6.7 Imports and modules (v0.2 — M19)
+
+The parser has accepted `import` and `from ... import` since M0 (the AST has carried `Module::imports` since the start), but M19 is the first milestone where the resolver, typechecker, and IR lowerer wire them through to the runtime.
+
+**Syntax** (also see §4 grammar):
+
+```
+import_stmt ::= "from" dotted_name "import" import_list NEWLINE
+              | "import" dotted_name [ "as" identifier ] NEWLINE
+import_list ::= identifier [ "as" identifier ] { "," identifier [ "as" identifier ] }
+```
+
+Three forms, all bound to top-level (module) scope:
+
+* `import sys` — introduces the name `sys` as a module reference.
+* `import sys as s` — same, bound under an alternate local name `s`.
+* `from sys import argv, exit` — each named item is introduced as a top-level binding (a value-typed `argv: List[str]`, a function-typed `exit: fn(i32) -> Never`). Aliases (`from sys import exit as bail`) are accepted per spec §4.
+
+Imports must appear at the top of the module (before any decl); the parser enforces this.
+
+**v0.2 stdlib is built-in.** All built-in modules are compiled into the resolver as a `StdlibModuleTable` (resolver-internal). Each entry lists its items, their static types, and the `NativeFn` discriminant the IR lowerer emits. There is no on-disk stdlib package, no module loader, and no `__init__.spy`. The shipped table is intentionally tiny:
+
+| Module | Items |
+|--------|-------|
+| `sys`  | `argv`, `exit`, `platform`, `version` (see §9.x below) |
+
+**Resolution rules.**
+
+* `import M` (or `import M as A`): if `M` is in the stdlib table, bind a `BuiltinModule` symbol; otherwise produce `E4001 "no stdlib module named '<M>' (user-defined modules are v0.3)"`.
+* `from M import x`: if `M` is in the stdlib table, look up `x` in `M.items`; on hit, bind `x` (or its alias) as a top-level symbol whose type is the item's declared type. On miss, produce `E4002 "module 'M' has no item named 'x'"`.
+* Legacy compatibility: `from threading import Channel` continues to work as a no-op because `Channel` is already in the prelude. v0.3 will retire this shim once `threading` migrates to the stdlib table.
+* Reading a module attribute (`sys.argv` or `s.argv` after `import sys as s`) is dispatched by the typechecker via the same stdlib table — module-attribute access is not a real field load.
+
+**Out of scope for v0.2** (deferred to v0.3+):
+
+* User-defined modules — multi-file `.spy` programs that import each other.
+* Submodules — `import os.path` (parser accepts dotted names but resolution rejects them).
+* Star imports — `from sys import *`.
+* Re-exports / `__all__`.
+* Cyclic-import detection (waits for user modules to exist).
+
+**Runtime model.** Module items dispatch through the standard `CALL_NATIVE` opcode using `NativeFn` ids in the `130-149` range (`sys`). A *constant* like `sys.argv` lowers to a 0-arg `CALL_NATIVE`; a *function* like `sys.exit(0)` lowers to an N-arg `CALL_NATIVE`. Constants are lazily materialised (and cached) by the VM on first access; see `Interpreter::sys_argv_cache`.
+
 ---
 
 ## 7. Dynamic Semantics
@@ -1084,6 +1127,43 @@ final class Ok[T, E](Result[T, E]):
 final class Err[T, E](Result[T, E]):
     error: E
 ```
+
+### 9.6 Module `sys` (v0.2 — M19)
+
+The first stdlib module that lives behind the M19 import-resolver
+infrastructure (rather than being flattened into the prelude). Foundation
+for the larger M20 batch (`os`, `os.path`, `io`, `json`, `re`, `time`,
+`random`, `math+`).
+
+```
+argv:     List[str]      # program args; argv[0] is the .spyc path
+platform: str            # "windows" | "linux" | "macos" | "unknown"
+version:  str            # banner string, e.g. "StrictPy v0.2"
+
+fn exit(code: i32) -> Never
+```
+
+Semantics:
+
+* `sys.argv` — lazy `List[str]`. Materialised on first read by the VM
+  and cached so subsequent reads return the same heap object (allowing
+  `sys.argv.append(...)` to be visible across the program).
+  `argv[0]` is conventionally the path to the `.spyc` that was invoked.
+* `sys.exit(code)` — terminates the program with the given exit code.
+  **Not catchable.** Calling `sys.exit` from inside a `try ... except
+  Exception:` walks straight past the handler (mirrors Python:
+  `SystemExit` derives from `BaseException`, not `Exception`).
+  Implemented as a non-`UncaughtException` VM error variant
+  (`VmError::Exit(i32)`) that only the top-level CLI driver translates
+  into a process exit code.
+* `sys.platform` — derived from the host platform at runtime
+  (`cfg!(target_os = ...)` inside the VM).
+* `sys.version` — pinned per build; will move to a `Cargo.toml`-derived
+  constant in M20 so the runtime and spec can't drift.
+
+I/O handles (`sys.stdin` / `sys.stdout` / `sys.stderr`) are deferred to
+M20 — the M5 `io.File` type requires going through `open(...)` and the
+pseudo-files for stdin/stdout/stderr don't fit that constructor cleanly.
 
 ---
 

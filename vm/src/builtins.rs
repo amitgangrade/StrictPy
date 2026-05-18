@@ -772,6 +772,59 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             Ok(lst as u64)
         }
 
+        // ── M19: `sys` module ──────────────────────────────────────────
+        NativeFn::SysArgv => {
+            // Lazy-materialise the argv list and cache it.  Subsequent
+            // reads (across the whole program) return the *same* heap
+            // object so e.g. `sys.argv.append(...)` is visible to a
+            // later `for a in sys.argv` and identity comparisons hold.
+            if let Some(p) = interp.sys_argv_cache {
+                return Ok(p);
+            }
+            let argv_strs: Vec<String> = interp.argv.clone();
+            let lst = interp.alloc_list(argv_strs.len());
+            for s in &argv_strs {
+                let sp = interp.alloc_string(s) as u64;
+                // SAFETY: lst is freshly allocated and owned by us.
+                unsafe { interp.list_push(lst, sp) };
+            }
+            let raw = lst as u64;
+            interp.sys_argv_cache = Some(raw);
+            Ok(raw)
+        }
+        NativeFn::SysExit => {
+            // `sys.exit(code: i32) -> Never`.  Surface a `VmError::Exit`
+            // that the propagator deliberately doesn't catch — only
+            // `run_file_with_args` (and `run_file_capture_with_args` in
+            // tests) translates it into an exit-code tuple.
+            let code = arg_i64(args, 0) as i32;
+            Err(VmError::Exit(code))
+        }
+        NativeFn::SysPlatform => {
+            // Determined at runtime from `cfg!`.  Allocates a new
+            // string each call — string interning is v0.3 work; the
+            // overhead is negligible compared to the alloc-list of an
+            // M20 `os.environ`.
+            let plat = if cfg!(target_os = "windows") {
+                "windows"
+            } else if cfg!(target_os = "linux") {
+                "linux"
+            } else if cfg!(target_os = "macos") {
+                "macos"
+            } else {
+                "unknown"
+            };
+            let p = interp.alloc_string(plat);
+            Ok(p as u64)
+        }
+        NativeFn::SysVersion => {
+            // Pinned to the spec version. M20+ will read this from the
+            // workspace `Cargo.toml` at compile time so the two can't
+            // drift.
+            let p = interp.alloc_string("StrictPy v0.2");
+            Ok(p as u64)
+        }
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),

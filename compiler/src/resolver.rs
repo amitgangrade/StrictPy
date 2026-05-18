@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
-    self, Block, ClassDecl, ClassModifier, ConstDecl, Expr, FuncDecl, Lvalue,
+    self, Block, ClassDecl, ClassModifier, ConstDecl, Expr, FuncDecl, ImportItem, Lvalue,
     Module, ProtocolDecl, Span, Stmt, TopDecl, TypeAliasDecl,
 };
 use crate::error::{codes, CompileError, ErrorCode};
@@ -152,6 +152,70 @@ pub struct ResolvedModule {
     pub class_of_symbol: HashMap<SymbolId, ClassId>,
     /// For each class id, the symbol that defines it (lookup back from id).
     pub symbol_of_class: HashMap<ClassId, SymbolId>,
+    /// M19: stdlib module table. Maps module name → its items. Looked
+    /// up by the typechecker on `module.attr` and by the IR lowerer to
+    /// pick the right `NativeFn` dispatch id.
+    pub stdlib_modules: HashMap<String, StdlibModule>,
+    /// M19: for each `Symbol` that came from `from sys import argv` /
+    /// `from sys import exit`, the corresponding stdlib item so the IR
+    /// lowerer knows what native to emit.
+    pub import_item: HashMap<SymbolId, StdlibItem>,
+    /// M19: for `import sys as s` / `import sys`, maps the introduced
+    /// symbol back to the underlying stdlib module name. Lets the
+    /// typechecker recover the module from a renamed alias.
+    pub module_alias: HashMap<SymbolId, String>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  M19: stdlib module table
+// ─────────────────────────────────────────────────────────────────────────
+//
+// The v0.2 stdlib lives entirely *inside the compiler* — no `.spy` source
+// files for `sys` etc. ship with the toolchain yet. This table is the
+// single source of truth for what names exist inside each built-in
+// module, what their static types are, and which `NativeFn` id the IR
+// lowerer should emit when the user writes `sys.argv` or `sys.exit(0)`.
+//
+// User-defined `.spy` modules and submodules (`os.path`) are deferred to
+// v0.3; resolution falls through to an `E4001` error.
+
+/// One item inside a built-in stdlib module — either a value-typed
+/// constant (`sys.argv`) or a function (`sys.exit`). Both kinds dispatch
+/// through a single `NativeFn` slot; the distinction matters only for
+/// the typechecker (a constant has a concrete `Ty`, a function has
+/// `Ty::Function`).
+#[derive(Debug, Clone)]
+pub struct StdlibItem {
+    pub name: String,
+    pub kind: StdlibItemKind,
+    /// Static type of the item. For `Function`, this is `Ty::Function`.
+    pub ty: Ty,
+    /// `NativeFn` discriminant (as u32). The IR lowerer emits a
+    /// `CallNative { native_id }` carrying this id.
+    pub native_id: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StdlibItemKind {
+    /// A lazily-materialised value like `sys.argv`. Reading the
+    /// attribute emits a 0-arg `CallNative`.
+    Const,
+    /// A callable like `sys.exit(code)`. Calling emits an N-arg
+    /// `CallNative` whose operands are the user-supplied args.
+    Function,
+}
+
+/// One built-in module exposed to user code.
+#[derive(Debug, Clone)]
+pub struct StdlibModule {
+    pub name: String,
+    pub items: Vec<StdlibItem>,
+}
+
+impl StdlibModule {
+    pub fn find(&self, name: &str) -> Option<&StdlibItem> {
+        self.items.iter().find(|i| i.name == name)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -187,6 +251,13 @@ pub struct Resolver {
     proto_name_to_id: HashMap<String, ProtoId>,
     /// Type-alias name → semantic Ty.
     type_aliases: HashMap<String, Ty>,
+    /// M19: built-in stdlib modules available to `import`. Populated by
+    /// `seed_stdlib_modules` at the start of resolve().
+    stdlib_modules: HashMap<String, StdlibModule>,
+    /// M19: see `ResolvedModule::import_item`.
+    import_item: HashMap<SymbolId, StdlibItem>,
+    /// M19: see `ResolvedModule::module_alias`.
+    module_alias: HashMap<SymbolId, String>,
 }
 
 impl Resolver {
@@ -252,6 +323,7 @@ impl Resolver {
         let prelude_scope = self.table.new_scope(None, false);
         let module_scope = self.table.new_scope(Some(prelude_scope), false);
 
+        self.seed_stdlib_modules();
         self.seed_prelude(prelude_scope);
 
         // ── Pass 1: register all top-level declarations (so order doesn't matter)
@@ -288,7 +360,66 @@ impl Resolver {
             function_sigs: self.function_sigs,
             class_of_symbol: self.class_of_symbol,
             symbol_of_class: self.symbol_of_class,
+            stdlib_modules: self.stdlib_modules,
+            import_item: self.import_item,
+            module_alias: self.module_alias,
         })
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  M19: stdlib module table
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Register every built-in module the resolver knows about. v0.2
+    /// ships only `sys`; M20 will register `os`, `os.path`, `io`,
+    /// `json`, `re`, `time`, `random`, `math` alongside.
+    fn seed_stdlib_modules(&mut self) {
+        use crate::types::PrimTy;
+        // Native ids come from `shared::native::NativeFn` (M19 block
+        // 130–149). We hard-code the discriminant values here to avoid
+        // a dependency cycle through the shared crate's `NativeFn::from_name`,
+        // which doesn't (and shouldn't) know stdlib module structure.
+        const SYS_ARGV: u32     = 130;
+        const SYS_EXIT: u32     = 131;
+        const SYS_PLATFORM: u32 = 132;
+        const SYS_VERSION: u32  = 133;
+
+        let sys = StdlibModule {
+            name: "sys".into(),
+            items: vec![
+                StdlibItem {
+                    name: "argv".into(),
+                    kind: StdlibItemKind::Const,
+                    ty: Ty::Generic {
+                        base: TypeCtor::List,
+                        args: vec![Ty::Primitive(PrimTy::Str)],
+                    },
+                    native_id: SYS_ARGV,
+                },
+                StdlibItem {
+                    name: "exit".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: Ty::Function {
+                        params: vec![Ty::Primitive(PrimTy::I32)],
+                        ret: Box::new(Ty::Never),
+                    },
+                    native_id: SYS_EXIT,
+                },
+                StdlibItem {
+                    name: "platform".into(),
+                    kind: StdlibItemKind::Const,
+                    ty: Ty::Primitive(PrimTy::Str),
+                    native_id: SYS_PLATFORM,
+                },
+                StdlibItem {
+                    name: "version".into(),
+                    kind: StdlibItemKind::Const,
+                    ty: Ty::Primitive(PrimTy::Str),
+                    native_id: SYS_VERSION,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("sys".into(), sys);
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -536,21 +667,118 @@ impl Resolver {
     // ─────────────────────────────────────────────────────────────────────
 
     fn register_top_decls(&mut self, scope: ScopeId, module: &Module) -> Result<(), CompileError> {
-        // Register imports first.  If a name already exists in the prelude
-        // (e.g. `from threading import Channel`), we treat the import as a no-op
-        // and keep the prelude binding — that way the symbol still carries its
-        // stub type for the type-checker.
+        // ── M19: import resolution ────────────────────────────────────
+        //
+        // Three kinds of imports:
+        //
+        //   (a) `import sys`                  — bind `sys` as BuiltinModule.
+        //   (b) `import sys as s`             — bind `s` as alias of `sys`.
+        //   (c) `from sys import argv, exit`  — bind each item as Const/Function.
+        //
+        // The pre-M19 fast-path (no-op when the name already exists in
+        // prelude) is preserved for legacy stdlibs that flatten into the
+        // prelude (`from threading import Channel`): those bindings come
+        // from `seed_prelude` and the import is purely cosmetic. New
+        // stdlib modules registered via `seed_stdlib_modules` take
+        // precedence — they go through the proper module table.
         for imp in &module.imports {
+            // Single-segment module path required in v0.2. Submodules
+            // (`os.path`) are parser-supported but resolve here as a
+            // missing module; flag explicitly for the future-work path.
+            let mod_name = imp.path.join(".");
+            let stdlib_mod = self.stdlib_modules.get(&mod_name).cloned();
+
             if !imp.items.is_empty() {
-                for it in &imp.items {
-                    let name = it.alias.as_deref().unwrap_or(&it.name);
-                    if self.table.lookup(scope, name).is_some() { continue; }
-                    self.make_symbol(scope, name, SymbolKind::Import, imp.span, None);
+                // (c) `from MOD import x, y as z, ...`
+                match &stdlib_mod {
+                    Some(m) => {
+                        for it in &imp.items {
+                            let local_name = it.alias.as_deref().unwrap_or(&it.name);
+                            let Some(item) = m.find(&it.name) else {
+                                return Err(Self::err_at(
+                                    imp.span,
+                                    codes::LINK_NO_SUCH_MODULE_ITEM,
+                                    format!(
+                                        "module `{}` has no item named `{}` (available: {})",
+                                        mod_name,
+                                        it.name,
+                                        m.items.iter()
+                                            .map(|i| i.name.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join(", "),
+                                    ),
+                                ));
+                            };
+                            if self.table.lookup(scope, local_name).is_some() {
+                                // Pre-existing prelude binding wins (legacy stdlib).
+                                continue;
+                            }
+                            let sid = self.make_symbol(
+                                scope,
+                                local_name,
+                                SymbolKind::Import,
+                                imp.span,
+                                Some(item.ty.clone()),
+                            );
+                            self.import_item.insert(sid, item.clone());
+                        }
+                    }
+                    None => {
+                        // Legacy fall-through: `from threading import Channel`
+                        // — `threading` isn't in `stdlib_modules` (yet), but
+                        // the prelude already bound `Channel`. Keep that
+                        // behavior.
+                        let unknown_items: Vec<&ImportItem> = imp.items.iter()
+                            .filter(|it| {
+                                let name = it.alias.as_deref().unwrap_or(&it.name);
+                                self.table.lookup(scope, name).is_none()
+                            })
+                            .collect();
+                        if !unknown_items.is_empty() {
+                            return Err(Self::err_at(
+                                imp.span,
+                                codes::LINK_MISSING_MODULE,
+                                format!(
+                                    "no stdlib module named `{}` (user-defined modules are v0.3)",
+                                    mod_name
+                                ),
+                            ));
+                        }
+                        // All items already in prelude — keep them.
+                    }
                 }
             } else {
-                let name = imp.alias.clone().unwrap_or_else(|| imp.path.join("."));
-                if self.table.lookup(scope, &name).is_some() { continue; }
-                self.make_symbol(scope, &name, SymbolKind::Import, imp.span, None);
+                // (a)/(b) `import MOD [as ALIAS]`
+                let local_name = imp.alias.clone().unwrap_or_else(|| mod_name.clone());
+                match &stdlib_mod {
+                    Some(_) => {
+                        if self.table.lookup(scope, &local_name).is_some() {
+                            continue;
+                        }
+                        let sid = self.make_symbol(
+                            scope,
+                            &local_name,
+                            SymbolKind::BuiltinModule,
+                            imp.span,
+                            None,
+                        );
+                        self.module_alias.insert(sid, mod_name.clone());
+                    }
+                    None => {
+                        if self.table.lookup(scope, &local_name).is_some() {
+                            // Legacy: `import threading` already bound by prelude.
+                            continue;
+                        }
+                        return Err(Self::err_at(
+                            imp.span,
+                            codes::LINK_MISSING_MODULE,
+                            format!(
+                                "no stdlib module named `{}` (user-defined modules are v0.3)",
+                                mod_name
+                            ),
+                        ));
+                    }
+                }
             }
         }
 

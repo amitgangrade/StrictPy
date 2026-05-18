@@ -2101,6 +2101,24 @@ fn lower_expr(fb: &mut FuncBuilder, ctx: &mut LowerCtx, e: &Expr) -> ValueId {
             if let Some((irc, ty)) = ctx.module_consts.get(name).cloned() {
                 return fb.push_value(ty, ValueKind::Const(irc));
             }
+            // M19: `from sys import argv` — the symbol resolves to a stdlib
+            // const. Read-as-value emits a 0-arg CallNative; the function
+            // form `exit(0)` is handled in lower_call below.
+            let scope = ctx.typed.resolved.module_scope;
+            if let Some(sid) = ctx.typed.resolved.symbols.lookup(scope, name) {
+                if let Some(item) = ctx.typed.resolved.import_item.get(&sid).cloned() {
+                    if matches!(item.kind, crate::resolver::StdlibItemKind::Const) {
+                        let ty = ctx.expr_ty(*span);
+                        return fb.push_value(
+                            ty,
+                            ValueKind::Op {
+                                op: IROp::NativeCall { native_id: item.native_id },
+                                args: vec![],
+                            },
+                        );
+                    }
+                }
+            }
             // Unknown ident (likely a prelude/builtin/class) — placeholder.
             let ty = ctx.expr_ty(*span);
             fb.push_value(ty, ValueKind::Const(IRConst::None))
@@ -2235,6 +2253,51 @@ fn lower_expr(fb: &mut FuncBuilder, ctx: &mut LowerCtx, e: &Expr) -> ValueId {
             lower_method_call(fb, ctx, receiver, method, args, *span)
         }
         Expr::Attr { obj, name, span } => {
+            // M19: `sys.argv` / `sys.platform` — the obj is an Ident
+            // whose symbol is a BuiltinModule registered via
+            // `import sys` (or aliased via `import sys as s`).  Const
+            // attrs lower to a 0-arg CallNative; function attrs are
+            // handled in lower_call where the *Call* sees the Attr
+            // callee.  This branch is for *read-as-value* — e.g.
+            // `s := sys.platform`.
+            if let Expr::Ident { name: mname, .. } = obj.as_ref() {
+                let scope = ctx.typed.resolved.module_scope;
+                if let Some(sid) = ctx.typed.resolved.symbols.lookup(scope, mname) {
+                    if matches!(
+                        ctx.typed.resolved.symbols.get(sid).kind,
+                        SymbolKind::BuiltinModule
+                    ) {
+                        // Recover the real module name (may differ from
+                        // the alias the user typed: `import sys as s`).
+                        let mod_name = ctx.typed.resolved.module_alias
+                            .get(&sid)
+                            .cloned()
+                            .unwrap_or_else(|| mname.clone());
+                        if let Some(m) = ctx.typed.resolved.stdlib_modules.get(&mod_name) {
+                            if let Some(item) = m.find(name) {
+                                if matches!(item.kind, crate::resolver::StdlibItemKind::Const) {
+                                    let ty = ctx.expr_ty(*span);
+                                    return fb.push_value(
+                                        ty,
+                                        ValueKind::Op {
+                                            op: IROp::NativeCall { native_id: item.native_id },
+                                            args: vec![],
+                                        },
+                                    );
+                                }
+                                // Function attr — emitting it as a value
+                                // would need a closure; v0.2 only
+                                // supports the call form. Fall through
+                                // to placeholder; the typechecker
+                                // already accepted this so this only
+                                // bites if user code passes
+                                // `sys.exit` as a value, which we
+                                // don't yet promise to support.
+                            }
+                        }
+                    }
+                }
+            }
             let recv = lower_expr(fb, ctx, obj);
             let obj_ty = ctx.expr_ty(expr_span(obj));
             // M14 tuples: `t.N` — numeric attr on Ty::Tuple maps directly
@@ -2928,6 +2991,71 @@ fn lower_call(
     span: Span,
 ) -> ValueId {
     let ret_ty = ctx.expr_ty(span);
+
+    // M19: namespaced stdlib call — `sys.exit(0)`.  Detect *before* the
+    // generic Ident handling so the callee's Attr isn't lowered as a
+    // field load (which would synthesise a bogus Load on the builtin-
+    // module placeholder slot).  The args are lowered exactly as for
+    // any other native call; we then emit a CallNative carrying the
+    // item's `native_id`.
+    if let Expr::Attr { obj, name: attr, .. } = callee {
+        if let Expr::Ident { name: mname, .. } = obj.as_ref() {
+            let scope = ctx.typed.resolved.module_scope;
+            if let Some(sid) = ctx.typed.resolved.symbols.lookup(scope, mname) {
+                if matches!(
+                    ctx.typed.resolved.symbols.get(sid).kind,
+                    SymbolKind::BuiltinModule
+                ) {
+                    let mod_name = ctx.typed.resolved.module_alias
+                        .get(&sid)
+                        .cloned()
+                        .unwrap_or_else(|| mname.clone());
+                    if let Some(m) = ctx.typed.resolved.stdlib_modules.get(&mod_name) {
+                        if let Some(item) = m.find(attr) {
+                            if matches!(item.kind, crate::resolver::StdlibItemKind::Function) {
+                                let mut arg_vs: Vec<ValueId> = Vec::with_capacity(args.len());
+                                for a in args {
+                                    arg_vs.push(lower_expr(fb, ctx, &a.value));
+                                }
+                                return fb.push_value(
+                                    ret_ty,
+                                    ValueKind::Op {
+                                        op: IROp::NativeCall { native_id: item.native_id },
+                                        args: arg_vs,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // M19: bare call to a `from sys import exit` symbol — same path
+    // as above but the callee is an Ident bound to an Import symbol
+    // carrying a StdlibItem of kind Function.
+    if let Expr::Ident { name, .. } = callee {
+        let scope = ctx.typed.resolved.module_scope;
+        if let Some(sid) = ctx.typed.resolved.symbols.lookup(scope, name) {
+            if let Some(item) = ctx.typed.resolved.import_item.get(&sid).cloned() {
+                if matches!(item.kind, crate::resolver::StdlibItemKind::Function) {
+                    let mut arg_vs: Vec<ValueId> = Vec::with_capacity(args.len());
+                    for a in args {
+                        arg_vs.push(lower_expr(fb, ctx, &a.value));
+                    }
+                    return fb.push_value(
+                        ret_ty,
+                        ValueKind::Op {
+                            op: IROp::NativeCall { native_id: item.native_id },
+                            args: arg_vs,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
     // M16: `isinstance(x, T)` is a *builtin* call whose second argument is a
     // type name, not a value. Lower the receiver, then emit an IROp::IsInstance
     // carrying the resolved class id. Doing this before the generic arg-lower
@@ -3368,9 +3496,46 @@ fn lower_method_call(
     args: &[ast::Arg],
     span: Span,
 ) -> ValueId {
+    // M19: `sys.exit(0)` parses as a MethodCall (the postfix parser
+    // folds `Attr + LParen` into MethodCall). Detect a builtin-module
+    // receiver *before* lowering the receiver — which would emit a
+    // bogus `Const(None)` placeholder for the module Ident — and
+    // dispatch straight to the stdlib item's NativeFn.
+    let ret_ty = ctx.expr_ty(span);
+    if let Expr::Ident { name: mname, .. } = receiver {
+        let scope = ctx.typed.resolved.module_scope;
+        if let Some(sid) = ctx.typed.resolved.symbols.lookup(scope, mname) {
+            if matches!(
+                ctx.typed.resolved.symbols.get(sid).kind,
+                SymbolKind::BuiltinModule
+            ) {
+                let mod_name = ctx.typed.resolved.module_alias
+                    .get(&sid)
+                    .cloned()
+                    .unwrap_or_else(|| mname.clone());
+                if let Some(m) = ctx.typed.resolved.stdlib_modules.get(&mod_name) {
+                    if let Some(item) = m.find(method) {
+                        if matches!(item.kind, crate::resolver::StdlibItemKind::Function) {
+                            let mut arg_vs: Vec<ValueId> = Vec::with_capacity(args.len());
+                            for a in args {
+                                arg_vs.push(lower_expr(fb, ctx, &a.value));
+                            }
+                            return fb.push_value(
+                                ret_ty,
+                                ValueKind::Op {
+                                    op: IROp::NativeCall { native_id: item.native_id },
+                                    args: arg_vs,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let recv = lower_expr(fb, ctx, receiver);
     let recv_ty = ctx.expr_ty(expr_span(receiver));
-    let ret_ty = ctx.expr_ty(span);
     let mut arg_vs = vec![recv];
     for a in args {
         arg_vs.push(lower_expr(fb, ctx, &a.value));

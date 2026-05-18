@@ -11,7 +11,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use strictpy_vm::{run_file, VmError};
+use strictpy_vm::{run_file_with_args, VmError};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -24,7 +24,7 @@ struct Cli {
     /// Path to a compiled `.spyc` module.
     module: PathBuf,
 
-    /// Arguments forwarded to the program's `main`.
+    /// Arguments forwarded to the program as `sys.argv[1..]`.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 }
@@ -32,11 +32,11 @@ struct Cli {
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    // `args` is parsed for forward-compatibility; v0.1 does not yet plumb
-    // them through to the program. TODO(spec): pass argv into `main`.
-    let _ = &cli.args;
-
-    match run_file(&cli.module) {
+    // M19: trailing args are now plumbed through to `sys.argv`. The
+    // VM's `run_file_with_args` handles `VmError::Exit(code)` → exit
+    // code translation internally; only true `UncaughtException` and
+    // other VM-level errors reach this arm.
+    match run_file_with_args(&cli.module, cli.args) {
         Ok(code) => {
             // Clamp into u8; conventionally Unix-style exit codes are 0..=255.
             ExitCode::from((code & 0xFF) as u8)

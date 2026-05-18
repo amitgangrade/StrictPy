@@ -286,6 +286,21 @@ pub struct Interpreter {
     /// try, on `LeaveTry` after the finally pops it (and we re-raise via
     /// `Rethrow`), or when a handler matches the pending type.
     pub(crate) pending_exception: Option<(String, String)>,
+
+    /// M19: command-line args forwarded to `sys.argv`. Per Python
+    /// convention `argv[0]` is the program path (the `.spyc` invoked)
+    /// and `argv[1..]` are the trailing args the CLI received. Set by
+    /// `Interpreter::set_argv` before `run_main`; defaults to a
+    /// single-element list containing `"<unknown>"` for tests that
+    /// instantiate the interp without going through `run_file_with_args`.
+    pub(crate) argv: Vec<String>,
+
+    /// M19: cached pointer to the heap-allocated `sys.argv` list.
+    /// `SysArgv` materialises it on first read and stashes the pointer
+    /// here so subsequent reads return the same object identity (so
+    /// `sys.argv is sys.argv` is true, and so that any user-side
+    /// mutation of the list — `sys.argv.pop()` — is visible).
+    pub(crate) sys_argv_cache: Option<u64>,
 }
 
 impl Interpreter {
@@ -311,7 +326,17 @@ impl Interpreter {
             frames: Vec::with_capacity(64),
             handler_frames: Vec::new(),
             pending_exception: None,
+            argv: Vec::new(),
+            sys_argv_cache: None,
         }
+    }
+
+    /// M19: set the command-line args visible to `sys.argv`. Must be
+    /// called *before* `run_main`; calling later won't affect the
+    /// already-materialised list cached in `sys_argv_cache`.
+    pub fn set_argv(&mut self, argv: Vec<String>) {
+        self.argv = argv;
+        self.sys_argv_cache = None;
     }
 
     /// Convenience accessor: the immutable module bytecode.

@@ -787,15 +787,83 @@ impl TypeChecker {
             }
             Expr::Call { callee, args, span } => self.synth_call(callee, args, *span, env, ctx, r),
             Expr::MethodCall { receiver, method, args, span } => {
+                // M19: `sys.exit(0)` parses as MethodCall (the postfix
+                // parser folds `Attr + LParen` into MethodCall). If the
+                // receiver is a builtin-module Ident, dispatch to the
+                // module's item *before* synth'ing the receiver — which
+                // would fail because builtin-module symbols carry no
+                // type.
+                if let Expr::Ident { name: mname, .. } = receiver.as_ref() {
+                    if let Some(sid) = r.symbols.lookup(r.module_scope, mname) {
+                        if matches!(r.symbols.get(sid).kind, SymbolKind::BuiltinModule) {
+                            let mod_name = r.module_alias.get(&sid).cloned()
+                                .unwrap_or_else(|| mname.clone());
+                            if let Some(m) = r.stdlib_modules.get(&mod_name) {
+                                if let Some(item) = m.find(method) {
+                                    if let Ty::Function { params, ret } = &item.ty {
+                                        if args.len() != params.len() {
+                                            return Err(type_err(*span, codes::TYPE_ARITY,
+                                                format!(
+                                                    "{}.{}() expects {} arg(s), got {}",
+                                                    mod_name, method,
+                                                    params.len(), args.len(),
+                                                )));
+                                        }
+                                        for (a, pt) in args.iter().zip(params.iter()) {
+                                            let _ = self.check_expr(&a.value, pt, env, ctx, r)?;
+                                        }
+                                        return Ok((**ret).clone());
+                                    }
+                                    return Err(type_err(*span, codes::TYPE_NOT_CALLABLE,
+                                        format!(
+                                            "{}.{} is not callable (it's a constant)",
+                                            mod_name, method
+                                        )));
+                                }
+                                return Err(type_err(*span,
+                                    codes::LINK_NO_SUCH_MODULE_ITEM,
+                                    format!(
+                                        "module `{}` has no item named `{}`",
+                                        mod_name, method
+                                    )));
+                            }
+                        }
+                    }
+                }
                 let recv_ty = self.synth_expr(receiver, env, ctx, r)?;
                 self.synth_method_call(&recv_ty, method, args, *span, env, ctx, r)
             }
             Expr::Attr { obj, name, span } => {
-                // Module attr access: io.File etc.  obj might be a BuiltinModule symbol.
+                // Module attr access: `sys.argv`, `io.File`, etc.  The
+                // obj here is an `Expr::Ident` whose symbol is either
+                //   * a BuiltinModule introduced via `import sys`
+                //     (M19) → look up the item in `stdlib_modules`,
+                //   * or a legacy flat-named alias like `io` whose
+                //     `io.File` is registered in the prelude as a
+                //     symbol with the joined name.
                 if let Expr::Ident { name: mname, .. } = obj.as_ref() {
                     if let Some(sid) = r.symbols.lookup(r.module_scope, mname) {
                         if matches!(r.symbols.get(sid).kind, SymbolKind::BuiltinModule) {
-                            // Look up a flattened name like "io.File".
+                            // M19: try the proper stdlib module table
+                            // first. The module backing this alias is
+                            // recorded in `module_alias` (set by
+                            // `register_top_decls` for `import sys`).
+                            let mod_name = r.module_alias.get(&sid).cloned()
+                                .unwrap_or_else(|| mname.clone());
+                            if let Some(m) = r.stdlib_modules.get(&mod_name) {
+                                if let Some(item) = m.find(name) {
+                                    return Ok(item.ty.clone());
+                                }
+                                return Err(type_err(*span,
+                                    codes::LINK_NO_SUCH_MODULE_ITEM,
+                                    format!(
+                                        "module `{}` has no attribute `{}` (available: {})",
+                                        mod_name, name,
+                                        m.items.iter().map(|i| i.name.as_str())
+                                            .collect::<Vec<_>>().join(", "),
+                                    )));
+                            }
+                            // Legacy fall-through: flattened name like "io.File".
                             let joined = format!("{}.{}", mname, name);
                             if let Some(s2) = r.symbols.lookup(r.module_scope, &joined) {
                                 if let Some(t) = ctx.base_types.get(&s2) { return Ok(t.clone()); }

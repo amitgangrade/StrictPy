@@ -33,4 +33,14 @@ pub enum VmError {
 
     #[error("VM trap: {0}")]
     Trap(String),
+
+    /// M19: `sys.exit(code)` — non-catchable program termination.
+    ///
+    /// The interpreter's `propagate_exception` loop only catches
+    /// `UncaughtException`; an `Exit` walks straight up the call stack
+    /// past every active try/except and is translated to a process
+    /// exit code by the CLI driver. Mirrors Python's `SystemExit`
+    /// (a `BaseException`, not an `Exception`).
+    #[error("program called sys.exit({0})")]
+    Exit(i32),
 }

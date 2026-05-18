@@ -1,0 +1,25 @@
+"""print_env.spy — small banner exercising all `sys` const attrs (M19).
+
+Demonstrates the v0.2 `sys` surface in one shot:
+
+  * `sys.version`  — version banner
+  * `sys.platform` — `"windows" | "linux" | "macos" | "unknown"`
+  * `sys.argv`     — the program path and any trailing args
+  * `import sys as s` — module-alias form, just to show resolution
+
+The output is intentionally stable across operating systems EXCEPT for
+the platform line — the integration test only asserts that the line
+exists and the value is one of the legal strings.
+
+Tests:
+  * `compiler/tests/print_env_runs.rs` — subprocess assertion.
+"""
+
+import sys as s
+
+fn main() -> i32:
+    println("== StrictPy banner ==")
+    println("version : " + s.version)
+    println("platform: " + s.platform)
+    println("argc    : " + str(i64(len(s.argv))))
+    return 0

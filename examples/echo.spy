@@ -1,0 +1,28 @@
+"""echo.spy — the smallest `sys.argv` consumer (M19 acceptance).
+
+Prints each command-line argument on its own line, prefixed with its
+index.  When invoked as `spy echo.spyc alpha beta gamma`, the output is:
+
+    argv[0] = examples/echo.spyc
+    argv[1] = alpha
+    argv[2] = beta
+    argv[3] = gamma
+
+`argv[0]` is set by the CLI driver to the `.spyc` path that was
+invoked, matching Python's convention.  Everything after that is the
+trailing args clap collected with `trailing_var_arg = true`.
+
+Tests:
+  * `compiler/tests/echo_runs.rs` — subprocess test asserting that
+    `argv[1..]` make it through `spy.exe`.
+"""
+
+import sys
+
+fn main() -> i32:
+    n: i64 = i64(len(sys.argv))
+    i: i64 = 0
+    while i < n:
+        println("argv[" + str(i) + "] = " + sys.argv[i])
+        i = i + 1
+    return 0

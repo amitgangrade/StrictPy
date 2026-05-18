@@ -116,4 +116,7 @@ pub mod codes {
 
     // ── E4xxx: linker / module ───────────────────────────────────────────
     pub const LINK_MISSING_MODULE: ErrorCode = "E4001";
+    /// `from x import y` where module `x` has no item named `y`,
+    /// or `x.y` where `x` is a module but has no such attribute (M19).
+    pub const LINK_NO_SUCH_MODULE_ITEM: ErrorCode = "E4002";
 }

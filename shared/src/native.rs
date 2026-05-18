@@ -125,6 +125,28 @@ pub enum NativeFn {
     // last element; trap with IndexError on empty.
     ListPop    = 107,
 
+    // ── 130–149: `sys` module (M19) ─────────────────────────────────────
+    // Foundation milestone for a real stdlib: the import-resolver and
+    // module-attribute typecheck were both new in M19 (no built-in
+    // module previously exposed attributes/functions to user code; the
+    // pre-M19 prelude flattened every name into module-scope). All four
+    // natives below dispatch through the standard `CallNative` path.
+    /// `sys.argv` — lazy List[str] of program args. The VM caches the
+    /// materialised list pointer in `Interpreter::sys_argv_cache` so
+    /// repeated reads return the same heap object.
+    SysArgv     = 130,
+    /// `sys.exit(code: i32) -> Never` — raises `VmError::Exit(code)`.
+    /// Deliberately not catchable: `propagate_exception` only matches
+    /// `VmError::UncaughtException`, so `Exit` walks straight up to the
+    /// CLI's top-level handler. Mirrors Python's `SystemExit` (a
+    /// BaseException, not an Exception).
+    SysExit     = 131,
+    /// `sys.platform` — one of `"windows" | "linux" | "macos" | "unknown"`.
+    /// Allocated once per call (str interning is a v0.3 nice-to-have).
+    SysPlatform = 132,
+    /// `sys.version` — version banner string. Constant per build.
+    SysVersion  = 133,
+
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
     /// encounters. The VM treats this as a runtime error.
@@ -207,6 +229,11 @@ impl NativeFn {
             106 => Some(Self::ListSorted),
             // real-world: fix — see `ListPop` definition above.
             107 => Some(Self::ListPop),
+            // M19: sys module.
+            130 => Some(Self::SysArgv),
+            131 => Some(Self::SysExit),
+            132 => Some(Self::SysPlatform),
+            133 => Some(Self::SysVersion),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

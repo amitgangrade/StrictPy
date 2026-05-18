@@ -43,16 +43,44 @@ pub use error::VmError;
 /// Load `.spyc` bytecode from `path`, link it, execute its `main` function,
 /// and return the integer exit code.
 pub fn run_file(path: &Path) -> Result<i32, VmError> {
+    run_file_with_args(path, Vec::new())
+}
+
+/// Like [`run_file`] but plumbs `args` through to `sys.argv` (M19).
+/// `argv[0]` is conventionally the program path (matching Python); the
+/// CLI driver constructs it from the `.spyc` path. `args` is everything
+/// after that — the trailing args the user typed on the command line.
+pub fn run_file_with_args(path: &Path, args: Vec<String>) -> Result<i32, VmError> {
     let bytes = std::fs::read(path).map_err(VmError::Io)?;
     let module = loader::load(&bytes)?;
     let mut interp = interp::Interpreter::new(module);
     builtins::register(&mut interp);
-    interp.run_main()
+    // Build the argv: [program-path, ...args]
+    let mut argv = Vec::with_capacity(args.len() + 1);
+    argv.push(path.to_string_lossy().into_owned());
+    argv.extend(args);
+    interp.set_argv(argv);
+    match interp.run_main() {
+        Ok(code) => Ok(code),
+        Err(VmError::Exit(code)) => Ok(code),
+        Err(e) => Err(e),
+    }
 }
 
 /// Like [`run_file`] but writes program stdout into `sink` instead of the
 /// process's real stdout. Used by integration tests to capture output.
 pub fn run_file_capture(path: &Path) -> Result<(i32, String), VmError> {
+    run_file_capture_with_args(path, Vec::new())
+}
+
+/// Like [`run_file_capture`] but also plumbs `args` through to `sys.argv`.
+/// M19: lets in-process tests verify `import sys; sys.exit(N)` without
+/// spawning a subprocess. The Exit code is translated to the integer
+/// part of the tuple the same way `run_file_with_args` does.
+pub fn run_file_capture_with_args(
+    path: &Path,
+    args: Vec<String>,
+) -> Result<(i32, String), VmError> {
     let bytes = std::fs::read(path).map_err(VmError::Io)?;
     let module = loader::load(&bytes)?;
     let mut interp = interp::Interpreter::new(module);
@@ -60,7 +88,15 @@ pub fn run_file_capture(path: &Path) -> Result<(i32, String), VmError> {
     let buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let sink = CaptureStdout { buf: buf.clone() };
     interp.set_stdout(Box::new(sink));
-    let code = interp.run_main()?;
+    let mut argv = Vec::with_capacity(args.len() + 1);
+    argv.push(path.to_string_lossy().into_owned());
+    argv.extend(args);
+    interp.set_argv(argv);
+    let code = match interp.run_main() {
+        Ok(c) => c,
+        Err(VmError::Exit(c)) => c,
+        Err(e) => return Err(e),
+    };
     let out = buf.lock().unwrap().clone();
     Ok((code, out))
 }
