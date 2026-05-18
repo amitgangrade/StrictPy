@@ -13,6 +13,9 @@ docs/thesis/
 ├── methodology.md                  How the project was conducted
 │                                   (AI-pair-programming process, decisions,
 │                                    measurement discipline)
+├── agent_briefing_patterns.md      Concrete patterns evolved across M0-M11
+│                                   for briefing sub-agents — brief skeleton,
+│                                   anti-patterns, parallel vs sequential
 ├── stats/
 │   ├── per_milestone.csv           Machine-readable metrics per milestone
 │   └── per_milestone.md            Same data, human-readable table
