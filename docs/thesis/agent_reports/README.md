@@ -42,3 +42,8 @@ the time it lands.
 | `m12_dijkstra.md` | M12 | Dijkstra + min-heap PQ. **Zero new bugs.** Confirmation for `final class` with parallel nested-list fields + recursive method calls. |
 | `m12_btree.md` | M12 | In-memory B-tree (order 4). Found **BUG-034** (str != str silent miscompile — same shape as BUG-008) and **BUG-035** (and/or no short-circuit). BUG-034 fixed inline. |
 | `m12_torture.md` | M12 | Torture test (250 sequential runs across calculator/json_parse/lisp). **BUG-026 + BUG-027 CONFIRMED FIXED.** |
+| `m13_short_circuit.md` | M13 | Short-circuit `and`/`or` (BUG-035 fixed). First mid-expression CFG manipulation; documents the slot-phi pattern for M15 try/except. |
+| `m14_tuples.md` | M14 | Tuples + destructuring. Heap-allocated synthetic class layouts; zero new VM opcodes. Eliminates highest-frequency workaround. Incidentally fixed an assert(cond, msg) IR-tuple-allocation crash. |
+| `m15_try_except.md` | M15 | try/except/finally + raise. **BUG-025 closed.** Lazy materialisation of exception objects; per-function JIT carve-out. |
+| `m16_match_isinstance.md` | M16 | `isinstance(x, T)` + `match case Constructor()`. Eliminates the `kind: i32` discriminator workaround. Flow-narrowing for isinstance mirrors is-not-none. |
+| `m17_generics.md` | M17 | Generic free functions with call-site monomorphisation. Lazy worklist (Pass 2.6 seeds; Pass 3.5 drains to fixpoint). Generic classes deferred to v0.2. |

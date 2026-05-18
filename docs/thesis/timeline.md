@@ -372,6 +372,163 @@ needs test cases for both forms.
 
 ---
 
+## M13–M17 — Language-completeness sprint (2026-05-18)
+
+A 5-milestone chain that closed every "language feature missing" item
+from the M10-M12 agent reports' "language-surface awkwardness" sections.
+Each milestone was one focused agent task; commits sequenced because
+all 5 features touched `ir.rs` and `typecheck.rs` and would have
+conflicted in parallel. Total wall-clock: a single orchestrator
+session; agent compute ~3 hours (M13) + ~40 min (M14) + ~52 min
+(M15) + ~35 min (M16) + ~67 min (M17) ≈ 4 hours.
+
+### M13 — Short-circuit `and`/`or` (BUG-035)
+
+The smallest task. Previously `and`/`or` lowered to `IAnd`/`IOr`
+(bitwise approximation). Tripped `IndexError(-1)` on the standard
+guard idiom `b > 0 and xs[b-1] > 0`. Fix landed `lower_short_circuit`
+in `compiler/src/ir.rs` — the project's **first mid-expression CFG
+manipulation**. Reuses the M3.5 slot-based phi pattern: pre-seed result
+slot with lhs, `CondBranch`, overwrite from rhs block only when control
+flows there.
+
+**Importantly, this pattern was the prerequisite for M15.** Try/except
+needs identical machinery: handler block + finally block + phi-merge
+on join. Sequencing M13 first was deliberate.
+
+### M14 — Tuples + destructuring
+
+The highest-frequency workflow win. Every M10-M12 stress program
+listed "no tuples / no multi-return" in its awkwardness section
+(workarounds: 1-element mutable lists as out-params; wrapper classes
+with `fst`/`snd` fields). M14 closed it.
+
+Representation: heap-allocated tuple objects as synthetic class
+layouts (kind=3 in the type table). **Zero new VM opcodes** — reuses
+`Alloc`/`Load`/`Store` and the existing class-tracing GC path.
+Surface: `Tuple[T1, T2, ...]` types, `(a, b)` literals, `t.0`/`t.1`
+field access, `let a, b = pair()` destructuring, return-position
+tuples, element-wise `==`/`!=`, `str()` formatting.
+
+Demo: `examples/dijkstra_with_tuples.spy` — `pop_min() -> Tuple[i32, f64]`
+returns both vertex and priority. Eliminates the `visited[]` array
+workaround the M12 dijkstra needed because `pop_min` could only return
+one value.
+
+Incidentally fixed an `assert(cond, msg)` IR-tuple-allocation crash that
+would have surfaced as a regression in every example using asserts
+with messages — caught because the tuple lowering tried to allocate
+with `tid=u32::MAX` for the wrapper tuple.
+
+### M15 — try/except/finally + raise (BUG-025 closed)
+
+The biggest of the 5 by far. End-to-end wiring through parser →
+resolver → typecheck → IR → codegen → bytecode → VM. The foundation
+was favourable: `Stmt::Try` already in AST (parser accepts it; codegen
+just drops it pre-M15), `VmError::UncaughtException { type_name, message }`
+already propagated through native calls (IndexError on `xs[i]`, IOError
+on `open()`, etc.). Pre-M15 these dropped to program-level abort; post-M15
+they flow through handler frames.
+
+Representation: **lazy materialisation on handler bind.** Exceptions
+stay as a Rust `VmError` payload until an `as e:` arm forces
+materialisation into a 2-field heap object. Most exceptions either
+escape or are caught without binding, so eager alloc would be waste.
+
+Four bytecode opcodes reserved since project start (Throw/EnterTry/
+LeaveTry/Rethrow) finally activated.
+
+JIT carve-out is **automatic** via `vm/src/decompile.rs`'s catch-all
+`_ => Err(DecodeError::Unsupported(...))` arm. Any function with
+try/raise opcodes silently falls back to the interpreter — mirrors
+the M8 per-function JIT opt-in pattern. Zero JIT changes needed.
+
+BUG-025 closing demo: `examples/safe_open.spy` — `try: f = open("missing.txt", "r") except IOError as e: ...`
+now catches the file-not-found and prints a recovery message. Pre-M15
+the same program aborts at the open call with non-zero exit.
+
+Known follow-up: `with open(...) as f:` does not route through try/except
+(the `with` desugaring bypasses the handler frame). Documented in §7.5.4
+of the spec; the long-term fix is to desugar `with` to a try/finally pair.
+
+### M16 — isinstance + match case Constructor() patterns
+
+Eliminates the `kind: i32` discriminator workaround used in every M10-M12
+sealed-class program (json_parse, lisp, lambda_calc, calculator). Pre-M16
+the natural form parsed but `Stmt::Match` was an M4-era placeholder in
+`compiler/src/ir.rs:894` that dropped to nothing.
+
+Surface: `isinstance(x, T)` with subclass-chain walking; flow narrowing
+in if-bodies (`if isinstance(x, T): x.field_of_T`); `match` with
+Constructor patterns, Tuple patterns, Wildcard, Identifier, and literal
+patterns. Sealed-class exhaustiveness as a stderr **warning** (not error
+— scoped down to avoid needing a real ADT pass).
+
+The Constructor field-binding via `Load { offset: layout.fields[i].offset }`
+**worked first-try thanks to M11's BUG-016 fix** (subclass field offsets
+no longer alias parent fields). This is the kind of compound result that
+makes the thesis: M11 + M16 ship a coherent class-system feature that
+neither one alone delivers.
+
+Demo: `examples/calculator_with_match.spy` — AST + 2 evaluators in 73
+lines. Clearer to read than the original `calculator.spy`'s virtual-method
+approach.
+
+### M17 — Generics with call-site monomorphisation
+
+Closes "rewrite-per-type friction" — the last item on the language-gap
+list. Previously `fn id[T](x: T) -> T` parsed (the AST had `GenericParam`
+on `FnDecl` since M1) but never monomorphised; the typechecker treated
+`T` as a hole.
+
+Strategy: **lazy monomorphisation via worklist.** Generic templates
+never emit bytecode. Each `(fn_sym, type_args)` pair gets one bytecode
+function with a deterministic mangled name (`id__i32`, `first__i32_str`,
+etc.). Pass 2.6 (new) seeds the worklist from the typechecker's
+instantiation set. Pass 3 skips generic templates. Pass 3.5 (new) drains
+the worklist; transitive instantiations are minted on the fly in
+`lower_call` and re-queued. Drains to fixed point.
+
+Per-instantiation operator binding: `T + T` defers; when the substituted
+instantiation re-typechecks, `i32 + i32` becomes `IAdd`, `str + str`
+becomes `StrConcat`, etc.
+
+Demo: `examples/quicksort_generic.spy` — 38 LoC `partition[T] +
+quicksort[T]` sorting both `List[i64]` and `List[f64]` from one body.
+~20% shorter than two hand-rolled copies at 2 types; the ratio scales
+linearly with type count.
+
+Out of scope (v0.2): generic classes, generic methods on non-generic
+classes, bounded generics (`T: Comparable`), auto-inference from
+return-type context.
+
+Incidental finding: `TypedModule::instantiations` was declared as
+`HashSet<(SymbolId, Vec<Ty>)>` in earlier scaffolding, but `Ty` doesn't
+derive `Hash`/`Eq` — the set was never inserted into. Switched to
+`Vec` + string-keyed dedup. No user-visible symptom.
+
+### Sprint totals
+
+- **Tests**: 206 → 255 (+49 across the chain).
+- **Examples**: 23 → 28 (+5: dijkstra_with_tuples, safe_open,
+  calculator_with_match, quicksort_generic, plus probe files).
+- **Spec**: STRICTPY_SPEC.md gained sections on tuples (§5.5),
+  try/except (§7.5), isinstance + match (§6.5), generics (§5.1.5).
+- **Bugs**: 31 found, 30 fixed, 1 deferred (only BUG-028, the lexer
+  line-continuation enhancement, remains).
+- **Workarounds eliminated** (per agent reports): 1-element mutable
+  lists, wrapper Pair classes, kind:i32 discriminators, virtual-method
+  pseudo-dispatch where the natural form was a tuple/match, and
+  rewrite-per-type for container algorithms.
+- **Benchmarks**: untouched. 16/16 wins; fib(30) 13.1ms (~11× CPython).
+  M13-M17 was language completeness, not perf work.
+
+The language now feels meaningfully **Python-shaped**. The remaining
+gaps (generic classes, exception subclassing, bounded generics,
+proper `with → try/finally` desugaring) are all scoped to v0.2.
+
+---
+
 ## What this trajectory shows
 
 - **Bugs found scales with running real programs, not with writing tests.**

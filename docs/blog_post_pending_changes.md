@@ -16,21 +16,46 @@ values. The post-M11 narrative below is retained because the M12
 chapter is mostly a confirmation of M11, plus the new "negative-form
 silent miscompiles" lesson.
 
+**M13–M17 update (2026-05-18)**: a 5-milestone language-completeness
+sprint shipped after M12. Each milestone is a feature-sized chapter
+in the rewrite. Sequenced because every feature touched ir.rs /
+typecheck.rs and parallel agents would have conflicted.
+
+- M13: short-circuit and/or (BUG-035 closed; first mid-expression CFG
+  manipulation in the project).
+- M14: tuples + destructuring (heap-allocated synthetic class layouts;
+  zero new VM opcodes; eliminates the highest-frequency M10-M12 friction).
+- M15: try/except/finally + raise (BUG-025 closed; lazy materialisation
+  of exception objects; automatic per-function JIT carve-out).
+- M16: isinstance + match case Constructor() (eliminates kind:i32
+  discriminator workaround; M11 + M16 ship a coherent class system
+  neither alone delivers).
+- M17: generics with call-site monomorphisation (lazy worklist;
+  per-instantiation operator binding; eliminates rewrite-per-type
+  friction).
+
+Post-M17 state: 255 tests, 0 failed, 31 bugs found, 30 fixed, 1
+deferred (only BUG-028 lexer line-continuation remains). 28 example
+programs. The language is now meaningfully "Python-shaped"; remaining
+gaps (generic classes, exception subclassing, bounded generics) are
+v0.2.
+
 ---
 
 ## Headline numbers that need updating
 
-| Field | Old (M9) | New (post-M12) | Source |
+| Field | Old (M9) | New (post-M17) | Source |
 |---|---|---|---|
-| Examples | 7 | **23** | `examples/*.spy` count (post-M12: + regex/dijkstra/btree) |
-| Tests passing | 134 | **206** | `docs/thesis/stats/per_milestone.csv` last row |
+| Examples | 7 | **28** | `examples/*.spy` count |
+| Tests passing | 134 | **255** | `docs/thesis/stats/per_milestone.csv` last row |
 | Benchmark wins | 16/0/0 | 16/0/0 (still) | `bench/history/m11_class_fix.json` |
-| fib(30) | 13.5ms (12× CPython) | 13.1ms (~11× CPython) | M11/M12 bench (unchanged) |
+| fib(30) | 13.5ms (12× CPython) | 13.1ms (~11× CPython) | M11/M12 bench (unchanged through M17) |
 | Quicksort 100K | 18.6ms (13× CPython) | 18.6ms (12× CPython) | M11 bench |
 | Distinct bugs found | "~12" | **31** | `docs/thesis/bugs/catalog.md` summary table |
-| Deferred bugs | 6 in BUGS_KNOWN.md | **3** | post-M12 BUGS_KNOWN.md state |
-| Code total | ~13K lines | **~21K Rust + ~5K StrictPy + ~3K tests + ~12K docs** | wc -l (approx) |
-| Milestones | M0-M9 | M0-M12 | git log |
+| Deferred bugs | 6 in BUGS_KNOWN.md | **1** (only BUG-028 lexer) | post-M17 BUGS_KNOWN.md state |
+| Code total | ~13K lines | **~24K Rust + ~5.5K StrictPy + ~4K tests + ~14K docs** | wc -l (approx, post-M17) |
+| Milestones | M0-M9 | M0-M17 | git log |
+| **NEW capabilities since M9** | — | tuples, try/except, isinstance, match case, generics | M13-M17 |
 
 The "beats CPython by up to 17×" tagline is still right (fib(33) is 16-17×
 depending on noise).
@@ -206,23 +231,29 @@ becomes redundant with the new lesson #8).
 Massively shrinks. The M9-era list had ~9 limitations; most are now
 fixed. Updated list (post-M11):
 
-- **No try/except codegen** — parser accepts it; codegen drops it. (Was
-  on the M9 list, still true.)
-- **No precise stack-map GC** — M9's `in_jit` pause still in place. (Was
-  on the M9 list, still true.)
-- **No `isinstance` / `match` case lowering** — every sealed hierarchy
-  still hand-rolls a `kind: i32` discriminator OR uses virtual methods
-  (now actually working post-M11). Sealed hierarchies are usable again
-  for the OO case; external variant discrimination still needs a
-  workaround.
-- **No user-code generics** — `fn identity[T](x: T)` syntax accepted but
-  not monomorphized at call sites. (New emphasis — M10/M11/M12 programs
-  repeatedly rewrote algorithms per type.)
-- **No implicit line continuation across infix operators** (BUG-028).
-  (Mechanically simple.)
-- **`and` / `or` are bitwise approximations** (BUG-035; M12 find). Trips
-  on the standard guard idiom `b > 0 and xs[b-1] > ...`. Needs IR
-  basic-block branching to fix.
+**Post-M17 — most items from this list are now fixed.** Updated:
+
+- ~~No `try/except` codegen~~ — **fixed in M15.** Full `try / except /
+  finally / raise` ships; BUG-025 (fallible `open()`) closed.
+- **No precise stack-map GC** — M9's `in_jit` pause still in place.
+  (Unchanged.)
+- ~~No `isinstance` / `match case` lowering~~ — **fixed in M16.**
+  Subclass-chain isinstance + Constructor/Tuple/Wildcard patterns +
+  flow narrowing + sealed-class exhaustiveness warning.
+- ~~No user-code generics~~ — **fixed in M17** (free functions only).
+  Call-site monomorphisation. Generic classes deferred to v0.2.
+- ~~`and` / `or` bitwise approximation~~ — **fixed in M13** (BUG-035).
+- **No tuples / multi-return** — ~~fixed in M14.~~
+- **No implicit line continuation across infix `+`** (BUG-028) — still
+  open. Only deferred bug post-M17.
+- **`with open(...) as f:` doesn't route through try/except** — known
+  gap from M15. Workaround: `try: with open(...) as f: ... except IOError:`
+  explicitly. Long-term fix: desugar `with` to try/finally.
+- **No generic classes** (`class Box[T]:`) — v0.2.
+- **No user-defined exception subclasses** — v0.1 ships 10 built-in
+  exception names; v0.2 adds subclassing.
+- **No bounded generics** (`T: Comparable`) — v0.1 falls back to
+  per-instantiation re-typecheck. v0.2.
 - **No NumPy/pandas** — see `docs/thesis/design_decisions/why_no_numpy_pandas.md`.
   Three theoretical paths exist, none planned.
 
