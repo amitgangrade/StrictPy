@@ -1327,6 +1327,162 @@ impl Resolver {
             ],
         };
         self.stdlib_modules.insert("statistics".into(), statistics_mod);
+
+        // ── M22 P2D: `struct` module ───────────────────────────────────
+        // Binary pack/unpack for fixed-width integers and IEEE 754 doubles.
+        // Returned `str` represents a sequence of bytes via codepoint 0-255
+        // per char (so `len(buf) == byte_count`).  Spec §9.15.
+        const STRUCT_PACK_U32_BE: u32   = 330;
+        const STRUCT_PACK_U32_LE: u32   = 331;
+        const STRUCT_PACK_U64_BE: u32   = 332;
+        const STRUCT_PACK_U64_LE: u32   = 333;
+        const STRUCT_PACK_F64_BE: u32   = 334;
+        const STRUCT_PACK_F64_LE: u32   = 335;
+        const STRUCT_UNPACK_U32_BE: u32 = 336;
+        const STRUCT_UNPACK_U32_LE: u32 = 337;
+        const STRUCT_UNPACK_U64_BE: u32 = 338;
+        const STRUCT_UNPACK_U64_LE: u32 = 339;
+        const STRUCT_UNPACK_F64_BE: u32 = 340;
+        const STRUCT_UNPACK_F64_LE: u32 = 341;
+
+        let struct_mod = StdlibModule {
+            name: "struct".into(),
+            items: vec![
+                StdlibItem {
+                    name: "pack_u32_be".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], str_ty.clone()),
+                    native_id: STRUCT_PACK_U32_BE,
+                },
+                StdlibItem {
+                    name: "pack_u32_le".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], str_ty.clone()),
+                    native_id: STRUCT_PACK_U32_LE,
+                },
+                StdlibItem {
+                    name: "pack_u64_be".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], str_ty.clone()),
+                    native_id: STRUCT_PACK_U64_BE,
+                },
+                StdlibItem {
+                    name: "pack_u64_le".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], str_ty.clone()),
+                    native_id: STRUCT_PACK_U64_LE,
+                },
+                StdlibItem {
+                    name: "pack_f64_be".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![f64_ty.clone()], str_ty.clone()),
+                    native_id: STRUCT_PACK_F64_BE,
+                },
+                StdlibItem {
+                    name: "pack_f64_le".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![f64_ty.clone()], str_ty.clone()),
+                    native_id: STRUCT_PACK_F64_LE,
+                },
+                StdlibItem {
+                    name: "unpack_u32_be".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone(), i32_ty.clone()], i64_ty.clone()),
+                    native_id: STRUCT_UNPACK_U32_BE,
+                },
+                StdlibItem {
+                    name: "unpack_u32_le".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone(), i32_ty.clone()], i64_ty.clone()),
+                    native_id: STRUCT_UNPACK_U32_LE,
+                },
+                StdlibItem {
+                    name: "unpack_u64_be".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone(), i32_ty.clone()], i64_ty.clone()),
+                    native_id: STRUCT_UNPACK_U64_BE,
+                },
+                StdlibItem {
+                    name: "unpack_u64_le".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone(), i32_ty.clone()], i64_ty.clone()),
+                    native_id: STRUCT_UNPACK_U64_LE,
+                },
+                StdlibItem {
+                    name: "unpack_f64_be".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone(), i32_ty.clone()], f64_ty.clone()),
+                    native_id: STRUCT_UNPACK_F64_BE,
+                },
+                StdlibItem {
+                    name: "unpack_f64_le".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone(), i32_ty.clone()], f64_ty.clone()),
+                    native_id: STRUCT_UNPACK_F64_LE,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("struct".into(), struct_mod);
+
+        // ── M22 P2D: `urllib_parse` module ─────────────────────────────
+        // URL escape / unescape and query-string round-tripping.  Module
+        // name uses underscore — submodule support (e.g. `urllib.parse`)
+        // is v0.3.  `parse_url` / `join_url` deferred to v0.3.  Spec §9.16.
+        const URL_QUOTE: u32        = 342;
+        const URL_QUOTE_PLUS: u32   = 343;
+        const URL_UNQUOTE: u32      = 344;
+        const URL_UNQUOTE_PLUS: u32 = 345;
+        const URL_ENCODE: u32       = 346;
+        const URL_PARSE_QUERY: u32  = 347;
+
+        let tuple_str_str_ty = Ty::Tuple(vec![str_ty.clone(), str_ty.clone()]);
+        let list_pair_ty = Ty::Generic {
+            base: TypeCtor::List,
+            args: vec![tuple_str_str_ty.clone()],
+        };
+
+        let urllib_mod = StdlibModule {
+            name: "urllib_parse".into(),
+            items: vec![
+                StdlibItem {
+                    name: "quote".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: URL_QUOTE,
+                },
+                StdlibItem {
+                    name: "quote_plus".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: URL_QUOTE_PLUS,
+                },
+                StdlibItem {
+                    name: "unquote".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: URL_UNQUOTE,
+                },
+                StdlibItem {
+                    name: "unquote_plus".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: URL_UNQUOTE_PLUS,
+                },
+                StdlibItem {
+                    name: "urlencode".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![list_pair_ty.clone()], str_ty.clone()),
+                    native_id: URL_ENCODE,
+                },
+                StdlibItem {
+                    name: "parse_query".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], list_pair_ty.clone()),
+                    native_id: URL_PARSE_QUERY,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("urllib_parse".into(), urllib_mod);
     }
 
     // ─────────────────────────────────────────────────────────────────────

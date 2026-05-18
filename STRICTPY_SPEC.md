@@ -1647,6 +1647,113 @@ What v0.2 does **not** ship:
   reservoir sampling).  Need mutable accumulator types that v0.2's
   builtin-class machinery doesn't yet expose.
 
+### 9.17 Module `struct` (v0.2 — M22 P2D)
+
+Fixed-width binary pack/unpack for unsigned integers (u32, u64) and
+IEEE 754 doubles, in big-endian and little-endian variants.  No Python-
+style format strings — every type/endianness pair is an explicit
+function name.
+
+```
+fn pack_u32_be(value: i64) -> str
+fn pack_u32_le(value: i64) -> str
+fn pack_u64_be(value: i64) -> str
+fn pack_u64_le(value: i64) -> str
+fn pack_f64_be(value: f64) -> str
+fn pack_f64_le(value: f64) -> str
+fn unpack_u32_be(bytes: str, offset: i32) -> i64
+fn unpack_u32_le(bytes: str, offset: i32) -> i64
+fn unpack_u64_be(bytes: str, offset: i32) -> i64
+fn unpack_u64_le(bytes: str, offset: i32) -> i64
+fn unpack_f64_be(bytes: str, offset: i32) -> f64
+fn unpack_f64_le(bytes: str, offset: i32) -> f64
+```
+
+**Binary-as-str encoding.**  StrictPy doesn't ship a runtime `bytes`
+type yet (that's v0.3), so `pack` returns a `str` in which each
+"byte" is one Unicode codepoint in the range `0..=255`.  Concretely:
+
+* Byte `0xAB` becomes the char `U+00AB`.  The resulting `str`'s
+  `len(...)` (char count) equals the byte count: a `pack_u32_be(...)`
+  result has `len == 4`.
+* The underlying UTF-8 representation is wider — codepoints in
+  `128..=255` are 2 UTF-8 bytes each — so the result is NOT a wire-
+  format byte buffer.  Two pack results may be concatenated with `+`
+  to build longer buffers; `unpack` indexes by codepoint not by
+  UTF-8 byte, so the concatenation is correct.
+* v0.3 will replace the `str` return type with a real `bytes` runtime
+  type once that primitive exists; the function names and semantics
+  stay the same.
+
+`unpack` raises `ValueError` if `offset + N > len(bytes)` (short
+buffer) or if any codepoint in the read window is outside `0..=255`
+(buffer not produced by a `pack`).
+
+What v0.2 does **not** ship:
+
+* `pack_u16_be / le` and matching `unpack_u16_be / le`.  Easy add for
+  v0.3 — reserved IDs 348/349 in the M22 P2D range.
+* `pack_i32`, `pack_i64`, signed-int unpacks.  Wrap via two's
+  complement on the caller side (`pack_u32_be(value & 0xFFFFFFFF)`
+  for `i32` round-trips).
+* Variable-width format strings (`">If"`).  Python's `struct.pack(">If",
+  ...)` style is convenient for protocol declarations but doesn't fit
+  the v0.2 fixed-arity native-function discipline.  v0.3 may add a
+  parser; for now, compose the per-type calls.
+
+### 9.18 Module `urllib_parse` (v0.2 — M22 P2D)
+
+Percent-encoding and query-string round-tripping for URLs.  The module
+name uses `_` rather than `.` because StrictPy doesn't have submodule
+support — `urllib.parse` is v0.3, at which point `urllib_parse`
+becomes a back-compat alias.
+
+```
+fn quote(s: str) -> str
+fn quote_plus(s: str) -> str
+fn unquote(s: str) -> str
+fn unquote_plus(s: str) -> str
+fn urlencode(pairs: List[Tuple[str, str]]) -> str
+fn parse_query(qs: str) -> List[Tuple[str, str]]
+```
+
+Semantics:
+
+* `quote(s)` percent-encodes every byte in `s`'s UTF-8 representation
+  *except* the unreserved set `A-Z a-z 0-9 - _ . ~` (RFC 3986
+  §2.3).  Spaces become `%20`.  Output uses upper-case hex.
+* `quote_plus(s)` is identical to `quote` except ASCII space becomes
+  `+` instead of `%20` — the form-encoding flavour used in
+  `application/x-www-form-urlencoded` query strings.
+* `unquote(s)` decodes `%HH` triples back to bytes, leaves other
+  characters untouched.  The resulting byte sequence is interpreted
+  as UTF-8; invalid sequences are recovered lossily (Python's
+  `errors='replace'` default).
+* `unquote_plus(s)` additionally decodes `+` → ASCII space.
+* `urlencode(pairs)` builds `k₁=v₁&k₂=v₂&...` from a list of
+  `(key, value)` tuples, applying `quote_plus` to each side.
+* `parse_query(qs)` is the inverse: split on `&`, then on the first
+  `=` per chunk, applying `unquote_plus` to both sides.  A chunk
+  with no `=` yields `(chunk, "")`.  Empty input yields the empty list.
+
+Errors: `unquote` / `unquote_plus` / `parse_query` raise `ValueError`
+on a malformed `%HH` escape (truncated or non-hex digits).  All other
+functions are total.
+
+What v0.2 does **not** ship:
+
+* `parse_url(url) -> Tuple[str, str, str, str, str]` returning
+  `(scheme, host, port, path, query)`.  Hand-rolling a robust URL
+  parser is genuinely complicated (port handling, userinfo, IPv6
+  literals); deferred to v0.3 with reservation against IDs 348/349
+  in the M22 P2D block.
+* `join_url(base, ref)` for relative-URL resolution.  Needs
+  `parse_url` first.
+* Per-key collection semantics.  `parse_query("a=1&a=2")` returns
+  both `("a", "1")` and `("a", "2")` as separate list entries —
+  v0.3 may add a `parse_query_dict` that collapses duplicates by
+  picking the last value (Python's default).
+
 ---
 
 ## 10. Compiler Architecture

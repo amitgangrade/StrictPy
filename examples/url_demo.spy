@@ -1,0 +1,85 @@
+"""url_demo — M22 P2D demo of the stdlib `urllib_parse` module.
+
+The module name uses an underscore — submodule support (e.g.
+`urllib.parse`) is v0.3.  Functions cover the common cases for
+hand-building / parsing query strings:
+
+  * `quote` / `unquote`        — percent-encode (space → %20)
+  * `quote_plus` / `unquote_plus` — form-encode (space → +)
+  * `urlencode`               — pairs → "k=v&a=b"
+  * `parse_query`             — inverse of urlencode
+
+`parse_url` / `join_url` are deferred to v0.3 (see spec §9.16).
+"""
+
+import urllib_parse
+
+fn main() -> i32:
+    # 1. quote: ASCII space → "%20"; `/` and `=` are unsafe so escape.
+    q1: str = urllib_parse.quote("a b/c=d")
+    println("quote ascii: " + q1)
+
+    # 2. quote_plus: ASCII space → "+".
+    q2: str = urllib_parse.quote_plus("hello world")
+    println("quote_plus: " + q2)
+
+    # 3. unreserved chars (A-Z a-z 0-9 - _ . ~) pass through unchanged.
+    q3: str = urllib_parse.quote("foo.bar_baz-qux~zot")
+    println("unreserved: " + q3)
+
+    # 4. Unicode round-trip: ☃ (snowman, U+2603) is 3 UTF-8 bytes.
+    snow: str = "snow=☃"
+    qsnow: str = urllib_parse.quote(snow)
+    println("quote unicode: " + qsnow)
+    back: str = urllib_parse.unquote(qsnow)
+    if back == snow:
+        println("unicode round-trip: ok")
+    else:
+        println("unicode round-trip: FAIL got " + back)
+
+    # 5. unquote on plain ASCII.
+    u1: str = urllib_parse.unquote("a%20b%2Fc%3Dd")
+    println("unquote ascii: " + u1)
+
+    # 6. unquote_plus: `+` → space.
+    u2: str = urllib_parse.unquote_plus("hello+world+foo")
+    println("unquote_plus: " + u2)
+
+    # 7. urlencode + parse_query round-trip.
+    pairs: List[Tuple[str, str]] = []
+    p1: Tuple[str, str] = ("k", "v")
+    p2: Tuple[str, str] = ("a", "b c")
+    p3: Tuple[str, str] = ("greet", "hi there!")
+    pairs.append(p1)
+    pairs.append(p2)
+    pairs.append(p3)
+    qs: str = urllib_parse.urlencode(pairs)
+    println("urlencode: " + qs)
+
+    parsed: List[Tuple[str, str]] = urllib_parse.parse_query(qs)
+    println("parse_query count: " + str(len(parsed)))
+    i: i64 = 0
+    while i < i64(len(parsed)):
+        pair: Tuple[str, str] = parsed[i]
+        println("  " + pair.0 + " = " + pair.1)
+        i = i + 1
+
+    # 8. parse_query on an empty string → empty list.
+    empty: List[Tuple[str, str]] = urllib_parse.parse_query("")
+    println("empty query len: " + str(len(empty)))
+
+    # 9. parse_query with a missing `=` — value defaults to "".
+    nokey: List[Tuple[str, str]] = urllib_parse.parse_query("flag&k=v")
+    println("nokey count: " + str(len(nokey)))
+    n0: Tuple[str, str] = nokey[0]
+    println("nokey[0]: " + n0.0 + "=[" + n0.1 + "]")
+
+    # 10. Bad percent-escape raises ValueError.
+    try:
+        bad: str = urllib_parse.unquote("a%ZZb")
+        println("UNREACHED: " + bad)
+    except ValueError as e:
+        println("caught bad escape")
+
+    println("done")
+    return 0

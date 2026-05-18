@@ -1881,9 +1881,352 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             Ok(p as u64)
         }
 
+        // ── M22 P2D: `struct` module ───────────────────────────────────
+        // Pack: encode N bytes as a string of N Unicode codepoints
+        // 0–255.  Each byte b ∈ 0..=127 is a 1-byte ASCII char in the
+        // resulting UTF-8 string; b ∈ 128..=255 is a 2-byte UTF-8
+        // sequence.  In both cases the str's *length in chars* equals
+        // the byte count, so users can `len(buf) == 4` for u32 packs.
+        //
+        // Unpack: walk the resulting String's chars(), treating each
+        // codepoint 0..=255 as one byte.  Any codepoint > 255 is a
+        // ValueError ("not a packed buffer").
+        NativeFn::StructPackU32Be => {
+            let v = arg_i64(args, 0);
+            let bytes = (v as u32).to_be_bytes();
+            let p = interp.alloc_string(&bytes_to_packed_str(&bytes));
+            Ok(p as u64)
+        }
+        NativeFn::StructPackU32Le => {
+            let v = arg_i64(args, 0);
+            let bytes = (v as u32).to_le_bytes();
+            let p = interp.alloc_string(&bytes_to_packed_str(&bytes));
+            Ok(p as u64)
+        }
+        NativeFn::StructPackU64Be => {
+            let v = arg_i64(args, 0);
+            let bytes = (v as u64).to_be_bytes();
+            let p = interp.alloc_string(&bytes_to_packed_str(&bytes));
+            Ok(p as u64)
+        }
+        NativeFn::StructPackU64Le => {
+            let v = arg_i64(args, 0);
+            let bytes = (v as u64).to_le_bytes();
+            let p = interp.alloc_string(&bytes_to_packed_str(&bytes));
+            Ok(p as u64)
+        }
+        NativeFn::StructPackF64Be => {
+            let v = arg_f64(args, 0);
+            let bytes = v.to_bits().to_be_bytes();
+            let p = interp.alloc_string(&bytes_to_packed_str(&bytes));
+            Ok(p as u64)
+        }
+        NativeFn::StructPackF64Le => {
+            let v = arg_f64(args, 0);
+            let bytes = v.to_bits().to_le_bytes();
+            let p = interp.alloc_string(&bytes_to_packed_str(&bytes));
+            Ok(p as u64)
+        }
+        NativeFn::StructUnpackU32Be => {
+            let s = arg_str(args, 0);
+            let off = arg_i64(args, 1) as usize;
+            let buf = packed_str_to_bytes(&s, off, 4, "unpack_u32_be")?;
+            let v = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as i64;
+            Ok(v as u64)
+        }
+        NativeFn::StructUnpackU32Le => {
+            let s = arg_str(args, 0);
+            let off = arg_i64(args, 1) as usize;
+            let buf = packed_str_to_bytes(&s, off, 4, "unpack_u32_le")?;
+            let v = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as i64;
+            Ok(v as u64)
+        }
+        NativeFn::StructUnpackU64Be => {
+            let s = arg_str(args, 0);
+            let off = arg_i64(args, 1) as usize;
+            let buf = packed_str_to_bytes(&s, off, 8, "unpack_u64_be")?;
+            let mut arr = [0u8; 8];
+            arr.copy_from_slice(&buf[..8]);
+            let v = u64::from_be_bytes(arr);
+            Ok(v)
+        }
+        NativeFn::StructUnpackU64Le => {
+            let s = arg_str(args, 0);
+            let off = arg_i64(args, 1) as usize;
+            let buf = packed_str_to_bytes(&s, off, 8, "unpack_u64_le")?;
+            let mut arr = [0u8; 8];
+            arr.copy_from_slice(&buf[..8]);
+            let v = u64::from_le_bytes(arr);
+            Ok(v)
+        }
+        NativeFn::StructUnpackF64Be => {
+            let s = arg_str(args, 0);
+            let off = arg_i64(args, 1) as usize;
+            let buf = packed_str_to_bytes(&s, off, 8, "unpack_f64_be")?;
+            let mut arr = [0u8; 8];
+            arr.copy_from_slice(&buf[..8]);
+            let v = f64::from_bits(u64::from_be_bytes(arr));
+            Ok(v.to_bits())
+        }
+        NativeFn::StructUnpackF64Le => {
+            let s = arg_str(args, 0);
+            let off = arg_i64(args, 1) as usize;
+            let buf = packed_str_to_bytes(&s, off, 8, "unpack_f64_le")?;
+            let mut arr = [0u8; 8];
+            arr.copy_from_slice(&buf[..8]);
+            let v = f64::from_bits(u64::from_le_bytes(arr));
+            Ok(v.to_bits())
+        }
+
+        // ── M22 P2D: `urllib_parse` module ─────────────────────────────
+        // Hand-rolled URL helpers — no `url` crate dependency.  See
+        // §9.16 for the unreserved-character set (`A-Z a-z 0-9 - _ . ~`).
+        // `urlencode` / `parse_query` round-trip arbitrary key/value
+        // pairs; the encode side uses `quote_plus` (form-encoding,
+        // `' '` → `'+'`) to match the dominant Python idiom for query
+        // strings.
+        NativeFn::UrlQuote => {
+            let s = arg_str(args, 0);
+            let out = url_quote(&s, false);
+            let p = interp.alloc_string(&out);
+            Ok(p as u64)
+        }
+        NativeFn::UrlQuotePlus => {
+            let s = arg_str(args, 0);
+            let out = url_quote(&s, true);
+            let p = interp.alloc_string(&out);
+            Ok(p as u64)
+        }
+        NativeFn::UrlUnquote => {
+            let s = arg_str(args, 0);
+            let out = url_unquote(&s, false)?;
+            let p = interp.alloc_string(&out);
+            Ok(p as u64)
+        }
+        NativeFn::UrlUnquotePlus => {
+            let s = arg_str(args, 0);
+            let out = url_unquote(&s, true)?;
+            let p = interp.alloc_string(&out);
+            Ok(p as u64)
+        }
+        NativeFn::UrlEncode => {
+            // Input: List[Tuple[str, str]] — each tuple is a heap object
+            // with two slots at HDR+0 / HDR+8 holding *StringRepr pointers.
+            let lst = arg_u64(args, 0) as *const crate::object::ListRepr;
+            if lst.is_null() {
+                return Err(VmError::UncaughtException {
+                    type_name: "NullPointerError".into(),
+                    message: "urlencode on null list".into(),
+                });
+            }
+            let mut parts: Vec<String> = Vec::new();
+            // SAFETY: lst was allocated as a ListRepr by the VM.
+            unsafe {
+                let len = (*lst).length;
+                let data = (*lst).data as *const u64;
+                for i in 0..len {
+                    let tup_ptr = std::ptr::read_unaligned(data.add(i)) as *const u8;
+                    if tup_ptr.is_null() {
+                        return Err(VmError::UncaughtException {
+                            type_name: "NullPointerError".into(),
+                            message: format!("urlencode: tuple #{i} is null"),
+                        });
+                    }
+                    // Tuple slots live at HDR + offset.  Reuse `crate::interp::HDR`
+                    // semantics — it's the size of ObjectHeader, currently 24 bytes.
+                    let slot0_ptr = tup_ptr.add(OBJECT_HEADER_SIZE);
+                    let slot1_ptr = tup_ptr.add(OBJECT_HEADER_SIZE + 8);
+                    let k_ptr = std::ptr::read_unaligned(slot0_ptr as *const u64) as *const StringRepr;
+                    let v_ptr = std::ptr::read_unaligned(slot1_ptr as *const u64) as *const StringRepr;
+                    let k = read_str(k_ptr);
+                    let v = read_str(v_ptr);
+                    parts.push(format!("{}={}", url_quote(&k, true), url_quote(&v, true)));
+                }
+            }
+            let joined = parts.join("&");
+            let p = interp.alloc_string(&joined);
+            Ok(p as u64)
+        }
+        NativeFn::UrlParseQuery => {
+            let qs = arg_str(args, 0);
+            // Split on `&` into key=value pairs.  A pair with no `=` is
+            // treated as (key, "").  Empty input → empty list.
+            let mut pairs: Vec<(String, String)> = Vec::new();
+            if !qs.is_empty() {
+                for chunk in qs.split('&') {
+                    if chunk.is_empty() {
+                        continue;
+                    }
+                    let (k, v) = match chunk.find('=') {
+                        Some(i) => (&chunk[..i], &chunk[i + 1..]),
+                        None => (chunk, ""),
+                    };
+                    let kd = url_unquote(k, true)?;
+                    let vd = url_unquote(v, true)?;
+                    pairs.push((kd, vd));
+                }
+            }
+            let lst = interp.alloc_list(pairs.len());
+            for (k, v) in pairs {
+                let k_ptr = interp.alloc_string(&k) as u64;
+                let v_ptr = interp.alloc_string(&v) as u64;
+                let tup = interp.alloc_tuple_obj(&[k_ptr, v_ptr]) as u64;
+                // SAFETY: lst is freshly allocated and owned by us.
+                unsafe { interp.list_push(lst, tup) };
+            }
+            Ok(lst as u64)
+        }
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
+    }
+}
+
+/// Size of `ObjectHeader` in bytes.  Tuple slots start at this offset
+/// from the object pointer.  Mirrors `crate::interp::HDR` (a private
+/// const there); we re-derive it via `size_of` so divergence between
+/// the two consts is impossible at the type level.
+const OBJECT_HEADER_SIZE: usize = std::mem::size_of::<crate::object::ObjectHeader>();
+
+/// Convert a byte slice into a string whose chars are each codepoint 0–255.
+/// `len(result_in_chars) == bytes.len()`.  Bytes 0–127 occupy 1 UTF-8
+/// byte; bytes 128–255 occupy 2 UTF-8 bytes (so the resulting str's
+/// `byte_len` is ≥ `bytes.len()`).  Round-trips losslessly via
+/// `packed_str_to_bytes`.
+fn bytes_to_packed_str(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        // SAFETY: every u8 maps to a valid Unicode codepoint (the C0 / Latin-1
+        // range fits inside char without surrogate concerns).
+        s.push(char::from(b));
+    }
+    s
+}
+
+/// Inverse of `bytes_to_packed_str`: walk `s.chars()` from `offset`, take
+/// `n` codepoints, require each to be ≤ 255.  Raises `ValueError` on
+/// short buffer / out-of-range char / negative offset (already converted
+/// to `usize` by the caller, but `arg_i64` could have sent us a huge
+/// number from a negative i32; we range-check here too).
+fn packed_str_to_bytes(s: &str, offset: usize, n: usize, who: &str) -> Result<Vec<u8>, VmError> {
+    let mut out = Vec::with_capacity(n);
+    let chars: Vec<char> = s.chars().collect();
+    if offset.checked_add(n).map(|end| end > chars.len()).unwrap_or(true) {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "{who}: need {n} bytes at offset {offset}, buffer has {} chars",
+                chars.len()
+            ),
+        });
+    }
+    for c in chars.iter().skip(offset).take(n) {
+        let cp = *c as u32;
+        if cp > 255 {
+            return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!(
+                    "{who}: codepoint U+{:04X} at offset {} is not a packed byte (must be 0..255)",
+                    cp,
+                    offset + out.len()
+                ),
+            });
+        }
+        out.push(cp as u8);
+    }
+    Ok(out)
+}
+
+/// Percent-encode `s`.  Unreserved chars (`A-Z a-z 0-9 - _ . ~`) pass
+/// through; all others become `%HH` (uppercase hex of each UTF-8 byte).
+/// When `plus_spaces` is true, ASCII space becomes `+` instead of `%20`
+/// (form-encoding mode).
+fn url_quote(s: &str, plus_spaces: bool) -> String {
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            b' ' if plus_spaces => out.push('+'),
+            _ => {
+                out.push('%');
+                out.push(hex_nibble(b >> 4));
+                out.push(hex_nibble(b & 0x0F));
+            }
+        }
+    }
+    out
+}
+
+fn hex_nibble(n: u8) -> char {
+    match n {
+        0..=9 => (b'0' + n) as char,
+        10..=15 => (b'A' + (n - 10)) as char,
+        _ => '?',
+    }
+}
+
+/// Decode percent-encoded `s`.  `%HH` triples → the byte `0xHH`.  When
+/// `plus_spaces` is true, `+` decodes to ASCII space (form-encoding).
+/// The resulting byte sequence is interpreted as UTF-8; non-UTF-8 input
+/// is recovered lossily via `String::from_utf8_lossy`.  Malformed `%XY`
+/// (non-hex digits after `%`) raises `ValueError`.
+fn url_unquote(s: &str, plus_spaces: bool) -> Result<String, VmError> {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'%' {
+            if i + 2 >= bytes.len() {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("unquote: truncated `%` escape at position {i}"),
+                });
+            }
+            let h = hex_digit(bytes[i + 1]).ok_or_else(|| VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!(
+                    "unquote: invalid hex digit `{}` at position {}",
+                    bytes[i + 1] as char,
+                    i + 1
+                ),
+            })?;
+            let l = hex_digit(bytes[i + 2]).ok_or_else(|| VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!(
+                    "unquote: invalid hex digit `{}` at position {}",
+                    bytes[i + 2] as char,
+                    i + 2
+                ),
+            })?;
+            out.push((h << 4) | l);
+            i += 3;
+        } else if b == b'+' && plus_spaces {
+            out.push(b' ');
+            i += 1;
+        } else {
+            out.push(b);
+            i += 1;
+        }
+    }
+    // Decoded bytes may form valid UTF-8 (e.g. `%E2%98%83` → ☃).  If not,
+    // fall back lossily — matches Python's `urllib.parse.unquote` default
+    // `errors='replace'`.
+    Ok(match String::from_utf8(out) {
+        Ok(s) => s,
+        Err(e) => String::from_utf8_lossy(&e.into_bytes()).into_owned(),
+    })
+}
+
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }
 

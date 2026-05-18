@@ -420,6 +420,63 @@ pub enum NativeFn {
     /// on empty input.
     StatsModeStr   = 329,
 
+    // ── 330-349: M22 P2D — `struct` + `urllib_parse` modules ────────────
+    // The `struct` module packs primitive integer / float values into
+    // fixed-width binary buffers.  StrictPy's `str` is logically a
+    // sequence of Unicode chars; we encode each "byte" as a Unicode
+    // codepoint 0–255 (so byte 0xFF becomes char U+00FF, which encodes
+    // to two UTF-8 bytes on disk but reads back as one char).  The
+    // resulting `str` is therefore NOT a valid binary buffer on the
+    // wire — for that, v0.3 will add a real `bytes` runtime type — but
+    // it round-trips losslessly through `pack`/`unpack` and is a usable
+    // shape for in-program protocol fiddling.  See spec §9.15.
+    //
+    // v0.3 / stretch goals not shipped:
+    //   - pack_u16_be / le + unpack_u16_be / le (two more ID pairs)
+    //   - real `bytes` type → would let `pack` return raw bytes, not
+    //     a "wide-char" str
+    //
+    /// `struct.pack_u32_be(value: i64) -> str` — 4 chars/bytes, big-endian.
+    StructPackU32Be   = 330,
+    /// `struct.pack_u32_le(value: i64) -> str` — 4 chars/bytes, little-endian.
+    StructPackU32Le   = 331,
+    /// `struct.pack_u64_be(value: i64) -> str` — 8 chars/bytes, big-endian.
+    StructPackU64Be   = 332,
+    /// `struct.pack_u64_le(value: i64) -> str` — 8 chars/bytes, little-endian.
+    StructPackU64Le   = 333,
+    /// `struct.pack_f64_be(value: f64) -> str` — 8 chars/bytes, IEEE 754 big-endian.
+    StructPackF64Be   = 334,
+    /// `struct.pack_f64_le(value: f64) -> str` — 8 chars/bytes, IEEE 754 little-endian.
+    StructPackF64Le   = 335,
+    /// `struct.unpack_u32_be(bytes: str, offset: i32) -> i64`.
+    StructUnpackU32Be = 336,
+    /// `struct.unpack_u32_le(bytes: str, offset: i32) -> i64`.
+    StructUnpackU32Le = 337,
+    /// `struct.unpack_u64_be(bytes: str, offset: i32) -> i64`.
+    StructUnpackU64Be = 338,
+    /// `struct.unpack_u64_le(bytes: str, offset: i32) -> i64`.
+    StructUnpackU64Le = 339,
+    /// `struct.unpack_f64_be(bytes: str, offset: i32) -> f64`.
+    StructUnpackF64Be = 340,
+    /// `struct.unpack_f64_le(bytes: str, offset: i32) -> f64`.
+    StructUnpackF64Le = 341,
+
+    // ── `urllib_parse` module (342-347) ─────────────────────────────────
+    // Hand-rolled URL helpers.  Module name uses underscore — submodules
+    // (e.g. `urllib.parse`) are v0.3.  `parse_url` / `join_url` deferred.
+    /// `urllib_parse.quote(s: str) -> str` — percent-encode unsafe chars.
+    UrlQuote      = 342,
+    /// `urllib_parse.quote_plus(s: str) -> str` — quote with `+` for spaces.
+    UrlQuotePlus  = 343,
+    /// `urllib_parse.unquote(s: str) -> str` — inverse of `quote`.
+    UrlUnquote    = 344,
+    /// `urllib_parse.unquote_plus(s: str) -> str` — inverse of `quote_plus`.
+    UrlUnquotePlus = 345,
+    /// `urllib_parse.urlencode(pairs: List[Tuple[str, str]]) -> str`.
+    UrlEncode     = 346,
+    /// `urllib_parse.parse_query(qs: str) -> List[Tuple[str, str]]`.
+    UrlParseQuery = 347,
+
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
     /// encounters. The VM treats this as a runtime error.
@@ -603,6 +660,27 @@ impl NativeFn {
             327 => Some(Self::StatsSum),
             328 => Some(Self::StatsQuantile),
             329 => Some(Self::StatsModeStr),
+            // M22 P2D: struct module (330-341, 12 ids).
+            330 => Some(Self::StructPackU32Be),
+            331 => Some(Self::StructPackU32Le),
+            332 => Some(Self::StructPackU64Be),
+            333 => Some(Self::StructPackU64Le),
+            334 => Some(Self::StructPackF64Be),
+            335 => Some(Self::StructPackF64Le),
+            336 => Some(Self::StructUnpackU32Be),
+            337 => Some(Self::StructUnpackU32Le),
+            338 => Some(Self::StructUnpackU64Be),
+            339 => Some(Self::StructUnpackU64Le),
+            340 => Some(Self::StructUnpackF64Be),
+            341 => Some(Self::StructUnpackF64Le),
+            // M22 P2D: urllib_parse module (342-347, 6 ids).
+            342 => Some(Self::UrlQuote),
+            343 => Some(Self::UrlQuotePlus),
+            344 => Some(Self::UrlUnquote),
+            345 => Some(Self::UrlUnquotePlus),
+            346 => Some(Self::UrlEncode),
+            347 => Some(Self::UrlParseQuery),
+            // 348-349 reserved for v0.3 (parse_url + join_url).
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

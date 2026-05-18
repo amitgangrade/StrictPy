@@ -1,0 +1,89 @@
+"""struct_demo — M22 P2D demo of the stdlib `struct` module.
+
+`struct` packs primitive integers / IEEE 754 doubles into fixed-width
+binary buffers represented as StrictPy `str`.  Each byte is one Unicode
+codepoint 0–255, so `len(buf) == byte_count` even when high bytes
+appear in the buffer.
+
+Per-byte char encoding is a v0.2 simplification — v0.3 will add a real
+`bytes` runtime type for proper wire-format work.  The current shape
+round-trips losslessly through pack/unpack and is enough for in-program
+protocol fiddling (Adler-32 checksums, ID encoding, etc.).
+"""
+
+import struct
+
+fn main() -> i32:
+    # 1. u32 big-endian round-trip on a known value.
+    n1: i64 = 0x01020304
+    buf1: str = struct.pack_u32_be(n1)
+    println("u32_be len: " + str(len(buf1)))
+    got1: i64 = struct.unpack_u32_be(buf1, 0)
+    println("u32_be round-trip: " + str(got1))
+
+    # 2. u32 little-endian round-trip — same value, different bytes.
+    buf2: str = struct.pack_u32_le(n1)
+    got2: i64 = struct.unpack_u32_le(buf2, 0)
+    println("u32_le round-trip: " + str(got2))
+
+    # 3. Endianness sanity: 0x01020304 BE != LE bytewise.
+    if buf1 == buf2:
+        println("BE/LE same bytes: BUG")
+    else:
+        println("BE/LE differ: ok")
+
+    # 4. Max u32 (0xFFFFFFFF) round-trip.  i64 holds it as 4294967295.
+    nmax: i64 = 4294967295
+    buf3: str = struct.pack_u32_be(nmax)
+    got3: i64 = struct.unpack_u32_be(buf3, 0)
+    println("u32 max round-trip: " + str(got3))
+
+    # 5. u64 big-endian on a 64-bit-only value.
+    n4: i64 = 9223372036854775807
+    buf4: str = struct.pack_u64_be(n4)
+    println("u64_be len: " + str(len(buf4)))
+    got4: i64 = struct.unpack_u64_be(buf4, 0)
+    println("u64_be round-trip: " + str(got4))
+
+    # 6. u64 little-endian.
+    buf5: str = struct.pack_u64_le(n4)
+    got5: i64 = struct.unpack_u64_le(buf5, 0)
+    println("u64_le round-trip: " + str(got5))
+
+    # 7. f64 round-trip on a non-trivial fraction.  3.141592653589793
+    # is a 17-significant-digit representation of pi that survives
+    # double-precision round-tripping by IEEE 754 design.
+    pi: f64 = 3.141592653589793
+    bufp: str = struct.pack_f64_be(pi)
+    println("f64_be len: " + str(len(bufp)))
+    gotp: f64 = struct.unpack_f64_be(bufp, 0)
+    if gotp == pi:
+        println("f64_be round-trip pi: ok")
+    else:
+        println("f64_be round-trip pi: FAIL")
+
+    bufp2: str = struct.pack_f64_le(pi)
+    gotp2: f64 = struct.unpack_f64_le(bufp2, 0)
+    if gotp2 == pi:
+        println("f64_le round-trip pi: ok")
+    else:
+        println("f64_le round-trip pi: FAIL")
+
+    # 8. Offset-into-buffer unpack: concatenate two u32s, unpack from
+    # offset 4 to pull out the second.
+    a: i64 = 0xAABBCCDD
+    b: i64 = 0x11223344
+    cat: str = struct.pack_u32_be(a) + struct.pack_u32_be(b)
+    println("cat len: " + str(len(cat)))
+    second: i64 = struct.unpack_u32_be(cat, 4)
+    println("second u32: " + str(second))
+
+    # 9. Out-of-bounds offset raises ValueError.
+    try:
+        oob: i64 = struct.unpack_u32_be(buf1, 100)
+        println("UNREACHED: " + str(oob))
+    except ValueError as e:
+        println("caught oob")
+
+    println("done")
+    return 0
