@@ -26,8 +26,9 @@ fn quicksort(a: List[i64], lo: i64, hi: i64) -> None:
 fn main() -> i32:
     a: List[i64] = [5, 2, 8, 1, 9, 3, 7, 4, 6, 0]
     quicksort(a, 0, 9)
-    i: i64 = 0
-    while i < 10:
-        println("a[" + str(i) + "] = " + str(a[i]))
-        i = i + 1
+    # Demonstrates the M9 `for x in xs:` desugaring — formerly a manual
+    # `while i < len(a)` index loop. The compiler lowers this to the
+    # equivalent indexed while in IR (see ir.rs::Stmt::For).
+    for v: i64 in a:
+        println(str(v))
     return 0

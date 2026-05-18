@@ -1,0 +1,194 @@
+"""In-memory KV store with an append-only WAL for durability.
+Architecture (mirrors examples/producer.spy):
+
+  - main thread sends \\t-separated command strings on `cmds: Channel[str]`
+  - worker thread owns the `Dict[str, str]` storage, replays the WAL from
+    disk at startup, then loops reading commands and applying them
+  - responses come back on `resp: Channel[str]`
+
+Commands are tab-separated:
+  SET\\tkey\\tvalue   → "OK"
+  GET\\tkey           → value or "<none>"
+  DEL\\tkey           → "OK" or "<missing>"
+  SHUTDOWN            → "BYE" then worker exits
+
+Why a SHUTDOWN sentinel instead of `close()` + `try_recv()`?
+  Known M5 limitation in vm/src/builtins.rs::ChannelTryRecv — both
+  "empty" and "disconnected" return NONE_SENTINEL. producer.spy gets
+  away with that because the consumer ALSO drains "any prefix ≥10", but
+  for a request/response KV store we'd lose commands. SHUTDOWN is the
+  unambiguous signal."""
+
+from threading import Thread, Channel
+
+# ── String helpers ──────────────────────────────────────────────────────
+# v0.1 has no `str.split(sep)` (see csv_aggregate.spy for the same gap)
+# so we hand-roll a tab splitter and a line splitter.
+
+fn split_tabs(s: str) -> List[str]:
+    out: List[str] = []
+    n: i64 = i64(len(s))
+    i: i64 = 0
+    start: i64 = 0
+    while i < n:
+        c: char = s[i]
+        if c == '\t':
+            out.append(s.slice(start, i))
+            start = i + 1
+        i = i + 1
+    out.append(s.slice(start, n))
+    return out
+
+fn split_lines(s: str) -> List[str]:
+    out: List[str] = []
+    n: i64 = i64(len(s))
+    i: i64 = 0
+    start: i64 = 0
+    while i < n:
+        c: char = s[i]
+        if c == '\n':
+            if i > start:
+                out.append(s.slice(start, i))
+            start = i + 1
+        i = i + 1
+    if start < n:
+        out.append(s.slice(start, n))
+    return out
+
+# ── WAL replay ──────────────────────────────────────────────────────────
+# WAL format: one record per line, e.g.
+#   SET\\tname\\talice
+#   DEL\\tname
+# Replaying means re-applying each record into a fresh dict.
+
+fn replay_wal(state: Dict[str, str], wal_text: str) -> None:
+    lines: List[str] = split_lines(wal_text)
+    i: i64 = 0
+    while i < len(lines):
+        line: str = lines[i]
+        if len(line) > 0:
+            fields: List[str] = split_tabs(line)
+            if len(fields) >= 1:
+                op: str = fields[0]
+                if op == "SET" and len(fields) >= 3:
+                    state[fields[1]] = fields[2]
+                elif op == "DEL" and len(fields) >= 2:
+                    # Spec §7.5 has `del d[k]` but to keep this example
+                    # focused we emulate delete by setting to a sentinel
+                    # string. A real impl would use the `del` statement.
+                    state[fields[1]] = "<deleted>"
+        i = i + 1
+
+# ── Worker loop ─────────────────────────────────────────────────────────
+# This closure runs on its own OS thread. It captures `cmds`, `resp`, and
+# `wal_path` from the outer scope (producer.spy proves M6 supports this
+# closure-capture-across-threads pattern).
+
+fn worker_loop(cmds: Channel[str], resp: Channel[str], wal_path: str) -> None:
+    state: Dict[str, str] = {}
+
+    # 1. Replay the WAL into `state`. If the file doesn't exist we just
+    #    start empty. (We can't catch IOErrors in v0.1 — open() panics
+    #    on missing files — so the test always pre-touches the WAL.)
+    initial: str = ""
+    with open(wal_path, "r") as f: io.File:
+        initial = f.read()
+    replay_wal(state, initial)
+
+    # 2. Open the WAL for append.
+    wal: io.File = open(wal_path, "a")
+
+    # 3. Process commands. We use blocking recv() instead of try_recv()
+    #    because try_recv can't tell "empty" from "closed" (see header).
+    #    The SHUTDOWN sentinel is what gets us out of the loop.
+    running: bool = true
+    while running:
+        cmd: str = cmds.recv()
+        fields: List[str] = split_tabs(cmd)
+        op: str = fields[0]
+        if op == "SHUTDOWN":
+            resp.send("BYE")
+            running = false
+        elif op == "SET":
+            if len(fields) >= 3:
+                k: str = fields[1]
+                v: str = fields[2]
+                state[k] = v
+                wal.write("SET\t" + k + "\t" + v + "\n")
+                resp.send("OK")
+            else:
+                resp.send("ERR")
+        elif op == "GET":
+            if len(fields) >= 2:
+                k2: str = fields[1]
+                got: str? = state.get(k2)
+                if got is none:
+                    resp.send("<none>")
+                else:
+                    resp.send(got)
+            else:
+                resp.send("ERR")
+        elif op == "DEL":
+            if len(fields) >= 2:
+                k3: str = fields[1]
+                # Bug #3 found: the typechecker rejects `dict.has(k)` with
+                # E2004 "no method `has` on type Dict[str, str]", even
+                # though shared/src/native.rs::DictHas exists and
+                # NativeFn::from_name maps "has" → DictHas. The method is
+                # plumbed end-to-end in the runtime but unknown to the
+                # frontend's synth_method_call dispatch in
+                # compiler/src/typecheck.rs. Workaround: use get() with
+                # an `is none` check.
+                existing: str? = state.get(k3)
+                if existing is none:
+                    resp.send("<missing>")
+                else:
+                    state[k3] = "<deleted>"
+                    wal.write("DEL\t" + k3 + "\n")
+                    resp.send("OK")
+            else:
+                resp.send("ERR")
+        else:
+            resp.send("ERR")
+    wal.close()
+
+# ── Main: drive the worker through a small scripted workload ───────────
+
+fn send_and_log(cmds: Channel[str], resp: Channel[str], cmd: str) -> None:
+    cmds.send(cmd)
+    r: str = resp.recv()
+    println(cmd + " → " + r)
+
+fn main() -> i32:
+    wal_path: str = "kvstore.wal"
+    cmds: Channel[str] = Channel[str](16)
+    resp: Channel[str] = Channel[str](16)
+    # Lambda captures cmds, resp, and wal_path — same pattern as
+    # producer.spy lines 26–28.
+    worker: Thread = Thread(fn() -> None: worker_loop(cmds, resp, wal_path))
+    worker.start()
+
+    send_and_log(cmds, resp, "SET\tname\talice")
+    send_and_log(cmds, resp, "SET\tage\t30")
+    send_and_log(cmds, resp, "GET\tname")
+    send_and_log(cmds, resp, "GET\tage")
+    send_and_log(cmds, resp, "GET\tmissing")
+    send_and_log(cmds, resp, "SET\tname\tbob")
+    send_and_log(cmds, resp, "GET\tname")
+    send_and_log(cmds, resp, "DEL\tage")
+    send_and_log(cmds, resp, "DEL\tnope")
+
+    # Drive enough ops to give the GC something to think about. Each
+    # iteration allocates a fresh command string, a response string, and
+    # touches the dict. If M9's `in_jit` flag really suppresses GC on
+    # long-running JIT'd code, heap growth here is the canary.
+    i: i64 = 0
+    while i < 200:
+        send_and_log(cmds, resp, "SET\tcounter\titer-" + str(i))
+        i = i + 1
+
+    send_and_log(cmds, resp, "GET\tcounter")
+    send_and_log(cmds, resp, "SHUTDOWN")
+
+    worker.join()
+    return 0

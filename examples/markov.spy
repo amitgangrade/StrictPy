@@ -1,0 +1,157 @@
+"""Markov-chain text generator over a small Alice-in-Wonderland corpus.
+
+Reads an inline corpus, builds an order-1 transition table (each unique
+word maps to a list of next-words it has been observed before, with
+duplicates so the implicit frequency is preserved), then walks the chain
+for ~40 steps using a deterministic LCG starting from a seed.
+
+Real-world Program #2. Smaller than json_parse and exercises a different
+slice of the type system: lots of string operations, Dict[str, List[str]]
+(does work — see probe), and integer arithmetic for the LCG.
+
+LIVE-LANGUAGE NOTES (see bug report):
+- `Dict[str, List[str]]` works cleanly in v0.1 — the M5-era "dicts only
+  support primitive values" warning turned out not to bite here; the
+  values are List[str] which is a reference handle. Round-trips through
+  `d.get(k)` and `d[k] = xs` both work. Mutations on the retrieved list
+  ARE visible through subsequent reads.
+- No `random` module in the stdlib (§9) so we hand-roll an LCG.
+- No `str.split(sep)` so we reuse the whitespace state-machine from
+  wordcount.spy.
+- `pseudo_random` uses Numerical Recipes constants. `% 2147483648` keeps
+  the result fitting in i32 once we cast back.
+"""
+
+# ── Random ────────────────────────────────────────────────────────────────
+# Linear-congruential generator. State is just the previous i64; caller
+# threads it through. Not crypto, just reproducible noise for a tour.
+
+fn pseudo_random(seed: i64) -> i64:
+    return (seed * 1103515245i64 + 12345i64) % 2147483648i64
+
+fn pick_index(seed: i64, n: i64) -> i64:
+    if n <= 0:
+        return 0
+    r: i64 = seed
+    if r < 0:
+        r = -r
+    return r % n
+
+# ── Tokenisation ──────────────────────────────────────────────────────────
+# Same idea as wordcount.spy: walk char-by-char, split on whitespace.
+# We deliberately keep punctuation glued to words so the chain stays small
+# and recognisable as English when printed.
+
+fn is_ws(c: char) -> bool:
+    return c == ' ' or c == '\t' or c == '\n' or c == '\r'
+
+fn split_ws(s: str) -> List[str]:
+    out: List[str] = []
+    n: i64 = i64(len(s))
+    i: i64 = 0
+    start: i64 = 0
+    in_word: bool = false
+    while i < n:
+        c: char = s[i]
+        if is_ws(c):
+            if in_word:
+                out.append(s.slice(start, i))
+                in_word = false
+        else:
+            if not in_word:
+                start = i
+                in_word = true
+        i = i + 1
+    if in_word:
+        out.append(s.slice(start, n))
+    return out
+
+# ── Chain construction ────────────────────────────────────────────────────
+# For each consecutive pair (words[i], words[i+1]) we append the second
+# to the list under the first key. Duplicates ARE kept — that gives us
+# implicit frequency weighting "for free" when we pick a uniform random
+# index later.
+
+fn build_chain(words: List[str]) -> Dict[str, List[str]]:
+    chain: Dict[str, List[str]] = {}
+    n: i64 = i64(len(words))
+    i: i64 = 0
+    while i < n - 1:
+        cur: str = words[i]
+        nxt: str = words[i + 1]
+        existing: List[str]? = chain.get(cur)
+        if existing is none:
+            xs: List[str] = []
+            xs.append(nxt)
+            chain[cur] = xs
+        else:
+            existing.append(nxt)
+        i = i + 1
+    return chain
+
+# ── Generation ────────────────────────────────────────────────────────────
+# Start from a seed word that's known to be in the corpus. At each step,
+# look up successors and pick one. If the current word has no successors
+# (end of corpus), fall back to the seed.
+
+fn generate(chain: Dict[str, List[str]], start: str, n_words: i32, seed: i64) -> str:
+    out: str = start
+    cur: str = start
+    r: i64 = seed
+    i: i32 = 0
+    while i < n_words:
+        succs: List[str]? = chain.get(cur)
+        if succs is none:
+            # End of chain — restart at the seed.
+            cur = start
+        else:
+            # `is not none` is broken in v0.1 (always returns the wrong
+            # answer), so we use the `is none`-then-else form. The else
+            # branch narrows succs to `List[str]`.
+            r = pseudo_random(r)
+            idx: i64 = pick_index(r, i64(len(succs)))
+            cur = succs[idx]
+            out = out + " " + cur
+        i = i + 1
+    return out
+
+# ── Corpus ────────────────────────────────────────────────────────────────
+# Two paragraphs from Lewis Carroll's _Alice's Adventures in Wonderland_
+# (public domain). Keeps "Alice" as the obvious seed.
+
+fn corpus() -> str:
+    # StrictPy v0.1 does NOT allow implicit line continuation across
+    # `+` (any attempt to break a string-concat over multiple lines
+    # raises E0001 "indentation must increase by exactly 4 spaces").
+    # We build the corpus by appending to a local accumulator.
+    s: str = ""
+    s = s + "Alice was beginning to get very tired of sitting by her sister "
+    s = s + "on the bank and of having nothing to do once or twice she had "
+    s = s + "peeped into the book her sister was reading but it had no "
+    s = s + "pictures or conversations in it and what is the use of a book "
+    s = s + "thought Alice without pictures or conversations So she was "
+    s = s + "considering in her own mind as well as she could for the hot "
+    s = s + "day made her feel very sleepy and stupid whether the pleasure "
+    s = s + "of making a daisy chain would be worth the trouble of getting "
+    s = s + "up and picking the daisies when suddenly a White Rabbit with "
+    s = s + "pink eyes ran close by her There was nothing so very remarkable "
+    s = s + "in that nor did Alice think it so very much out of the way to "
+    s = s + "hear the Rabbit say to itself Oh dear Oh dear I shall be late "
+    s = s + "when she thought it over afterwards it occurred to her that "
+    s = s + "she ought to have wondered at this but at the time it all "
+    s = s + "seemed quite natural"
+    return s
+
+fn main() -> i32:
+    text: str = corpus()
+    words: List[str] = split_ws(text)
+    println("corpus words: " + str(len(words)))
+    chain: Dict[str, List[str]] = build_chain(words)
+    println("unique tokens: " + str(len(chain)))
+
+    # Generate ~40 words starting from "Alice" with a fixed LCG seed so
+    # the output is reproducible across runs.
+    out: str = generate(chain, "Alice", 40i32, 1234567i64)
+    println("--- generated ---")
+    println(out)
+    return 0

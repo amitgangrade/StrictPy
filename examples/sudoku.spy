@@ -1,0 +1,205 @@
+"""Sudoku solver via depth-first backtracking. Hardcodes a classic
+"easy" 9x9 puzzle (the canonical Wikipedia example), finds the unique
+solution, and pretty-prints both the original and the solved board.
+
+This program stresses StrictPy's:
+  - `List[List[i32]]` indexed mutation (`grid[r][c] = digit`) and the
+    invariant that `grid[r]` returns a *reference* to the inner row so
+    the assignment is observed by the caller.
+  - Recursive `bool`-returning functions with early bailout — the
+    nullable-narrowing bug that bit csv_aggregate could plausibly have
+    boolean cousins around `if recurse(...): return true`.
+  - 2D mutation + restoration around a recursive call:
+        grid[r][c] = d
+        if solve(grid): return true
+        grid[r][c] = 0
+    This round-trip must leave the board byte-identical when the branch
+    fails, or the algorithm wedges.
+  - Integer floor division (`r // 3`) for the 3x3 box index.
+
+Recursion depth: a 9x9 sudoku has at most 81 empty cells, so the
+recursion never approaches the 1024-frame VM cap (§14.2). We
+deliberately avoid the "hardest sudoku" puzzles for that reason.
+
+No `for x in xs:` in StrictPy v0.1, no `list.sort()`, no `range` in
+`for`, no comprehensions — everything is indexed `while`."""
+
+final N: i32 = 9
+
+# ── Board construction ───────────────────────────────────────────────
+# We build the puzzle row-by-row at runtime rather than via a 9x9
+# literal because StrictPy v0.1 doesn't have a tested 2D list literal
+# pattern in the existing examples; the wordcount/csv_aggregate idiom
+# is incremental `.append`. Each entry uses 0 for a blank.
+
+fn make_row(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32, h: i32, i: i32) -> List[i32]:
+    row: List[i32] = []
+    row.append(a)
+    row.append(b)
+    row.append(c)
+    row.append(d)
+    row.append(e)
+    row.append(f)
+    row.append(g)
+    row.append(h)
+    row.append(i)
+    return row
+
+fn make_puzzle() -> List[List[i32]]:
+    """Canonical Wikipedia easy puzzle. Solution is unique and well
+    known (first row of solution: 5 3 4 6 7 8 9 1 2)."""
+    g: List[List[i32]] = []
+    g.append(make_row(5, 3, 0, 0, 7, 0, 0, 0, 0))
+    g.append(make_row(6, 0, 0, 1, 9, 5, 0, 0, 0))
+    g.append(make_row(0, 9, 8, 0, 0, 0, 0, 6, 0))
+    g.append(make_row(8, 0, 0, 0, 6, 0, 0, 0, 3))
+    g.append(make_row(4, 0, 0, 8, 0, 3, 0, 0, 1))
+    g.append(make_row(7, 0, 0, 0, 2, 0, 0, 0, 6))
+    g.append(make_row(0, 6, 0, 0, 0, 0, 2, 8, 0))
+    g.append(make_row(0, 0, 0, 4, 1, 9, 0, 0, 5))
+    g.append(make_row(0, 0, 0, 0, 8, 0, 0, 7, 9))
+    return g
+
+# ── Constraint checks ────────────────────────────────────────────────
+
+fn row_has(grid: List[List[i32]], r: i32, digit: i32) -> bool:
+    """True if `digit` already appears in row `r`."""
+    c: i32 = 0
+    while c < N:
+        if grid[r][c] == digit:
+            return true
+        c = c + 1
+    return false
+
+fn col_has(grid: List[List[i32]], c: i32, digit: i32) -> bool:
+    """True if `digit` already appears in column `c`."""
+    r: i32 = 0
+    while r < N:
+        if grid[r][c] == digit:
+            return true
+        r = r + 1
+    return false
+
+fn box_has(grid: List[List[i32]], r: i32, c: i32, digit: i32) -> bool:
+    """True if `digit` already appears in the 3x3 box containing
+    cell (r, c). Box origin is found by integer floor-division."""
+    br: i32 = (r // 3) * 3
+    bc: i32 = (c // 3) * 3
+    dr: i32 = 0
+    while dr < 3:
+        dc: i32 = 0
+        while dc < 3:
+            if grid[br + dr][bc + dc] == digit:
+                return true
+            dc = dc + 1
+        dr = dr + 1
+    return false
+
+fn is_valid(grid: List[List[i32]], r: i32, c: i32, digit: i32) -> bool:
+    """True if placing `digit` at (r, c) violates no Sudoku constraint."""
+    if row_has(grid, r, digit):
+        return false
+    if col_has(grid, c, digit):
+        return false
+    if box_has(grid, r, c, digit):
+        return false
+    return true
+
+# ── Empty-cell search ────────────────────────────────────────────────
+# We return `(found, row, col)` packed into a 3-int list because
+# StrictPy v0.1 has no tuple type in the typechecker we've exercised
+# so far. The list always has length 3.
+
+fn find_empty(grid: List[List[i32]]) -> List[i32]:
+    """Find the next blank cell in row-major order. Returns
+    [1, r, c] if found, else [0, 0, 0]. We pack into List[i32] because
+    multi-return / tuple support isn't exercised elsewhere in
+    examples/, and avoiding it sidesteps a potential unknown."""
+    out: List[i32] = []
+    r: i32 = 0
+    while r < N:
+        c: i32 = 0
+        while c < N:
+            if grid[r][c] == 0:
+                out.append(1)
+                out.append(r)
+                out.append(c)
+                return out
+            c = c + 1
+        r = r + 1
+    out.append(0)
+    out.append(0)
+    out.append(0)
+    return out
+
+# ── Solver ───────────────────────────────────────────────────────────
+
+fn solve(grid: List[List[i32]]) -> bool:
+    """Backtracking solve. Returns true on first solution found and
+    leaves the grid in that state; returns false (and restores any
+    cells it touched) if no solution exists from the current state."""
+    spot: List[i32] = find_empty(grid)
+    if spot[0] == 0:
+        # No empty cell — done.
+        return true
+    r: i32 = spot[1]
+    c: i32 = spot[2]
+    digit: i32 = 1
+    while digit <= 9:
+        if is_valid(grid, r, c, digit):
+            grid[r][c] = digit
+            if solve(grid):
+                return true
+            # Backtrack: restore the cell so the parent frame sees the
+            # board exactly as it left it.
+            grid[r][c] = 0
+        digit = digit + 1
+    return false
+
+# ── Pretty-printing ──────────────────────────────────────────────────
+
+fn render_row(grid: List[List[i32]], r: i32) -> str:
+    """Render one row as `5 3 4 | 6 7 8 | 9 1 2`-style text with bars
+    between 3x3 boxes. Blanks (0) render as `.`."""
+    line: str = ""
+    c: i32 = 0
+    while c < N:
+        if c == 3 or c == 6:
+            line = line + "| "
+        v: i32 = grid[r][c]
+        if v == 0:
+            line = line + ". "
+        else:
+            line = line + str(v) + " "
+        c = c + 1
+    return line
+
+fn render(grid: List[List[i32]]) -> None:
+    """Print the whole grid with 3x3-box separators."""
+    r: i32 = 0
+    while r < N:
+        if r == 3 or r == 6:
+            println("------+-------+------")
+        println(render_row(grid, r))
+        r = r + 1
+
+fn main() -> i32:
+    grid: List[List[i32]] = make_puzzle()
+    println("puzzle:")
+    render(grid)
+    ok: bool = solve(grid)
+    if not ok:
+        println("UNSOLVABLE")
+        return 1
+    println("")
+    println("solution:")
+    render(grid)
+    # Print a single-line signature of the solved board's first row so
+    # the integration test has a stable anchor to match against.
+    sig: str = ""
+    c: i32 = 0
+    while c < N:
+        sig = sig + str(grid[0][c])
+        c = c + 1
+    println("row0=" + sig)
+    return 0

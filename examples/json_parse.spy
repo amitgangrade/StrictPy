@@ -1,0 +1,374 @@
+"""Recursive-descent JSON parser + serializer (round-trip).
+
+Real-world StrictPy program: parses a subset of JSON (null, true/false,
+integers, decimals, unescaped strings, arrays, objects) into a tagged AST,
+then renders it back to text.
+
+WHAT THIS PROGRAM PROVED ABOUT STRICTPY v0.1 (the deliverable is the bug
+list, not the JSON parser). The natural OO design — a sealed `JsonValue`
+class with one final subclass per variant (Null/Bool/Number/String/Array/
+Object) and an instance method on a `Parser` class for each grammar rule
+— does NOT compile correctly. Five separate bugs forced the unusual
+shape below; the smallest reproducers live in `_probe_json.spy` and are
+called out in the bug report.
+
+  1. **`sealed` parents drop virtual dispatch.** Calling `v.render()` on
+     a `JsonValue`-typed receiver invokes the BASE method, never the
+     override. Switching `sealed` → `open` is the workaround.
+
+  2. **Subclass field offsets alias parent fields.** When the parent has
+     any field (e.g. `kind: i32`) AND a subclass declares its own field
+     (any type — i32/i64/f64/bool/str all reproduce), writing the
+     subclass field clobbers the parent field. Workaround: empty parent
+     class.
+
+  3. **Vtable wraps at 4 entries.** A base + 3 overrides is the maximum.
+     The 4th subclass falls back to the base method; the 5th to
+     subclass-1's method; the 6th to subclass-2's. So 6 natural JSON
+     variants produce 3 wrong renderings. Workaround: collapse to 3
+     classes — `JsonAtom` covers null/bool/number/string with an internal
+     `kind` discriminator; `JsonArray` and `JsonObject` carry the
+     composite payloads.
+
+  4. **Method on a class with a `str` parameter destabilises memory.**
+     Even a no-op method `fn dummy(self, s: str) -> bool: return false`,
+     never called, can corrupt the heap at runtime — but only when the
+     program also defines a JsonValue-style class hierarchy. The bug is
+     non-deterministic: the same .spy sometimes runs and sometimes
+     crashes with `STATUS_HEAP_CORRUPTION`. Workaround: move every
+     `Parser` method that takes a `str` arg out of the class and make it
+     a free function `fn p_foo(p: Parser, s: str) -> ...`.
+
+  5. **Subclass declaration order affects whether the program crashes.**
+     With the JsonValue hierarchy below, declaring JsonObject LAST
+     (natural alphabetical order) crashed; declaring it FIRST stabilised
+     the program. Reproducer in probe 53.
+
+Independent gaps:
+
+  - **`Dict[K, V]` only supports primitive V.** Natural JSON encoding is
+    `Dict[str, JsonValue]`; we couldn't get it past compile/runtime.
+    Workaround is parallel `List[str] keys` + `List[JsonValue] vals`,
+    which also preserves insertion order.
+
+  - **No `isinstance`, no working `match`/`case` on class patterns.** To
+    discriminate variants externally, you'd need one or the other. We
+    sidestep this: every operation that needs to "case on the variant"
+    is a virtual method (just `render` here).
+
+  - **`str(c: char)` returns the codepoint as decimal text**, not the
+    one-char string. So `str('h')` prints "104", not "h". Likewise
+    `i32(c)` returns 0 instead of the codepoint. Both work around in
+    this program because we never need to convert a single `char` back
+    to a string — we concatenate slices instead.
+
+  - **No JSON string escape decoding.** v0.1 strings don't have any
+    helper for unescaping `\\n`/`\\t`/`\\"`/etc., and we don't add escape
+    handling here. The headline input has no escapes inside string
+    values, so it round-trips fine.
+"""
+
+# ── AST ────────────────────────────────────────────────────────────────────
+#
+# `open` not `sealed` (bug 1). No fields on the base (bug 2). Only 3
+# subclasses (bug 3). JsonObject declared FIRST (bug 5).
+
+open class JsonValue:
+    fn __init__(self) -> None:
+        pass
+
+    open fn render(self) -> str:
+        return "<JsonValue:unimpl>"
+
+final class JsonObject(JsonValue):
+    keys: List[str]
+    vals: List[JsonValue]
+
+    fn __init__(self, k: List[str], v: List[JsonValue]) -> None:
+        self.keys = k
+        self.vals = v
+
+    fn render(self) -> str:
+        out: str = "{"
+        i: i64 = 0
+        while i < len(self.keys):
+            if i > 0:
+                out = out + ", "
+            out = out + "\"" + self.keys[i] + "\": " + self.vals[i].render()
+            i = i + 1
+        return out + "}"
+
+final class JsonArray(JsonValue):
+    items: List[JsonValue]
+
+    fn __init__(self, items: List[JsonValue]) -> None:
+        self.items = items
+
+    fn render(self) -> str:
+        out: str = "["
+        i: i64 = 0
+        while i < len(self.items):
+            if i > 0:
+                out = out + ", "
+            out = out + self.items[i].render()
+            i = i + 1
+        return out + "]"
+
+# JsonAtom kinds:
+#   0 = null
+#   1 = bool true
+#   2 = bool false
+#   3 = number (payload in `num`)
+#   4 = string (payload in `s`)
+final class JsonAtom(JsonValue):
+    kind: i32
+    num: f64
+    s: str
+
+    fn __init__(self, kind: i32, num: f64, s: str) -> None:
+        self.kind = kind
+        self.num = num
+        self.s = s
+
+    fn render(self) -> str:
+        if self.kind == 0:
+            return "null"
+        if self.kind == 1:
+            return "true"
+        if self.kind == 2:
+            return "false"
+        if self.kind == 3:
+            return str(self.num)
+        if self.kind == 4:
+            return "\"" + self.s + "\""
+        return "<bad-atom>"
+
+# Convenience constructors. Return `JsonValue` not `JsonAtom` so callers
+# can stash them in `List[JsonValue]` directly.
+
+fn mk_null() -> JsonValue:
+    return JsonAtom(0, 0.0, "")
+
+fn mk_bool(b: bool) -> JsonValue:
+    if b:
+        return JsonAtom(1, 0.0, "")
+    return JsonAtom(2, 0.0, "")
+
+fn mk_number(n: f64) -> JsonValue:
+    return JsonAtom(3, n, "")
+
+fn mk_string(s: str) -> JsonValue:
+    return JsonAtom(4, 0.0, s)
+
+# ── Character helpers ─────────────────────────────────────────────────────
+
+fn is_ws(c: char) -> bool:
+    return c == ' ' or c == '\t' or c == '\n' or c == '\r'
+
+fn is_digit(c: char) -> bool:
+    return c >= '0' and c <= '9'
+
+# ── Parser ────────────────────────────────────────────────────────────────
+#
+# The `Parser` is a plain state holder (src, pos, n) with no methods —
+# bug 4 above. All operations are free functions that take a Parser as
+# their first argument.
+
+final class Parser:
+    src: str
+    pos: i64
+    n: i64
+
+    fn __init__(self, src: str) -> None:
+        self.src = src
+        self.pos = 0
+        self.n = i64(len(src))
+
+fn p_at_end(p: Parser) -> bool:
+    return p.pos >= p.n
+
+fn p_peek(p: Parser) -> char:
+    if p.pos >= p.n:
+        return '\0'
+    return p.src[p.pos]
+
+fn p_skip_ws(p: Parser) -> None:
+    while p.pos < p.n:
+        c: char = p.src[p.pos]
+        if is_ws(c):
+            p.pos = p.pos + 1
+        else:
+            return
+
+fn p_starts_with(p: Parser, s: str) -> bool:
+    slen: i64 = i64(len(s))
+    if p.pos + slen > p.n:
+        return false
+    i: i64 = 0
+    while i < slen:
+        if p.src[p.pos + i] != s[i]:
+            return false
+        i = i + 1
+    return true
+
+fn p_consume(p: Parser, s: str) -> bool:
+    if p_starts_with(p, s):
+        p.pos = p.pos + i64(len(s))
+        return true
+    return false
+
+# ── Grammar rules ─────────────────────────────────────────────────────────
+
+fn parse_value(p: Parser) -> JsonValue:
+    p_skip_ws(p)
+    if p_at_end(p):
+        return mk_null()
+    c: char = p_peek(p)
+    if c == '{':
+        return parse_object(p)
+    if c == '[':
+        return parse_array(p)
+    if c == '"':
+        return parse_string_value(p)
+    if c == 't' or c == 'f':
+        return parse_bool(p)
+    if c == 'n':
+        return parse_null_lit(p)
+    if c == '-' or is_digit(c):
+        return parse_number(p)
+    # Unknown — skip and recover.
+    p.pos = p.pos + 1
+    return mk_null()
+
+fn parse_null_lit(p: Parser) -> JsonValue:
+    if p_consume(p, "null"):
+        return mk_null()
+    p.pos = p.pos + 1
+    return mk_null()
+
+fn parse_bool(p: Parser) -> JsonValue:
+    if p_consume(p, "true"):
+        return mk_bool(true)
+    if p_consume(p, "false"):
+        return mk_bool(false)
+    p.pos = p.pos + 1
+    return mk_null()
+
+fn parse_number(p: Parser) -> JsonValue:
+    start: i64 = p.pos
+    if p_peek(p) == '-':
+        p.pos = p.pos + 1
+    while p.pos < p.n and is_digit(p.src[p.pos]):
+        p.pos = p.pos + 1
+    # Optional fraction.
+    if p.pos < p.n and p.src[p.pos] == '.':
+        p.pos = p.pos + 1
+        while p.pos < p.n and is_digit(p.src[p.pos]):
+            p.pos = p.pos + 1
+    # Optional exponent.
+    if p.pos < p.n:
+        c: char = p.src[p.pos]
+        if c == 'e' or c == 'E':
+            p.pos = p.pos + 1
+            if p.pos < p.n:
+                s: char = p.src[p.pos]
+                if s == '+' or s == '-':
+                    p.pos = p.pos + 1
+            while p.pos < p.n and is_digit(p.src[p.pos]):
+                p.pos = p.pos + 1
+    lex: str = p.src.slice(start, p.pos)
+    return mk_number(parse_f64(lex))
+
+fn parse_string_raw(p: Parser) -> str:
+    if p.pos < p.n and p.src[p.pos] == '"':
+        p.pos = p.pos + 1
+    start: i64 = p.pos
+    while p.pos < p.n and p.src[p.pos] != '"':
+        p.pos = p.pos + 1
+    body: str = p.src.slice(start, p.pos)
+    if p.pos < p.n and p.src[p.pos] == '"':
+        p.pos = p.pos + 1
+    return body
+
+fn parse_string_value(p: Parser) -> JsonValue:
+    return mk_string(parse_string_raw(p))
+
+fn parse_array(p: Parser) -> JsonValue:
+    if p.pos < p.n and p.src[p.pos] == '[':
+        p.pos = p.pos + 1
+    items: List[JsonValue] = []
+    p_skip_ws(p)
+    if p.pos < p.n and p.src[p.pos] == ']':
+        p.pos = p.pos + 1
+        return JsonArray(items)
+    items.append(parse_value(p))
+    p_skip_ws(p)
+    while p.pos < p.n and p.src[p.pos] == ',':
+        p.pos = p.pos + 1
+        p_skip_ws(p)
+        items.append(parse_value(p))
+        p_skip_ws(p)
+    if p.pos < p.n and p.src[p.pos] == ']':
+        p.pos = p.pos + 1
+    return JsonArray(items)
+
+fn parse_member(p: Parser, keys: List[str], vals: List[JsonValue]) -> None:
+    p_skip_ws(p)
+    if p.pos >= p.n or p.src[p.pos] != '"':
+        return
+    k: str = parse_string_raw(p)
+    p_skip_ws(p)
+    if p.pos < p.n and p.src[p.pos] == ':':
+        p.pos = p.pos + 1
+    p_skip_ws(p)
+    v: JsonValue = parse_value(p)
+    keys.append(k)
+    vals.append(v)
+
+fn parse_object(p: Parser) -> JsonValue:
+    if p.pos < p.n and p.src[p.pos] == '{':
+        p.pos = p.pos + 1
+    keys: List[str] = []
+    vals: List[JsonValue] = []
+    p_skip_ws(p)
+    if p.pos < p.n and p.src[p.pos] == '}':
+        p.pos = p.pos + 1
+        return JsonObject(keys, vals)
+    parse_member(p, keys, vals)
+    p_skip_ws(p)
+    while p.pos < p.n and p.src[p.pos] == ',':
+        p.pos = p.pos + 1
+        p_skip_ws(p)
+        parse_member(p, keys, vals)
+        p_skip_ws(p)
+    if p.pos < p.n and p.src[p.pos] == '}':
+        p.pos = p.pos + 1
+    return JsonObject(keys, vals)
+
+fn parse(src: str) -> JsonValue:
+    p: Parser = Parser(src)
+    p_skip_ws(p)
+    v: JsonValue = parse_value(p)
+    return v
+
+# ── Driver ────────────────────────────────────────────────────────────────
+
+fn round_trip(src: str) -> str:
+    v: JsonValue = parse(src)
+    return v.render()
+
+fn main() -> i32:
+    # The headline JSON input the task spec calls for is
+    #   {"name": "alice", "age": 30, "tags": ["admin", "user"],
+    #    "active": true, "score": null}
+    # In v0.1 this triggers a mid-parse VM heap-corruption crash (see
+    # the design-notes docstring above and the bug report).
+    #
+    # Even the small atom-only cases are unstable when several are run
+    # back to back: each round_trip() allocates a Parser + JsonAtom + str
+    # and the cumulative allocation pressure tips the program into the
+    # crash. We pick a few that show parsing works and stop.
+    println(round_trip("null"))
+    println(round_trip("true"))
+    println(round_trip("false"))
+    return 0

@@ -793,16 +793,126 @@ fn lower_stmt(fb: &mut FuncBuilder, ctx: &mut LowerCtx, s: &Stmt) -> Option<()> 
             lower_while(fb, ctx, cond, body);
             Some(())
         }
-        Stmt::For { var, iter, body, .. } => {
-            // Best-effort: lower iter, then run body once with `var` bound
-            // to a const-none placeholder. This is enough to keep IR
-            // structurally valid; full __iter__/__next__ lowering is M3+.
-            let _ = lower_expr(fb, ctx, iter);
-            let placeholder_ty = Ty::Primitive(PrimTy::Unit);
-            let v = fb.push_value(placeholder_ty.clone(), ValueKind::Const(IRConst::None));
-            let slot = fb.alloc_slot(var, placeholder_ty);
-            fb.emit_write_local(slot, v);
+        Stmt::For { var, var_ty, iter, body, .. } => {
+            // Desugar `for x: T in xs: body` into the index-counted while
+            // loop equivalent, for now supporting only `List[T]` receivers:
+            //
+            //     __i: i64 = 0
+            //     __n: i64 = ArrayLen(xs)
+            //     while __i < __n:
+            //         x: T = xs[__i]
+            //         <body>
+            //         __i = __i + 1
+            //
+            // Generic iterator protocol (`__iter__` / `__next__`) is M10
+            // work; until then a non-List receiver falls back to the old
+            // placeholder behaviour so we don't regress IR validity for
+            // programs that loop over `range(...)` etc.
+            //
+            // real-world: Game of Life, Sudoku, JSON parser et al. all
+            // want a one-liner `for x in xs:` instead of hand-rolled
+            // index loops.
+            let iter_ty = ctx.expr_ty(expr_span(iter));
+            let is_list = matches!(
+                &iter_ty,
+                Ty::Generic { base: TypeCtor::List, .. }
+            );
+            if !is_list {
+                // Fallback path — preserves the prior placeholder so we
+                // don't crash on `for i in range(...)` or other non-List
+                // iterables. TODO(M10): full __iter__/__next__ protocol.
+                let _ = lower_expr(fb, ctx, iter);
+                let placeholder_ty = Ty::Primitive(PrimTy::Unit);
+                let v = fb.push_value(placeholder_ty.clone(), ValueKind::Const(IRConst::None));
+                let slot = fb.alloc_slot(var, placeholder_ty);
+                fb.emit_write_local(slot, v);
+                return lower_block(fb, ctx, body);
+            }
+
+            // Element type from `List[T]` — fall back to the declared
+            // var_ty if the args slot is empty for some reason.
+            let elem_ty = match &iter_ty {
+                Ty::Generic { args, .. } if !args.is_empty() => args[0].clone(),
+                _ => ctx
+                    .typed
+                    .resolved
+                    .ast_type_to_ty
+                    .get(&(ast_type_span(var_ty).start, ast_type_span(var_ty).end))
+                    .cloned()
+                    .unwrap_or(Ty::Primitive(PrimTy::Unit)),
+            };
+
+            // Materialise the iterable once, before the loop header, so
+            // `xs` is only evaluated a single time.
+            let arr = lower_expr(fb, ctx, iter);
+            let i64_ty = Ty::Primitive(PrimTy::I64);
+
+            // __i: i64 = 0
+            let zero = fb.push_value(i64_ty.clone(), ValueKind::Const(IRConst::I64(0)));
+            let i_slot = {
+                // Use a unique name so a nested `for` doesn't clobber the outer
+                // one's counter. Slot-of-name lookup keys the slot table.
+                let n = format!("__for_i_{}", fb.slot_ty.len());
+                let s = fb.alloc_slot(&n, i64_ty.clone());
+                fb.emit_write_local(s, zero);
+                s
+            };
+            // __n: i64 = ArrayLen(xs)
+            let len_v = fb.push_value(
+                i64_ty.clone(),
+                ValueKind::Op { op: IROp::ArrayLen, args: vec![arr] },
+            );
+            let n_slot = {
+                let n = format!("__for_n_{}", fb.slot_ty.len());
+                let s = fb.alloc_slot(&n, i64_ty.clone());
+                fb.emit_write_local(s, len_v);
+                s
+            };
+
+            // Declare the user-visible loop variable up-front so reads
+            // inside the body resolve through `slot_for(var)`.
+            let var_slot = fb.alloc_slot(var, elem_ty.clone());
+
+            // while __i < __n:
+            let header = fb.new_block();
+            let body_b = fb.new_block();
+            let exit = fb.new_block();
+            fb.terminate(Terminator::Branch { target: header });
+
+            // header: test
+            fb.switch_to(header);
+            let i_cur = fb.emit_read_local(i_slot);
+            let n_cur = fb.emit_read_local(n_slot);
+            let cond = fb.push_value(
+                Ty::Primitive(PrimTy::Bool),
+                ValueKind::Op { op: IROp::ILt, args: vec![i_cur, n_cur] },
+            );
+            fb.terminate(Terminator::CondBranch { cond, t: body_b, f: exit });
+
+            // body: x = xs[__i]; <body>; __i = __i + 1
+            fb.switch_to(body_b);
+            let i_now = fb.emit_read_local(i_slot);
+            let elt = fb.push_value(
+                elem_ty.clone(),
+                ValueKind::Op { op: IROp::ArrayGet, args: vec![arr, i_now] },
+            );
+            fb.emit_write_local(var_slot, elt);
+
+            fb.loop_stack.push((header, exit));
             lower_block(fb, ctx, body);
+            fb.loop_stack.pop();
+
+            // __i = __i + 1
+            let i_again = fb.emit_read_local(i_slot);
+            let one = fb.push_value(i64_ty.clone(), ValueKind::Const(IRConst::I64(1)));
+            let next_i = fb.push_value(
+                i64_ty.clone(),
+                ValueKind::Op { op: IROp::IAdd, args: vec![i_again, one] },
+            );
+            fb.emit_write_local(i_slot, next_i);
+            fb.terminate(Terminator::Branch { target: header });
+
+            fb.switch_to(exit);
             Some(())
         }
         Stmt::With { expr, binding, body, .. } => {
@@ -1182,8 +1292,17 @@ fn lower_expr(fb: &mut FuncBuilder, ctx: &mut LowerCtx, e: &Expr) -> ValueId {
         Expr::Unary { op, operand, span } => {
             let v = lower_expr(fb, ctx, operand);
             let ty = ctx.expr_ty(*span);
+            // real-world: nullable-narrowing audit — `ty` may be
+            // `Nullable(F32)`/`Nullable(F64)` because the IR slot holds
+            // the declared type even after the typechecker narrowed
+            // inside `if x is not none:`. Match against the inner type
+            // so `-x` for `x: f64?` correctly picks FNeg, not INeg.
+            let dispatch_ty = match &ty {
+                Ty::Nullable(inner) => (**inner).clone(),
+                other => other.clone(),
+            };
             let irop = match op {
-                UnaryOp::Neg => match ty {
+                UnaryOp::Neg => match dispatch_ty {
                     Ty::Primitive(p) if p.is_float() => IROp::FNeg,
                     _ => IROp::INeg,
                 },
@@ -1574,7 +1693,20 @@ fn emit_binop(
         AstBinOp::Gt => if is_float { IROp::FGt } else { IROp::IGt },
         AstBinOp::Ge => if is_float { IROp::FGe } else { IROp::IGe },
         AstBinOp::Is => IROp::RefEq,
-        AstBinOp::IsNot => IROp::RefEq, // codegen could invert
+        AstBinOp::IsNot => {
+            // real-world: fix — the old lowering emitted `IROp::RefEq` for
+            // both `is` and `is not`, so `x is not none` evaluated to the
+            // same boolean as `x is none` (i.e. inverted). Lower `is not`
+            // as `not (l is r)` by emitting `RefEq` followed by `BoolNot`.
+            let eq = fb.push_value(
+                Ty::Primitive(PrimTy::Bool),
+                ValueKind::Op { op: IROp::RefEq, args: vec![l, r] },
+            );
+            return fb.push_value(
+                ty,
+                ValueKind::Op { op: IROp::BoolNot, args: vec![eq] },
+            );
+        }
         AstBinOp::In => IROp::IEq,      // placeholder
         AstBinOp::NotIn => IROp::INe,   // placeholder
         AstBinOp::And => IROp::IAnd,    // bitwise approximation
@@ -1694,6 +1826,28 @@ fn lower_call(
                             );
                         }
                     }
+                    // real-world: `sorted(xs)` needs an explicit type-tag
+                    // operand so the VM can pick the right comparator.
+                    // Infer the element type from the receiver List[T].
+                    if name == "sorted" {
+                        if let Some(arg0) = args.first() {
+                            let arg_ty = ctx.expr_ty(expr_span(&arg0.value));
+                            let tag = sort_type_tag_for(&arg_ty);
+                            let tag_v = fb.push_value(
+                                Ty::Primitive(PrimTy::I64),
+                                ValueKind::Const(IRConst::I64(tag as i64)),
+                            );
+                            let mut sort_args = arg_vs;
+                            sort_args.push(tag_v);
+                            return fb.push_value(
+                                ret_ty,
+                                ValueKind::Op {
+                                    op: IROp::NativeCall { native_id: NativeFn::ListSorted as u32 },
+                                    args: sort_args,
+                                },
+                            );
+                        }
+                    }
                     // Otherwise a native.
                     let nid = NativeFn::from_name(name)
                         .map(|n| n as u32)
@@ -1726,6 +1880,12 @@ fn lower_call(
                             Some(Ty::Primitive(PrimTy::F32))
                             | Some(Ty::Primitive(PrimTy::F64)) => NativeFn::StrFromF64 as u32,
                             Some(Ty::Primitive(PrimTy::Bool)) => NativeFn::StrFromBool as u32,
+                            // real-world: fix — str(char) used to fall
+                            // through to StrFromAny which formatted the
+                            // codepoint as a decimal integer (so `str('h')`
+                            // returned "104"). Dispatch to StrFromChar so a
+                            // single-codepoint string is allocated.
+                            Some(Ty::Primitive(PrimTy::Char)) => NativeFn::StrFromChar as u32,
                             Some(Ty::Primitive(PrimTy::Str)) => {
                                 // No conversion needed — emit a copy.
                                 return fb.push_value(
@@ -1836,6 +1996,27 @@ fn lower_method_call(
         }
     }
 
+    // real-world: `xs.sort()` over `List[T]` needs an extra type-tag
+    // operand so the VM picks the right comparator. Inject it before
+    // dispatching to NativeFn::ListSort.
+    if method == "sort" {
+        if let Ty::Generic { base: TypeCtor::List, .. } = &recv_ty {
+            let tag = sort_type_tag_for(&recv_ty);
+            let tag_v = fb.push_value(
+                Ty::Primitive(PrimTy::I64),
+                ValueKind::Const(IRConst::I64(tag as i64)),
+            );
+            arg_vs.push(tag_v);
+            return fb.push_value(
+                ret_ty,
+                ValueKind::Op {
+                    op: IROp::NativeCall { native_id: NativeFn::ListSort as u32 },
+                    args: arg_vs,
+                },
+            );
+        }
+    }
+
     // Otherwise treat as a native method (e.g. Channel.send, List.append).
     // stdlib: a few method names are overloaded across runtime classes
     // (e.g. `close()` exists on both Channel and io.File). Disambiguate by
@@ -1846,6 +2027,39 @@ fn lower_method_call(
         ret_ty,
         ValueKind::Op { op: IROp::NativeCall { native_id: nid }, args: arg_vs },
     )
+}
+
+/// Map a `List[T]` (or any container type) to the TypeTag byte the
+/// sort/sorted natives use to pick a comparator. Unknown types map to
+/// TypeTag::Ref so the VM at least sorts something — but the VM will
+/// raise TypeError for elements that aren't actually str pointers.
+///
+/// real-world: every sort callsite passes this tag as the final
+/// argument.
+fn sort_type_tag_for(ty: &Ty) -> u8 {
+    use strictpy_shared::TypeTag;
+    let elem = match ty {
+        Ty::Generic { args, .. } if !args.is_empty() => &args[0],
+        other => other,
+    };
+    // Strip nullable just in case — the audit caught this exact gotcha
+    // elsewhere; sorting a List[T?] would otherwise misdispatch.
+    let elem = match elem {
+        Ty::Nullable(inner) => inner.as_ref(),
+        other => other,
+    };
+    match elem {
+        Ty::Primitive(PrimTy::I64) | Ty::Primitive(PrimTy::U64)
+            | Ty::Primitive(PrimTy::I32) | Ty::Primitive(PrimTy::U32)
+            | Ty::Primitive(PrimTy::I16) | Ty::Primitive(PrimTy::U16)
+            | Ty::Primitive(PrimTy::I8)  | Ty::Primitive(PrimTy::U8)
+            => TypeTag::I64 as u8,
+        Ty::Primitive(PrimTy::F32) | Ty::Primitive(PrimTy::F64)
+            => TypeTag::F64 as u8,
+        // Strings are heap-allocated; their slot is a pointer.
+        Ty::Primitive(PrimTy::Str) => TypeTag::Ref as u8,
+        _ => TypeTag::Ref as u8,
+    }
 }
 
 /// Pick the right `NativeFn` for `receiver.method(...)` given the static
@@ -2148,5 +2362,58 @@ fn main() -> i32:
                 fid.0,
             );
         }
+    }
+
+    /// `for x: T in xs:` over a `List[T]` should desugar into the
+    /// equivalent index-counted while-loop: i64 counter, ArrayLen,
+    /// ILt header test, ArrayGet body load, IAdd-by-one step.
+    ///
+    /// real-world: every stress program (Game of Life, JSON parser,
+    /// markov, ...) was hand-rolling this index loop. The lowering
+    /// removes that boilerplate.
+    #[test]
+    fn for_in_list_desugars_to_indexed_while() {
+        let src = "\
+fn main() -> i32:
+    xs: List[i64] = [10, 20, 30]
+    total: i64 = 0
+    for x: i64 in xs:
+        total = total + x
+    return 0
+";
+        let m = lower_src(src);
+        let main = m.functions.iter().find(|f| f.name == "main").expect("main");
+
+        let mut saw_arraylen = false;
+        let mut saw_arrayget = false;
+        let mut saw_ilt = false;
+        let mut saw_iadd_step = false;
+        for b in &main.blocks {
+            for v in &b.values {
+                if let ValueKind::Op { op, .. } = &v.kind {
+                    match op {
+                        IROp::ArrayLen => saw_arraylen = true,
+                        IROp::ArrayGet => saw_arrayget = true,
+                        IROp::ILt => saw_ilt = true,
+                        // We can't easily distinguish the user-level
+                        // `total + x` IAdd from the counter step, so
+                        // just confirm at least one IAdd exists.
+                        IROp::IAdd => saw_iadd_step = true,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert!(saw_arraylen, "for-in must emit ArrayLen on the iterable");
+        assert!(saw_arrayget, "for-in must emit ArrayGet inside the body");
+        assert!(saw_ilt, "for-in must emit ILt for the header test");
+        assert!(saw_iadd_step, "for-in must emit at least one IAdd (step or body)");
+
+        // CondBranch with two distinct targets must exist (the loop
+        // header).
+        let has_condbr = main.blocks.iter().any(|b| {
+            matches!(b.terminator, Terminator::CondBranch { .. })
+        });
+        assert!(has_condbr, "for-in must terminate the header with a CondBranch");
     }
 }

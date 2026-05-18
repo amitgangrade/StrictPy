@@ -43,6 +43,12 @@ pub enum NativeFn {
     // first program that needs str→number parsing.
     F64FromStr    = 26,
     I64FromStr    = 27,
+    // real-world: csv_aggregate / wordcount / markov — every stress test
+    // that touches text rolled its own splitter. `s.split(sep) -> List[str]`
+    // lifts that boilerplate. Returns the empty list for an empty `s`
+    // (matches Rust's `str::split`'s behaviour minus the trailing-empty
+    // edge case, which we suppress for ergonomics — see vm/src/builtins.rs).
+    StrSplit      = 28,
 
     // ── 30–49: io ───────────────────────────────────────────────────────
     IoOpen     = 30,
@@ -98,6 +104,22 @@ pub enum NativeFn {
     /// the existing STR_CHAR_AT opcode but is reachable from the
     /// NativeCall path used by the Index-expr lowering.
     StrCharAt  = 104,
+    // real-world: every stress test that produced ranked output
+    // (csv_aggregate top-N, wordcount frequency table, markov chain
+    // training) had to hand-roll a sort. Both forms take a trailing
+    // u32 type-tag operand (TypeTag::I64/F64/Ref) that the VM uses to
+    // pick the comparator — passing the tag explicitly is simpler than
+    // teaching the native to walk the list's RuntimeType vtable.
+    /// In-place: `xs.sort()` — args: `[list_ptr, type_tag_u32]`.
+    ListSort   = 105,
+    /// Returns a copy: `sorted(xs)` — args: `[list_ptr, type_tag_u32]`.
+    ListSorted = 106,
+    // real-world: fix — JSON / BF / KV-store stress tests all wanted
+    // `xs.pop()`. The opcode `ListPop = 0xF2` exists in the VM but
+    // wasn't reachable via the source-level method call (no native id,
+    // no typecheck synth entry, no IR dispatch). Remove and return the
+    // last element; trap with IndexError on empty.
+    ListPop    = 107,
 
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
@@ -136,6 +158,7 @@ impl NativeFn {
             // real-world: csv_aggregate
             26 => Some(Self::F64FromStr),
             27 => Some(Self::I64FromStr),
+            28 => Some(Self::StrSplit),
             30 => Some(Self::IoOpen),
             31 => Some(Self::FileRead),
             32 => Some(Self::FileWrite),
@@ -175,6 +198,10 @@ impl NativeFn {
             102 => Some(Self::SetLen),
             103 => Some(Self::DictNew),
             104 => Some(Self::StrCharAt),
+            105 => Some(Self::ListSort),
+            106 => Some(Self::ListSorted),
+            // real-world: fix — see `ListPop` definition above.
+            107 => Some(Self::ListPop),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }
@@ -231,6 +258,20 @@ impl NativeFn {
             // real-world: csv_aggregate — str→number parsing.
             "parse_f64"   => Some(Self::F64FromStr),
             "parse_i64"   => Some(Self::I64FromStr),
+
+            // real-world: every text-processing stress test wants split.
+            "split"       => Some(Self::StrSplit),
+
+            // real-world: stress tests producing ranked output. Note that
+            // `from_name("sort")` is invoked through resolve_native_method
+            // (method-call path) and `from_name("sorted")` through the
+            // top-level lower_call path.
+            "sort"        => Some(Self::ListSort),
+            "sorted"      => Some(Self::ListSorted),
+            // real-world: fix — `xs.pop()` lowered through the method
+            // dispatcher. The receiver is implicit (the list pointer),
+            // so the IR appends it as the first argument before the call.
+            "pop"         => Some(Self::ListPop),
 
             _ => None,
         }

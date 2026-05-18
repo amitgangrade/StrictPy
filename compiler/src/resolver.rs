@@ -365,6 +365,12 @@ impl Resolver {
                 params: vec![Ty::Primitive(PrimTy::Str)],
                 ret: Box::new(Ty::Primitive(PrimTy::I64)),
             }),
+            // real-world: stress tests producing ranked output. `sorted(xs)`
+            // returns a fresh sorted copy of `xs` (immutable view). The
+            // sentinel signature (no params, Never ret) is replaced by
+            // the type-checker's tailored `sorted` handling below — same
+            // pattern as `abs` / `min` / `max`.
+            ("sorted",  Ty::Function { params: vec![], ret: Box::new(Ty::Never) }),
         ];
         for (name, ty) in builtins {
             self.make_symbol(scope, name, SymbolKind::Function, Span::DUMMY, Some(ty.clone()));

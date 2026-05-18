@@ -1,0 +1,157 @@
+"""Conway's Game of Life on a fixed 30x15 toroidal-but-actually-bounded
+grid. Seeded with a glider in the upper-left corner and a blinker on the
+right side. Runs 20 generations and prints each frame to stdout with `#`
+for live cells and `.` for dead cells.
+
+This program stresses StrictPy's `List[List[i32]]` support: nested list
+literals built incrementally (`grid.append(row)`), indexed mutation of
+the inner list via `grid[r][c] = v` (which only works if `grid[r]`
+returns a *reference* to the inner row, not a copy), and per-generation
+allocation of a fresh grid (GC pressure on a tight loop).
+
+Boundary policy: cells outside the grid are treated as dead. That means
+the glider eventually walks off the south-east corner and dies. With the
+blinker added on the right we still see oscillation in the late frames.
+
+No `for x in xs` in StrictPy v0.1 — every traversal is an indexed
+`while`. No nested-list literal syntax like `[[0,0],[0,0]]` is used here
+because we build rows incrementally to keep the lowering simple."""
+
+final COLS: i32 = 30
+final ROWS: i32 = 15
+final GENERATIONS: i32 = 20
+
+# ── Grid construction ─────────────────────────────────────────────────
+
+fn make_grid() -> List[List[i32]]:
+    """Allocate a fresh ROWS x COLS grid of zeros."""
+    g: List[List[i32]] = []
+    r: i32 = 0
+    while r < ROWS:
+        row: List[i32] = []
+        c: i32 = 0
+        while c < COLS:
+            row.append(0)
+            c = c + 1
+        g.append(row)
+        r = r + 1
+    return g
+
+fn seed(g: List[List[i32]]) -> None:
+    """Seed a glider in the upper-left and a vertical blinker on the
+    right. The glider moves diagonally down-right one cell every 4
+    generations; the blinker oscillates with period 2."""
+    # Glider (canonical south-east form):
+    #   . # .
+    #   . . #
+    #   # # #
+    g[0][1] = 1
+    g[1][2] = 1
+    g[2][0] = 1
+    g[2][1] = 1
+    g[2][2] = 1
+    # Vertical blinker on the right side, centred vertically.
+    br: i32 = ROWS // 2
+    bc: i32 = COLS - 5
+    g[br - 1][bc] = 1
+    g[br][bc] = 1
+    g[br + 1][bc] = 1
+
+# ── Neighbour count + step ────────────────────────────────────────────
+
+fn cell_at(g: List[List[i32]], r: i32, c: i32) -> i32:
+    """Read a cell; out-of-bounds reads return 0 (dead). Keeps the
+    neighbour loop branch-free of bounds checks."""
+    if r < 0:
+        return 0
+    if r >= ROWS:
+        return 0
+    if c < 0:
+        return 0
+    if c >= COLS:
+        return 0
+    return g[r][c]
+
+fn count_neighbours(g: List[List[i32]], r: i32, c: i32) -> i32:
+    """Sum the 8 surrounding cells. We unroll the 3x3 - centre instead of
+    a nested loop to avoid the extra `i64` index conversions."""
+    n: i32 = 0
+    n = n + cell_at(g, r - 1, c - 1)
+    n = n + cell_at(g, r - 1, c)
+    n = n + cell_at(g, r - 1, c + 1)
+    n = n + cell_at(g, r,     c - 1)
+    n = n + cell_at(g, r,     c + 1)
+    n = n + cell_at(g, r + 1, c - 1)
+    n = n + cell_at(g, r + 1, c)
+    n = n + cell_at(g, r + 1, c + 1)
+    return n
+
+fn step(g: List[List[i32]]) -> List[List[i32]]:
+    """Compute the next generation into a fresh grid. Standard Life
+    rules:
+      - A live cell with 2 or 3 live neighbours stays alive.
+      - A dead cell with exactly 3 live neighbours becomes alive.
+      - All others are dead in the next gen.
+    """
+    out: List[List[i32]] = make_grid()
+    r: i32 = 0
+    while r < ROWS:
+        c: i32 = 0
+        while c < COLS:
+            n: i32 = count_neighbours(g, r, c)
+            alive: i32 = g[r][c]
+            next_v: i32 = 0
+            if alive == 1:
+                if n == 2 or n == 3:
+                    next_v = 1
+            else:
+                if n == 3:
+                    next_v = 1
+            out[r][c] = next_v
+            c = c + 1
+        r = r + 1
+    return out
+
+# ── Rendering ─────────────────────────────────────────────────────────
+
+fn render(g: List[List[i32]], gen: i32) -> None:
+    """Print a labelled frame. We build each row as a `str` and then
+    `println` it — avoids per-cell IO overhead."""
+    println("-- generation " + str(gen) + " --")
+    r: i32 = 0
+    while r < ROWS:
+        line: str = ""
+        c: i32 = 0
+        while c < COLS:
+            if g[r][c] == 1:
+                line = line + "#"
+            else:
+                line = line + "."
+            c = c + 1
+        println(line)
+        r = r + 1
+
+fn count_live(g: List[List[i32]]) -> i32:
+    """Sanity counter so tests can assert the simulation is doing
+    something nontrivial."""
+    total: i32 = 0
+    r: i32 = 0
+    while r < ROWS:
+        c: i32 = 0
+        while c < COLS:
+            total = total + g[r][c]
+            c = c + 1
+        r = r + 1
+    return total
+
+fn main() -> i32:
+    grid: List[List[i32]] = make_grid()
+    seed(grid)
+    render(grid, 0)
+    g: i32 = 1
+    while g <= GENERATIONS:
+        grid = step(grid)
+        render(grid, g)
+        g = g + 1
+    println("final live cells: " + str(count_live(grid)))
+    return 0

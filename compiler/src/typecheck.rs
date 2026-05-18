@@ -822,6 +822,22 @@ impl TypeChecker {
                     for a in args { let _ = self.check_or_synth(&a.value, Some(&Ty::Primitive(PrimTy::I64)), env, ctx, r)?; }
                     return Ok(Ty::Generic { base: TypeCtor::Range, args: vec![] });
                 }
+                // real-world: stress tests producing ranked output.
+                // `sorted(xs)` over `List[T]` returns `List[T]`. v1 only
+                // supports T ∈ {i64, f64, str}; richer key-fn forms wait
+                // for M10 generic comparators.
+                "sorted" => {
+                    if args.len() != 1 {
+                        return Err(type_err(span, codes::TYPE_ARITY,
+                            "sorted takes 1 argument".into()));
+                    }
+                    let t = self.synth_expr(&args[0].value, env, ctx, r)?;
+                    if let Ty::Generic { base: TypeCtor::List, args: a } = &t {
+                        return Ok(Ty::Generic { base: TypeCtor::List, args: a.clone() });
+                    }
+                    return Err(type_err(span, codes::TYPE_MISMATCH,
+                        format!("sorted expects a List, got {}", t.display())));
+                }
                 "assert" => {
                     if args.is_empty() {
                         return Err(type_err(span, codes::TYPE_ARITY,
@@ -849,6 +865,19 @@ impl TypeChecker {
                     }
                     let _ = self.synth_expr(&args[0].value, env, ctx, r)?;
                     return Ok(Ty::Primitive(prim_from_name_unchecked(name)));
+                }
+                // real-world: fix — `char(i32)` builds a Char from a
+                // codepoint. The native CharFromI32 (id 23) and IR
+                // dispatch were already wired; only the typechecker's
+                // numeric-ctor allow-list was missing this case, so any
+                // call to `char(72)` failed E2011 "not callable".
+                "char" => {
+                    if args.len() != 1 {
+                        return Err(type_err(span, codes::TYPE_ARITY,
+                            "char() takes 1 argument".into()));
+                    }
+                    let _ = self.synth_expr(&args[0].value, env, ctx, r)?;
+                    return Ok(Ty::Primitive(PrimTy::Char));
                 }
                 _ => {}
             }
@@ -941,6 +970,25 @@ impl TypeChecker {
                 for arg in args { let _ = self.synth_expr(&arg.value, env, ctx, r)?; }
                 return Ok(Ty::Nullable(Box::new(a[0].clone())));
             }
+            // real-world: in-place sort. Element type must be i64/f64/str
+            // for v1 — VM raises TypeError for anything else.
+            (Ty::Generic { base: TypeCtor::List, args: _ }, "sort") => {
+                if !args.is_empty() {
+                    return Err(type_err(span, codes::TYPE_ARITY,
+                        "List.sort takes no arguments in v1".into()));
+                }
+                return Ok(Ty::Primitive(PrimTy::Unit));
+            }
+            // real-world: fix — `xs.pop()` removes and returns the last
+            // element of a List[T]. Empty list traps with IndexError at
+            // runtime. Mirrors Python's list.pop() (no-arg form).
+            (Ty::Generic { base: TypeCtor::List, args: a }, "pop") if a.len() == 1 => {
+                if !args.is_empty() {
+                    return Err(type_err(span, codes::TYPE_ARITY,
+                        "List.pop takes no arguments in v1".into()));
+                }
+                return Ok(a[0].clone());
+            }
             // Dict methods
             (Ty::Generic { base: TypeCtor::Dict, args: a }, "get") if a.len() == 2 => {
                 if !args.is_empty() {
@@ -967,6 +1015,18 @@ impl TypeChecker {
                 }
                 return Ok(Ty::Primitive(PrimTy::Bool));
             }
+            // real-world: fix — `dict.has(k) -> bool` was wired through
+            // the IR (`resolve_native_method` dispatches to `DictHas`,
+            // VM implements it) but the typechecker rejected it with
+            // E2004 "no method `has`". Add the synth entry to mirror
+            // `contains` (we keep both names — `has` is what JSON / KV
+            // store / BF examples reach for).
+            (Ty::Generic { base: TypeCtor::Dict, args: a }, "has") if a.len() == 2 => {
+                if !args.is_empty() {
+                    let _ = self.check_expr(&args[0].value, &a[0], env, ctx, r)?;
+                }
+                return Ok(Ty::Primitive(PrimTy::Bool));
+            }
             // str methods — stdlib: wordcount.spy
             (Ty::Primitive(PrimTy::Str), "slice") => {
                 for a in args { let _ = self.check_or_synth(&a.value, Some(&Ty::Primitive(PrimTy::I64)), env, ctx, r)?; }
@@ -978,6 +1038,15 @@ impl TypeChecker {
             }
             (Ty::Primitive(PrimTy::Str), "len") => {
                 return Ok(Ty::Primitive(PrimTy::I64));
+            }
+            // real-world: csv_aggregate / wordcount / markov all need a
+            // string splitter. `s.split(sep) -> List[str]`.
+            (Ty::Primitive(PrimTy::Str), "split") => {
+                for a in args { let _ = self.check_or_synth(&a.value, Some(&Ty::Primitive(PrimTy::Str)), env, ctx, r)?; }
+                return Ok(Ty::Generic {
+                    base: TypeCtor::List,
+                    args: vec![Ty::Primitive(PrimTy::Str)],
+                });
             }
             // Channel methods — stdlib: producer.spy
             (Ty::Generic { base: TypeCtor::Channel, args: a }, "send") if a.len() == 1 => {

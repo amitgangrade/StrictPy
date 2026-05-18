@@ -1,0 +1,176 @@
+"""Brainfuck interpreter — runs a classic 8-instruction BF program over a
+30000-cell byte tape. Exercises:
+
+  - char literal equality (`if c == '+':`) per §3.7 — barely exercised
+    elsewhere in the example suite.
+  - `s[i]` returning `char` per §7.4.
+  - Indexed list mutation with i64 indices, hammered ~hundreds of times
+    per BF instruction.
+  - A precomputed jump-table for `[`/`]` matching so we never recurse —
+    a long BF program would otherwise blow the 1024-frame stack limit.
+
+We intentionally implement `,` (read input) as a no-op since v0.1 has no
+stdin primitive (open()/read() reads files only — see shared/src/native.rs).
+
+The classic "Hello World!" program ends with `>>+.>++.` which writes '\n'
+then '.', etc. — but the canonical 106-byte program prints exactly
+"Hello World!\n" so that's what we assert in the integration test."""
+
+# ── Tape helpers ────────────────────────────────────────────────────────
+
+fn make_tape(n: i64) -> List[i32]:
+    out: List[i32] = []
+    i: i64 = 0
+    while i < n:
+        out.append(0)
+        i = i + 1
+    return out
+
+# ── Jump table: for each `[` find the matching `]` and vice versa ───────
+# Returns a List[i64] of length `len(prog)` where jumps[i] = matching
+# bracket index if prog[i] is '[' or ']'; -1 otherwise. Linear time using
+# an explicit stack — no recursion so we never trip the frame-depth limit
+# on long BF programs.
+
+fn build_jumps(prog: str) -> List[i64]:
+    n: i64 = i64(len(prog))
+    jumps: List[i64] = []
+    i: i64 = 0
+    while i < n:
+        jumps.append(-1i64)
+        i = i + 1
+    stack: List[i64] = []
+    i = 0
+    while i < n:
+        c: char = prog[i]
+        if c == '[':
+            stack.append(i)
+        elif c == ']':
+            if len(stack) == 0:
+                # Unbalanced — leave jumps[i] = -1; the interpreter will
+                # treat that as a no-op. A real impl would raise here.
+                i = i + 1
+                continue
+            open_idx: i64 = stack[len(stack) - 1]
+            # Pop by overwriting + truncating is not in v0.1; we instead
+            # rebuild the stack without the last element. Cheap because
+            # bracket nesting in real programs is shallow (<32).
+            new_stack: List[i64] = []
+            k: i64 = 0
+            while k < i64(len(stack)) - 1i64:
+                new_stack.append(stack[k])
+                k = k + 1
+            stack = new_stack
+            jumps[open_idx] = i
+            jumps[i] = open_idx
+        i = i + 1
+    return jumps
+
+# ── Output: build a string one char at a time ───────────────────────────
+# StrictPy has no `print(char, end='')` — println always appends a
+# newline. So we accumulate output into a string and println it once at
+# the end. (str + str works per §7; that's our only build primitive.)
+#
+# Bug #1 found: `char(i32)` is documented as a prelude constructor (§9 and
+# shared/src/native.rs::CharFromI32), but the typechecker's numeric-ctor
+# allow-list (compiler/src/typecheck.rs:845) only includes the int/float
+# primitives — `char` triggers E2011 "value of type char is not callable".
+# Workaround: pre-build a 256-entry ASCII lookup string at startup and
+# index into it with `s[v]`, which §7.4 specifies returns a `char`.
+
+fn build_ascii_table() -> str:
+    # We rely on `str(char_literal)` to convert each printable char to a
+    # 1-char string. For the printable range (32..127) that's safe; for
+    # control chars and high-bit bytes we use \xHH escapes. The result is
+    # a 256-char string where position v has the char with code-point v.
+    # Hello-World only emits values 10 and 32..126, so we just need those
+    # filled correctly; for everything else we substitute '?'.
+    t: str = ""
+    # Fill 0..32 with placeholders, except newline (10).
+    i: i64 = 0
+    while i < 32:
+        if i == 10:
+            t = t + "\n"
+        else:
+            t = t + "?"
+        i = i + 1
+    # 32..127 printable ASCII, by hand.
+    t = t + " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    # Pad 127..256 with '?'.
+    j: i64 = 127
+    while j < 256:
+        t = t + "?"
+        j = j + 1
+    return t
+
+fn cell_to_char_str(v: i32, table: str) -> str:
+    # Wrap to 0..=255 then slice out a 1-char substring. We use `slice()`
+    # rather than `str(table[idx])` because of Bug #2 below.
+    #
+    # Bug #2 found: `str(c)` where `c: char` returns the decimal code
+    # point as a string, not the character. Root cause is in
+    # vm/src/builtins.rs::StrFromAny — the M3 lowerer routes every
+    # `str(x)` to StrFromAny regardless of argument type, and StrFromAny
+    # has no way to tell a char-typed u64 from an int-typed u64, so it
+    # formats with `format!("{}", v as i64)`. The IR lowerer should
+    # dispatch to StrFromChar (NativeFn 10) when the static argument
+    # type is char. As-is, `str('H')` returns "72". Workaround: use
+    # `s.slice(idx, idx + 1)` which returns a proper 1-char `str`.
+    masked: i32 = v
+    while masked < 0:
+        masked = masked + 256
+    while masked >= 256:
+        masked = masked - 256
+    idx: i64 = i64(masked)
+    return table.slice(idx, idx + 1)
+
+# ── Interpreter ─────────────────────────────────────────────────────────
+
+fn run(prog: str) -> str:
+    tape: List[i32] = make_tape(30000i64)
+    jumps: List[i64] = build_jumps(prog)
+    table: str = build_ascii_table()
+    ptr: i64 = 0
+    pc: i64 = 0
+    n: i64 = i64(len(prog))
+    out: str = ""
+    while pc < n:
+        c: char = prog[pc]
+        if c == '+':
+            tape[ptr] = tape[ptr] + 1
+        elif c == '-':
+            tape[ptr] = tape[ptr] - 1
+        elif c == '>':
+            ptr = ptr + 1
+        elif c == '<':
+            ptr = ptr - 1
+        elif c == '.':
+            out = out + cell_to_char_str(tape[ptr], table)
+        elif c == ',':
+            # No stdin in v0.1 — leave the cell untouched.
+            pc = pc
+        elif c == '[':
+            if tape[ptr] == 0:
+                target: i64 = jumps[pc]
+                if target >= 0i64:
+                    pc = target
+        elif c == ']':
+            if tape[ptr] != 0:
+                target2: i64 = jumps[pc]
+                if target2 >= 0i64:
+                    pc = target2
+        # other chars (whitespace, comments) are ignored
+        pc = pc + 1
+    return out
+
+fn main() -> i32:
+    # Canonical "Hello World!\n" — the classic 106-byte BF program from
+    # esolangs.org. Outputs exactly "Hello World!\n" if the interpreter
+    # is correct.
+    hello: str = "++++++++[>++++[>++>+++>+++>+<<<<-]>+>+>->>+[<]<-]>>.>---.+++++++..+++.>>.<-.<.+++.------.--------.>>+.>++."
+    result: str = run(hello)
+    # Print with a trailing newline (println appends one) — so we strip
+    # the literal '\n' the BF program emits to avoid a double newline.
+    # The test asserts containment of "Hello World!" either way.
+    println(result)
+    return 0

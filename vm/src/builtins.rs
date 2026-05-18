@@ -114,6 +114,41 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             let p = interp.alloc_string(&format!("{s}{c}"));
             Ok(p as u64)
         }
+        // real-world: csv_aggregate / wordcount / markov — every text
+        // stress program had to hand-roll a splitter. `s.split(sep)`
+        // returns a freshly allocated `List[str]` whose elements are
+        // each their own heap-allocated StringRepr (so the GC can manage
+        // them independently of `s`).
+        //
+        // Behaviour:
+        //   - empty `s`           → empty list
+        //   - empty `sep`         → ValueError (matches Python — and avoids
+        //                           Rust's infinite single-char iteration)
+        //   - `sep` not present   → single-element list containing `s`
+        //   - normal case         → split on each (non-overlapping)
+        //                           occurrence of `sep`
+        NativeFn::StrSplit => {
+            let s = arg_str(args, 0);
+            let sep = arg_str(args, 1);
+            if sep.is_empty() {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: "split: empty separator".into(),
+                });
+            }
+            if s.is_empty() {
+                let lst = interp.alloc_list(0);
+                return Ok(lst as u64);
+            }
+            let parts: Vec<&str> = s.split(sep.as_str()).collect();
+            let lst = interp.alloc_list(parts.len());
+            for p in parts {
+                let sp = interp.alloc_string(p) as u64;
+                // SAFETY: lst is a freshly allocated list owned by us.
+                unsafe { interp.list_push(lst, sp) };
+            }
+            Ok(lst as u64)
+        }
 
         // real-world: csv_aggregate — parse a decimal string.
         // Rust's `str::parse::<f64>()` accepts the standard "[+-]?digits.digits"
@@ -247,6 +282,32 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
                 std::ptr::write_unaligned(data.add(idx), val);
             }
             Ok(0)
+        }
+        // real-world: fix — `xs.pop()` removes and returns the last
+        // element. Mirrors the existing `Opcode::ListPop` interpreter
+        // path (op_list_pop) but routed through the native-call
+        // dispatcher so source-level method calls reach it.
+        NativeFn::ListPop => {
+            let lst = arg_u64(args, 0) as *mut crate::object::ListRepr;
+            if lst.is_null() {
+                return Err(VmError::UncaughtException {
+                    type_name: "NullPointerError".into(),
+                    message: "pop on null list".into(),
+                });
+            }
+            unsafe {
+                let length = (*lst).length;
+                if length == 0 {
+                    return Err(VmError::UncaughtException {
+                        type_name: "IndexError".into(),
+                        message: "pop from empty list".into(),
+                    });
+                }
+                let data = (*lst).data as *const u64;
+                let v = std::ptr::read_unaligned(data.add(length - 1));
+                (*lst).length = length - 1;
+                Ok(v)
+            }
         }
 
         // ── Math (i64 / f64) ────────────────────────────────────────────
@@ -606,6 +667,51 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
                 message: format!("string index {idx} out of range"),
             })?;
             Ok(ch as u32 as u64)
+        }
+
+        // real-world: stress tests producing ranked output (csv top-N,
+        // wordcount frequency, markov training). `xs.sort()` mutates in
+        // place; `sorted(xs)` returns a fresh sorted copy. Args are:
+        //   [list_ptr, type_tag_u32]
+        // where type_tag is TypeTag::I64 / F64 / Ref (str). Generic
+        // comparators (`key=`) are M10 work.
+        NativeFn::ListSort => {
+            let lst = arg_u64(args, 0) as *mut crate::object::ListRepr;
+            let tag = arg_u64(args, 1) as u8;
+            if lst.is_null() {
+                return Err(VmError::UncaughtException {
+                    type_name: "NullPointerError".into(),
+                    message: "sort on null list".into(),
+                });
+            }
+            // SAFETY: lst from the heap.
+            unsafe { sort_list_in_place(lst, tag)? };
+            Ok(0)
+        }
+        NativeFn::ListSorted => {
+            let src = arg_u64(args, 0) as *const crate::object::ListRepr;
+            let tag = arg_u64(args, 1) as u8;
+            if src.is_null() {
+                let lst = interp.alloc_list(0);
+                return Ok(lst as u64);
+            }
+            // Copy then sort the copy.
+            let (len, elems) = unsafe {
+                let len = (*src).length;
+                let mut v: Vec<u64> = Vec::with_capacity(len);
+                for j in 0..len {
+                    v.push(std::ptr::read_unaligned(((*src).data as *const u64).add(j)));
+                }
+                (len, v)
+            };
+            let dst = interp.alloc_list(len);
+            for v in elems {
+                // SAFETY: dst freshly allocated.
+                unsafe { interp.list_push(dst, v) };
+            }
+            // SAFETY: dst from heap.
+            unsafe { sort_list_in_place(dst, tag)? };
+            Ok(dst as u64)
         }
 
         // ── Sets ────────────────────────────────────────────────────────
@@ -1013,6 +1119,64 @@ fn arg_str(args: &[u64], i: usize) -> String {
     // SAFETY: any pointer here came from our heap (or null). `read_str`
     // tolerates both.
     unsafe { read_str(p) }
+}
+
+/// Sort a `ListRepr` in place. Element bytes are interpreted by `tag`:
+///   - TypeTag::I64 (3)  → signed integer compare
+///   - TypeTag::F64 (9)  → float compare, NaN treated as greatest
+///   - TypeTag::Ref (11) → pointer to StringRepr; compare by UTF-8 bytes
+/// Any other tag yields an UncaughtException("TypeError"). v1 only
+/// supports these three element types; generic comparators (`key=`)
+/// are M10 work.
+///
+/// SAFETY: caller must ensure `lst` is a valid heap pointer.
+unsafe fn sort_list_in_place(
+    lst: *mut crate::object::ListRepr,
+    tag: u8,
+) -> Result<(), VmError> {
+    let len = (*lst).length;
+    if len <= 1 {
+        return Ok(());
+    }
+    let data = (*lst).data as *mut u64;
+    let slice: &mut [u64] = std::slice::from_raw_parts_mut(data, len);
+    match tag {
+        // TypeTag::I64
+        3 => slice.sort_unstable_by(|a, b| (*a as i64).cmp(&(*b as i64))),
+        // TypeTag::F64
+        9 => slice.sort_unstable_by(|a, b| {
+            let x = f64::from_bits(*a);
+            let y = f64::from_bits(*b);
+            // NaN-tolerant ordering: NaN > everything so all NaNs cluster
+            // at the end, matching Rust's `f64::total_cmp` semantics
+            // without pulling it in. partial_cmp + fallback ensures total.
+            match x.partial_cmp(&y) {
+                Some(o) => o,
+                None => match (x.is_nan(), y.is_nan()) {
+                    (true, true) => std::cmp::Ordering::Equal,
+                    (true, false) => std::cmp::Ordering::Greater,
+                    (false, true) => std::cmp::Ordering::Less,
+                    _ => std::cmp::Ordering::Equal,
+                },
+            }
+        }),
+        // TypeTag::Ref → str pointers
+        11 => slice.sort_unstable_by(|a, b| {
+            let sa = read_str(*a as *const StringRepr);
+            let sb = read_str(*b as *const StringRepr);
+            sa.cmp(&sb)
+        }),
+        other => {
+            return Err(VmError::UncaughtException {
+                type_name: "TypeError".into(),
+                message: format!(
+                    "sort/sorted only supports List[i64], List[f64], List[str] in v1; \
+                     got element type tag {other}"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Format an f64 like the spec's `str(f64)` builtin: shortest round-trip
@@ -1483,5 +1647,138 @@ mod tests {
         let s = alloc_s(&mut i, "-42");
         let r = dispatch(&mut i, NativeFn::I64FromStr as u32, &[s]).unwrap();
         assert_eq!(r as i64, -42);
+    }
+
+    // ── String split (real-world: csv_aggregate / wordcount / markov) ──
+
+    fn read_list_of_str(lst_ptr: u64) -> Vec<String> {
+        let lst = lst_ptr as *const crate::object::ListRepr;
+        unsafe {
+            (0..(*lst).length)
+                .map(|j| {
+                    let sp = std::ptr::read_unaligned(((*lst).data as *const u64).add(j));
+                    read_str(sp as *const StringRepr)
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn str_split_comma_returns_list_of_str() {
+        let mut i = empty_interp();
+        let s = alloc_s(&mut i, "a,b,c");
+        let sep = alloc_s(&mut i, ",");
+        let r = dispatch(&mut i, NativeFn::StrSplit as u32, &[s, sep]).unwrap();
+        assert_eq!(read_list_of_str(r), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn str_split_no_match_returns_single_element_list() {
+        let mut i = empty_interp();
+        let s = alloc_s(&mut i, "abc");
+        let sep = alloc_s(&mut i, ",");
+        let r = dispatch(&mut i, NativeFn::StrSplit as u32, &[s, sep]).unwrap();
+        assert_eq!(read_list_of_str(r), vec!["abc"]);
+    }
+
+    #[test]
+    fn str_split_empty_separator_traps() {
+        let mut i = empty_interp();
+        let s = alloc_s(&mut i, "abc");
+        let sep = alloc_s(&mut i, "");
+        let err = dispatch(&mut i, NativeFn::StrSplit as u32, &[s, sep]).unwrap_err();
+        match err {
+            VmError::UncaughtException { type_name, .. } => assert_eq!(type_name, "ValueError"),
+            other => panic!("expected ValueError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn str_split_empty_input_returns_empty_list() {
+        let mut i = empty_interp();
+        let s = alloc_s(&mut i, "");
+        let sep = alloc_s(&mut i, ",");
+        let r = dispatch(&mut i, NativeFn::StrSplit as u32, &[s, sep]).unwrap();
+        assert!(read_list_of_str(r).is_empty());
+    }
+
+    // ── List sort / sorted (real-world: stress tests ranking output) ──
+
+    fn alloc_list_of_u64(interp: &mut Interpreter, vals: &[u64]) -> u64 {
+        let lst = interp.alloc_list(vals.len());
+        for v in vals {
+            // SAFETY: lst freshly allocated.
+            unsafe { interp.list_push(lst, *v) };
+        }
+        lst as u64
+    }
+
+    fn read_list_of_u64(lst_ptr: u64) -> Vec<u64> {
+        let lst = lst_ptr as *const crate::object::ListRepr;
+        unsafe {
+            (0..(*lst).length)
+                .map(|j| std::ptr::read_unaligned(((*lst).data as *const u64).add(j)))
+                .collect()
+        }
+    }
+
+    /// TypeTag::I64 = 3
+    const TAG_I64: u64 = 3;
+    /// TypeTag::F64 = 9
+    const TAG_F64: u64 = 9;
+    /// TypeTag::Ref = 11
+    const TAG_REF: u64 = 11;
+
+    #[test]
+    fn sorted_i64_returns_new_list_in_order() {
+        let mut i = empty_interp();
+        let src = alloc_list_of_u64(&mut i, &[3, 1, 2]);
+        let r = dispatch(&mut i, NativeFn::ListSorted as u32, &[src, TAG_I64]).unwrap();
+        assert_eq!(read_list_of_u64(r), vec![1u64, 2, 3]);
+        // Original must be untouched.
+        assert_eq!(read_list_of_u64(src), vec![3u64, 1, 2]);
+    }
+
+    #[test]
+    fn sort_i64_in_place_with_negatives() {
+        let mut i = empty_interp();
+        let neg5 = (-5i64) as u64;
+        let neg1 = (-1i64) as u64;
+        let lst = alloc_list_of_u64(&mut i, &[neg1, 4, neg5, 0]);
+        dispatch(&mut i, NativeFn::ListSort as u32, &[lst, TAG_I64]).unwrap();
+        let got = read_list_of_u64(lst);
+        let signed: Vec<i64> = got.into_iter().map(|x| x as i64).collect();
+        assert_eq!(signed, vec![-5, -1, 0, 4]);
+    }
+
+    #[test]
+    fn sort_f64_in_place_handles_negatives() {
+        let mut i = empty_interp();
+        let lst = alloc_list_of_u64(
+            &mut i,
+            &[1.5f64.to_bits(), (-2.0f64).to_bits(), 0.0f64.to_bits(), 1.0f64.to_bits()],
+        );
+        dispatch(&mut i, NativeFn::ListSort as u32, &[lst, TAG_F64]).unwrap();
+        let got: Vec<f64> = read_list_of_u64(lst).into_iter().map(f64::from_bits).collect();
+        assert_eq!(got, vec![-2.0, 0.0, 1.0, 1.5]);
+    }
+
+    #[test]
+    fn sorted_str_by_byte_order() {
+        let mut i = empty_interp();
+        let a = alloc_s(&mut i, "banana");
+        let b = alloc_s(&mut i, "apple");
+        let c = alloc_s(&mut i, "cherry");
+        let src = alloc_list_of_u64(&mut i, &[a, b, c]);
+        let r = dispatch(&mut i, NativeFn::ListSorted as u32, &[src, TAG_REF]).unwrap();
+        assert_eq!(read_list_of_str(r), vec!["apple", "banana", "cherry"]);
+    }
+
+    #[test]
+    fn sort_on_empty_list_is_noop() {
+        let mut i = empty_interp();
+        let lst = alloc_list_of_u64(&mut i, &[]);
+        dispatch(&mut i, NativeFn::ListSort as u32, &[lst, TAG_I64]).unwrap();
+        assert!(read_list_of_u64(lst).is_empty());
     }
 }

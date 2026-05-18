@@ -259,10 +259,23 @@ impl<'a, S: ConstSink> Codegen<'a, S> {
         // size-specific opcodes for integer/float comparisons (whose
         // result type is `Bool` and so doesn't itself encode the input
         // width).
-        let operand_ty = args
+        //
+        // real-world: csv_aggregate / nullable-narrowing audit — strip
+        // `Ty::Nullable(T)` to `T` before any primitive-type dispatch
+        // below. The typechecker narrows `x: T?` to `T` inside `if x is
+        // not none:` branches, but the IR slot for `x` still carries
+        // `Nullable(T)` so naive `matches!(ty, Ty::Primitive(p) if
+        // p.is_float())` returned false and we silently emitted the
+        // wrong typed opcode (e.g. F64 op on raw f32 bits, or I32 op on
+        // f64 bits). Unwrap once here so every `Ty::Primitive(...)`
+        // match below sees the narrowed inner type.
+        let raw_operand_ty = args
             .first()
             .and_then(|a| self.value_ty(a.0))
             .unwrap_or_else(|| ty.clone());
+        let operand_ty = unwrap_nullable_ty(&raw_operand_ty).clone();
+        let ty_owned = unwrap_nullable_ty(ty).clone();
+        let ty = &ty_owned;
         match op {
             IROp::IAdd => self.write_bin(
                 op_for_iadd(ty).or_else(|| op_for_iadd(&operand_ty)).unwrap_or(Opcode::IAddI32),
@@ -678,9 +691,18 @@ impl<'a, S: ConstSink> Codegen<'a, S> {
 //  Opcode selection helpers
 // ─────────────────────────────────────────────────────────────────────────
 
+/// Strip `Ty::Nullable(T)` to `T`. Defensive helper for primitive-type
+/// dispatch — see `emit_op` comment about nullable narrowing.
+pub(crate) fn unwrap_nullable_ty(ty: &Ty) -> &Ty {
+    match ty {
+        Ty::Nullable(inner) => inner.as_ref(),
+        other => other,
+    }
+}
+
 /// Pick the concrete add opcode for an integer `IAdd` given its operand type.
 pub fn op_for_iadd(ty: &Ty) -> Option<Opcode> {
-    match ty {
+    match unwrap_nullable_ty(ty) {
         Ty::Primitive(PrimTy::I32) => Some(Opcode::IAddI32),
         Ty::Primitive(PrimTy::I64) => Some(Opcode::IAddI64),
         Ty::Primitive(PrimTy::U32) => Some(Opcode::UAddU32),
@@ -690,7 +712,7 @@ pub fn op_for_iadd(ty: &Ty) -> Option<Opcode> {
 }
 
 pub fn op_for_isub(ty: &Ty) -> Option<Opcode> {
-    match ty {
+    match unwrap_nullable_ty(ty) {
         Ty::Primitive(PrimTy::I32) => Some(Opcode::ISubI32),
         Ty::Primitive(PrimTy::I64) => Some(Opcode::ISubI64),
         Ty::Primitive(PrimTy::U32) => Some(Opcode::USubU32),
@@ -700,7 +722,7 @@ pub fn op_for_isub(ty: &Ty) -> Option<Opcode> {
 }
 
 pub fn op_for_imul(ty: &Ty) -> Option<Opcode> {
-    match ty {
+    match unwrap_nullable_ty(ty) {
         Ty::Primitive(PrimTy::I32) => Some(Opcode::IMulI32),
         Ty::Primitive(PrimTy::I64) => Some(Opcode::IMulI64),
         Ty::Primitive(PrimTy::U32) => Some(Opcode::UMulU32),
@@ -710,7 +732,7 @@ pub fn op_for_imul(ty: &Ty) -> Option<Opcode> {
 }
 
 pub fn op_for_idiv(ty: &Ty) -> Option<Opcode> {
-    match ty {
+    match unwrap_nullable_ty(ty) {
         Ty::Primitive(PrimTy::I32) => Some(Opcode::IDivI32),
         Ty::Primitive(PrimTy::I64) => Some(Opcode::IDivI64),
         Ty::Primitive(PrimTy::U32) => Some(Opcode::UDivU32),
@@ -725,7 +747,7 @@ enum IntCmp { Eq, Ne, Lt, Le, Gt, Ge }
 /// Pick the size-correct integer comparison opcode for the given operand
 /// type. Falls back to the i32 variant for unknown / non-integer types.
 fn int_cmp_op(ty: &Ty, op: IntCmp) -> Opcode {
-    match ty {
+    match unwrap_nullable_ty(ty) {
         Ty::Primitive(PrimTy::I64) => match op {
             IntCmp::Eq => Opcode::IEqI64,
             IntCmp::Ne => Opcode::INeI64,
@@ -762,7 +784,7 @@ fn int_cmp_op(ty: &Ty, op: IntCmp) -> Opcode {
 }
 
 fn ty_tag_for(ty: &Ty) -> TypeTag {
-    match ty {
+    match unwrap_nullable_ty(ty) {
         Ty::Primitive(PrimTy::Bool) => TypeTag::Bool,
         Ty::Primitive(PrimTy::I8) => TypeTag::I8,
         Ty::Primitive(PrimTy::I16) => TypeTag::I16,
@@ -865,5 +887,96 @@ mod tests {
         let emitted = emit_function(&f, &mut sink);
         // First byte must be IADD_I64 since both ops are i64.
         assert_eq!(emitted.code[0], Opcode::IAddI64 as u8);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  Nullable-narrowing dispatch tests
+    //
+    //  real-world: csv_aggregate / nullable-narrowing audit — when the
+    //  typechecker narrows `x: T?` to `T` inside a guard, the IR slot for
+    //  `x` still carries `Nullable(T)`. Codegen must strip the nullable
+    //  wrapper before any primitive-type dispatch or it picks the wrong
+    //  typed opcode (e.g. IAddI32 for i64?, FAddF64 for f32?).
+    // ─────────────────────────────────────────────────────────────────────
+
+    fn null(inner: Ty) -> Ty { Ty::Nullable(Box::new(inner)) }
+
+    fn op_to_byte(oc: Opcode) -> u8 { oc as u8 }
+
+    /// Build a 2-param fn whose only op is `op` over the two params. The
+    /// result type and the param types are caller-controlled so we can
+    /// force `Nullable(T)` slot types just like the IR builder would after
+    /// narrowing.
+    fn build_binop_fn(param_ty: Ty, result_ty: Ty, op: IROp) -> IRFunction {
+        IRFunction {
+            id: FuncId(0),
+            name: "f".into(),
+            params: vec![param_ty.clone(), param_ty.clone()],
+            ret: result_ty.clone(),
+            blocks: vec![BasicBlock {
+                id: BlockId(0),
+                values: vec![
+                    Value { id: 0, ty: param_ty.clone(), kind: ValueKind::Param { idx: 0 } },
+                    Value { id: 1, ty: param_ty.clone(), kind: ValueKind::Param { idx: 1 } },
+                    Value {
+                        id: 2,
+                        ty: result_ty,
+                        kind: ValueKind::Op { op, args: vec![ValueId(0), ValueId(1)] },
+                    },
+                ],
+                terminator: Terminator::Ret { value: Some(ValueId(2)) },
+            }],
+        }
+    }
+
+    #[test]
+    fn iadd_dispatches_i64_even_when_slot_is_nullable() {
+        // Pre-fix: op_for_iadd(Nullable(I64)) → None → defaulted to IAddI32.
+        let f = build_binop_fn(null(Ty::Primitive(PrimTy::I64)), Ty::Primitive(PrimTy::I64), IROp::IAdd);
+        let mut sink = FakeSink::new();
+        let e = emit_function(&f, &mut sink);
+        assert_eq!(e.code[0], op_to_byte(Opcode::IAddI64),
+            "IAdd on i64? slot must pick IAddI64, got opcode byte {:#x}", e.code[0]);
+    }
+
+    #[test]
+    fn fadd_dispatches_f32_even_when_slot_is_nullable() {
+        // Pre-fix: matches!(operand_ty, Ty::Primitive(F32)) was false for
+        // Nullable(F32), so we silently selected FAddF64.
+        let f = build_binop_fn(null(Ty::Primitive(PrimTy::F32)), Ty::Primitive(PrimTy::F32), IROp::FAdd);
+        let mut sink = FakeSink::new();
+        let e = emit_function(&f, &mut sink);
+        assert_eq!(e.code[0], op_to_byte(Opcode::FAddF32),
+            "FAdd on f32? slot must pick FAddF32, got opcode byte {:#x}", e.code[0]);
+    }
+
+    #[test]
+    fn int_cmp_dispatches_i64_even_when_slot_is_nullable() {
+        // Pre-fix: int_cmp_op(Nullable(I64), Eq) fell through to IEqI32.
+        let f = build_binop_fn(null(Ty::Primitive(PrimTy::I64)), Ty::Primitive(PrimTy::Bool), IROp::IEq);
+        let mut sink = FakeSink::new();
+        let e = emit_function(&f, &mut sink);
+        assert_eq!(e.code[0], op_to_byte(Opcode::IEqI64),
+            "IEq on i64? slot must pick IEqI64, got opcode byte {:#x}", e.code[0]);
+    }
+
+    #[test]
+    fn fcmp_dispatches_f32_even_when_slot_is_nullable() {
+        let f = build_binop_fn(null(Ty::Primitive(PrimTy::F32)), Ty::Primitive(PrimTy::Bool), IROp::FLt);
+        let mut sink = FakeSink::new();
+        let e = emit_function(&f, &mut sink);
+        assert_eq!(e.code[0], op_to_byte(Opcode::FLtF32),
+            "FLt on f32? slot must pick FLtF32, got opcode byte {:#x}", e.code[0]);
+    }
+
+    #[test]
+    fn irem_dispatches_i64_even_when_result_ty_is_nullable() {
+        // Pre-fix: matches!(ty, Ty::Primitive(I64) | Ty::Primitive(U64))
+        // was false for Nullable(I64), so we selected IRemI32.
+        let f = build_binop_fn(Ty::Primitive(PrimTy::I64), null(Ty::Primitive(PrimTy::I64)), IROp::IRem);
+        let mut sink = FakeSink::new();
+        let e = emit_function(&f, &mut sink);
+        assert_eq!(e.code[0], op_to_byte(Opcode::IRemI64),
+            "IRem on i64? result must pick IRemI64, got opcode byte {:#x}", e.code[0]);
     }
 }
