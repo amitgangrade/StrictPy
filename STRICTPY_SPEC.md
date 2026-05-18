@@ -541,7 +541,9 @@ informal Python repr but without the type-decoration.
   indexing: `t.0`, `t.1`, ...
 - `len(t)` is not defined (the arity is part of the type).
 - Tuples cannot be `Dict` keys in v0.1 (no `Hash` impl).
-- Pattern matching on tuples in `match`/`case` is deferred.
+- Pattern matching on tuples in `match`/`case` is supported as of M16
+  (positional only — `case (a, b):` — with `Identifier` and `Wildcard`
+  sub-patterns).
 
 **Subtyping.** `Tuple[T1, ..., Tn] <: Tuple[U1, ..., Un]` iff
 `Ti <: Ui` pointwise (covariant per §5.2).
@@ -603,7 +605,29 @@ Nullable and union types narrow based on:
 
 ### 6.5 Exhaustiveness
 
-`match` statements must be exhaustive over the scrutinee type, or include a wildcard `_` case. Failure is a compile error.
+`match` statements must be exhaustive over the scrutinee type, or include a wildcard `_` case.
+
+**M16 v0.1 implementation note.** The full algebraic-datatypes exhaustiveness pass is deferred. The current compiler emits a *warning* to stderr (not a hard error) when:
+
+* the scrutinee's static type is a `sealed class` with declared subclasses, AND
+* the `match` has no `case _:` arm and no terminal `case x:` identifier pattern, AND
+* at least one direct subclass appears in *no* `case Constructor(...):` arm.
+
+Open-class scrutinees, primitive scrutinees, and tuple scrutinees are not yet exhaustiveness-checked at all. An unmatched scrutinee at runtime simply falls out of the `match` block — there is no `MatchError` exception. v0.2 will tighten this into a compile error with full algebraic coverage.
+
+### 6.5.1 Supported pattern forms (M16 v0.1)
+
+| Pattern                       | Source           | Notes                                                                 |
+|-------------------------------|------------------|-----------------------------------------------------------------------|
+| `case _:`                     | `Wildcard`       | Always matches; binds nothing.                                        |
+| `case x:`                     | `Identifier`     | Always matches; binds the scrutinee to `x`.                           |
+| `case ClassName(p1, p2, ...):`| `Constructor`    | Runtime `isinstance` test; sub-patterns bind fields by declaration order. Only `Identifier` and `Wildcard` sub-patterns are supported in v0.1 — nested constructor patterns are deferred. |
+| `case (p1, p2, ...):`         | `Tuple`          | Unconditional positional destructure (arity already verified by the typechecker). Only `Identifier` and `Wildcard` sub-patterns in v0.1.                              |
+| `case 42:` / `case "hi":`     | `Literal`        | Equality test against an `int` / `float` / `str` / `char` / `bool` / `none` literal. |
+
+**Deferred (v0.2+):** or-patterns (`case A | B:`), guard clauses (`case Pat if cond:`), keyword-arg constructor patterns (`case Foo(x=1):`), range patterns, mapping patterns (`case {"k": v}:`), and nested constructor patterns (`case Pair(Number(n), c):`).
+
+The scrutinee expression is evaluated **exactly once**, regardless of how many arms reference it; the value is stashed in a hidden local slot at the top of the lowered match.
 
 ### 6.6 Purity (advisory)
 
@@ -865,6 +889,18 @@ fn min[T: Comparable](a: T, b: T) -> T
 fn max[T: Comparable](a: T, b: T) -> T
 fn range(start: i64, stop: i64, step: i64 = 1) -> Range
 fn assert(cond: bool, msg: str = "") -> None
+fn isinstance(x: any, T: type) -> bool   # M16
+
+# isinstance(x, T) — runtime class check. T must name a user class;
+# protocols, primitive types, and generic instantiations are NOT valid
+# second arguments in v0.1. Walks the parent chain via the runtime
+# type table, so `isinstance(sub_instance, Base)` is true.
+#
+# Acts as a flow-narrowing predicate inside `if isinstance(x, T):` —
+# within the then-branch `x` has static type `T`. The narrowing is
+# rolled back at the end of the branch. Narrowing does NOT compose
+# through `and` / `or` in v0.1 (i.e. `if isinstance(x, A) and x.f > 0:`
+# does not see `x: A` in the right operand).
 
 # str(x: T) -> str  -- canonical text form of x
 #   * For floats, integral values keep one trailing decimal place

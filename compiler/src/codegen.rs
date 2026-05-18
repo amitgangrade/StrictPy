@@ -588,6 +588,13 @@ impl<'a, S: ConstSink> Codegen<'a, S> {
                 self.write_u16(argr.first().copied().unwrap_or(0));
                 self.write_u32(u32::MAX);
             }
+            IROp::IsInstance { class_id } => {
+                // IS_INSTANCE dst:r16, obj:r16, type_id:u32
+                self.write_op(Opcode::IsInstance);
+                self.write_u16(dst);
+                self.write_u16(argr.first().copied().unwrap_or(0));
+                self.write_u32(*class_id);
+            }
 
             // M15: exception-handling encoding.
             //

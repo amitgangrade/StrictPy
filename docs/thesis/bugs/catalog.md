@@ -62,6 +62,37 @@ Post-M15 state (2026-05-18):
   interpreter automatically.
 - Only BUG-028 (lexer line continuation) remains deferred.
 
+Post-M16 state (2026-05-18 later):
+
+- **M16 closed two long-standing language gaps**: `isinstance(x, T)`
+  was stubbed-true from M3 (`vm/src/interp.rs::op_is_instance` returned
+  1 regardless), and `match` / `case Constructor(...)` parsed end-to-end
+  but the IR lowerer dropped every arm (`compiler/src/ir.rs::Stmt::Match`
+  was an M4 placeholder). Together these forced every sealed-hierarchy
+  stress program (`json_parse`, `lisp`, `lambda_calc`, `calculator`) to
+  either roll a `kind: i32` discriminator field or route every operation
+  through a virtual method on an `open class` base. Neither was a numbered
+  bug; both were architectural gaps documented in the M10-M12 agent
+  reports as "language-surface awkwardness".
+- Implementation: `IROp::IsInstance { class_id }` lowers to the existing
+  `Opcode::IsInstance` opcode (now reading object header → vtable →
+  `type_id` and walking `module.types[*].base_type` until match);
+  `lower_match` evaluates the scrutinee into a hidden local slot and
+  emits each arm as an isinstance-guarded basic-block test with field
+  destructuring via the resolver's `ClassLayout.fields[i].offset`. Flow
+  narrowing for `if isinstance(x, T):` mirrors the existing `is not none`
+  narrowing in `narrowings_from_cond`.
+- Carve-outs: only `Identifier` and `Wildcard` sub-patterns in
+  `Constructor`/`Tuple` patterns are supported (nested constructor
+  patterns deferred); `isinstance` accepts only user classes (not
+  protocols, primitives, or generics); narrowing does NOT compose
+  through `and`/`or`; exhaustiveness is a stderr warning, not an error.
+- Tests: `vm/tests/m16_match_isinstance.rs` (9 tests),
+  `compiler/tests/calculator_with_match_runs.rs` (2 tests),
+  `examples/calculator_with_match.spy` (NEW — sealed-class AST + match
+  evaluator demo).
+- BUG-028 (lexer line continuation) is still the only deferred bug.
+
 ## Full catalog
 
 ### Critical: silent miscompiles

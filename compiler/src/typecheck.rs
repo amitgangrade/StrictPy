@@ -344,18 +344,106 @@ impl TypeChecker {
                 self.check_block(body, ret, &env2, ctx, r)?;
                 if let Some(eb) = else_block { self.check_block(eb, ret, env, ctx, r)?; }
             }
-            Stmt::Match { scrutinee, arms, .. } => {
-                let _ = self.check_or_synth(scrutinee, None, env, ctx, r)?;
+            Stmt::Match { scrutinee, arms, span } => {
+                let scrut_ty = self.check_or_synth(scrutinee, None, env, ctx, r)?;
                 let mut has_wildcard = false;
+                // Track which class ids are matched by Constructor patterns —
+                // used for the sealed-hierarchy exhaustiveness warning.
+                let mut matched_classes: HashSet<ClassId> = HashSet::new();
                 for arm in arms {
-                    if matches!(arm.pattern, ast::Pattern::Wildcard(_) | ast::Pattern::Identifier(_, _)) {
-                        has_wildcard = true;
+                    let mut env2 = env.clone();
+                    match &arm.pattern {
+                        ast::Pattern::Wildcard(_) => {
+                            has_wildcard = true;
+                        }
+                        ast::Pattern::Identifier(name, pspan) => {
+                            has_wildcard = true;
+                            // Bind the identifier to the scrutinee's type.
+                            if let Some(sid) = r.symbols.symbols.iter()
+                                .find(|s| s.name == *name && s.def_span.start == pspan.start)
+                                .map(|s| s.id)
+                            {
+                                env2.types.insert(sid, scrut_ty.clone());
+                            }
+                        }
+                        ast::Pattern::Constructor { ty, fields, .. } => {
+                            // Resolve the pattern's class id and narrow the
+                            // scrutinee (if it's a simple ident).
+                            let key = ast_type_span(ty);
+                            let pat_ty = r.ast_type_to_ty.get(&key).cloned();
+                            if let Some(Ty::Class(cid)) = &pat_ty {
+                                matched_classes.insert(*cid);
+                                // Bind each Identifier sub-pattern to the
+                                // corresponding field's declared type.
+                                if let Some(layout) = ctx.classes.get(cid).cloned() {
+                                    for (i, sub) in fields.iter().enumerate() {
+                                        if let ast::Pattern::Identifier(fname, pspan) = sub {
+                                            if let Some(finfo) = layout.fields.get(i) {
+                                                if let Some(sid) = r.symbols.symbols.iter()
+                                                    .find(|s| s.name == *fname && s.def_span.start == pspan.start)
+                                                    .map(|s| s.id)
+                                                {
+                                                    env2.types.insert(sid, finfo.ty.clone());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                // If the scrutinee was an ident, also narrow
+                                // it to the pattern's class within the arm.
+                                if let Expr::Ident { span: sspan, .. } = scrutinee {
+                                    if let Some(sid) = r.ident_to_symbol.get(&(sspan.start, sspan.end)) {
+                                        env2.types.insert(*sid, Ty::Class(*cid));
+                                    }
+                                }
+                            }
+                        }
+                        ast::Pattern::Tuple(elems, _) => {
+                            if let Ty::Tuple(elem_tys) = &scrut_ty {
+                                for (i, sub) in elems.iter().enumerate() {
+                                    if let ast::Pattern::Identifier(fname, pspan) = sub {
+                                        if let Some(elem_ty) = elem_tys.get(i) {
+                                            if let Some(sid) = r.symbols.symbols.iter()
+                                                .find(|s| s.name == *fname && s.def_span.start == pspan.start)
+                                                .map(|s| s.id)
+                                            {
+                                                env2.types.insert(sid, elem_ty.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        ast::Pattern::Literal(_, _) => {}
                     }
-                    self.check_block(&arm.body, ret, env, ctx, r)?;
+                    self.check_block(&arm.body, ret, &env2, ctx, r)?;
                 }
+                // M16 exhaustiveness (spec §6.5): if scrutinee is a sealed
+                // class, every direct subclass must be matched (or a
+                // wildcard provided). Emit a warning to stderr on miss —
+                // not a hard error in v0.1.
                 if !has_wildcard {
-                    // TODO(spec §6.5): real exhaustiveness over sealed unions and literals.
-                    // For now require a wildcard for non-trivial scrutinees.
+                    if let Ty::Class(cid) = &scrut_ty {
+                        if let Some(layout) = ctx.classes.get(cid) {
+                            if layout.is_sealed {
+                                let missing: Vec<&str> = ctx
+                                    .classes
+                                    .values()
+                                    .filter(|c| c.base == Some(*cid)
+                                        && !matched_classes.contains(&c.id))
+                                    .map(|c| c.name.as_str())
+                                    .collect();
+                                if !missing.is_empty() {
+                                    eprintln!(
+                                        "warning: match on sealed `{}` is non-exhaustive; missing: {} (at byte {}-{})",
+                                        layout.name,
+                                        missing.join(", "),
+                                        span.start, span.end,
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
             }
             Stmt::Try { body, handlers, else_block, finally_block, .. } => {
@@ -923,6 +1011,35 @@ impl TypeChecker {
                     }
                     return Ok(Ty::Primitive(PrimTy::Unit));
                 }
+                // M16: `isinstance(x, T)` — runtime class check. Returns bool.
+                // The second argument must name a user class. Flow-narrowing
+                // happens in `narrowings_from_cond` once the call sits in an
+                // `if` condition.
+                "isinstance" => {
+                    if args.len() != 2 {
+                        return Err(type_err(span, codes::TYPE_ARITY,
+                            "isinstance takes 2 arguments: (value, ClassName)".into()));
+                    }
+                    let _ = self.synth_expr(&args[0].value, env, ctx, r)?;
+                    // Second arg: must be a class-naming ident.
+                    if let Expr::Ident { name, span: ispan } = &args[1].value {
+                        if let Some(sid) = r.symbols.lookup(r.module_scope, name) {
+                            let s = r.symbols.get(sid);
+                            if matches!(s.kind, SymbolKind::Class) && s.class_id.is_some() {
+                                // Stash the class type at the second-arg's
+                                // span so the IR lowerer can recover the
+                                // class id when materialising IROp::IsInstance.
+                                self.expr_types.insert(
+                                    (ispan.start, ispan.end),
+                                    Ty::Class(s.class_id.unwrap()),
+                                );
+                                return Ok(Ty::Primitive(PrimTy::Bool));
+                            }
+                        }
+                    }
+                    return Err(type_err(span, codes::TYPE_MISMATCH,
+                        "isinstance: second argument must name a user class".into()));
+                }
                 "str" => {
                     // str(x) converts any value to str.
                     if args.len() != 1 {
@@ -1346,9 +1463,34 @@ fn apply_narrows(env: &mut Env, n: &Narrowing) {
 }
 
 fn narrowings_from_cond(cond: &Expr, r: &ResolvedModule, env: &Env) -> (Narrowing, Narrowing) {
-    // Recognize `x is none`, `x is not none`, `x == none`, `x != none`.
+    // Recognize `x is none`, `x is not none`, `x == none`, `x != none`, and
+    // M16's `isinstance(x, T)`.
     let mut then_n = Narrowing::default();
     let mut else_n = Narrowing::default();
+    // M16: `isinstance(x, T)` — narrow `x` to T inside the then-branch.
+    // We don't narrow in the else-branch (could be a sibling subclass or
+    // anything else); the spec calls this out.
+    if let Expr::Call { callee, args, .. } = cond {
+        if let Expr::Ident { name, .. } = callee.as_ref() {
+            if name == "isinstance" && args.len() == 2 {
+                if let Expr::Ident { span: xspan, .. } = &args[0].value {
+                    if let Expr::Ident { name: tname, .. } = &args[1].value {
+                        if let Some(sid_t) = r.symbols.lookup(r.module_scope, tname) {
+                            let s = r.symbols.get(sid_t);
+                            if matches!(s.kind, SymbolKind::Class) {
+                                if let Some(cid) = s.class_id {
+                                    if let Some(sid_x) = r.ident_to_symbol.get(&(xspan.start, xspan.end)) {
+                                        then_n.entries.push((*sid_x, Ty::Class(cid)));
+                                        let _ = env;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     if let Expr::Binary { op, lhs, rhs, .. } = cond {
         let (is_none, is_negated) = match op {
             BinOp::Is => (matches!(rhs.as_ref(), Expr::Literal { lit: Literal::None, .. }), false),

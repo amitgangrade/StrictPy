@@ -371,6 +371,11 @@ impl Resolver {
             // the type-checker's tailored `sorted` handling below — same
             // pattern as `abs` / `min` / `max`.
             ("sorted",  Ty::Function { params: vec![], ret: Box::new(Ty::Never) }),
+            // M16: `isinstance(x, T)` — runtime class check. The second
+            // argument names a user class (not a value). The typechecker
+            // and IR lowerer treat this call specially; the sentinel
+            // signature is just here to put `isinstance` in scope.
+            ("isinstance", Ty::Function { params: vec![], ret: Box::new(Ty::Primitive(PrimTy::Bool)) }),
         ];
         for (name, ty) in builtins {
             self.make_symbol(scope, name, SymbolKind::Function, Span::DUMMY, Some(ty.clone()));

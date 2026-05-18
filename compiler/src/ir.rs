@@ -137,6 +137,10 @@ pub enum IROp {
     BoundsCheck,
     NullCheck,
     TypeCheck,
+    /// M16: `isinstance(x, T)` — read the object's runtime class id and walk
+    /// the parent chain. Args: `[obj]`. Returns `bool`. `class_id` is the
+    /// runtime *type-table* id (matching the operand of `IROp::Alloc`).
+    IsInstance { class_id: u32 },
 
     // ── Exceptions (M15 try/except) ──────────────────────────────────────
     /// Push a handler frame onto the interpreter's handler stack at the
@@ -1193,7 +1197,10 @@ fn lower_stmt(fb: &mut FuncBuilder, ctx: &mut LowerCtx, s: &Stmt) -> Option<()> 
             }
             Some(())
         }
-        Stmt::Match { .. } => Some(()), // M4
+        Stmt::Match { scrutinee, arms, .. } => {
+            lower_match(fb, ctx, scrutinee, arms);
+            Some(())
+        }
         Stmt::Pass { .. } => Some(()),
     }
 }
@@ -1256,6 +1263,254 @@ fn lower_while(fb: &mut FuncBuilder, ctx: &mut LowerCtx, cond: &Expr, body: &Blo
     fb.terminate(Terminator::Branch { target: header });
 
     fb.switch_to(exit);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  M16: match / case lowering
+// ─────────────────────────────────────────────────────────────────────────
+//
+// Strategy: evaluate the scrutinee exactly once into a fresh local slot, then
+// emit each arm as an if-elif test that reads from that slot.
+//
+// * Pattern::Wildcard / Pattern::Identifier — unconditional branch into the
+//   arm body. Identifier additionally binds the scrutinee to a new local.
+// * Pattern::Constructor { ty, fields } — emit `IsInstance` against the
+//   class type-table id; on match, bind each `fields[i]` (which is itself
+//   a Pattern, but for v0.1 we only support Identifier sub-patterns) to the
+//   value at the class's `fields[i].offset`.
+// * Pattern::Tuple(elems) — accept unconditionally (the static typechecker
+//   already verified arity and element types). Each element pattern is bound
+//   the same way as Constructor fields, at offset `8 * i`.
+// * Pattern::Literal — equality test via IEq / FEq / StrEq depending on the
+//   scrutinee's primitive kind.
+//
+// After every arm a Branch(exit) is emitted on the success path. The
+// fall-through after the last arm also branches to exit, so unmatched
+// scrutinees simply fall out of the construct (Python semantics: no
+// `MatchError` exception in v0.1; exhaustiveness is enforced via spec
+// §6.5 in the typechecker as a warning).
+fn lower_match(
+    fb: &mut FuncBuilder,
+    ctx: &mut LowerCtx,
+    scrutinee: &Expr,
+    arms: &[ast::MatchArm],
+) {
+    // Evaluate the scrutinee exactly once and stash in a hidden local. Each
+    // arm test re-reads it so the source expression isn't re-evaluated.
+    let scrut_v = lower_expr(fb, ctx, scrutinee);
+    let scrut_ty = find_value_ty(fb, scrut_v).unwrap_or(Ty::Primitive(PrimTy::Unit));
+    // Reserve a slot name that can't clash with a user identifier.
+    let slot_name = format!("__match_scrut_{}", fb.fresh_value());
+    let scrut_slot = fb.alloc_slot(&slot_name, scrut_ty.clone());
+    fb.emit_write_local(scrut_slot, scrut_v);
+
+    let exit = fb.new_block();
+
+    for arm in arms {
+        let scrut_read = fb.emit_read_local(scrut_slot);
+        match &arm.pattern {
+            ast::Pattern::Wildcard(_) => {
+                lower_block(fb, ctx, &arm.body);
+                fb.terminate(Terminator::Branch { target: exit });
+                // Anything after a wildcard is unreachable in source; the
+                // typechecker / parser does not currently forbid it, so be
+                // tolerant and continue lowering subsequent arms into a
+                // fresh dead block.
+                let dead = fb.new_block();
+                fb.switch_to(dead);
+            }
+            ast::Pattern::Identifier(name, _) => {
+                // Bind the scrutinee to `name` and unconditionally enter
+                // the arm body.
+                let slot = fb.alloc_slot(name, scrut_ty.clone());
+                fb.emit_write_local(slot, scrut_read);
+                lower_block(fb, ctx, &arm.body);
+                fb.terminate(Terminator::Branch { target: exit });
+                let dead = fb.new_block();
+                fb.switch_to(dead);
+            }
+            ast::Pattern::Constructor { ty, fields, .. } => {
+                let cid_opt = ctor_pattern_class_id(ctx, ty);
+                let arm_b = fb.new_block();
+                let next_b = fb.new_block();
+                if let Some(cid) = cid_opt {
+                    let tid = ctx.class_type_id.get(&cid.0).copied().unwrap_or(cid.0);
+                    let cond = fb.push_value(
+                        Ty::Primitive(PrimTy::Bool),
+                        ValueKind::Op {
+                            op: IROp::IsInstance { class_id: tid },
+                            args: vec![scrut_read],
+                        },
+                    );
+                    fb.terminate(Terminator::CondBranch {
+                        cond,
+                        t: arm_b,
+                        f: next_b,
+                    });
+                    fb.switch_to(arm_b);
+                    // Bind each Identifier sub-pattern to the matching field.
+                    if let Some(layout) = ctx.class_layouts.get(&cid).cloned() {
+                        let scrut_in_arm = fb.emit_read_local(scrut_slot);
+                        for (i, sub) in fields.iter().enumerate() {
+                            if let ast::Pattern::Identifier(fname, _) = sub {
+                                if let Some(finfo) = layout.fields.get(i) {
+                                    let v = fb.push_value(
+                                        finfo.ty.clone(),
+                                        ValueKind::Op {
+                                            op: IROp::Load { offset: finfo.offset },
+                                            args: vec![scrut_in_arm],
+                                        },
+                                    );
+                                    let slot = fb.alloc_slot(fname, finfo.ty.clone());
+                                    fb.emit_write_local(slot, v);
+                                }
+                            }
+                            // Wildcards and nested constructor patterns are
+                            // v0.2 work; v0.1 only supports flat Identifier
+                            // sub-patterns and Wildcards (no binding).
+                        }
+                    }
+                    lower_block(fb, ctx, &arm.body);
+                    fb.terminate(Terminator::Branch { target: exit });
+                    fb.switch_to(next_b);
+                } else {
+                    // Couldn't resolve class; arm becomes unreachable.
+                    fb.terminate(Terminator::Branch { target: next_b });
+                    fb.switch_to(next_b);
+                }
+            }
+            ast::Pattern::Tuple(elems, _) => {
+                // Tuples are statically-shaped, so we accept unconditionally
+                // and just bind each Identifier sub-pattern.
+                if let Ty::Tuple(elem_tys) = &scrut_ty {
+                    for (i, sub) in elems.iter().enumerate() {
+                        if let ast::Pattern::Identifier(name, _) = sub {
+                            let elem_ty = elem_tys
+                                .get(i)
+                                .cloned()
+                                .unwrap_or(Ty::Primitive(PrimTy::Unit));
+                            let v = fb.push_value(
+                                elem_ty.clone(),
+                                ValueKind::Op {
+                                    op: IROp::Load { offset: (i as u32) * 8 },
+                                    args: vec![scrut_read],
+                                },
+                            );
+                            let slot = fb.alloc_slot(name, elem_ty);
+                            fb.emit_write_local(slot, v);
+                        }
+                    }
+                }
+                lower_block(fb, ctx, &arm.body);
+                fb.terminate(Terminator::Branch { target: exit });
+                let dead = fb.new_block();
+                fb.switch_to(dead);
+            }
+            ast::Pattern::Literal(lit, _) => {
+                // Equality test against the literal. Currently supports
+                // ints / strs / bools / chars / floats. Anything weirder
+                // falls through (no match).
+                let lit_v = lower_literal_for_match(fb, lit, &scrut_ty);
+                let cmp_op = match &scrut_ty {
+                    Ty::Primitive(PrimTy::F32) | Ty::Primitive(PrimTy::F64) => IROp::FEq,
+                    Ty::Primitive(PrimTy::Str) => IROp::StrEq,
+                    _ => IROp::IEq,
+                };
+                let cond = fb.push_value(
+                    Ty::Primitive(PrimTy::Bool),
+                    ValueKind::Op {
+                        op: cmp_op,
+                        args: vec![scrut_read, lit_v],
+                    },
+                );
+                let arm_b = fb.new_block();
+                let next_b = fb.new_block();
+                fb.terminate(Terminator::CondBranch {
+                    cond,
+                    t: arm_b,
+                    f: next_b,
+                });
+                fb.switch_to(arm_b);
+                lower_block(fb, ctx, &arm.body);
+                fb.terminate(Terminator::Branch { target: exit });
+                fb.switch_to(next_b);
+            }
+        }
+    }
+
+    // Fall-through (no match): branch to exit.
+    fb.terminate(Terminator::Branch { target: exit });
+    fb.switch_to(exit);
+}
+
+fn ctor_pattern_class_id(ctx: &LowerCtx, ty: &ast::Type) -> Option<ClassId> {
+    // Resolve the AST type to a Ty via the resolver's ast_type_to_ty map,
+    // then read off the class id.
+    let key = ast_type_span(ty);
+    let resolved = ctx
+        .typed
+        .resolved
+        .ast_type_to_ty
+        .get(&(key.start, key.end))
+        .cloned();
+    match resolved {
+        Some(Ty::Class(cid)) => Some(cid),
+        _ => {
+            // Fallback: try to resolve by name lookup if the AST is a bare
+            // ident. Constructor patterns with dotted names (modules) are
+            // not supported in v0.1.
+            if let ast::Type::Named { name, .. } = ty {
+                if let Some(sid) = ctx
+                    .typed
+                    .resolved
+                    .symbols
+                    .lookup(ctx.typed.resolved.module_scope, name)
+                {
+                    return ctx.typed.resolved.symbols.get(sid).class_id;
+                }
+            }
+            None
+        }
+    }
+}
+
+fn lower_literal_for_match(fb: &mut FuncBuilder, lit: &Literal, expected: &Ty) -> ValueId {
+    match lit {
+        Literal::Int { value, .. } => match expected {
+            Ty::Primitive(PrimTy::I64) | Ty::Primitive(PrimTy::U64) => fb.push_value(
+                expected.clone(),
+                ValueKind::Const(IRConst::I64(*value as i64)),
+            ),
+            _ => fb.push_value(
+                Ty::Primitive(PrimTy::I32),
+                ValueKind::Const(IRConst::I32(*value as i32)),
+            ),
+        },
+        Literal::Float { value, .. } => fb.push_value(
+            Ty::Primitive(PrimTy::F64),
+            ValueKind::Const(IRConst::F64(*value)),
+        ),
+        Literal::Str(s) => fb.push_value(
+            Ty::Primitive(PrimTy::Str),
+            ValueKind::Const(IRConst::Str(s.clone())),
+        ),
+        Literal::Char(c) => fb.push_value(
+            Ty::Primitive(PrimTy::Char),
+            ValueKind::Const(IRConst::Char(*c)),
+        ),
+        Literal::Bool(b) => fb.push_value(
+            Ty::Primitive(PrimTy::Bool),
+            ValueKind::Const(IRConst::Bool(*b)),
+        ),
+        Literal::None => fb.push_value(
+            Ty::Primitive(PrimTy::Null),
+            ValueKind::Const(IRConst::None),
+        ),
+        Literal::Bytes(_) => fb.push_value(
+            Ty::Primitive(PrimTy::Unit),
+            ValueKind::Const(IRConst::None),
+        ),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -2432,6 +2687,42 @@ fn lower_call(
     span: Span,
 ) -> ValueId {
     let ret_ty = ctx.expr_ty(span);
+    // M16: `isinstance(x, T)` is a *builtin* call whose second argument is a
+    // type name, not a value. Lower the receiver, then emit an IROp::IsInstance
+    // carrying the resolved class id. Doing this before the generic arg-lower
+    // avoids accidentally treating the class name as an Ident expression.
+    if let Expr::Ident { name, .. } = callee {
+        if name == "isinstance" && args.len() == 2 {
+            let obj = lower_expr(fb, ctx, &args[0].value);
+            // Resolve the second arg as a class name.
+            let mut class_tid: Option<u32> = None;
+            if let Expr::Ident { name: tname, .. } = &args[1].value {
+                if let Some(sid) = ctx.typed.resolved.symbols.lookup(
+                    ctx.typed.resolved.module_scope,
+                    tname,
+                ) {
+                    let sym = ctx.typed.resolved.symbols.get(sid);
+                    if let Some(cid) = sym.class_id {
+                        class_tid = Some(
+                            ctx.class_type_id
+                                .get(&cid.0)
+                                .copied()
+                                .unwrap_or(cid.0),
+                        );
+                    }
+                }
+            }
+            let tid = class_tid.unwrap_or(u32::MAX);
+            return fb.push_value(
+                Ty::Primitive(PrimTy::Bool),
+                ValueKind::Op {
+                    op: IROp::IsInstance { class_id: tid },
+                    args: vec![obj],
+                },
+            );
+        }
+    }
+
     // Lower args.
     let mut arg_vs: Vec<ValueId> = Vec::with_capacity(args.len());
     for a in args {

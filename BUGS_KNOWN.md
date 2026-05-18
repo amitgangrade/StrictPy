@@ -262,3 +262,57 @@ expression will need the same shape).
 - The B-tree workaround (nested `if` for the `b > 0 and ranks[b-1] >
   ranks[b]` insertion-sort condition) is now unnecessary but not
   actively wrong. Leaving it for a future stress-test refactor pass.
+
+---
+
+## Fixed in M16
+
+Two language-gap closures in one round — `isinstance` and `match` / `case`.
+Neither was a numbered bug; both were architectural gaps documented in the
+M10–M12 agent reports as "language-surface awkwardness" (every sealed-
+hierarchy stress program — `json_parse`, `lisp`, `lambda_calc`, `calculator`
+— either rolled a `kind: i32` discriminator field or routed every operation
+through virtual methods because there was no way to ask "is this thing
+actually a `Pair`?" at runtime).
+
+| # | Gap closed | Fix location | Regression test |
+|---|------------|--------------|-----------------|
+| M16-A | `isinstance(x, T)` was the stub `op_is_instance` from M3 that always returned `true` (`vm/src/interp.rs:1281` pre-M16). | (1) New `IROp::IsInstance { class_id: u32 }` in `compiler/src/ir.rs` (lowers to existing `Opcode::IsInstance` with a real type-table id). (2) `compiler/src/typecheck.rs::synth_call` recognises `isinstance` as a 2-arg builtin whose second arg names a class. (3) `compiler/src/typecheck.rs::narrowings_from_cond` extended to narrow `x` to `T` inside `if isinstance(x, T):` then-branches, mirroring the pre-existing `is not none` narrowing pattern. (4) `compiler/src/ir.rs::lower_call` short-circuits `isinstance(x, T)` before the generic arg-lower so the type-name argument isn't accidentally compiled as a value-expression. (5) `vm/src/interp.rs::op_is_instance` now reads the object's `ObjectHeader.vtable -> RuntimeType.type_id` and walks the parent chain via `shared.module.types[*].base_type` until it finds the target or hits `NO_BASE_TYPE`. | `vm/tests/m16_match_isinstance.rs` (4 isinstance tests + 5 match tests). |
+| M16-B | `match v: case Pair(car, cdr): ...` parsed end-to-end since M3 but `compiler/src/ir.rs::Stmt::Match` was an empty M4 placeholder (commented `// M4`). Programs got no diagnostic — the arm body simply never ran. | (1) New `compiler/src/ir.rs::lower_match` — evaluates the scrutinee exactly once into a hidden local slot, then emits each arm as an if-elif test reading from that slot. Constructor patterns emit `IsInstance` against the class's type-table id then bind each Identifier sub-pattern via `Load { offset }` against the resolved field offset. Tuple patterns destructure unconditionally at `8 * i` offsets (the typechecker has already verified arity). (2) `compiler/src/typecheck.rs::Stmt::Match` now narrows the scrutinee per-arm and binds sub-pattern identifiers to the correct field/element types. (3) Exhaustiveness warning: a sealed-class match with missing variants and no wildcard prints a warning to stderr but does not fail typecheck (v0.1 — spec §6.5 documents the gap). | Same suite. |
+
+### Notes for the next round
+
+- **`isinstance` for protocols / primitives / generics** is not supported.
+  `isinstance(x, Hashable)`, `isinstance(x, i32)`, `isinstance(x, List[i32])`
+  all currently error out with "second argument must name a user class".
+  Protocol membership in particular needs the itable walk (analogous to
+  the vtable walk already done in `op_is_instance`).
+- **Narrowing through `and` / `or`** isn't there. `if isinstance(x, A) and x.field > 0:`
+  does NOT see `x: A` in the right operand of the `and`. The short-circuit
+  CFG path landed in M13 didn't thread narrowing into the right-operand
+  block. A future round can adapt `narrowings_from_cond` to also annotate
+  the short-circuit join's intermediate block.
+- **Nested constructor patterns** (`case Pair(Number(n), c):`) are NOT
+  supported in v0.1. The lowerer only recognises `Identifier` and
+  `Wildcard` as sub-patterns of `Constructor`/`Tuple`. Adding nested
+  constructor patterns is a recursion in `lower_match` — straightforward
+  but didn't fit in v0.1 scope.
+- **Exhaustiveness is a *warning*, not an error.** A real algebraic-datatype
+  pass would track every sealed-class hierarchy in the program and verify
+  every variant appears (or a wildcard is present) — that's spec §6.5's
+  promised behaviour. The current implementation only catches the
+  "missing direct subclass" case for sealed types.
+- **Or-patterns / guard clauses / range patterns / mapping patterns** are
+  all explicitly deferred. The parser already accepts `case Pat if cond:`
+  (the guard field on `MatchArm`); the IR lowerer currently ignores it.
+- **The example rewrite** is `examples/calculator_with_match.spy` (NEW,
+  129 lines, runs through `compiler/tests/calculator_with_match_runs.rs`).
+  The pre-M16 `examples/calculator.spy` (249 lines) is left untouched as
+  the workaround baseline. The match-form AST + evaluator is 73 source
+  lines vs the virtual-method form's ~79 lines for the same surface — the
+  win is qualitative more than quantitative on this particular program,
+  because the original used virtual dispatch rather than the worse
+  `kind: i32` discriminator pattern. The big payoff is for the sealed-
+  hierarchy programs (`json_parse.spy`, `lisp.spy`, `lambda_calc.spy`)
+  whose discriminator workarounds CAN now be deleted; per the brief, we
+  do not migrate them in this round.

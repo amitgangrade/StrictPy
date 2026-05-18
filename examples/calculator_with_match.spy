@@ -1,0 +1,129 @@
+"""M16 demo: arithmetic AST evaluator using `match` / `case` instead of
+the pre-M16 virtual-method / `kind: i32` discriminator workaround.
+
+This program walks the same AST family `examples/calculator.spy` builds
+(Lit / BinOp / UnaryOp), but where the original `eval()` had to be a
+virtual method on `open class Expr` (because StrictPy lacked `match`
+lowering and runtime isinstance), this version uses a `sealed class Expr`
+with the natural Python form:
+
+    match e:
+        case Lit(value):       ...
+        case BinOp(op, l, r):  ...
+        case UnaryOp(op, x):   ...
+
+Two M16 things matter for the result:
+
+  * `sealed class Expr` actually means "the closed set of subclasses is
+    Lit/BinOp/UnaryOp". The match-statement typechecker now warns when a
+    sealed match is non-exhaustive; the program below is exhaustive so
+    no warning fires.
+
+  * `case Lit(value):` binds `value: f64` (the declared field type) inside
+    the arm body without any explicit cast. Pre-M16 this required either
+    a virtual override on Lit or a `kind: i32` field on a god-class.
+"""
+
+# ── AST ────────────────────────────────────────────────────────────────────
+#
+# `sealed` because exactly Lit / BinOp / UnaryOp form the language; nobody
+# outside this module is allowed to add a fourth variant.  The match below
+# enumerates all three.
+
+sealed class Expr:
+    fn __init__(self) -> None:
+        pass
+
+final class Lit(Expr):
+    value: f64
+
+    fn __init__(self, value: f64) -> None:
+        self.value = value
+
+final class BinOp(Expr):
+    op: char
+    lhs: Expr
+    rhs: Expr
+
+    fn __init__(self, op: char, lhs: Expr, rhs: Expr) -> None:
+        self.op = op
+        self.lhs = lhs
+        self.rhs = rhs
+
+final class UnaryOp(Expr):
+    op: char
+    operand: Expr
+
+    fn __init__(self, op: char, operand: Expr) -> None:
+        self.op = op
+        self.operand = operand
+
+# ── Evaluator (M16 match form) ─────────────────────────────────────────────
+
+fn eval_expr(e: Expr) -> f64:
+    match e:
+        case Lit(value):
+            return value
+        case BinOp(op, lhs, rhs):
+            a: f64 = eval_expr(lhs)
+            b: f64 = eval_expr(rhs)
+            if op == '+':
+                return a + b
+            if op == '-':
+                return a - b
+            if op == '*':
+                return a * b
+            if op == '/':
+                if b == 0.0:
+                    return 0.0
+                return a / b
+            return 0.0
+        case UnaryOp(op, operand):
+            v: f64 = eval_expr(operand)
+            if op == '-':
+                return 0.0 - v
+            return v
+    return 0.0
+
+fn render_expr(e: Expr) -> str:
+    match e:
+        case Lit(value):
+            return str(value)
+        case BinOp(op, lhs, rhs):
+            op_str: str = " ? "
+            if op == '+':
+                op_str = " + "
+            if op == '-':
+                op_str = " - "
+            if op == '*':
+                op_str = " * "
+            if op == '/':
+                op_str = " / "
+            return "(" + render_expr(lhs) + op_str + render_expr(rhs) + ")"
+        case UnaryOp(op, operand):
+            return "(-" + render_expr(operand) + ")"
+    return "<unknown>"
+
+# ── Driver ─────────────────────────────────────────────────────────────────
+
+fn report(label: str, e: Expr) -> None:
+    println(label + " = " + render_expr(e) + " => " + str(eval_expr(e)))
+
+fn main() -> i32:
+    # 1 + 2
+    e1: Expr = BinOp('+', Lit(1.0), Lit(2.0))
+    report("1 + 2", e1)
+
+    # 3 * (4 - 1)
+    e2: Expr = BinOp('*', Lit(3.0), BinOp('-', Lit(4.0), Lit(1.0)))
+    report("3 * (4 - 1)", e2)
+
+    # -(2 + 3) * 4
+    e3: Expr = BinOp('*', UnaryOp('-', BinOp('+', Lit(2.0), Lit(3.0))), Lit(4.0))
+    report("-(2 + 3) * 4", e3)
+
+    # (10 - 2) / (1 + 1)
+    e4: Expr = BinOp('/', BinOp('-', Lit(10.0), Lit(2.0)), BinOp('+', Lit(1.0), Lit(1.0)))
+    report("(10 - 2) / (1 + 1)", e4)
+
+    return 0

@@ -1276,10 +1276,60 @@ impl Interpreter {
     }
     fn op_is_instance(&mut self) -> Result<(), VmError> {
         let dst = self.read_u16()?;
-        let _src = self.read_u16()?;
-        let _ = self.read_u32()?;
-        // Conservative: always true. Real isinstance is M5.
-        self.write_reg(dst, 1);
+        let src = self.read_u16()?;
+        let target = self.read_u32()?;
+        // M16: real isinstance. Sentinel target u32::MAX (legacy from the
+        // pre-M16 IROp::TypeCheck path) still answers true for back-compat.
+        if target == u32::MAX {
+            self.write_reg(dst, 1);
+            return Ok(());
+        }
+        let p = self.read_reg(src) as *const u8;
+        if p.is_null() {
+            // isinstance(none, T) is false.
+            self.write_reg(dst, 0);
+            return Ok(());
+        }
+        // Load the runtime type pointer from the header and read its
+        // type_id. Then walk the base_type chain via the module's type
+        // table until we find `target` or hit NO_BASE_TYPE.
+        let hdr = p as *const ObjectHeader;
+        let rt = unsafe { (*hdr).vtable };
+        if rt.is_null() {
+            self.write_reg(dst, 0);
+            return Ok(());
+        }
+        let start_id = unsafe { (*rt).type_id };
+        let mut cur = start_id;
+        let mut matched = false;
+        // Each user class produces one entry in `module.types`; the slot
+        // index equals the type_id. Built-in pseudo-types (list/str/etc.)
+        // use u32::MAX-N sentinels and never appear in the table — they
+        // simply have no parent.
+        const NO_BASE: u32 = strictpy_shared::file_format::NO_BASE_TYPE;
+        // Cap the walk: defensive bound against malformed type tables.
+        for _ in 0..32 {
+            if cur == target {
+                matched = true;
+                break;
+            }
+            // Find the type-table entry whose type_id == cur.
+            let entry = self
+                .shared
+                .module
+                .types
+                .iter()
+                .find(|t| t.type_id == cur);
+            let next = match entry {
+                Some(e) => e.base_type,
+                None => NO_BASE,
+            };
+            if next == NO_BASE || next == cur {
+                break;
+            }
+            cur = next;
+        }
+        self.write_reg(dst, if matched { 1 } else { 0 });
         Ok(())
     }
     fn op_null_check(&mut self) -> Result<(), VmError> {
