@@ -1,0 +1,94 @@
+"""subprocess_demo — M23 P3a-A demo of the stdlib `subprocess` module.
+
+Exercises:
+  * `subprocess.run(prog, args)` — blocking spawn + wait + capture
+    stdout/stderr.  Returns `(exit_code, stdout, stderr)` as a 3-tuple.
+  * `subprocess.run_with_stdin(prog, args, stdin_data)` — pipes input
+    to the child's stdin (filter-style: `sort`, `wc`, etc.).
+  * `subprocess.spawn(prog, args)` + `subprocess.wait(handle)` — the
+    non-blocking primitives.  Useful for daemon processes and any
+    pattern where you want to overlap child work with parent work.
+  * Cross-platform shell selection via `sys.platform`: Windows uses
+    `cmd.exe /c <cmd>`, Unix uses `sh -c <cmd>`.  `echo` is a shell
+    builtin on Windows so we never invoke it directly.
+
+Tests:
+  * `compiler/tests/subprocess_demo_runs.rs` — subprocess assertion.
+"""
+
+import subprocess
+import sys
+import re
+
+fn shell_argv(cmd: str) -> List[str]:
+    # Build the platform-appropriate argv for "run this shell command".
+    # Windows -> cmd.exe /c <cmd>; Unix -> sh -c <cmd>.
+    args: List[str] = []
+    if sys.platform == "windows":
+        args.append("/c")
+    else:
+        args.append("-c")
+    args.append(cmd)
+    return args
+
+fn shell_prog() -> str:
+    if sys.platform == "windows":
+        return "cmd.exe"
+    return "sh"
+
+fn main() -> i32:
+    println("platform: " + sys.platform)
+
+    # 1. subprocess.run — fire the shell, capture "hello stdout".
+    prog: str = shell_prog()
+    a1: List[str] = shell_argv("echo hello stdout")
+    r1: Tuple[i32, str, str] = subprocess.run(prog, a1)
+    println("run.exit: " + str(r1.0))
+    # Output may contain a trailing CRLF/LF depending on the shell;
+    # check via a substring so the test isn't platform-specific.
+    if re.search("hello stdout", r1.1):
+        println("run.stdout: ok")
+    else:
+        println("run.stdout: FAIL (" + r1.1 + ")")
+
+    # 2. subprocess.run on a command that exits non-zero.  Exit codes
+    # propagate as the first tuple element.
+    a2: List[str] = shell_argv("exit 7")
+    r2: Tuple[i32, str, str] = subprocess.run(prog, a2)
+    println("exit7.code: " + str(r2.0))
+
+    # 3. subprocess.run_with_stdin — pipe "world" into a cat-equivalent
+    # and capture the round-trip.  Windows `findstr x*` happens to act
+    # like cat (matches any line); on Unix, `cat` does the obvious.
+    in_pipe: str = "hello-from-stdin\n"
+    pipe_cmd: str = ""
+    if sys.platform == "windows":
+        pipe_cmd = "findstr x*"
+    else:
+        pipe_cmd = "cat"
+    a3: List[str] = shell_argv(pipe_cmd)
+    r3: Tuple[i32, str, str] = subprocess.run_with_stdin(prog, a3, in_pipe)
+    println("stdin.exit: " + str(r3.0))
+    if re.search("hello-from-stdin", r3.1):
+        println("stdin.stdout: ok")
+    else:
+        println("stdin.stdout: FAIL (" + r3.1 + ")")
+
+    # 4. subprocess.spawn + subprocess.wait — non-blocking start, then
+    # block on the handle.  Equivalent behaviour to subprocess.run for
+    # short children, but exercises the handle-based API.
+    a4: List[str] = shell_argv("exit 0")
+    h: i64 = subprocess.spawn(prog, a4)
+    println("spawned handle > 0: " + str(h > 0i64))
+    code: i32 = subprocess.wait(h)
+    println("wait.code: " + str(code))
+
+    # 5. Spawn-failure path: a nonexistent program raises IOError.
+    try:
+        bogus: i64 = subprocess.spawn("definitely_not_a_real_program_42424242", [])
+        println("UNREACHED: " + str(bogus))
+    except IOError as e:
+        println("caught IOError on bogus spawn")
+
+    println("done")
+    return 0

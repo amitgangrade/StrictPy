@@ -2819,6 +2819,390 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             Ok(p as u64)
         }
 
+        // ── M23 P3a-A: `subprocess` module ─────────────────────────────
+        NativeFn::SubprocessRun => {
+            let prog = arg_str(args, 0);
+            let argv = read_list_str(args, 1);
+            let out = std::process::Command::new(&prog)
+                .args(&argv)
+                .output()
+                .map_err(|e| VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!("subprocess.run({:?}): {}", prog, e),
+                })?;
+            // Exit code: `.code()` is None for signal-terminated children
+            // (Unix only).  Python's subprocess.run reports negative
+            // signal numbers; we follow suit so Unix code can distinguish
+            // "exited cleanly with N" from "killed by signal N".
+            let code = match out.status.code() {
+                Some(c) => c,
+                None => {
+                    // Unix signal-termination — encode as negative.
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::process::ExitStatusExt;
+                        out.status.signal().map(|s| -(s as i32)).unwrap_or(-1)
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        -1
+                    }
+                }
+            };
+            let stdout_s = String::from_utf8_lossy(&out.stdout).into_owned();
+            let stderr_s = String::from_utf8_lossy(&out.stderr).into_owned();
+            let so = interp.alloc_string(&stdout_s) as u64;
+            let se = interp.alloc_string(&stderr_s) as u64;
+            // Tuple slots are 8-byte u64 reads; i32 sits in the low word.
+            let code_slot = (code as u32) as u64;
+            let tup = interp.alloc_tuple_obj(&[code_slot, so, se]);
+            Ok(tup as u64)
+        }
+        NativeFn::SubprocessRunWithStdin => {
+            use std::io::Write;
+            use std::process::Stdio;
+            let prog = arg_str(args, 0);
+            let argv = read_list_str(args, 1);
+            let stdin_data = arg_str(args, 2);
+            let mut child = std::process::Command::new(&prog)
+                .args(&argv)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!("subprocess.run_with_stdin({:?}): spawn: {}", prog, e),
+                })?;
+            // Write to the child's stdin, then close it so the child sees
+            // EOF.  Scoping the borrow keeps the closure short-lived.
+            if let Some(mut sin) = child.stdin.take() {
+                sin.write_all(stdin_data.as_bytes()).map_err(|e| {
+                    VmError::UncaughtException {
+                        type_name: "IOError".into(),
+                        message: format!("subprocess.run_with_stdin({:?}): write stdin: {}", prog, e),
+                    }
+                })?;
+                // `sin` dropped here → child stdin pipe closes → EOF.
+            }
+            let out = child.wait_with_output().map_err(|e| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("subprocess.run_with_stdin({:?}): wait: {}", prog, e),
+            })?;
+            let code = match out.status.code() {
+                Some(c) => c,
+                None => {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::process::ExitStatusExt;
+                        out.status.signal().map(|s| -(s as i32)).unwrap_or(-1)
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        -1
+                    }
+                }
+            };
+            let stdout_s = String::from_utf8_lossy(&out.stdout).into_owned();
+            let stderr_s = String::from_utf8_lossy(&out.stderr).into_owned();
+            let so = interp.alloc_string(&stdout_s) as u64;
+            let se = interp.alloc_string(&stderr_s) as u64;
+            let code_slot = (code as u32) as u64;
+            let tup = interp.alloc_tuple_obj(&[code_slot, so, se]);
+            Ok(tup as u64)
+        }
+        NativeFn::SubprocessSpawn => {
+            let prog = arg_str(args, 0);
+            let argv = read_list_str(args, 1);
+            let child = std::process::Command::new(&prog)
+                .args(&argv)
+                .spawn()
+                .map_err(|e| VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!("subprocess.spawn({:?}): {}", prog, e),
+                })?;
+            let handle = subprocess_table_insert(child);
+            Ok(handle as u64)
+        }
+        NativeFn::SubprocessWait => {
+            let handle = arg_i64(args, 0);
+            let mut child = subprocess_table_take(handle)?;
+            let status = child.wait().map_err(|e| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("subprocess.wait({}): {}", handle, e),
+            })?;
+            let code = match status.code() {
+                Some(c) => c,
+                None => {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::process::ExitStatusExt;
+                        status.signal().map(|s| -(s as i32)).unwrap_or(-1)
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        -1
+                    }
+                }
+            };
+            Ok((code as u32) as u64)
+        }
+        NativeFn::SubprocessTryWait => {
+            let handle = arg_i64(args, 0);
+            // `try_wait` returns `Ok(Some(status))` if exited; we then take
+            // ownership of the entry so the caller can't call wait/kill
+            // again on the same handle.  `Ok(None)` leaves the child in
+            // the table for a future call.
+            let mut guard = SUBPROCESS_TABLE.lock().expect("subprocess table poisoned");
+            let table = guard.as_mut().ok_or_else(|| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("subprocess.try_wait({}): invalid handle (never spawned)", handle),
+            })?;
+            let child = table.get_mut(&handle).ok_or_else(|| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("subprocess.try_wait({}): invalid handle", handle),
+            })?;
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    // Drop entry now that we've reaped it.
+                    let _ = table.remove(&handle);
+                    let code = match status.code() {
+                        Some(c) => c,
+                        None => {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::process::ExitStatusExt;
+                                status.signal().map(|s| -(s as i32)).unwrap_or(-1)
+                            }
+                            #[cfg(not(unix))]
+                            {
+                                -1
+                            }
+                        }
+                    };
+                    Ok((code as u32) as u64)
+                }
+                Ok(None) => Ok(NONE_SENTINEL),
+                Err(e) => Err(VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!("subprocess.try_wait({}): {}", handle, e),
+                }),
+            }
+        }
+        NativeFn::SubprocessKill => {
+            let handle = arg_i64(args, 0);
+            let mut guard = SUBPROCESS_TABLE.lock().expect("subprocess table poisoned");
+            let table = guard.as_mut().ok_or_else(|| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("subprocess.kill({}): invalid handle (never spawned)", handle),
+            })?;
+            let child = table.get_mut(&handle).ok_or_else(|| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("subprocess.kill({}): invalid handle", handle),
+            })?;
+            // `kill` returns Err(InvalidInput) if the child has already
+            // exited — surface that as a silent success (matches Python's
+            // `Popen.kill` on an already-dead process).
+            match child.kill() {
+                Ok(()) => Ok(0),
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => Ok(0),
+                Err(e) => Err(VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!("subprocess.kill({}): {}", handle, e),
+                }),
+            }
+        }
+
+        // ── M23 P3a-A: `pathlib` module ────────────────────────────────
+        NativeFn::PathlibJoin => {
+            // Same as path.join.  Duplicated under pathlib for namespace
+            // coherence.
+            let a = arg_str(args, 0);
+            let b = arg_str(args, 1);
+            let joined = std::path::Path::new(&a).join(&b);
+            let p = interp.alloc_string(&joined.to_string_lossy());
+            Ok(p as u64)
+        }
+        NativeFn::PathlibWithSuffix => {
+            let path = arg_str(args, 0);
+            let new_suffix = arg_str(args, 1);
+            // Use the same Python-style splitext semantics as M20a so
+            // `with_suffix("a", ".txt")` → `"a.txt"` and
+            // `with_suffix(".bashrc", ".tmp")` → `".bashrc.tmp"`
+            // (leading dot is not an extension).
+            let (without_ext, _ext) = splitext_python(&path);
+            let result = format!("{}{}", without_ext, new_suffix);
+            let p = interp.alloc_string(&result);
+            Ok(p as u64)
+        }
+        NativeFn::PathlibWithName => {
+            let path = arg_str(args, 0);
+            let new_name = arg_str(args, 1);
+            let parent = std::path::Path::new(&path)
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            // Compose with the OS-native separator (let Path::join figure
+            // it out).  An empty parent → just the new name.
+            let result = if parent.is_empty() {
+                new_name
+            } else {
+                std::path::Path::new(&parent)
+                    .join(&new_name)
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            let p = interp.alloc_string(&result);
+            Ok(p as u64)
+        }
+        NativeFn::PathlibParent => {
+            let path = arg_str(args, 0);
+            let parent = std::path::Path::new(&path)
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let p = interp.alloc_string(&parent);
+            Ok(p as u64)
+        }
+        NativeFn::PathlibName => {
+            let path = arg_str(args, 0);
+            let base = std::path::Path::new(&path)
+                .file_name()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.clone());
+            let p = interp.alloc_string(&base);
+            Ok(p as u64)
+        }
+        NativeFn::PathlibStem => {
+            // Python's pathlib `stem` strips only the LAST extension:
+            //   "a.txt"          → "a"
+            //   "archive.tar.gz" → "archive.tar"
+            //   ".bashrc"        → ".bashrc"   (leading dot, no ext)
+            //   "README"         → "README"
+            // Identical to the "without_ext" half of splitext_python applied
+            // to the basename.
+            let path = arg_str(args, 0);
+            let basename = std::path::Path::new(&path)
+                .file_name()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.clone());
+            let (stem, _ext) = splitext_python(&basename);
+            let p = interp.alloc_string(stem);
+            Ok(p as u64)
+        }
+        NativeFn::PathlibSuffix => {
+            let path = arg_str(args, 0);
+            let basename = std::path::Path::new(&path)
+                .file_name()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.clone());
+            let (_stem, suffix) = splitext_python(&basename);
+            let p = interp.alloc_string(suffix);
+            Ok(p as u64)
+        }
+        NativeFn::PathlibParts => {
+            let path = arg_str(args, 0);
+            // `Path::components` handles cross-platform separator
+            // splitting and root/prefix peeling for us.  Convert each
+            // component back to a lossy string.
+            let parts: Vec<String> = std::path::Path::new(&path)
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            let lst = interp.alloc_list(parts.len());
+            for s in &parts {
+                let sp = interp.alloc_string(s) as u64;
+                unsafe { interp.list_push(lst, sp) };
+            }
+            Ok(lst as u64)
+        }
+        NativeFn::PathlibIsAbsolute => {
+            let path = arg_str(args, 0);
+            Ok(if std::path::Path::new(&path).is_absolute() { 1 } else { 0 })
+        }
+        NativeFn::PathlibAbsolute => {
+            let path = arg_str(args, 0);
+            let p = std::path::Path::new(&path);
+            let abs = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                let cwd = std::env::current_dir().map_err(|e| VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!("pathlib.absolute({:?}): cwd: {}", path, e),
+                })?;
+                cwd.join(p)
+            };
+            let s = interp.alloc_string(&abs.to_string_lossy());
+            Ok(s as u64)
+        }
+        NativeFn::PathlibRelativeTo => {
+            let path = arg_str(args, 0);
+            let base = arg_str(args, 1);
+            let rel = std::path::Path::new(&path)
+                .strip_prefix(std::path::Path::new(&base))
+                .map_err(|_| VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "pathlib.relative_to: {:?} is not a sub-path of {:?}",
+                        path, base
+                    ),
+                })?;
+            let s = interp.alloc_string(&rel.to_string_lossy());
+            Ok(s as u64)
+        }
+        NativeFn::PathlibReadText => {
+            let path = arg_str(args, 0);
+            let s = std::fs::read_to_string(&path).map_err(|e| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("pathlib.read_text({:?}): {}", path, e),
+            })?;
+            let p = interp.alloc_string(&s);
+            Ok(p as u64)
+        }
+        NativeFn::PathlibWriteText => {
+            let path = arg_str(args, 0);
+            let content = arg_str(args, 1);
+            std::fs::write(&path, &content).map_err(|e| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("pathlib.write_text({:?}): {}", path, e),
+            })?;
+            Ok(0)
+        }
+        NativeFn::PathlibReadLines => {
+            let path = arg_str(args, 0);
+            let mut s = std::fs::read_to_string(&path).map_err(|e| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("pathlib.read_lines({:?}): {}", path, e),
+            })?;
+            // Strip a single trailing newline so a "a\nb\n" file gives
+            // ["a", "b"] rather than ["a", "b", ""].  Tolerate "\r\n"
+            // line endings on Windows.
+            if s.ends_with('\n') {
+                s.pop();
+                if s.ends_with('\r') {
+                    s.pop();
+                }
+            }
+            let lines: Vec<&str> = if s.is_empty() {
+                Vec::new()
+            } else {
+                // Split on \n, then strip a trailing \r from each line
+                // (Windows-style CRLF).  Done as two passes for clarity.
+                s.split('\n').collect()
+            };
+            let lst = interp.alloc_list(lines.len());
+            for ln in &lines {
+                let cleaned = if ln.ends_with('\r') {
+                    &ln[..ln.len() - 1]
+                } else {
+                    *ln
+                };
+                let sp = interp.alloc_string(cleaned) as u64;
+                unsafe { interp.list_push(lst, sp) };
+            }
+            Ok(lst as u64)
+        }
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
@@ -3799,6 +4183,81 @@ fn arg_str(args: &[u64], i: usize) -> String {
     // SAFETY: any pointer here came from our heap (or null). `read_str`
     // tolerates both.
     unsafe { read_str(p) }
+}
+
+/// M23 P3a-A: read a `List[str]` argument into a `Vec<String>`.  Each
+/// slot is a heap pointer to a `StringRepr`; `read_str` decodes UTF-8
+/// (lossy-tolerant per the M19 convention).  Returns an empty Vec for
+/// a null pointer (the same shape `read_list_f64` uses for f64 lists).
+///
+/// Used by the `subprocess.run` family (each takes `args: List[str]`)
+/// and any future native that needs argv-shaped input.
+fn read_list_str(args: &[u64], i: usize) -> Vec<String> {
+    let src = arg_u64(args, i) as *const crate::object::ListRepr;
+    if src.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: src is a heap-allocated ListRepr.
+    unsafe {
+        let len = (*src).length;
+        let data = (*src).data as *const u64;
+        let mut v: Vec<String> = Vec::with_capacity(len);
+        for j in 0..len {
+            let sp = std::ptr::read_unaligned(data.add(j)) as *const StringRepr;
+            v.push(read_str(sp));
+        }
+        v
+    }
+}
+
+/// M23 P3a-A: global registry of spawned subprocess children.  Maps an
+/// opaque `i64` handle (returned to user code from `subprocess.spawn`)
+/// to a `std::process::Child` we keep alive until `wait` / `try_wait`
+/// (success) or `kill` reaps it.
+///
+/// A global Mutex is the simplest design: the Interpreter doesn't own
+/// this state because `Interpreter::from_shared` can clone the parent's
+/// state when spawning a thread (M6 threading), and we want a child
+/// spawned in one thread to remain reachable from another.  The
+/// alternative (per-Interpreter table) would surprise users who write
+/// "spawn in main, wait in worker thread" patterns.
+///
+/// Handles are monotonically increasing `i64`s allocated from
+/// `SUBPROCESS_NEXT_HANDLE`.  We never reuse handles within a process —
+/// 2^63 spawns at one-per-microsecond is ~300,000 years.
+static SUBPROCESS_TABLE: std::sync::Mutex<Option<std::collections::HashMap<i64, std::process::Child>>>
+    = std::sync::Mutex::new(None);
+static SUBPROCESS_NEXT_HANDLE: std::sync::atomic::AtomicI64
+    = std::sync::atomic::AtomicI64::new(1);
+
+/// Insert a freshly-spawned child into the subprocess table; return the
+/// new handle.
+fn subprocess_table_insert(child: std::process::Child) -> i64 {
+    let handle = SUBPROCESS_NEXT_HANDLE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let mut guard = SUBPROCESS_TABLE.lock().expect("subprocess table poisoned");
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    map.insert(handle, child);
+    handle
+}
+
+/// Remove an entry from the subprocess table by handle.  Used by `wait`
+/// (full reap).  Raises IOError if the handle isn't registered (already
+/// waited / never spawned).
+fn subprocess_table_take(handle: i64) -> Result<std::process::Child, VmError> {
+    let mut guard = SUBPROCESS_TABLE.lock().expect("subprocess table poisoned");
+    let map = match guard.as_mut() {
+        Some(m) => m,
+        None => {
+            return Err(VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("subprocess: handle {} not found (never spawned)", handle),
+            });
+        }
+    };
+    map.remove(&handle).ok_or_else(|| VmError::UncaughtException {
+        type_name: "IOError".into(),
+        message: format!("subprocess: handle {} not found (already reaped?)", handle),
+    })
 }
 
 /// M22 P2C: read a `List[f64]` argument into a `Vec<f64>`.  The slot

@@ -477,6 +477,121 @@ pub enum NativeFn {
     /// `urllib_parse.parse_query(qs: str) -> List[Tuple[str, str]]`.
     UrlParseQuery = 347,
 
+    // ── 350–369: `subprocess` module (M23 P3a-A) ────────────────────────
+    // Cross-platform process spawn + wait + IO capture, backed by
+    // Rust's `std::process::Command`.  Running processes are tracked
+    // in a global `Mutex<HashMap<i64, Child>>` (see `vm/src/builtins.rs::
+    // SUBPROCESS_TABLE`) and exposed to user code as opaque `i64` handles
+    // — the same pattern M5 used for `io.File` (resource table + handle)
+    // because stdlib classes are still v0.3 work.
+    //
+    // The blocking convenience wrappers `run` and `run_with_stdin` cover
+    // the common case (`subprocess.run("ls", ["-l"])`).  `spawn` / `wait` /
+    // `try_wait` / `kill` provide the non-blocking primitives for daemons
+    // and supervision trees.
+    //
+    // Streaming stdin/stdout/stderr — i.e. `Popen.stdout.read(...)` — is
+    // intentionally NOT shipped; it would need readable byte handles
+    // which are also v0.3 territory.  v0.2 programs that need streaming
+    // can spawn a child, pipe via `run_with_stdin`, and parse the
+    // collected stdout/stderr after the child exits.
+    //
+    /// `subprocess.run(prog: str, args: List[str]) -> Tuple[i32, str, str]`.
+    /// Spawn-and-wait.  Captures both stdout and stderr.  Returns
+    /// `(exit_code, stdout, stderr)`.  Raises `IOError` if the spawn
+    /// fails (`prog` not found, permission denied, etc.).
+    SubprocessRun           = 350,
+    /// `subprocess.run_with_stdin(prog: str, args: List[str], stdin_data: str)
+    ///     -> Tuple[i32, str, str]`.
+    /// Same as `run` but pipes `stdin_data` to the child's stdin before
+    /// waiting.  Useful for filters (`sort`, `grep`, `wc`) that read
+    /// stdin.  Raises `IOError` on spawn or pipe failure.
+    SubprocessRunWithStdin  = 351,
+    /// `subprocess.spawn(prog: str, args: List[str]) -> i64` — start a
+    /// process without waiting; return an opaque handle for `wait` /
+    /// `try_wait` / `kill`.  Stdin/stdout/stderr are inherited from the
+    /// parent — no piping.  Raises `IOError` on spawn failure.
+    SubprocessSpawn         = 352,
+    /// `subprocess.wait(handle: i64) -> i32` — block until the child
+    /// identified by `handle` exits; return its exit code.  Raises
+    /// `IOError` if the handle is invalid or already waited.
+    SubprocessWait          = 353,
+    /// `subprocess.try_wait(handle: i64) -> i32?` — non-blocking check.
+    /// Returns the exit code if the child has exited, `none` if it's
+    /// still running.  Raises `IOError` on invalid handle.
+    SubprocessTryWait       = 354,
+    /// `subprocess.kill(handle: i64) -> None` — force-terminate the
+    /// child (SIGKILL on Unix, TerminateProcess on Windows).  Silently
+    /// succeeds if the child has already exited.  Raises `IOError` on
+    /// invalid handle.
+    SubprocessKill          = 355,
+
+    // ── 370–389: `pathlib` module (M23 P3a-A) ───────────────────────────
+    // Object-oriented path API as a *flat function* surface — the Pythonic
+    // `Path("foo") / "bar"` chaining isn't expressible in v0.2 (stdlib
+    // classes are v0.3, same blocker that punted typed JsonValue in M20c
+    // and ArgParser in M22 P2A).  Functions operate on `str`-typed paths
+    // and round-trip cleanly with the M20a `path` and `os` modules.
+    //
+    // Functions duplicated from M20a's `path` (e.g. `join`, `parent` ==
+    // `dirname`, `name` == `basename`) are kept for namespace coherence
+    // — programs that `import pathlib` shouldn't also need `import path`
+    // for the basics.
+    //
+    /// `pathlib.join(a: str, b: str) -> str` — concat two path components
+    /// using the OS-native separator.  Alias of `path.join`.
+    PathlibJoin       = 370,
+    /// `pathlib.with_suffix(p: str, new_suffix: str) -> str` — replace the
+    /// extension.  `with_suffix("a.txt", ".csv")` → `"a.csv"`.  If `p` has
+    /// no extension, the suffix is appended.  `new_suffix` should include
+    /// the leading dot (matches Python's pathlib).
+    PathlibWithSuffix = 371,
+    /// `pathlib.with_name(p: str, new_name: str) -> str` — replace the
+    /// final path component (basename).  `with_name("a/b.txt", "c.csv")`
+    /// → `"a/c.csv"`.
+    PathlibWithName   = 372,
+    /// `pathlib.parent(p: str) -> str` — parent directory (alias for
+    /// ergonomics over M20a `path.dirname`).
+    PathlibParent     = 373,
+    /// `pathlib.name(p: str) -> str` — final path component (alias over
+    /// `path.basename`).
+    PathlibName       = 374,
+    /// `pathlib.stem(p: str) -> str` — basename minus the last extension.
+    /// `"a.txt"` → `"a"`; `"archive.tar.gz"` → `"archive.tar"` (Python's
+    /// stem only strips the last suffix).
+    PathlibStem       = 375,
+    /// `pathlib.suffix(p: str) -> str` — the last extension including the
+    /// leading dot.  `"a.txt"` → `".txt"`; `"README"` → `""`.
+    PathlibSuffix     = 376,
+    /// `pathlib.parts(p: str) -> List[str]` — split the path into
+    /// components.  `"a/b/c"` → `["a", "b", "c"]`.  Drive letters and
+    /// the root separator are included verbatim on each platform.
+    PathlibParts      = 377,
+    /// `pathlib.is_absolute(p: str) -> bool` — cross-platform absolute-
+    /// path check using `std::path::Path::is_absolute`.
+    PathlibIsAbsolute = 378,
+    /// `pathlib.absolute(p: str) -> str` — make `p` absolute relative to
+    /// the current working directory.  Does NOT resolve symlinks (that's
+    /// `os.realpath` territory; v0.3).  Raises `IOError` if the current
+    /// directory can't be queried.
+    PathlibAbsolute   = 379,
+    /// `pathlib.relative_to(p: str, base: str) -> str` — make `p` relative
+    /// to `base`.  Raises `ValueError` if `p` is not a sub-path of `base`.
+    PathlibRelativeTo = 380,
+    /// `pathlib.read_text(p: str) -> str` — read the entire file as UTF-8.
+    /// Convenience wrapper over `std::fs::read_to_string`.  Raises
+    /// `IOError`.
+    PathlibReadText   = 381,
+    /// `pathlib.write_text(p: str, content: str) -> None` — atomic-ish
+    /// write via `std::fs::write`.  Raises `IOError`.
+    PathlibWriteText  = 382,
+    /// `pathlib.read_lines(p: str) -> List[str]` — read the file then
+    /// split on `\n`.  A trailing newline is stripped (so a file
+    /// `"a\nb\n"` reads as `["a", "b"]`, matching Python's
+    /// `Path.read_text().splitlines()` minus the dialect quirks).
+    /// Raises `IOError`.
+    PathlibReadLines  = 383,
+
     // ── 290–299: `base64` module (M22 P2B) ──────────────────────────────
     // Backed by the `base64` crate (engine API).  Strings round-trip
     // through UTF-8.  `decode` raises `ValueError` on malformed input;
@@ -833,6 +948,28 @@ impl NativeFn {
             346 => Some(Self::UrlEncode),
             347 => Some(Self::UrlParseQuery),
             // 348-349 reserved for v0.3 (parse_url + join_url).
+            // M23 P3a-A: subprocess module (350-355, 6 ids; 356-369 reserved).
+            350 => Some(Self::SubprocessRun),
+            351 => Some(Self::SubprocessRunWithStdin),
+            352 => Some(Self::SubprocessSpawn),
+            353 => Some(Self::SubprocessWait),
+            354 => Some(Self::SubprocessTryWait),
+            355 => Some(Self::SubprocessKill),
+            // M23 P3a-A: pathlib module (370-383, 14 ids; 384-389 reserved).
+            370 => Some(Self::PathlibJoin),
+            371 => Some(Self::PathlibWithSuffix),
+            372 => Some(Self::PathlibWithName),
+            373 => Some(Self::PathlibParent),
+            374 => Some(Self::PathlibName),
+            375 => Some(Self::PathlibStem),
+            376 => Some(Self::PathlibSuffix),
+            377 => Some(Self::PathlibParts),
+            378 => Some(Self::PathlibIsAbsolute),
+            379 => Some(Self::PathlibAbsolute),
+            380 => Some(Self::PathlibRelativeTo),
+            381 => Some(Self::PathlibReadText),
+            382 => Some(Self::PathlibWriteText),
+            383 => Some(Self::PathlibReadLines),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

@@ -1928,6 +1928,218 @@ impl Resolver {
             ],
         };
         self.stdlib_modules.insert("csv".into(), csv_mod);
+
+        // ── M23 P3a-A: `subprocess` module ─────────────────────────────
+        // Cross-platform process spawn + capture + wait, backed by Rust's
+        // `std::process::Command`.  Running processes are tracked in a
+        // global resource table inside the VM (same shape as M5's file
+        // table) and exposed to user code as opaque `i64` handles —
+        // stdlib classes are still v0.3 work.
+        //
+        // The two blocking convenience wrappers (`run`, `run_with_stdin`)
+        // each return a `Tuple[i32, str, str]` of `(exit_code, stdout,
+        // stderr)`.  `spawn` + `wait` + `try_wait` + `kill` are the
+        // non-blocking primitives for daemon and supervision use cases.
+        const SUBPROCESS_RUN: u32             = 350;
+        const SUBPROCESS_RUN_WITH_STDIN: u32  = 351;
+        const SUBPROCESS_SPAWN: u32           = 352;
+        const SUBPROCESS_WAIT: u32            = 353;
+        const SUBPROCESS_TRY_WAIT: u32        = 354;
+        const SUBPROCESS_KILL: u32            = 355;
+
+        let tuple_i32_str_str = Ty::Tuple(vec![
+            i32_ty.clone(),
+            str_ty.clone(),
+            str_ty.clone(),
+        ]);
+        let nullable_i32_ty = Ty::Nullable(Box::new(i32_ty.clone()));
+
+        let subprocess_mod = StdlibModule {
+            name: "subprocess".into(),
+            items: vec![
+                StdlibItem {
+                    name: "run".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), list_str_ty.clone()],
+                        tuple_i32_str_str.clone(),
+                    ),
+                    native_id: SUBPROCESS_RUN,
+                },
+                StdlibItem {
+                    name: "run_with_stdin".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), list_str_ty.clone(), str_ty.clone()],
+                        tuple_i32_str_str.clone(),
+                    ),
+                    native_id: SUBPROCESS_RUN_WITH_STDIN,
+                },
+                StdlibItem {
+                    name: "spawn".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), list_str_ty.clone()],
+                        i64_ty.clone(),
+                    ),
+                    native_id: SUBPROCESS_SPAWN,
+                },
+                StdlibItem {
+                    name: "wait".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i32_ty.clone()),
+                    native_id: SUBPROCESS_WAIT,
+                },
+                StdlibItem {
+                    name: "try_wait".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], nullable_i32_ty.clone()),
+                    native_id: SUBPROCESS_TRY_WAIT,
+                },
+                StdlibItem {
+                    name: "kill".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], unit_ty.clone()),
+                    native_id: SUBPROCESS_KILL,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("subprocess".into(), subprocess_mod);
+
+        // ── M23 P3a-A: `pathlib` module ────────────────────────────────
+        // Object-oriented path manipulation shipped as a *flat-function*
+        // API over `str`-typed paths.  Pythonic `Path("a") / "b"` chaining
+        // isn't expressible until v0.3 brings stdlib classes; the
+        // flat-function shape covers every concrete use case the M22
+        // examples (and the planned Phase 3b examples) need.
+        //
+        // Aliases of the M20a `path` module entries (`join`, `parent` ==
+        // `dirname`, `name` == `basename`) are kept under the `pathlib`
+        // namespace so a program that `import pathlib` doesn't also need
+        // `import path` for the basics.  The IR routes both to handlers
+        // that share helper code (e.g. PathlibParent reuses the same
+        // Path::parent logic as PathDirname); duplicating registrations
+        // is purely an ergonomic / discoverability tool.
+        const PATHLIB_JOIN: u32         = 370;
+        const PATHLIB_WITH_SUFFIX: u32  = 371;
+        const PATHLIB_WITH_NAME: u32    = 372;
+        const PATHLIB_PARENT: u32       = 373;
+        const PATHLIB_NAME: u32         = 374;
+        const PATHLIB_STEM: u32         = 375;
+        const PATHLIB_SUFFIX: u32       = 376;
+        const PATHLIB_PARTS: u32        = 377;
+        const PATHLIB_IS_ABSOLUTE: u32  = 378;
+        const PATHLIB_ABSOLUTE: u32     = 379;
+        const PATHLIB_RELATIVE_TO: u32  = 380;
+        const PATHLIB_READ_TEXT: u32    = 381;
+        const PATHLIB_WRITE_TEXT: u32   = 382;
+        const PATHLIB_READ_LINES: u32   = 383;
+
+        let pathlib_mod = StdlibModule {
+            name: "pathlib".into(),
+            items: vec![
+                StdlibItem {
+                    name: "join".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), str_ty.clone()],
+                        str_ty.clone(),
+                    ),
+                    native_id: PATHLIB_JOIN,
+                },
+                StdlibItem {
+                    name: "with_suffix".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), str_ty.clone()],
+                        str_ty.clone(),
+                    ),
+                    native_id: PATHLIB_WITH_SUFFIX,
+                },
+                StdlibItem {
+                    name: "with_name".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), str_ty.clone()],
+                        str_ty.clone(),
+                    ),
+                    native_id: PATHLIB_WITH_NAME,
+                },
+                StdlibItem {
+                    name: "parent".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: PATHLIB_PARENT,
+                },
+                StdlibItem {
+                    name: "name".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: PATHLIB_NAME,
+                },
+                StdlibItem {
+                    name: "stem".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: PATHLIB_STEM,
+                },
+                StdlibItem {
+                    name: "suffix".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: PATHLIB_SUFFIX,
+                },
+                StdlibItem {
+                    name: "parts".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], list_str_ty.clone()),
+                    native_id: PATHLIB_PARTS,
+                },
+                StdlibItem {
+                    name: "is_absolute".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], bool_ty.clone()),
+                    native_id: PATHLIB_IS_ABSOLUTE,
+                },
+                StdlibItem {
+                    name: "absolute".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: PATHLIB_ABSOLUTE,
+                },
+                StdlibItem {
+                    name: "relative_to".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), str_ty.clone()],
+                        str_ty.clone(),
+                    ),
+                    native_id: PATHLIB_RELATIVE_TO,
+                },
+                StdlibItem {
+                    name: "read_text".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: PATHLIB_READ_TEXT,
+                },
+                StdlibItem {
+                    name: "write_text".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), str_ty.clone()],
+                        unit_ty.clone(),
+                    ),
+                    native_id: PATHLIB_WRITE_TEXT,
+                },
+                StdlibItem {
+                    name: "read_lines".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], list_str_ty.clone()),
+                    native_id: PATHLIB_READ_LINES,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("pathlib".into(), pathlib_mod);
     }
 
     // ─────────────────────────────────────────────────────────────────────

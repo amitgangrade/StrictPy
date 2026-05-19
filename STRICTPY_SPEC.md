@@ -1968,6 +1968,158 @@ What v0.2 does **not** ship: dialect configuration; `DictReader` /
 reading (`parse` buffers the whole file); `QUOTE_ALL` /
 `QUOTE_NONNUMERIC` policies.
 
+### 9.24 Module `subprocess` (v0.2 — M23 P3a-A)
+
+Cross-platform OS process spawn, capture, and lifecycle control,
+backed by Rust's `std::process::Command`.  Spawned processes are
+exposed to user code as opaque `i64` handles into a VM-owned process
+registry — the same shape M5 uses for `io.File` handles, because
+stdlib classes are still v0.3 work (same blocker that punted the
+typed `JsonValue` in M20c and `ArgParser` in M22 P2A).
+
+```
+fn run(prog: str, args: List[str]) -> Tuple[i32, str, str]
+fn run_with_stdin(prog: str, args: List[str], stdin_data: str)
+        -> Tuple[i32, str, str]
+fn spawn(prog: str, args: List[str]) -> i64
+fn wait(handle: i64) -> i32
+fn try_wait(handle: i64) -> i32?
+fn kill(handle: i64) -> None
+```
+
+Semantics:
+
+* `run(prog, args)` spawns `prog args...`, blocks until the child
+  exits, captures both stdout and stderr, and returns the 3-tuple
+  `(exit_code, stdout, stderr)`.  `prog` is searched on `PATH` unless
+  it's an absolute path.  Raises `IOError` if the spawn itself fails
+  (executable not found, permission denied, etc.).
+* `run_with_stdin(prog, args, stdin_data)` is identical to `run`
+  except `stdin_data` is written to the child's stdin (and the pipe
+  closed) before waiting.  Convenient for filter-style children
+  (`sort`, `wc`, `grep`).
+* `spawn(prog, args)` starts the process *without* waiting and
+  returns an opaque `i64` handle.  Stdin/stdout/stderr are inherited
+  from the parent — no piping.  Raises `IOError` on spawn failure.
+* `wait(handle)` blocks until the spawned child exits; returns its
+  exit code.  Raises `IOError` if the handle is invalid or already
+  waited.
+* `try_wait(handle)` is a non-blocking poll: returns the exit code if
+  the child has exited, `none` if it's still running.  Raises
+  `IOError` on invalid handle.
+* `kill(handle)` force-terminates the child (SIGKILL on Unix,
+  TerminateProcess on Windows).  Silently succeeds on an
+  already-exited child (matches Python's `Popen.kill`).
+
+**Exit-code encoding.**  On Unix, a child terminated by a signal has
+no integer exit code; we follow Python's `subprocess.run` convention
+and report `-signal_number` (negative).  `wait`/`run` always return an
+`i32` so user code can branch on `code < 0`.
+
+**Cross-platform notes:**
+
+* On Windows `echo`, `dir`, `type`, etc. are shell builtins, not real
+  executables.  `subprocess.run("echo", ["hi"])` will fail with
+  "program not found".  Wrap shell commands as `cmd.exe /c <cmd>`
+  (Windows) or `sh -c <cmd>` (Unix); use `sys.platform` to dispatch.
+* Argument quoting differs (Windows applies CommandLineToArgvW; Unix
+  preserves args verbatim).  Rust's `std::process::Command::args`
+  does the host-appropriate thing — pass arguments as separate
+  `List[str]` elements, not pre-joined.
+
+What v0.2 does **not** ship:
+
+* **Streaming stdin/stdout/stderr** (`Popen.stdout.read(...)`).  Would
+  need readable byte-stream handles, which v0.3 will introduce
+  alongside the `bytes` runtime type.
+* **Environment-variable injection** (`subprocess.run(..., env=...)`).
+  Use `os.set_env` in the parent (it inherits to children) for v0.2.
+* **`shell=True` form** taking a single command string.  Spell it
+  explicitly as `subprocess.run("sh", ["-c", cmd])` or the cmd.exe
+  equivalent.
+* **`check=True` raise-on-nonzero**.  User code that wants this can
+  inspect `r.0` and raise its own `RuntimeError`.
+
+### 9.25 Module `pathlib` (v0.2 — M23 P3a-A)
+
+Object-oriented path manipulation shipped as a *flat-function* API
+over `str`-typed paths.  The Pythonic `Path("a") / "b"` chaining
+isn't expressible in v0.2 because stdlib classes don't yet have a
+registration path (deferred to v0.3 alongside `JsonValue`, `ArgParser`,
+and `Counter[K, V]` from M20c / M22).  Functions consume and produce
+`str` so they compose freely with the M20a `os` and `path` modules.
+
+```
+fn join(a: str, b: str) -> str
+fn with_suffix(p: str, new_suffix: str) -> str
+fn with_name(p: str, new_name: str) -> str
+fn parent(p: str) -> str
+fn name(p: str) -> str
+fn stem(p: str) -> str
+fn suffix(p: str) -> str
+fn parts(p: str) -> List[str]
+fn is_absolute(p: str) -> bool
+fn absolute(p: str) -> str
+fn relative_to(p: str, base: str) -> str
+fn read_text(p: str) -> str
+fn write_text(p: str, content: str) -> None
+fn read_lines(p: str) -> List[str]
+```
+
+Semantics:
+
+* `join(a, b)` concatenates `a` and `b` using the OS-native separator
+  (`/` on Unix, `\` on Windows).  Alias of `path.join` — duplicated
+  under `pathlib` for namespace coherence.
+* `with_suffix(p, ".x")` replaces the last extension.  Names with no
+  extension get the suffix appended (`with_suffix("README", ".md")`
+  → `"README.md"`).  A leading dot is not an extension
+  (`with_suffix(".bashrc", ".tmp")` → `".bashrc.tmp"`).
+* `with_name(p, "x")` replaces the basename: `with_name("a/b/c.txt",
+  "new.csv")` → `"a/b/new.csv"`.
+* `parent(p)` / `name(p)` are aliases over `path.dirname` /
+  `path.basename`.
+* `stem(p)` is the basename minus the LAST extension.  Python's
+  pathlib convention: `"a.txt"` → `"a"`; `"archive.tar.gz"` →
+  `"archive.tar"`; `".bashrc"` → `".bashrc"`.
+* `suffix(p)` is the last extension including the leading dot.
+  `"a.txt"` → `".txt"`; `"README"` → `""`.
+* `parts(p)` splits the path into components via
+  `std::path::Path::components`.  `"a/b/c"` → `["a", "b", "c"]`.
+  Drive prefixes and root markers are emitted verbatim on each
+  platform.
+* `is_absolute(p)` is the cross-platform absolute-path test.
+* `absolute(p)` makes `p` absolute relative to the current working
+  directory.  Does NOT resolve symlinks (that's `os.realpath`
+  territory, deferred to v0.3).  Raises `IOError` if the current
+  directory can't be queried.
+* `relative_to(p, base)` strips the `base` prefix from `p`.  Raises
+  `ValueError` if `p` is not a sub-path of `base`.
+* `read_text(p)` returns the entire file as a UTF-8 string.  Raises
+  `IOError`.
+* `write_text(p, content)` writes via `std::fs::write` (truncating).
+  Raises `IOError`.
+* `read_lines(p)` reads + splits on `\n`.  A trailing newline is
+  stripped (so `"a\nb\n"` → `["a", "b"]`).  CRLF line endings are
+  normalised — the trailing `\r` of each `\n`-split chunk is removed.
+  Raises `IOError`.
+
+What v0.2 does **not** ship:
+
+* **A real `Path` class** with operator overloads (`/`) and chained
+  methods.  Needs stdlib-class registration (v0.3).
+* **`glob` / `iterdir` / `match`**.  Python's `pathlib` includes
+  these but they overlap with `os.listdir` + the `re` module already
+  in v0.2.  v0.3 may add a thin layer.
+* **`unlink` / `mkdir` / `rmdir`**.  Use `os.remove`, `os.mkdir`
+  from M20a directly; we deliberately don't duplicate the FS-mutation
+  surface across modules.
+* **`exists` / `is_file` / `is_dir`**.  Same reasoning — already
+  available under `os`.
+* **`symlink_to` / `readlink` / `resolve` (symlink-following
+  `realpath`)**.  Deferred to v0.3; `absolute` is the lexical-only
+  alternative.
+
 ---
 
 ## 10. Compiler Architecture

@@ -1,0 +1,94 @@
+"""pathlib_demo — M23 P3a-A demo of the stdlib `pathlib` module.
+
+Exercises:
+  * Pure path manipulation: `join`, `parent`, `name`, `stem`, `suffix`,
+    `parts`, `with_suffix`, `with_name`.
+  * Cross-platform `is_absolute` and `absolute` resolution against the
+    current working directory.
+  * Round-trip file IO: `write_text` + `read_text` + `read_lines` on a
+    temp file under the project root.
+  * Subpath maths: `relative_to` recovers a child path; the
+    not-a-subpath case raises ValueError.
+
+v0.2 ships pathlib as a flat-function API over `str`-typed paths — no
+`Path` class until v0.3 (stdlib class registration is the same blocker
+M22 hit for typed ArgParser/Counter).  The function shape covers the
+common manipulation pipeline ergonomically.
+
+Tests:
+  * `compiler/tests/pathlib_demo_runs.rs` — subprocess assertion.
+"""
+
+import pathlib
+import os
+
+fn main() -> i32:
+    # 1. join — same behaviour as M20a path.join, available under both
+    # namespaces for ergonomics.
+    j: str = pathlib.join("a", "b")
+    println("join.len: " + str(len(j)))
+
+    # 2. with_suffix — replace the extension.
+    s1: str = pathlib.with_suffix("report.txt", ".csv")
+    println("with_suffix: " + s1)
+    # Adding an extension to an extensionless name should APPEND.
+    s2: str = pathlib.with_suffix("README", ".md")
+    println("add_suffix: " + s2)
+
+    # 3. with_name — replace the basename.
+    n1: str = pathlib.with_name("a/b/c.txt", "x.csv")
+    println("with_name.suffix: " + pathlib.suffix(n1))
+    println("with_name.name: " + pathlib.name(n1))
+
+    # 4. stem / suffix / parent / name on a multi-extension path.
+    p: str = "archive.tar.gz"
+    println("stem: " + pathlib.stem(p))
+    println("suffix: " + pathlib.suffix(p))
+
+    # 5. parts — split a path into components.
+    pieces: List[str] = pathlib.parts("a/b/c")
+    println("parts.len: " + str(len(pieces)))
+    if len(pieces) >= 3:
+        println("parts.0: " + pieces[0])
+        println("parts.2: " + pieces[2])
+
+    # 6. is_absolute — relative paths are not absolute.
+    println("is_abs.rel: " + str(pathlib.is_absolute("a/b")))
+
+    # 7. absolute — resolves against cwd.  Don't print the value (cwd
+    # varies between hosts) — just check the result IS absolute.
+    abs1: str = pathlib.absolute("relative.txt")
+    println("absolute.is_abs: " + str(pathlib.is_absolute(abs1)))
+
+    # 8. read_text / write_text — round-trip a temp file in the cwd.
+    tmp: str = "_pathlib_demo_tmp.txt"
+    content: str = "line1\nline2\nline3\n"
+    pathlib.write_text(tmp, content)
+    got: str = pathlib.read_text(tmp)
+    if got == content:
+        println("read_text: ok")
+    else:
+        println("read_text: FAIL")
+
+    # 9. read_lines — split on newlines, trailing newline stripped.
+    lines: List[str] = pathlib.read_lines(tmp)
+    println("read_lines.count: " + str(len(lines)))
+    if len(lines) >= 3:
+        println("read_lines.0: " + lines[0])
+        println("read_lines.2: " + lines[2])
+
+    # 10. Clean up the temp file (use os.remove since pathlib's
+    # unlink/remove is not in v0.2 — see spec §9.X).
+    os.remove(tmp)
+
+    # 11. relative_to — happy path + not-a-subpath ValueError.
+    rel: str = pathlib.relative_to("a/b/c", "a")
+    println("relative_to: " + pathlib.name(rel))
+    try:
+        bad: str = pathlib.relative_to("x/y", "a/b")
+        println("UNREACHED: " + bad)
+    except ValueError as e:
+        println("caught ValueError on relative_to")
+
+    println("done")
+    return 0
