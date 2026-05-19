@@ -1,0 +1,267 @@
+"""job_scheduler.spy — M24-A stress test of the Phase 3a stdlib surface.
+
+Combines four Phase 3a modules — `subprocess`, `threading` (Lock +
+Semaphore), `queue` (PriorityQueue), and `datetime` — in one program.
+The shape:
+
+  * A hardcoded list of jobs (name + shell-command + priority + retry_max).
+  * A `queue.PriorityQueue` of pending work, keyed by priority (lower
+    runs first).  Tie-break is implicit FIFO (handled inside the queue
+    impl's monotonic seq).
+  * A pool of N=3 worker threads.  Each worker:
+        - acquires a `threading.Semaphore` (signalled per job push);
+        - pops the next (priority, job-id) off the PQ;
+        - runs the job via `subprocess.run`;
+        - on success, appends a result row under a `threading.Lock`;
+        - on non-zero exit, increments retry_count and re-pushes with
+          a heavier priority + a delayed `datetime` schedule.
+  * The main thread waits for every job to either succeed or exhaust
+    its retry budget, then prints a summary.
+
+The point of this program is NOT to be a polished scheduler — it's to
+combine these four modules in one tight loop and catch any
+incidental interaction bug.
+
+Tests:
+  * `compiler/tests/job_scheduler_runs.rs` — asserts canonical summary.
+
+Probe results recorded in `docs/thesis/agent_reports/m24_a.md`.
+"""
+
+import subprocess
+import threading
+import queue
+import datetime
+import sys
+import time
+from threading import Thread
+
+
+# ── Globals ───────────────────────────────────────────────────────────
+#
+# In v0.2, module-level statements with side effects can't run; we
+# build the globals inside main() and pass i64 handles into worker
+# closures.  Job table is a flat list of strings encoded as
+# "<job-id>|<name>|<cmd>|<exit-target>|<retry_max>" for primitive
+# transport.  retry_count and outcome are mutable across threads via
+# parallel List[i32] slots indexed by job-id.
+
+# Sentinel job-id used to signal "no more work, please exit" to a worker.
+fn poison_id() -> i64:
+    return -1i64
+
+
+fn shell_prog() -> str:
+    if sys.platform == "windows":
+        return "cmd.exe"
+    return "sh"
+
+
+fn shell_flag() -> str:
+    if sys.platform == "windows":
+        return "/c"
+    return "-c"
+
+
+fn build_argv(cmd: str) -> List[str]:
+    args: List[str] = []
+    args.append(shell_flag())
+    args.append(cmd)
+    return args
+
+
+# Worker thread body.  Reads from the PQ until it pops the poison id.
+fn worker_body(worker_id: i32, pq: i64, sem: i64, log_lock: i64, state_lock: i64, job_names: List[str], job_cmds: List[str], job_retry_max: List[i32], retry_count: List[i32], outcome_code: List[i32], outcome_finish: List[i64], pending_left: List[i32]) -> None:
+    prog: str = shell_prog()
+    while true:
+        # Block until the main thread / a previous retry signals work.
+        threading.semaphore_acquire(sem)
+
+        # Pop the next job from the PQ under no further locking — the PQ
+        # is internally synchronised.
+        if queue.pq_is_empty(pq):
+            # Spurious wake-up shouldn't happen with a counting sem, but
+            # be defensive.
+            continue
+        top: Tuple[f64, i64] = queue.pq_pop_min_i64(pq)
+        prio: f64 = top.0
+        jid: i64 = top.1
+
+        if jid == poison_id():
+            # Poison pill: re-release for other workers and exit.
+            return
+
+        idx: i64 = jid
+        name: str = job_names[idx]
+        cmd: str = job_cmds[idx]
+
+        # Run the job.  `subprocess.run` is blocking-spawn-and-wait
+        # internally; that's exactly what we want here.
+        argv: List[str] = build_argv(cmd)
+        r: Tuple[i32, str, str] = subprocess.run(prog, argv)
+        code: i32 = r.0
+        finish: i64 = datetime.now()
+
+        if code == 0:
+            # Success — record under the log lock.
+            threading.lock_acquire(log_lock)
+            outcome_code[idx] = code
+            outcome_finish[idx] = finish
+            threading.lock_release(log_lock)
+
+            threading.lock_acquire(state_lock)
+            pending_left[0] = pending_left[0] - 1
+            threading.lock_release(state_lock)
+        else:
+            # Failure — bump retry_count and either re-queue or give up.
+            threading.lock_acquire(state_lock)
+            rc: i32 = retry_count[idx] + 1
+            retry_count[idx] = rc
+            max_r: i32 = job_retry_max[idx]
+            threading.lock_release(state_lock)
+
+            if rc > max_r:
+                # Out of retries — record final failure.
+                threading.lock_acquire(log_lock)
+                outcome_code[idx] = code
+                outcome_finish[idx] = finish
+                threading.lock_release(log_lock)
+
+                threading.lock_acquire(state_lock)
+                pending_left[0] = pending_left[0] - 1
+                threading.lock_release(state_lock)
+            else:
+                # Re-queue with priority bumped by 10*rc and a scheduled
+                # delay (we don't actually sleep — for stress-test speed
+                # we just verify the datetime arithmetic).
+                _scheduled_at: i64 = datetime.add_seconds(finish, i64(rc))
+                new_prio: f64 = prio + (10.0 * f64(rc))
+                queue.pq_push_i64(pq, new_prio, jid)
+                threading.semaphore_release(sem)
+
+
+fn main() -> i32:
+    println("platform: " + sys.platform)
+
+    # ── Build the job table ────────────────────────────────────────
+    #
+    # 6 jobs, of which 2 are deliberately set to fail (exit 3) to
+    # exercise the retry path.  retry_max=2 means up to 3 total
+    # attempts; both fail-jobs will exhaust the budget.
+    job_names: List[str] = []
+    job_cmds: List[str] = []
+    job_prio: List[f64] = []
+    job_retry_max: List[i32] = []
+
+    job_names.append("alpha")
+    job_cmds.append("echo alpha-ok")
+    job_prio.append(3.0)
+    job_retry_max.append(0)
+
+    job_names.append("bravo")
+    job_cmds.append("echo bravo-ok")
+    job_prio.append(1.0)
+    job_retry_max.append(0)
+
+    job_names.append("charlie")
+    job_cmds.append("echo charlie-ok")
+    job_prio.append(5.0)
+    job_retry_max.append(0)
+
+    job_names.append("delta")
+    job_cmds.append("echo delta-ok")
+    job_prio.append(2.0)
+    job_retry_max.append(0)
+
+    job_names.append("fail-eager")  # always fails — exits 3
+    job_cmds.append("exit 3")
+    job_prio.append(4.0)
+    job_retry_max.append(2)
+
+    job_names.append("fail-late")  # always fails — exits 5
+    job_cmds.append("exit 5")
+    job_prio.append(6.0)
+    job_retry_max.append(1)
+
+    n_jobs: i64 = len(job_names)
+    println("job-count=" + str(n_jobs))
+
+    # ── Per-job mutable state arrays ───────────────────────────────
+    retry_count: List[i32] = []
+    outcome_code: List[i32] = []
+    outcome_finish: List[i64] = []
+    i: i64 = 0i64
+    while i < n_jobs:
+        retry_count.append(0)
+        outcome_code.append(-999)
+        outcome_finish.append(0i64)
+        i = i + 1i64
+
+    pending_left: List[i32] = [i32(n_jobs)]
+
+    # ── Synchronisation primitives ─────────────────────────────────
+    pq: i64 = queue.pq_new_i64()
+    sem: i64 = threading.semaphore_new(0)
+    log_lock: i64 = threading.lock_new()
+    state_lock: i64 = threading.lock_new()
+
+    # ── Push initial jobs ──────────────────────────────────────────
+    i = 0i64
+    while i < n_jobs:
+        queue.pq_push_i64(pq, job_prio[i], i)
+        threading.semaphore_release(sem)
+        i = i + 1i64
+    println("queue-len-initial=" + str(queue.pq_len(pq)))
+
+    # ── Spawn N workers ────────────────────────────────────────────
+    n_workers: i32 = 3
+    t1: Thread = Thread(fn() -> None: worker_body(1, pq, sem, log_lock, state_lock, job_names, job_cmds, job_retry_max, retry_count, outcome_code, outcome_finish, pending_left))
+    t2: Thread = Thread(fn() -> None: worker_body(2, pq, sem, log_lock, state_lock, job_names, job_cmds, job_retry_max, retry_count, outcome_code, outcome_finish, pending_left))
+    t3: Thread = Thread(fn() -> None: worker_body(3, pq, sem, log_lock, state_lock, job_names, job_cmds, job_retry_max, retry_count, outcome_code, outcome_finish, pending_left))
+
+    t1.start()
+    t2.start()
+    t3.start()
+
+    # ── Wait until pending_left hits 0 ─────────────────────────────
+    while true:
+        threading.lock_acquire(state_lock)
+        left: i32 = pending_left[0]
+        threading.lock_release(state_lock)
+        if left <= 0:
+            break
+        time.sleep_ms(10i64)
+
+    # ── Send poison pills + final semaphore releases ──────────────
+    j: i32 = 0
+    while j < n_workers:
+        queue.pq_push_i64(pq, 1e9, poison_id())
+        threading.semaphore_release(sem)
+        j = j + 1
+
+    t1.join()
+    t2.join()
+    t3.join()
+
+    # ── Summary table ──────────────────────────────────────────────
+    println("--- summary ---")
+    n_success: i32 = 0
+    n_failed: i32 = 0
+    i = 0i64
+    while i < n_jobs:
+        n: str = job_names[i]
+        c: i32 = outcome_code[i]
+        rc2: i32 = retry_count[i]
+        status: str = "ok"
+        if c != 0:
+            status = "FAIL"
+            n_failed = n_failed + 1
+        else:
+            n_success = n_success + 1
+        println("job " + n + " exit=" + str(c) + " retries=" + str(rc2) + " status=" + status)
+        i = i + 1i64
+
+    println("success=" + str(n_success))
+    println("failed=" + str(n_failed))
+    println("done")
+    return 0

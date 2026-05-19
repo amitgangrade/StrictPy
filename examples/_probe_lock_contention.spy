@@ -1,0 +1,43 @@
+"""M24-A Probe 5: Lock contention.  4 workers each append 50 entries to
+a shared List[i32] under a single Lock.  Final length must be exactly
+200 every time.
+
+The Tuple-of-(str, i32, i64) shape from Probe 9 is exercised below for
+the actual scheduler-style results list; here we keep it simple with
+i32 to isolate the lock + List append interaction.
+"""
+
+import threading
+from threading import Thread
+
+fn worker(lock_h: i64, results: List[i32], who: i32) -> None:
+    i: i32 = 0
+    while i < 50:
+        threading.lock_acquire(lock_h)
+        results.append(who * 1000 + i)
+        threading.lock_release(lock_h)
+        i = i + 1
+
+fn main() -> i32:
+    results: List[i32] = []
+    lock_h: i64 = threading.lock_new()
+
+    t1: Thread = Thread(fn() -> None: worker(lock_h, results, 1))
+    t2: Thread = Thread(fn() -> None: worker(lock_h, results, 2))
+    t3: Thread = Thread(fn() -> None: worker(lock_h, results, 3))
+    t4: Thread = Thread(fn() -> None: worker(lock_h, results, 4))
+
+    t1.start()
+    t2.start()
+    t3.start()
+    t4.start()
+
+    t1.join()
+    t2.join()
+    t3.join()
+    t4.join()
+
+    n: i64 = len(results)
+    println("len=" + str(n))
+    println("expected-200=" + str(n == 200i64))
+    return 0

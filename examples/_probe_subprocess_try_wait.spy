@@ -1,0 +1,42 @@
+"""M24-A Probe 3: subprocess.try_wait returns none while running, then
+the exit code after the child completes.
+
+Spawns a ~500ms sleep child.  Polls try_wait() every 100ms.  Expect to
+see at least one `none` return (still running) and then a final `0`
+exit code.
+"""
+import subprocess
+import sys
+import time
+
+fn main() -> i32:
+    prog: str = "sh"
+    args: List[str] = ["-c", "sleep 1"]
+    if sys.platform == "windows":
+        prog = "cmd.exe"
+        # /nobreak so it doesn't accept keypress.  /t 1 = 1 second.
+        args = ["/c", "timeout /t 1 /nobreak > NUL"]
+
+    h: i64 = subprocess.spawn(prog, args)
+    println("spawned")
+
+    saw_none: bool = false
+    saw_done: bool = false
+    final_code: i32 = -999
+
+    i: i32 = 0
+    while i < 50:
+        # try_wait returns i32? — none while running, the code when done.
+        maybe: i32? = subprocess.try_wait(h)
+        if maybe is not none:
+            saw_done = true
+            final_code = maybe
+            break
+        saw_none = true
+        time.sleep_ms(100i64)
+        i = i + 1
+
+    println("saw-none-at-least-once=" + str(saw_none))
+    println("saw-done=" + str(saw_done))
+    println("final-code=" + str(final_code))
+    return 0

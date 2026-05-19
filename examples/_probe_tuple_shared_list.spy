@@ -1,0 +1,78 @@
+"""M24-A Probe 9: Tuple-of-(str, i32, i64) in a shared List across threads.
+
+This is the canonical results-row shape — (job_name, exit_code,
+finish_epoch).  4 threads each append 25 rows under a Lock; the final
+list must have exactly 100 entries with every row's (str, i32, i64)
+intact.
+"""
+import threading
+import datetime
+from threading import Thread
+
+fn worker(name: str, lock_h: i64, rows: List[Tuple[str, i32, i64]]) -> None:
+    i: i32 = 0
+    while i < 25:
+        ts: i64 = datetime.now()
+        row: Tuple[str, i32, i64] = (name, i, ts)
+        threading.lock_acquire(lock_h)
+        rows.append(row)
+        threading.lock_release(lock_h)
+        i = i + 1
+
+fn main() -> i32:
+    rows: List[Tuple[str, i32, i64]] = []
+    lock_h: i64 = threading.lock_new()
+
+    t1: Thread = Thread(fn() -> None: worker("alpha", lock_h, rows))
+    t2: Thread = Thread(fn() -> None: worker("bravo", lock_h, rows))
+    t3: Thread = Thread(fn() -> None: worker("charlie", lock_h, rows))
+    t4: Thread = Thread(fn() -> None: worker("delta", lock_h, rows))
+
+    t1.start()
+    t2.start()
+    t3.start()
+    t4.start()
+
+    t1.join()
+    t2.join()
+    t3.join()
+    t4.join()
+
+    println("count=" + str(len(rows)))
+
+    # Tally name occurrences via str-equality.  Each name should appear
+    # exactly 25 times.
+    a: i32 = 0
+    b: i32 = 0
+    c: i32 = 0
+    d: i32 = 0
+    bad: i32 = 0
+    i: i64 = 0i64
+    while i < len(rows):
+        r: Tuple[str, i32, i64] = rows[i]
+        name: str = r.0
+        idx: i32 = r.1
+        ts: i64 = r.2
+        if name == "alpha":
+            a = a + 1
+        elif name == "bravo":
+            b = b + 1
+        elif name == "charlie":
+            c = c + 1
+        elif name == "delta":
+            d = d + 1
+        else:
+            bad = bad + 1
+        # Quick sanity on the i32 + i64 slots.
+        if idx < 0 or idx >= 25:
+            bad = bad + 1
+        if ts <= 0i64:
+            bad = bad + 1
+        i = i + 1i64
+
+    println("alpha=" + str(a))
+    println("bravo=" + str(b))
+    println("charlie=" + str(c))
+    println("delta=" + str(d))
+    println("bad=" + str(bad))
+    return 0

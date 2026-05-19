@@ -1,0 +1,48 @@
+"""M24-A Probe 4: spawn a long-running process, then kill it from
+another thread.  Verifies subprocess.kill() correctly observes
+termination from the wait()ing thread.
+
+`timeout /t 60` (Windows) / `sleep 60` (Unix) — would otherwise block
+for 60 seconds.  We spawn it, sleep briefly on main, then call
+subprocess.kill() and confirm wait() returns promptly.
+"""
+import subprocess
+import threading
+import sys
+import time
+from threading import Thread
+
+fn killer(handle: i64) -> None:
+    # Sleep ~200ms so main's wait() is definitely entered first.
+    time.sleep_ms(200i64)
+    subprocess.kill(handle)
+
+fn main() -> i32:
+    prog: str = "sh"
+    args: List[str] = ["-c", "sleep 60"]
+    if sys.platform == "windows":
+        prog = "cmd.exe"
+        args = ["/c", "timeout /t 60 /nobreak"]
+
+    start: f64 = time.monotonic()
+    h: i64 = subprocess.spawn(prog, args)
+    println("spawned-handle-positive=" + str(h > 0i64))
+
+    # Spawn a thread to kill the process after a short delay.
+    t: Thread = Thread(fn() -> None: killer(h))
+    t.start()
+
+    # Block in main thread on wait().  Should return shortly after the
+    # killer thread fires (~200ms), NOT after 60s.
+    code: i32 = subprocess.wait(h)
+    elapsed: f64 = time.monotonic() - start
+    t.join()
+
+    println("wait-returned=true")
+    # On Unix, SIGKILL -> exit code -9.  On Windows, TerminateProcess
+    # -> 1 (the value passed to TerminateProcess).  We just check that
+    # it's not the normal success code.
+    println("nonzero-exit=" + str(code != 0))
+    # The whole operation should be < 5 seconds, not 60.
+    println("elapsed-under-5s=" + str(elapsed < 5.0))
+    return 0

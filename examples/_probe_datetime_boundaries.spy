@@ -1,0 +1,55 @@
+"""M24-A Probe 8: datetime arithmetic around month/year boundaries.
+
+Tests:
+  * add 30 seconds * retry_count for retry backoff (small ints)
+  * add 1 day from 2026-01-31 -> 2026-02-01 (Jan has 31 days)
+  * add 30 days from 2026-01-31 -> should be 2026-03-02 (Jan + Feb 28)
+  * add 1 day from 2024-02-29 (leap) -> 2024-03-01
+  * add 365 days from 2024-02-29 -> 2025-02-28 (next year is non-leap)
+  * Year boundary: add 1 day to 2026-12-31 -> 2027-01-01
+"""
+import datetime
+
+fn main() -> i32:
+    # Retry-backoff arithmetic (seconds level).
+    base: i64 = datetime.from_ymd_hms(2026, 5, 18, 12, 0, 0)
+    plus_30s: i64 = datetime.add_seconds(base, 30i64)
+    iso: str = datetime.to_iso(plus_30s)
+    println("plus30s=" + iso)
+
+    plus_60s: i64 = datetime.add_seconds(base, 60i64)
+    iso2: str = datetime.to_iso(plus_60s)
+    println("plus60s=" + iso2)
+
+    # Jan 31 + 1 day = Feb 1
+    jan31: i64 = datetime.from_ymd(2026, 1, 31)
+    feb01: i64 = datetime.add_days(jan31, 1i64)
+    println("jan31+1=" + datetime.to_date_str(feb01))
+
+    # Jan 31 + 30 days = should be March 2 (31 - 31 = 0 days into Feb,
+    # then 30 - 31 = -1, no.  Day-31 + 30 = day 61 of the year.
+    # 2026-01-31 is day 31.  31 + 30 = 61.  Feb 2026 has 28 days, so day
+    # 61 is March 2.
+    mar02: i64 = datetime.add_days(jan31, 30i64)
+    println("jan31+30=" + datetime.to_date_str(mar02))
+
+    # Leap-day handling.  2024-02-29 + 1 day = 2024-03-01.
+    leap_day: i64 = datetime.from_ymd(2024, 2, 29)
+    leap_next: i64 = datetime.add_days(leap_day, 1i64)
+    println("leap+1=" + datetime.to_date_str(leap_next))
+
+    # 2024-02-29 + 365 days = 2025-02-28 (a non-leap-year, so we land
+    # one day SHY of the anniversary).
+    year_later: i64 = datetime.add_days(leap_day, 365i64)
+    println("leap+365=" + datetime.to_date_str(year_later))
+
+    # Year boundary.
+    dec31: i64 = datetime.from_ymd(2026, 12, 31)
+    jan01: i64 = datetime.add_days(dec31, 1i64)
+    println("dec31+1=" + datetime.to_date_str(jan01))
+
+    # diff_seconds round-trip.
+    diff: i64 = datetime.diff_seconds(plus_60s, base)
+    println("diff=" + str(diff))
+
+    return 0

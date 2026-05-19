@@ -1,0 +1,58 @@
+"""M24-A Probe 6: threading.Semaphore as a blocking "job available" signal.
+
+Main thread starts 3 worker threads that immediately try to
+semaphore_acquire().  All 3 should block.  Main thread does a
+brief sleep, then releases 3 times.  Each worker should wake, record
+"got" in a counter, and exit.
+
+If the semaphore implementation misses wakeups, the workers will hang
+and the joins will deadlock.  We don't have a deadlock-timeout in the
+runtime so this test simply *runs to completion* with `got=3` to
+prove all 3 workers were woken.
+"""
+import threading
+import time
+from threading import Thread
+
+fn waiter(sem: i64, lock_h: i64, counter: List[i32]) -> None:
+    threading.semaphore_acquire(sem)
+    threading.lock_acquire(lock_h)
+    counter[0] = counter[0] + 1
+    threading.lock_release(lock_h)
+
+fn main() -> i32:
+    sem: i64 = threading.semaphore_new(0)
+    lock_h: i64 = threading.lock_new()
+    counter: List[i32] = [0]
+
+    t1: Thread = Thread(fn() -> None: waiter(sem, lock_h, counter))
+    t2: Thread = Thread(fn() -> None: waiter(sem, lock_h, counter))
+    t3: Thread = Thread(fn() -> None: waiter(sem, lock_h, counter))
+
+    t1.start()
+    t2.start()
+    t3.start()
+
+    # Give workers time to block on the semaphore.
+    time.sleep_ms(100i64)
+
+    # No worker should have run yet.
+    threading.lock_acquire(lock_h)
+    before: i32 = counter[0]
+    threading.lock_release(lock_h)
+    println("before-release=" + str(before))
+
+    # Release 3 permits — each worker should wake.
+    threading.semaphore_release(sem)
+    threading.semaphore_release(sem)
+    threading.semaphore_release(sem)
+
+    t1.join()
+    t2.join()
+    t3.join()
+
+    threading.lock_acquire(lock_h)
+    after: i32 = counter[0]
+    threading.lock_release(lock_h)
+    println("after-release=" + str(after))
+    return 0

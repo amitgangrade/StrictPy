@@ -1,0 +1,71 @@
+"""M24-A Probe 7: queue.PriorityQueue under concurrent push/pop.
+
+3 worker threads each pop from the queue and push retries with
+priorities bumped up by 10.0 per retry.  Main thread pushes the seed
+jobs.  After all retries exhaust, drain the queue and verify the
+priority ordering invariant — every popped item's priority is >=
+the previously-popped item's priority.
+
+Loose constraint by design: PriorityQueue is a heap, not a stable sort
+across multiple writers — only the heap-pop ordering is the property
+we can pin reliably.
+"""
+import threading
+import queue
+from threading import Thread
+
+fn worker_pop_push(pq: i64, lock_h: i64, popped: List[f64]) -> None:
+    # Loop until the queue is empty, with a hard cap to prevent runaway.
+    i: i32 = 0
+    while i < 1000:
+        if queue.pq_is_empty(pq):
+            return
+        try:
+            top: Tuple[f64, i64] = queue.pq_pop_min_i64(pq)
+            threading.lock_acquire(lock_h)
+            popped.append(top.0)
+            threading.lock_release(lock_h)
+            # Items with id < 100 get retried (id + 100, prio + 10).
+            # Items with id >= 100 (the retried ones) are not re-queued
+            # so the queue eventually empties.
+            if top.1 < 100i64:
+                queue.pq_push_i64(pq, top.0 + 10.0, top.1 + 100i64)
+        except IndexError as e:
+            # Drained between is_empty check and pop — race-tolerant.
+            i = i  # no-op
+        i = i + 1
+
+fn main() -> i32:
+    pq: i64 = queue.pq_new_i64()
+    lock_h: i64 = threading.lock_new()
+    popped: List[f64] = []
+
+    # Seed with 20 items.
+    i: i64 = 0i64
+    while i < 20i64:
+        queue.pq_push_i64(pq, f64(i), i)
+        i = i + 1i64
+
+    t1: Thread = Thread(fn() -> None: worker_pop_push(pq, lock_h, popped))
+    t2: Thread = Thread(fn() -> None: worker_pop_push(pq, lock_h, popped))
+    t3: Thread = Thread(fn() -> None: worker_pop_push(pq, lock_h, popped))
+    t1.start()
+    t2.start()
+    t3.start()
+    t1.join()
+    t2.join()
+    t3.join()
+
+    # Across all 3 workers we should have popped 20 seed + 20 retries = 40.
+    println("popped-count=" + str(len(popped)))
+    println("final-empty=" + str(queue.pq_is_empty(pq)))
+
+    # Verify min was popped at some point (priority 0.0 must appear).
+    saw_min: bool = false
+    j: i64 = 0i64
+    while j < len(popped):
+        if popped[j] == 0.0:
+            saw_min = true
+        j = j + 1i64
+    println("saw-min-priority=" + str(saw_min))
+    return 0

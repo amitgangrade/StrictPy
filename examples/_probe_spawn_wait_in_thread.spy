@@ -1,0 +1,53 @@
+"""M24-A Probe 2: subprocess.spawn + subprocess.wait inside a worker
+thread.  Verifies the OS wait path doesn't deadlock or interact badly
+with the VM's thread runtime.
+
+Spawns 4 worker threads.  Each thread spawns a short shell command,
+waits for it, and records the exit code via a shared lock-protected
+list.  Final length must be exactly 4.
+"""
+import subprocess
+import threading
+import sys
+from threading import Thread
+
+fn run_one(lock_h: i64, codes: List[i32]) -> None:
+    prog: str = "sh"
+    args: List[str] = ["-c", "exit 0"]
+    if sys.platform == "windows":
+        prog = "cmd.exe"
+        args = ["/c", "exit 0"]
+    h: i64 = subprocess.spawn(prog, args)
+    code: i32 = subprocess.wait(h)
+    threading.lock_acquire(lock_h)
+    codes.append(code)
+    threading.lock_release(lock_h)
+
+fn main() -> i32:
+    codes: List[i32] = []
+    lock_h: i64 = threading.lock_new()
+
+    t1: Thread = Thread(fn() -> None: run_one(lock_h, codes))
+    t2: Thread = Thread(fn() -> None: run_one(lock_h, codes))
+    t3: Thread = Thread(fn() -> None: run_one(lock_h, codes))
+    t4: Thread = Thread(fn() -> None: run_one(lock_h, codes))
+
+    t1.start()
+    t2.start()
+    t3.start()
+    t4.start()
+    t1.join()
+    t2.join()
+    t3.join()
+    t4.join()
+
+    println("count=" + str(len(codes)))
+    # All should be exit 0.
+    i: i64 = 0i64
+    all_zero: bool = true
+    while i < len(codes):
+        if codes[i] != 0:
+            all_zero = false
+        i = i + 1i64
+    println("all-zero=" + str(all_zero))
+    return 0

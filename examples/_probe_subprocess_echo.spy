@@ -1,0 +1,15 @@
+"""M24-A Probe 1: subprocess.run echo cross-platform."""
+import subprocess
+import sys
+
+fn main() -> i32:
+    prog: str = "sh"
+    flag: str = "-c"
+    if sys.platform == "windows":
+        prog = "cmd.exe"
+        flag = "/c"
+    args: List[str] = [flag, "echo hello"]
+    r: Tuple[i32, str, str] = subprocess.run(prog, args)
+    println("exit=" + str(r.0))
+    println("stdout-has-hello=" + str(len(r.1) > 0))
+    return 0
