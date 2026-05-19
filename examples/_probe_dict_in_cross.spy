@@ -1,0 +1,53 @@
+"""_probe_dict_in_cross_dict.spy — M24-B probe.
+
+Minimal repro: a key in dict A is reported as NOT in dict B, even though
+B contains a textually-identical key.  The keys are produced by
+`str(i64)` from the same underlying integer, but each dict materialises
+them independently via two separate `str(i64)` calls.
+
+If the dict `in` operator compares by interned-string identity rather
+than by string value, this could surface a real bug.  If `str(i64)`
+returns a fresh non-canonicalised String each call, the two dicts hash
+to different buckets.
+
+Expected behaviour: `"1779199200" in counts` should be true when counts
+has a key `"1779199200"` regardless of how each string was constructed.
+"""
+
+
+fn main() -> i32:
+    expected: Dict[str, i64] = {}
+    actual: Dict[str, i64] = {}
+
+    base: i64 = 1779199200i64
+
+    # Build both dicts identically.
+    expected[str(base)] = 1i64
+    expected[str(base + 3600i64)] = 2i64
+    expected[str(base + 7200i64)] = 3i64
+
+    actual[str(base)] = 1i64
+    actual[str(base + 3600i64)] = 2i64
+    actual[str(base + 7200i64)] = 3i64
+
+    exp_keys: List[str] = expected.keys()
+    nek: i32 = i32(i64(len(exp_keys)))
+    println("expected keys: " + str(nek))
+    println("actual keys: " + str(i64(len(actual.keys()))))
+
+    i: i32 = 0i32
+    while i < nek:
+        k: str = exp_keys[i]
+        if k in actual:
+            println("  " + k + " in actual: true")
+        else:
+            println("  " + k + " in actual: false")
+        i = i + 1i32
+
+    # Also test direct literal lookup.
+    if "1779199200" in actual:
+        println("literal in actual: true")
+    else:
+        println("literal in actual: false")
+
+    return 0

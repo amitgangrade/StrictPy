@@ -1,0 +1,759 @@
+"""event_log.spy — M24-B SQLite-backed event log CLI tool.
+
+Stress-tests the M23 Phase 3a stdlib surface (`sqlite3` + `datetime` +
+`pathlib` + `io` + `re`) combined with `argparse` from M22 P2A.
+
+Three operating modes selected by `--mode`:
+
+  1. `ingest`   — read a file of `"<ISO> <CATEGORY> <MESSAGE>"` lines,
+                  parse via `datetime.from_iso`, insert into the events
+                  table.
+  2. `query`    — print events newer than `--since`, filtered by
+                  `--category`, ordered by timestamp.
+  3. `summary`  — print a per-bucket count of events, where buckets
+                  are either `hour` or `day` aligned.
+
+Plus a default mode `demo` (used when --mode is not supplied) that
+exercises all the probes from the M24-B brief inline against an
+in-memory database and prints OK/FAIL lines.
+
+Tests:
+  * `compiler/tests/event_log_runs.rs` — subprocess assertions over
+    the demo mode, plus a separate run that drives `ingest` against a
+    procedurally-generated input file.
+"""
+
+import sys
+import argparse
+import sqlite3
+import datetime
+import pathlib
+import re
+import io
+import os
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────
+
+
+fn die(code: i32, msg: str) -> None:
+    """Print msg to stderr and call sys.exit(code)."""
+    io.write_stderr("event_log: " + msg + "\n")
+    sys.exit(code)
+    return
+
+
+fn parse_line(line: str) -> Tuple[str, str, str]:
+    """Split a log line into (timestamp, category, message).
+
+    Each input line has shape `"<ISO timestamp> <category> <message>"`.
+    `re.find` returns (start, end) of the timestamp; we slice manually
+    via the index machinery (no .slice() method in v0.2).
+
+    Raises ValueError if the line shape is unrecognisable.
+    """
+    # Match an ISO-8601 timestamp at the start of the line.  Permissive
+    # enough to accept Z / +00:00 / -HH:MM / no-suffix forms; datetime
+    # .from_iso() does the real validation.
+    pos: Tuple[i32, i32] = re.find("^[0-9-]+T[0-9:]+(Z|[+-][0-9:]+)?", line)
+    if pos.0 != 0i32:
+        raise ValueError("line does not start with an ISO timestamp")
+    ts_end: i32 = pos.1
+    ts_str: str = substring(line, 0i32, ts_end)
+    # The character immediately after the timestamp must be a space.
+    if i32(i64(len(line))) <= ts_end + 1i32:
+        raise ValueError("line truncated after timestamp")
+    rest: str = substring(line, ts_end + 1i32, i32(i64(len(line))))
+    # Split the rest into category + remainder on the first space.
+    sp: i32 = first_space(rest)
+    if sp < 0i32:
+        raise ValueError("missing category")
+    cat: str = substring(rest, 0i32, sp)
+    msg: str = substring(rest, sp + 1i32, i32(i64(len(rest))))
+    return (ts_str, cat, msg)
+
+
+fn substring(s: str, start: i32, end: i32) -> str:
+    """Build a substring of `s` over the half-open range [start, end)."""
+    if end <= start:
+        return ""
+    n: i32 = i32(i64(len(s)))
+    if start < 0i32:
+        return ""
+    if end > n:
+        end = n
+    out: str = ""
+    i: i32 = start
+    while i < end:
+        out = out + str(char(i32(i64(s[i]))))
+        i = i + 1i32
+    return out
+
+
+fn first_space(s: str) -> i32:
+    """Return the byte offset of the first ASCII space, or -1 if none."""
+    n: i32 = i32(i64(len(s)))
+    i: i32 = 0i32
+    while i < n:
+        if i32(i64(s[i])) == 32i32:
+            return i
+        i = i + 1i32
+    return -1i32
+
+
+fn ensure_schema(conn: i64) -> None:
+    """Create the events table if it doesn't already exist."""
+    sqlite3.execute(conn, "CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, ts INTEGER, category TEXT, message TEXT)")
+    return
+
+
+fn insert_event(conn: i64, ts: i64, category: str, message: str) -> None:
+    """Insert one row via parameter-bound INSERT.  TEXT-binds ts."""
+    params: List[str] = []
+    params.append(str(ts))
+    params.append(category)
+    params.append(message)
+    sqlite3.execute_params(conn, "INSERT INTO events (ts, category, message) VALUES (?, ?, ?)", params)
+    return
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Mode: ingest
+# ─────────────────────────────────────────────────────────────────────
+
+
+fn run_ingest(db_path: str, file_path: str) -> i32:
+    """Read the input file, parse each line, insert into the events table."""
+    # pathlib.read_text raises IOError on missing file — that's the
+    # canonical probe path.
+    content: str = ""
+    try:
+        content = pathlib.read_text(file_path)
+    except IOError as ioe:
+        die(2i32, "cannot read input file: " + ioe.message)
+        return 2
+    lines: List[str] = content.split("\n")
+
+    conn: i64 = sqlite3.connect(db_path)
+    ensure_schema(conn)
+
+    inserted: i32 = 0i32
+    skipped: i32 = 0i32
+    n: i32 = i32(i64(len(lines)))
+    i: i32 = 0i32
+    while i < n:
+        line: str = lines[i]
+        # Skip blank lines and #-comments.
+        if i64(len(line)) == 0i64 or i32(i64(line[0])) == 35i32:
+            i = i + 1i32
+            continue
+        try:
+            parts: Tuple[str, str, str] = parse_line(line)
+            ts: i64 = datetime.from_iso(parts.0)
+            insert_event(conn, ts, parts.1, parts.2)
+            inserted = inserted + 1i32
+        except ValueError as e:
+            skipped = skipped + 1i32
+        i = i + 1i32
+
+    sqlite3.close(conn)
+    println("ingest: inserted=" + str(inserted) + " skipped=" + str(skipped))
+    return 0
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Mode: query
+# ─────────────────────────────────────────────────────────────────────
+
+
+fn run_query(db_path: str, since_iso: str, category: str) -> i32:
+    """Print events with ts >= since_iso, filtered by category."""
+    since_ts: i64 = 0i64
+    try:
+        since_ts = datetime.from_iso(since_iso)
+    except ValueError as e:
+        die(2i32, "bad --since timestamp: " + e.message)
+        return 2
+
+    conn: i64 = sqlite3.connect(db_path)
+    ensure_schema(conn)
+
+    params: List[str] = []
+    params.append(str(since_ts))
+    params.append(category)
+    rows: List[List[str]] = sqlite3.query_params(conn, "SELECT ts, category, message FROM events WHERE ts >= ? AND category = ? ORDER BY ts ASC", params)
+
+    n: i32 = i32(i64(len(rows)))
+    println("query: matched=" + str(n))
+    i: i32 = 0i32
+    while i < n:
+        row: List[str] = rows[i]
+        # row[0] is the integer ts as decimal text; parse back via parse_i64.
+        ts_text: str = row[0i32]
+        ts: i64 = parse_i64(ts_text)
+        iso: str = datetime.to_iso(ts)
+        println(iso + " [" + row[1i32] + "] " + row[2i32])
+        i = i + 1i32
+
+    sqlite3.close(conn)
+    return 0
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Mode: summary
+# ─────────────────────────────────────────────────────────────────────
+
+
+fn dict_has_str(d: Dict[str, i64], k: str) -> bool:
+    """Workaround for `k in d`: BUG-039 — `in` returns false on
+    `Dict[str, *]` even when the key is present.  We use `.get()` which
+    returns `i64?` and check for `is not none`.  Since `.get()` returns
+    a default sentinel on miss, we can't distinguish a stored `0` from
+    a missing key — but in this program no count or aligned-epoch is
+    ever exactly 0, so this is safe.
+
+    Update: actually `.get()` on `Dict[str, i64]` returns `i64?` so the
+    distinguishing IS done by the optional wrapper.  See _probe_dict_str_key.spy.
+    """
+    v: i64? = d.get(k)
+    return v is not none
+
+
+fn bucket_align(ts: i64, bucket_secs: i64) -> i64:
+    """Floor ts to the nearest bucket_secs boundary."""
+    # ts mod bucket_secs, but handle negative ts by using a sentinel
+    # branch.  All our test data is post-epoch so this is the easy case.
+    r: i64 = ts % bucket_secs
+    if r < 0i64:
+        r = r + bucket_secs
+    return ts - r
+
+
+fn star_bar(n: i32) -> str:
+    """Return a string of `n` `*` characters."""
+    out: str = ""
+    i: i32 = 0i32
+    while i < n:
+        out = out + "*"
+        i = i + 1i32
+    return out
+
+
+fn run_summary(db_path: str, buckets: str) -> i32:
+    """Print a per-bucket histogram of event counts."""
+    bucket_secs: i64 = 3600i64
+    bucket_fmt: str = "hour"
+    if buckets == "hour":
+        bucket_secs = 3600i64
+        bucket_fmt = "hour"
+    elif buckets == "day":
+        bucket_secs = 86400i64
+        bucket_fmt = "day"
+    else:
+        die(2i32, "unknown --buckets value (want hour|day): " + buckets)
+        return 2
+
+    conn: i64 = sqlite3.connect(db_path)
+    ensure_schema(conn)
+    rows: List[List[str]] = sqlite3.query(conn, "SELECT ts FROM events ORDER BY ts ASC")
+    sqlite3.close(conn)
+
+    # In-memory aggregation: bucket -> count.  Bucket is the aligned
+    # epoch seconds (stored as the string of that integer for dict
+    # keying).  We also keep an ordered list of bucket keys so the
+    # output is deterministic.
+    counts: Dict[str, i64] = {}
+    order: List[str] = []
+    n: i32 = i32(i64(len(rows)))
+    i: i32 = 0i32
+    while i < n:
+        ts_text: str = rows[i][0i32]
+        ts: i64 = parse_i64(ts_text)
+        aligned: i64 = bucket_align(ts, bucket_secs)
+        key: str = str(aligned)
+        # `key in counts` is broken on Dict[str, *] (BUG-039) — use .get().
+        if dict_has_str(counts, key):
+            counts[key] = counts[key] + 1i64
+        else:
+            counts[key] = 1i64
+            order.append(key)
+        i = i + 1i32
+
+    println("summary: buckets=" + bucket_fmt + " unique=" + str(i64(len(order))))
+    bn: i32 = i32(i64(len(order)))
+    j: i32 = 0i32
+    while j < bn:
+        key: str = order[j]
+        bucket_ts: i64 = parse_i64(key)
+        c: i64 = counts[key]
+        label: str = ""
+        if bucket_fmt == "hour":
+            # "2026-05-19 14"
+            label = datetime.to_date_str(bucket_ts) + " " + format_hour(bucket_ts)
+        else:
+            # day bucket — "2026-05-19"
+            label = datetime.to_date_str(bucket_ts)
+        bar: str = star_bar(i32(c))
+        println(label + ": " + bar + " (" + str(c) + ")")
+        j = j + 1i32
+
+    return 0
+
+
+fn format_hour(ts: i64) -> str:
+    """Two-digit hour-of-day for the given epoch seconds."""
+    h: i32 = datetime.hour(ts)
+    if h < 10i32:
+        return "0" + str(h)
+    return str(h)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Mode: demo — runs the 10-probe self-test inline against :memory:
+# ─────────────────────────────────────────────────────────────────────
+
+
+fn probe_print(name: str, ok: bool) -> None:
+    if ok:
+        println("PROBE " + name + ": PASS")
+    else:
+        println("PROBE " + name + ": FAIL")
+    return
+
+
+fn gen_test_events(out_path: str, n: i32) -> None:
+    """Procedurally generate `n` ISO+category+message lines.
+
+    Categories rotate among {auth, db, net, ui}; messages embed the
+    integer index so each line is unique.  Timestamps step at +37s
+    each, starting at 2026-05-19T00:00:00Z, so 5000 events cover
+    ~51 hours — plenty for hour-bucket testing.
+    """
+    base: i64 = datetime.from_ymd(2026, 5, 19)
+    cats: List[str] = []
+    cats.append("auth")
+    cats.append("db")
+    cats.append("net")
+    cats.append("ui")
+    buf: str = ""
+    i: i32 = 0i32
+    while i < n:
+        t: i64 = base + i64(i) * 37i64
+        iso: str = datetime.to_iso(t)
+        cat: str = cats[i % 4i32]
+        line: str = iso + " " + cat + " event #" + str(i) + " happened"
+        buf = buf + line + "\n"
+        i = i + 1i32
+    pathlib.write_text(out_path, buf)
+    return
+
+
+fn run_demo() -> i32:
+    """Execute every M24-B probe inline; print PASS/FAIL per probe."""
+    println("== M24-B event_log demo ==")
+
+    # ── Probe 3: datetime.from_iso parsing edge cases ───────────────────
+    p3_ok: bool = true
+    try:
+        v1: i64 = datetime.from_iso("2026-05-19T14:23:11Z")
+        s1: str = datetime.to_iso(v1)
+        if s1 != "2026-05-19T14:23:11Z":
+            p3_ok = false
+        v2: i64 = datetime.from_iso("2026-05-19T14:23:11+00:00")
+        if v2 != v1:
+            p3_ok = false
+        # date-only round-trips via to_date_str, not to_iso.
+        v3: i64 = datetime.from_iso("2026-05-19")
+        if datetime.to_date_str(v3) != "2026-05-19":
+            p3_ok = false
+    except ValueError as e:
+        p3_ok = false
+    # The "not-a-date" must raise ValueError.
+    p3_bad_raised: bool = false
+    try:
+        bad: i64 = datetime.from_iso("not-a-date")
+        # If we get here, ValueError was NOT raised — bad.
+    except ValueError as e:
+        p3_bad_raised = true
+    probe_print("3 datetime.from_iso edge cases", p3_ok and p3_bad_raised)
+
+    # ── Probe 4: month-boundary arithmetic ──────────────────────────────
+    p4_ok: bool = true
+    try:
+        eom: i64 = datetime.from_iso("2026-01-31T23:59:59Z")
+        next_s: i64 = datetime.add_seconds(eom, 1i64)
+        if datetime.to_iso(next_s) != "2026-02-01T00:00:00Z":
+            p4_ok = false
+    except ValueError as e:
+        p4_ok = false
+    probe_print("4 month-boundary add_seconds", p4_ok)
+
+    # ── Probe 7: sqlite + datetime epoch round trip ─────────────────────
+    p7_ok: bool = true
+    conn7: i64 = sqlite3.connect(":memory:")
+    ensure_schema(conn7)
+    moment: i64 = datetime.from_ymd_hms(2026, 5, 19, 14, 23, 11)
+    insert_event(conn7, moment, "auth", "round-trip test")
+    rs7: List[List[str]] = sqlite3.query(conn7, "SELECT ts FROM events")
+    if i32(i64(len(rs7))) != 1i32:
+        p7_ok = false
+    else:
+        got_ts_text: str = rs7[0i32][0i32]
+        got_ts: i64 = parse_i64(got_ts_text)
+        # from_unix is identity in v0.2 — exercise the call anyway.
+        normalised: i64 = datetime.from_unix(got_ts)
+        if normalised != moment:
+            p7_ok = false
+        if datetime.to_iso(normalised) != "2026-05-19T14:23:11Z":
+            p7_ok = false
+    sqlite3.close(conn7)
+    probe_print("7 sqlite + datetime round-trip", p7_ok)
+
+    # ── Probe 5: empty result set ───────────────────────────────────────
+    p5_ok: bool = true
+    conn5: i64 = sqlite3.connect(":memory:")
+    ensure_schema(conn5)
+    insert_event(conn5, 0i64, "auth", "hello")
+    p5_params: List[str] = []
+    p5_params.append("does-not-exist")
+    res5: List[List[str]] = sqlite3.query_params(conn5, "SELECT * FROM events WHERE category = ?", p5_params)
+    if i32(i64(len(res5))) != 0i32:
+        p5_ok = false
+    sqlite3.close(conn5)
+    probe_print("5 query empty result", p5_ok)
+
+    # ── Probe 6: SQL injection via parameter binding ────────────────────
+    p6_ok: bool = true
+    conn6: i64 = sqlite3.connect(":memory:")
+    ensure_schema(conn6)
+    insert_event(conn6, 100i64, "auth", "before-injection")
+    inj_params: List[str] = []
+    inj_params.append("0")
+    inj_params.append("'; DROP TABLE events;--")
+    res6: List[List[str]] = sqlite3.query_params(conn6, "SELECT ts FROM events WHERE ts >= ? AND category = ?", inj_params)
+    # Should match nothing — and the table must survive.
+    if i32(i64(len(res6))) != 0i32:
+        p6_ok = false
+    # Confirm events table still exists by querying for the row we inserted.
+    survived: List[List[str]] = sqlite3.query(conn6, "SELECT count(*) FROM events")
+    if i32(i64(len(survived))) != 1i32:
+        p6_ok = false
+    else:
+        if survived[0i32][0i32] != "1":
+            p6_ok = false
+    sqlite3.close(conn6)
+    probe_print("6 SQL injection survives parameter binding", p6_ok)
+
+    # ── Probe 8: pathlib.read_text on missing file raises IOError ───────
+    p8_ok: bool = false
+    try:
+        _missing: str = pathlib.read_text("_nonexistent_file_for_m24b_probe_.txt")
+    except IOError as ioe:
+        p8_ok = true
+    probe_print("8 pathlib.read_text missing file IOError", p8_ok)
+
+    # ── Probe 1: argparse with 3 modes via --mode opt ───────────────────
+    # We synthesise an argv and test that parse() correctly extracts
+    # --mode=ingest with the dependent flags.
+    p1_ok: bool = true
+    parser: Dict[str, str] = build_parser()
+    fake1: List[str] = []
+    fake1.append("event_log.spyc")
+    fake1.append("--mode")
+    fake1.append("query")
+    fake1.append("--since")
+    fake1.append("2026-05-19T00:00:00Z")
+    fake1.append("--category")
+    fake1.append("auth")
+    try:
+        a1: Dict[str, str] = argparse.parse(parser, fake1)
+        if argparse.get_opt(a1, "--mode") != "query":
+            p1_ok = false
+        if argparse.get_opt(a1, "--since") != "2026-05-19T00:00:00Z":
+            p1_ok = false
+        if argparse.get_opt(a1, "--category") != "auth":
+            p1_ok = false
+    except ValueError as e:
+        p1_ok = false
+    # And argparse should reject an unknown flag:
+    parser_b: Dict[str, str] = build_parser()
+    bad_argv: List[str] = []
+    bad_argv.append("event_log.spyc")
+    bad_argv.append("--nope")
+    bad_argv.append("x")
+    p1_rejected: bool = false
+    try:
+        a_bad: Dict[str, str] = argparse.parse(parser_b, bad_argv)
+    except ValueError as e:
+        p1_rejected = true
+    probe_print("1 argparse 3-mode --mode opt", p1_ok and p1_rejected)
+
+    # ── Probe 2: 1000+ row INSERT via execute_params ────────────────────
+    p2_ok: bool = true
+    conn2: i64 = sqlite3.connect(":memory:")
+    ensure_schema(conn2)
+    sqlite3.execute(conn2, "BEGIN")
+    j: i32 = 0i32
+    while j < 1200i32:
+        insert_event(conn2, 1000i64 + i64(j), "bulk", "row " + str(j))
+        j = j + 1i32
+    sqlite3.execute(conn2, "COMMIT")
+    cnt2: List[List[str]] = sqlite3.query(conn2, "SELECT count(*) FROM events")
+    if cnt2[0i32][0i32] != "1200":
+        p2_ok = false
+    sqlite3.close(conn2)
+    probe_print("2 1200 INSERTs via execute_params", p2_ok)
+
+    # ── Probe 9: 5000-event ingest + query-all path ─────────────────────
+    p9_ok: bool = true
+    tmp_file: str = "_m24b_events_input.txt"
+    gen_test_events(tmp_file, 5000i32)
+    conn9: i64 = sqlite3.connect(":memory:")
+    ensure_schema(conn9)
+    raw9: str = pathlib.read_text(tmp_file)
+    lines9: List[str] = raw9.split("\n")
+    sqlite3.execute(conn9, "BEGIN")
+    ins9: i32 = 0i32
+    k: i32 = 0i32
+    nk: i32 = i32(i64(len(lines9)))
+    while k < nk:
+        ln: str = lines9[k]
+        if i64(len(ln)) > 0i64:
+            try:
+                pt: Tuple[str, str, str] = parse_line(ln)
+                ts9: i64 = datetime.from_iso(pt.0)
+                insert_event(conn9, ts9, pt.1, pt.2)
+                ins9 = ins9 + 1i32
+            except ValueError as e:
+                pass
+        k = k + 1i32
+    sqlite3.execute(conn9, "COMMIT")
+    all9: List[List[str]] = sqlite3.query(conn9, "SELECT ts, category, message FROM events ORDER BY ts ASC")
+    if i32(i64(len(all9))) != 5000i32:
+        p9_ok = false
+    sqlite3.close(conn9)
+    # Clean up the temp file.
+    try:
+        os.remove(tmp_file)
+    except IOError as ioe:
+        pass
+    probe_print("9 5000 events ingested + queried", p9_ok)
+
+    # ── Probe 10: hour-bucket histogram correctness ─────────────────────
+    conn10: i64 = sqlite3.connect(":memory:")
+    ensure_schema(conn10)
+    # 10 events across 3 hours: 4 in hour 14, 3 in hour 15, 3 in hour 16.
+    base10: i64 = datetime.from_ymd_hms(2026, 5, 19, 14, 0, 0)
+    ks: List[i64] = []
+    ks.append(0i64)
+    ks.append(900i64)
+    ks.append(1800i64)
+    ks.append(3500i64)
+    ks.append(3700i64)
+    ks.append(5000i64)
+    ks.append(7100i64)
+    ks.append(7300i64)
+    ks.append(7700i64)
+    ks.append(9000i64)
+    nk2: i32 = i32(i64(len(ks)))
+    kk: i32 = 0i32
+    while kk < nk2:
+        insert_event(conn10, base10 + ks[kk], "auth", "e" + str(kk))
+        kk = kk + 1i32
+    rs10: List[List[str]] = sqlite3.query(conn10, "SELECT ts FROM events ORDER BY ts ASC")
+    sqlite3.close(conn10)
+    counts10: Dict[str, i64] = {}
+    nr10: i32 = i32(i64(len(rs10)))
+    rr: i32 = 0i32
+    while rr < nr10:
+        ts10: i64 = parse_i64(rs10[rr][0i32])
+        b10: i64 = bucket_align(ts10, 3600i64)
+        bk10: str = str(b10)
+        # NOTE: `bk10 in counts10` is broken (see _probe_dict_str_key.spy /
+        # BUG-039).  Workaround via `.get()` + `is not none`.
+        if dict_has_str(counts10, bk10):
+            counts10[bk10] = counts10[bk10] + 1i64
+        else:
+            counts10[bk10] = 1i64
+        rr = rr + 1i32
+    # Recompute expected counts directly from ks for robustness.  Same
+    # `.get()` workaround for the BUG-039 `in` problem.
+    expected: Dict[str, i64] = {}
+    kk2: i32 = 0i32
+    while kk2 < nk2:
+        eb: i64 = bucket_align(base10 + ks[kk2], 3600i64)
+        ek: str = str(eb)
+        if dict_has_str(expected, ek):
+            expected[ek] = expected[ek] + 1i64
+        else:
+            expected[ek] = 1i64
+        kk2 = kk2 + 1i32
+    # Compare counts10 to expected.
+    p10_match: bool = true
+    exp_keys: List[str] = expected.keys()
+    nek: i32 = i32(i64(len(exp_keys)))
+    ek2: i32 = 0i32
+    while ek2 < nek:
+        kk3: str = exp_keys[ek2]
+        if not dict_has_str(counts10, kk3):
+            p10_match = false
+        else:
+            if counts10[kk3] != expected[kk3]:
+                p10_match = false
+        ek2 = ek2 + 1i32
+    # Also check no extra keys in counts10.
+    actual_keys: List[str] = counts10.keys()
+    nak: i32 = i32(i64(len(actual_keys)))
+    ak: i32 = 0i32
+    while ak < nak:
+        akk: str = actual_keys[ak]
+        if not dict_has_str(expected, akk):
+            p10_match = false
+        ak = ak + 1i32
+    probe_print("10 hour-bucket histogram correctness", p10_match)
+
+    # ── Likely-bug probes ───────────────────────────────────────────────
+
+    # UTF-8 multibyte char in parameter binding.
+    putf_ok: bool = true
+    conn_u: i64 = sqlite3.connect(":memory:")
+    ensure_schema(conn_u)
+    # Accented chars (é = U+00E9, 2 bytes UTF-8) + emoji (rocket = U+1F680, 4 bytes UTF-8).
+    accented: str = "café"
+    rocket: str = "🚀 launch!"
+    insert_event(conn_u, 5i64, accented, rocket)
+    rs_u: List[List[str]] = sqlite3.query(conn_u, "SELECT category, message FROM events")
+    if i32(i64(len(rs_u))) != 1i32:
+        putf_ok = false
+    else:
+        if rs_u[0i32][0i32] != accented:
+            putf_ok = false
+        if rs_u[0i32][1i32] != rocket:
+            putf_ok = false
+    sqlite3.close(conn_u)
+    probe_print("U UTF-8 multibyte param binding", putf_ok)
+
+    # Pre-epoch DateTime round trip.
+    ppre_ok: bool = true
+    try:
+        pre: i64 = datetime.from_iso("1900-01-01T00:00:00Z")
+        # 1900-01-01 is 70 years before 1970 -> approx -2208988800 secs
+        # We don't pin the exact value here; just check round-trip.
+        if datetime.to_iso(pre) != "1900-01-01T00:00:00Z":
+            ppre_ok = false
+        # Year/month/day extraction.
+        if datetime.year(pre) != 1900:
+            ppre_ok = false
+        if datetime.month(pre) != 1:
+            ppre_ok = false
+        if datetime.day(pre) != 1:
+            ppre_ok = false
+    except ValueError as e:
+        ppre_ok = false
+    probe_print("P pre-epoch datetime round trip", ppre_ok)
+
+    # Year-boundary arithmetic (Jan 1 -> Dec 31 prev year).
+    pyb_ok: bool = true
+    try:
+        jan1: i64 = datetime.from_ymd(2026, 1, 1)
+        prev_day: i64 = datetime.add_days(jan1, -1i64)
+        if datetime.to_date_str(prev_day) != "2025-12-31":
+            pyb_ok = false
+    except ValueError as e:
+        pyb_ok = false
+    probe_print("Y year-boundary add_days(-1)", pyb_ok)
+
+    # ── New found bug: `in` returns false on Dict[str, *] ───────────────
+    # This is BUG-039 (M24-B finding).  Pin the broken behaviour so the
+    # demo loudly signals when it gets fixed.
+    pbug_observed: bool = false
+    bug_d: Dict[str, i64] = {}
+    bug_d["x"] = 1i64
+    # Lookup via [] returns the right value.
+    if bug_d["x"] != 1i64:
+        pbug_observed = false
+    else:
+        # `in` is the buggy operator.  We expect false here today.
+        if "x" in bug_d:
+            # If we land here, the bug is FIXED.  Flip the sense.
+            pbug_observed = false
+        else:
+            pbug_observed = true
+    # We invert the report so PASS = "still broken as expected".
+    # Once the underlying fix lands, this probe will FLIP and that's
+    # the signal the regression test caught the fix.
+    probe_print("B BUG-039 'in' broken on Dict[str,*] (pin)", pbug_observed)
+
+    # sqlite3.connect to non-existent directory should raise IOError.
+    pnd_ok: bool = false
+    try:
+        no_dir_path: str = pathlib.join("_no_such_dir_for_m24b_", "events.db")
+        cnd: i64 = sqlite3.connect(no_dir_path)
+        # On some platforms SQLite is lenient and creates the file in cwd
+        # if the dirname is empty; the rusqlite docs say it returns an
+        # error for invalid filenames.  Whatever happens, close handle.
+        sqlite3.close(cnd)
+    except IOError as ioe:
+        pnd_ok = true
+    except ValueError as e:
+        # If the wrapper surfaces this as ValueError instead, that's
+        # technically inconsistent with the spec which says IOError —
+        # record as soft FAIL.
+        pnd_ok = false
+    probe_print("D sqlite3.connect to bad dir IOError", pnd_ok)
+
+    println("== demo done ==")
+    return 0
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Argparse wiring
+# ─────────────────────────────────────────────────────────────────────
+
+
+fn build_parser() -> Dict[str, str]:
+    """Configure the argparse handle with all 5 options used by the modes."""
+    p: Dict[str, str] = argparse.new("event_log")
+    argparse.add_opt(p, "--mode", "demo")
+    argparse.add_opt(p, "--file", "")
+    argparse.add_opt(p, "--db", "events.db")
+    argparse.add_opt(p, "--since", "1970-01-01T00:00:00Z")
+    argparse.add_opt(p, "--category", "")
+    argparse.add_opt(p, "--buckets", "hour")
+    return p
+
+
+fn main() -> i32:
+    parser: Dict[str, str] = build_parser()
+    if argparse.help_requested(sys.argv):
+        println(argparse.help_text(parser))
+        return 0
+
+    try:
+        a: Dict[str, str] = argparse.parse(parser, sys.argv)
+        mode: str = argparse.get_opt(a, "--mode")
+        if mode == "demo":
+            return run_demo()
+        elif mode == "ingest":
+            file_path: str = argparse.get_opt(a, "--file")
+            if i64(len(file_path)) == 0i64:
+                die(2i32, "--mode=ingest requires --file=PATH")
+                return 2
+            return run_ingest(argparse.get_opt(a, "--db"), file_path)
+        elif mode == "query":
+            return run_query(argparse.get_opt(a, "--db"),
+                             argparse.get_opt(a, "--since"),
+                             argparse.get_opt(a, "--category"))
+        elif mode == "summary":
+            return run_summary(argparse.get_opt(a, "--db"),
+                               argparse.get_opt(a, "--buckets"))
+        else:
+            die(2i32, "unknown --mode (want demo|ingest|query|summary): " + mode)
+            return 2
+    except ValueError as e:
+        io.write_stderr("event_log: " + e.message + "\n")
+        println(argparse.help_text(parser))
+        sys.exit(2)
+        return 2

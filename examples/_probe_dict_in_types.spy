@@ -1,0 +1,54 @@
+"""_probe_dict_in_types.spy — narrow what `in` does on dicts.
+
+Tests:
+* Python semantics: `k in d` should test for key membership.
+* Maybe StrictPy implements `v in d` (value membership)? unlikely but test.
+* Maybe Dict[int, V] works while Dict[str, V] doesn't?
+"""
+
+
+fn main() -> i32:
+    # Dict[str, i64] — does "in" check key or value membership?
+    d: Dict[str, i64] = {}
+    d["alpha"] = 42i64
+    d["beta"] = 7i64
+
+    # Key membership
+    if "alpha" in d:
+        println("\"alpha\" in d: true")
+    else:
+        println("\"alpha\" in d: false")
+
+    # Non-member key
+    if "gamma" in d:
+        println("\"gamma\" in d: true  (UNEXPECTED)")
+    else:
+        println("\"gamma\" in d: false")
+
+    # Dict[i64, i64] — does it work with integer keys?
+    di: Dict[i64, i64] = {}
+    di[1i64] = 10i64
+    di[2i64] = 20i64
+    if 1i64 in di:
+        println("1 in di: true")
+    else:
+        println("1 in di: false")
+    if 3i64 in di:
+        println("3 in di: true  (UNEXPECTED)")
+    else:
+        println("3 in di: false")
+
+    # Dict[str, str]
+    ds: Dict[str, str] = {}
+    ds["k1"] = "v1"
+    if "k1" in ds:
+        println("k1 in ds: true")
+    else:
+        println("k1 in ds: false")
+    # Try value-membership behaviour:
+    if "v1" in ds:
+        println("v1 in ds: true (would mean value-membership)")
+    else:
+        println("v1 in ds: false")
+
+    return 0

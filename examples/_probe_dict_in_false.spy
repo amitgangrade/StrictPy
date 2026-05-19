@@ -1,0 +1,49 @@
+"""_probe_dict_str_key.spy — minimal repro that `in` always returns
+false on Dict[str, i64].
+
+This file is part of M24-B's investigation of probe 10's histogram
+mismatch.
+
+The behavior we observe: even immediately after `d["x"] = 1`, the
+expression `"x" in d` returns false.  The dict has the key (len == 1
+counted, keys() returns it).
+"""
+
+
+fn main() -> i32:
+    d: Dict[str, i64] = {}
+    d["x"] = 1i64
+    if "x" in d:
+        println("x in d: true")
+    else:
+        println("x in d: false")
+
+    # Use a local variable for the key (in case the literal version
+    # tickles a constant-folding issue).
+    kv: str = "x"
+    if kv in d:
+        println("kv in d: true")
+    else:
+        println("kv in d: false")
+
+    # Bare `in` expression assigned to a bool.
+    b: bool = "x" in d
+    println("b = " + str(b))
+
+    # Lookup works?
+    println("d[\"x\"] = " + str(d["x"]))
+
+    # keys()
+    ks: List[str] = d.keys()
+    n: i32 = i32(i64(len(ks)))
+    i: i32 = 0i32
+    while i < n:
+        println("key " + str(i) + " = \"" + ks[i] + "\" len=" + str(i64(len(ks[i]))))
+        # Lookup THIS key (taken from keys()).
+        if ks[i] in d:
+            println("  ks[i] in d: true")
+        else:
+            println("  ks[i] in d: false")
+        i = i + 1i32
+
+    return 0
