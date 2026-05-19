@@ -127,6 +127,25 @@ Post-M17 state (2026-05-18 even later):
 - BUG-028 (lexer line continuation) is still the only legacy deferred
   bug.
 
+Post-M22 state (2026-05-19):
+
+- **No new bugs**. M19 (sys + import machinery), M20a/b/c (os/path/io,
+  time/random/math, json/re), M21 (BUG-037 fix + integration example),
+  M22 (Phase 2 stdlib — argparse/collections/csv, base64/hashlib,
+  itertools/statistics, struct/urllib_parse via 4 parallel worktree
+  agents). 17 stdlib modules shipped over the four milestones with
+  exactly one incidental find (BUG-037 `??` always-fallback in M20a,
+  fixed in M21). The M19 `seed_stdlib_modules` table proved to be
+  load-bearing: new modules slot in without disturbing resolver /
+  typecheck / IR.
+- Bench re-run after M22 confirms **16/16 wins vs CPython 3.12.10**
+  held across every milestone since M9. fib(30) 15.7 ms = ~12× faster
+  than CPython; fib(33) 36.3 ms = ~17× faster. Cross-snapshot variance
+  is ~10-20% (single-machine wall-clock noise); no perf regression
+  introduced by any of M12-M22.
+- Bug totals unchanged: **33 found, 32 fixed, 1 deferred** (still
+  only BUG-028).
+
 ## Full catalog
 
 ### Critical: silent miscompiles

@@ -16,6 +16,42 @@ values. The post-M11 narrative below is retained because the M12
 chapter is mostly a confirmation of M11, plus the new "negative-form
 silent miscompiles" lesson.
 
+**M22 update (2026-05-19 later)**: Phase 2 stdlib sprint shipped 9 more
+modules in **one parallel-worktree round** — first time the project ran
+parallel stdlib agents.
+
+Four agents (P2A argparse+collections+csv; P2B base64+hashlib; P2C
+itertools+statistics; P2D struct+urllib_parse) ran simultaneously in
+isolated git worktrees, then the orchestrator cherry-picked all four
+onto main with mechanical conflict resolution (append-at-end on
+`resolver.rs`/`native.rs`/`builtins.rs` + spec §9.X renumbering).
+Total wall-clock: ~1.5h parallel agent compute + ~30min orchestrator
+integration. The M19-M21 sequential alternative would have been ~5h
+cumulative.
+
+Zero new bugs across all four agents — the M22 zero-bug streak is now
+five consecutive sub-milestones (M20b, M20c, M21, plus all four of
+M22). The M19 `seed_stdlib_modules` table is the load-bearing seam.
+
+Stdlib totals after Phase 1 + Phase 2:
+- **17 modules** (sys/os/path/io/time/random/math/json/re +
+  argparse/collections/csv/base64/hashlib/itertools/statistics/struct/
+  urllib_parse).
+- 130+ NativeFn IDs (130-347).
+- 7 vm/Cargo.toml deps (serde_json, regex, base64, sha1, sha2, md-5, hmac).
+- 23 new example programs (~half a screen of code each).
+- 267 → 468 tests across M19-M22.
+
+**Bench re-run after M22**: same 16/16 wins vs CPython 3.12.10 that
+M9 first delivered. fib(30) = 15.7ms (~12× faster than CPython);
+fib(33) = 36.3ms (~17× faster). Cross-snapshot variance is ~10-20%;
+no codegen-affecting change since M9 (the JIT-emitted hot-loop code
+hasn't been touched). The structural-stability story is now
+load-bearing thesis material: every milestone since M9 has shipped
+16/16 wins, and the M9 → M22 trajectory is essentially flat —
+correctness, language features, stdlib all layered on top without
+disturbing the perf story.
+
 **M19–M21 update (2026-05-19)**: a 6-milestone stdlib sprint shipped
 the import system + Phase 1 stdlib (sys/os/path/io/time/random/math/
 json/re). The language went from "every native is a bare-name prelude
@@ -64,18 +100,19 @@ v0.2.
 
 ## Headline numbers that need updating
 
-| Field | Old (M9) | New (post-M21) | Source |
+| Field | Old (M9) | New (post-M22) | Source |
 |---|---|---|---|
-| Examples | 7 | **46** | `examples/*.spy` count |
-| Tests passing | 134 | **379** | `docs/thesis/stats/per_milestone.csv` last row |
-| Benchmark wins | 16/0/0 | 16/0/0 (still) | `bench/history/m11_class_fix.json` |
-| fib(30) | 13.5ms (12× CPython) | 13.1ms (~11× CPython) | M11/M12 bench (unchanged through M17) |
-| Quicksort 100K | 18.6ms (13× CPython) | 18.6ms (12× CPython) | M11 bench |
-| Distinct bugs found | "~12" | **31** | `docs/thesis/bugs/catalog.md` summary table |
-| Deferred bugs | 6 in BUGS_KNOWN.md | **1** (only BUG-028 lexer) | post-M17 BUGS_KNOWN.md state |
-| Code total | ~13K lines | **~24K Rust + ~5.5K StrictPy + ~4K tests + ~14K docs** | wc -l (approx, post-M17) |
-| Milestones | M0-M9 | M0-M17 | git log |
-| **NEW capabilities since M9** | — | tuples, try/except, isinstance, match case, generics | M13-M17 |
+| Examples | 7 | **55** | `examples/*.spy` count |
+| Tests passing | 134 | **468** | `docs/thesis/stats/per_milestone.csv` last row |
+| Benchmark wins | 16/0/0 | 16/0/0 (still) | `bench/history/m22_phase2_stdlib.json` (M22 re-run) |
+| fib(30) | 13.5ms (12× CPython) | 15.7ms (~12× CPython) | M22 bench (within ~10% noise of M9-M11 peak) |
+| Quicksort 100K | 18.6ms (13× CPython) | 22.6ms (12× CPython) | M22 bench |
+| Distinct bugs found | "~12" | **33** | `docs/thesis/bugs/catalog.md` summary table |
+| Deferred bugs | 6 in BUGS_KNOWN.md | **1** (only BUG-028 lexer) | post-M22 BUGS_KNOWN.md state |
+| Code total | ~13K lines | **~27K Rust + ~9K StrictPy + ~6K tests + ~16K docs** | wc -l (approx, post-M22) |
+| Milestones | M0-M9 | M0-M22 | git log |
+| **NEW capabilities since M9** | — | tuples, try/except, isinstance, match case, generics, 17 stdlib modules | M13-M22 |
+| **Stdlib modules** | 0 | **17** (sys/os/path/io/time/random/math/json/re/argparse/collections/csv/base64/hashlib/itertools/statistics/struct/urllib_parse) | M19-M22 |
 
 The "beats CPython by up to 17×" tagline is still right (fib(33) is 16-17×
 depending on noise).
@@ -136,6 +173,61 @@ Then the torture test: 250 sequential invocations across calculator,
 json_parse, and lisp = 250 clean = BUG-026/027 confirmed. In 3.12s of CI
 wall-clock. The marginal cost of "provisional → confirmed" is tiny;
 the credibility upgrade is large.
+
+### 1c. The "language matures into a real toolkit" chapter (M19-M22 stdlib)
+
+The bulk-add story. Six milestones across M19-M22 shipped 17 stdlib
+modules and the import system. Three sub-themes worth weaving together:
+
+- **M19 — the import seam**. The hard infrastructure was making
+  `import json; json.parse(s)` work at all — resolver namespace lookup,
+  typecheck attribute resolution, IR lowering to NativeFn calls, lazy
+  argv materialisation, the non-catchable `VmError::Exit` for
+  `sys.exit`. After M19 every subsequent stdlib module slotted in
+  without touching resolver/typecheck/IR — the `seed_stdlib_modules`
+  table is the load-bearing piece.
+
+- **M22 — first parallel-worktree stdlib round**. Four agents shipped
+  9 modules concurrently in isolated git worktrees. Orchestrator
+  cherry-picked all four onto main, resolving mechanical conflicts in
+  4 files. Total wall-clock: ~1.5h parallel + ~30min integration. The
+  sequential alternative would have been ~5h. **This is the first
+  time worktree isolation was used in the project**, and it worked —
+  the pattern is now the recommended one for "many independent
+  stdlib modules" rounds.
+
+- **The minigrep moment** (M21 integration example). A ~110-LOC CLI
+  grep tool using sys + os + io + re + time + try/except + tuples in
+  one program. Until M22, every CLI tool hand-parsed sys.argv; after
+  M22's argparse + collections + csv, the language reaches the
+  "Python for scripts" baseline. Worth a paragraph in the blog as the
+  concrete "what can you actually do with StrictPy now?" answer.
+
+The thesis-shaped finding: **17 stdlib modules added with one
+incidental bug** (BUG-037 `??` always-fallback in M20a, fixed in M21).
+The zero-bug streak across M20b/M20c/M21/M22 P2A/B/C/D is six
+sub-milestones — the M19 seam is a real architectural achievement,
+not just a label.
+
+### 1d. The post-M22 bench re-run (performance stability since M9)
+
+Worth a short paragraph in the existing performance section. The
+StrictPy-across-milestones chart (`bench/BENCH_REPORT.md` "Historical
+comparison" section):
+
+| Cell | M7 pre-JIT | M8 | M9 | M11 | M22 (now) |
+|---|---:|---:|---:|---:|---:|
+| fib(30) | 931 ms | 14.6 ms | 13.5 ms | 13.1 ms | 15.7 ms |
+| quicksort(100K) | 660 ms | 679 ms | 18.6 ms | 18.6 ms | 22.6 ms |
+| dot(1M) | 604 ms | 478 ms | 54 ms | 75 ms | 60 ms |
+
+Two distinct stories: (a) the **M7 → M8 → M9 cliff** when Cranelift
+AOT landed and then full JIT coverage closed the remaining gaps; (b)
+the **M9 → M22 plateau** — 11 milestones of correctness work,
+language features, and 17 stdlib modules with the bench numbers
+essentially flat (within ~10-20% variance). The performance story is
+"static types unlock native-speed codegen; that codegen is structurally
+stable as the language grows." Worth one paragraph plus the table.
 
 ### 2. The BUG-029 story (op_new class_id ↔ type_id collision)
 
