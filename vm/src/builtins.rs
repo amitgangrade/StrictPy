@@ -3203,6 +3203,124 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             Ok(lst as u64)
         }
 
+        // ── M23 P3a-D: `sqlite3` module ─────────────────────────────────
+        // Connections live in `interp.shared.sqlite_connections` indexed
+        // by an i64 handle.  Slot 0 is reserved as "no connection".  We
+        // briefly lock the table to look up the slot, then *take* the
+        // Connection out, drop the lock, run the SQL, and put the
+        // Connection back — so a long-running query doesn't block
+        // sibling `sqlite3.connect` calls on other threads.  Closure on
+        // a missing/zero handle raises ValueError; closing twice is a
+        // no-op (matches Python's `Connection.close()` semantics).
+        NativeFn::Sqlite3Connect => {
+            let path = arg_str(args, 0);
+            let conn = rusqlite::Connection::open(&path).map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!("sqlite3.connect({:?}): {}", path, e),
+                }
+            })?;
+            let mut tab = interp.shared.sqlite_connections.lock().unwrap();
+            let handle = tab.len() as i64;
+            tab.push(Some(conn));
+            Ok(handle as u64)
+        }
+        NativeFn::Sqlite3Close => {
+            let handle = arg_i64(args, 0);
+            if handle <= 0 {
+                return Ok(0);
+            }
+            let mut tab = interp.shared.sqlite_connections.lock().unwrap();
+            if let Some(slot) = tab.get_mut(handle as usize) {
+                *slot = None; // drops the rusqlite::Connection
+            }
+            Ok(0)
+        }
+        NativeFn::Sqlite3Execute => {
+            let handle = arg_i64(args, 0);
+            let sql = arg_str(args, 1);
+            sqlite3_with_conn(interp, handle, |conn| {
+                conn.execute(&sql, []).map(|_| ()).map_err(|e| {
+                    VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!("sqlite3.execute: {}", e),
+                    }
+                })
+            })?;
+            Ok(0)
+        }
+        NativeFn::Sqlite3ExecuteParams => {
+            let handle = arg_i64(args, 0);
+            let sql = arg_str(args, 1);
+            let params = sqlite3_read_str_list(args, 2)?;
+            sqlite3_with_conn(interp, handle, |conn| {
+                let bound: Vec<&dyn rusqlite::ToSql> =
+                    params.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+                conn.execute(&sql, rusqlite::params_from_iter(bound.iter()))
+                    .map(|_| ())
+                    .map_err(|e| VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!("sqlite3.execute_params: {}", e),
+                    })
+            })?;
+            Ok(0)
+        }
+        NativeFn::Sqlite3Query => {
+            let handle = arg_i64(args, 0);
+            let sql = arg_str(args, 1);
+            let rows = sqlite3_with_conn(interp, handle, |conn| {
+                sqlite3_run_query(conn, &sql, &[])
+            })?;
+            Ok(sqlite3_alloc_rows(interp, &rows) as u64)
+        }
+        NativeFn::Sqlite3QueryParams => {
+            let handle = arg_i64(args, 0);
+            let sql = arg_str(args, 1);
+            let params = sqlite3_read_str_list(args, 2)?;
+            let rows = sqlite3_with_conn(interp, handle, |conn| {
+                sqlite3_run_query(conn, &sql, &params)
+            })?;
+            Ok(sqlite3_alloc_rows(interp, &rows) as u64)
+        }
+        NativeFn::Sqlite3LastInsertRowid => {
+            let handle = arg_i64(args, 0);
+            let rowid = sqlite3_with_conn(interp, handle, |conn| {
+                Ok(conn.last_insert_rowid())
+            })?;
+            Ok(rowid as u64)
+        }
+        NativeFn::Sqlite3Changes => {
+            let handle = arg_i64(args, 0);
+            let n = sqlite3_with_conn(interp, handle, |conn| {
+                Ok(conn.changes() as i32)
+            })?;
+            Ok(n as u32 as u64)
+        }
+        NativeFn::Sqlite3ColumnNames => {
+            let handle = arg_i64(args, 0);
+            let sql = arg_str(args, 1);
+            let names = sqlite3_with_conn(interp, handle, |conn| {
+                let stmt = conn.prepare(&sql).map_err(|e| {
+                    VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!("sqlite3.column_names: prepare: {}", e),
+                    }
+                })?;
+                Ok(stmt
+                    .column_names()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<String>>())
+            })?;
+            let lst = interp.alloc_list(names.len());
+            for n in names {
+                let sp = interp.alloc_string(&n) as u64;
+                // SAFETY: lst freshly allocated.
+                unsafe { interp.list_push(lst, sp) };
+            }
+            Ok(lst as u64)
+        }
+
         // ── M23 P3a-B: `datetime` module ───────────────────────────────
         // Calendar arithmetic + ISO-8601 parse/format over unix-epoch
         // seconds.  Reuses `civil_from_days` (from M20b) for epoch->ymd
@@ -3690,6 +3808,167 @@ fn pq_peek_min(interp: &Interpreter, handle: i64, who: &str) -> Result<(f64, u64
 /// const there); we re-derive it via `size_of` so divergence between
 /// the two consts is impossible at the type level.
 const OBJECT_HEADER_SIZE: usize = std::mem::size_of::<crate::object::ObjectHeader>();
+
+// ─── M23 P3a-D: sqlite3 helpers ────────────────────────────────────────
+
+/// Borrow a `rusqlite::Connection` out of the shared slot table for the
+/// duration of `f`, then put it back.  The slot is briefly nulled while
+/// `f` runs so the table lock isn't held across the SQL call — sibling
+/// connections on other threads can still open / close in parallel.
+/// Reentrant use on the same handle (e.g. a handler that calls back
+/// into another sqlite3 native on the same connection) is a runtime
+/// error ("connection in use") rather than a deadlock.
+fn sqlite3_with_conn<T>(
+    interp: &mut Interpreter,
+    handle: i64,
+    f: impl FnOnce(&mut rusqlite::Connection) -> Result<T, VmError>,
+) -> Result<T, VmError> {
+    if handle <= 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("sqlite3: invalid connection handle {}", handle),
+        });
+    }
+    let mut conn = {
+        let mut tab = interp.shared.sqlite_connections.lock().unwrap();
+        let slot = tab.get_mut(handle as usize).ok_or_else(|| {
+            VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!("sqlite3: unknown connection handle {}", handle),
+            }
+        })?;
+        slot.take().ok_or_else(|| VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "sqlite3: connection {} is closed or in use",
+                handle
+            ),
+        })?
+    };
+    let result = f(&mut conn);
+    // Put the connection back regardless of success.  If the user's SQL
+    // raised, they can still re-use the connection (mirrors Python's
+    // sqlite3 module: a failed `execute` doesn't invalidate the conn).
+    {
+        let mut tab = interp.shared.sqlite_connections.lock().unwrap();
+        if let Some(slot) = tab.get_mut(handle as usize) {
+            *slot = Some(conn);
+        }
+    }
+    result
+}
+
+/// Read a `List[str]` argument out of the call args.  Returns the empty
+/// Vec for a null pointer.  Used for the `params: List[str]` parameter
+/// in `execute_params` / `query_params`.
+fn sqlite3_read_str_list(args: &[u64], i: usize) -> Result<Vec<String>, VmError> {
+    let src = arg_u64(args, i) as *const crate::object::ListRepr;
+    if src.is_null() {
+        return Ok(Vec::new());
+    }
+    // SAFETY: src is a heap-allocated ListRepr.
+    unsafe {
+        let len = (*src).length;
+        let data = (*src).data as *const u64;
+        let mut v = Vec::with_capacity(len);
+        for j in 0..len {
+            let sp = std::ptr::read_unaligned(data.add(j)) as *const StringRepr;
+            v.push(read_str(sp));
+        }
+        Ok(v)
+    }
+}
+
+/// Run a SELECT (or any row-returning statement) and collect every
+/// cell into a stringified `Vec<Vec<String>>`.  Cell rendering:
+///   INTEGER → decimal text;
+///   REAL    → `format!("{}", f64)`;
+///   TEXT    → the text as-is;
+///   NULL    → "" (the empty string);
+///   BLOB    → lowercase hex of the bytes.
+fn sqlite3_run_query(
+    conn: &mut rusqlite::Connection,
+    sql: &str,
+    params: &[String],
+) -> Result<Vec<Vec<String>>, VmError> {
+    let mut stmt = conn.prepare(sql).map_err(|e| VmError::UncaughtException {
+        type_name: "ValueError".into(),
+        message: format!("sqlite3.query: prepare: {}", e),
+    })?;
+    let n_cols = stmt.column_count();
+    let bound: Vec<&dyn rusqlite::ToSql> =
+        params.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+    let mut rows = stmt
+        .query(rusqlite::params_from_iter(bound.iter()))
+        .map_err(|e| VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("sqlite3.query: query: {}", e),
+        })?;
+    let mut out: Vec<Vec<String>> = Vec::new();
+    loop {
+        let row = rows.next().map_err(|e| VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("sqlite3.query: row: {}", e),
+        })?;
+        let row = match row {
+            Some(r) => r,
+            None => break,
+        };
+        let mut cells: Vec<String> = Vec::with_capacity(n_cols);
+        for i in 0..n_cols {
+            let val: rusqlite::types::Value =
+                row.get(i).map_err(|e| VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("sqlite3.query: column {}: {}", i, e),
+                })?;
+            cells.push(sqlite3_stringify(&val));
+        }
+        out.push(cells);
+    }
+    Ok(out)
+}
+
+fn sqlite3_stringify(v: &rusqlite::types::Value) -> String {
+    use rusqlite::types::Value;
+    match v {
+        Value::Null => String::new(),
+        Value::Integer(n) => n.to_string(),
+        Value::Real(f) => {
+            // Match the python-sqlite3 default render for REAL.  We use
+            // Rust's `{}` formatter, which prints "3.14" for 3.14 and
+            // "3" for an integer-valued f64 — close enough for the
+            // stringified-result simplification this module documents.
+            format!("{}", f)
+        }
+        Value::Text(s) => s.clone(),
+        Value::Blob(bytes) => {
+            let mut out = String::with_capacity(bytes.len() * 2);
+            for b in bytes {
+                out.push_str(&format!("{:02x}", b));
+            }
+            out
+        }
+    }
+}
+
+/// Allocate a `List[List[str]]` for query rows.
+fn sqlite3_alloc_rows(
+    interp: &mut Interpreter,
+    rows: &[Vec<String>],
+) -> *mut crate::object::ListRepr {
+    let outer = interp.alloc_list(rows.len());
+    for row in rows {
+        let inner = interp.alloc_list(row.len());
+        for cell in row {
+            let sp = interp.alloc_string(cell) as u64;
+            // SAFETY: inner freshly allocated, owned by us.
+            unsafe { interp.list_push(inner, sp) };
+        }
+        // SAFETY: outer freshly allocated, owned by us.
+        unsafe { interp.list_push(outer, inner as u64) };
+    }
+    outer
+}
 
 /// Convert a byte slice into a string whose chars are each codepoint 0–255.
 /// `len(result_in_chars) == bytes.len()`.  Bytes 0–127 occupy 1 UTF-8

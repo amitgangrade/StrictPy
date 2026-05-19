@@ -242,6 +242,9 @@ pub struct SharedVm {
     pub semaphores: Arc<Mutex<Vec<Option<SemaphoreSlot>>>>,
     /// M23 P3a-C: `queue.PriorityQueue` slots. Index 0 reserved.
     pub priority_queues: Arc<Mutex<Vec<Option<PqSlot>>>>,
+    /// M23 P3a-D: open SQLite connections, indexed by i64 handle.  Slot 0
+    /// is reserved as "no connection".
+    pub sqlite_connections: Arc<Mutex<Vec<Option<rusqlite::Connection>>>>,
     /// M7: shared stdout sink so spawned worker threads write to the same
     /// destination as the parent interpreter. Without this, the capture
     /// sink installed by `run_file_capture` only sees the parent's writes;
@@ -289,6 +292,7 @@ impl SharedVm {
             locks: Arc::new(Mutex::new(vec![None])),
             semaphores: Arc::new(Mutex::new(vec![None])),
             priority_queues: Arc::new(Mutex::new(vec![None])),
+            sqlite_connections: Arc::new(Mutex::new(vec![None])),
             stdout: Arc::new(Mutex::new(Box::new(RealStdout))),
             #[cfg(feature = "jit")]
             jit: None,
@@ -330,6 +334,7 @@ impl SharedVm {
             locks: Arc::new(Mutex::new(vec![None])),
             semaphores: Arc::new(Mutex::new(vec![None])),
             priority_queues: Arc::new(Mutex::new(vec![None])),
+            sqlite_connections: Arc::new(Mutex::new(vec![None])),
             stdout: Arc::new(Mutex::new(Box::new(RealStdout))),
             jit: Some(jit_cell),
             in_jit: AtomicUsize::new(0),

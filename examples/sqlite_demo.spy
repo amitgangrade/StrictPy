@@ -1,0 +1,99 @@
+"""sqlite_demo.spy — M23 P3a-D demo of the stdlib `sqlite3` module.
+
+Opens an in-memory SQLite database, creates a `notes` table, inserts a
+handful of rows via parameter-binding (which prevents SQL injection
+even when the values contain `'` quotes or `;--` comment sequences),
+queries them back, and exercises `last_insert_rowid` / `changes` /
+`column_names`.
+
+The module is intentionally tiny — connection handles are i64, every
+result cell is stringified, no prepared-statement caching yet.  See
+spec §9.24 for the v0.2 limitations.
+"""
+
+import sqlite3
+
+
+fn main() -> i32:
+    # 1. Open an in-memory DB (no filesystem mess; no cross-test pollution).
+    conn: i64 = sqlite3.connect(":memory:")
+
+    # 2. Create a `notes` table.  CREATE returns no rows so we use execute.
+    sqlite3.execute(conn, "CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT, body TEXT)")
+
+    # 3. Insert three rows via parameter binding.  Each row uses `?`
+    # placeholders to demonstrate the SQL-injection-safe path.
+    row1: List[str] = []
+    row1.append("first")
+    row1.append("hello world")
+    sqlite3.execute_params(conn, "INSERT INTO notes (title, body) VALUES (?, ?)", row1)
+
+    row2: List[str] = []
+    row2.append("second")
+    row2.append("body two")
+    sqlite3.execute_params(conn, "INSERT INTO notes (title, body) VALUES (?, ?)", row2)
+
+    # SQL-injection-safe: the apostrophe in "O'Brien" and the literal
+    # "; drop table notes;--" in the body are bound as TEXT, not parsed
+    # as SQL.  The notes table survives.
+    row3: List[str] = []
+    row3.append("O'Brien")
+    row3.append("drop table notes;--")
+    sqlite3.execute_params(conn, "INSERT INTO notes (title, body) VALUES (?, ?)", row3)
+
+    # 4. last_insert_rowid reflects the third INSERT.
+    rid: i64 = sqlite3.last_insert_rowid(conn)
+    println("last_insert_rowid: " + str(rid))
+
+    # 5. Query everything back.  Each row is a `List[str]`, each cell
+    # stringified; integer ids come back as decimal text.
+    rows: List[List[str]] = sqlite3.query(conn, "SELECT id, title, body FROM notes ORDER BY id")
+    n: i32 = i32(i64(len(rows)))
+    println("row count: " + str(n))
+    if n >= 1i32:
+        first: List[str] = rows[0i32]
+        if i32(i64(len(first))) >= 2i32:
+            println("first title: " + first[1i32])
+
+    # Pull just the third row to confirm the injection-attack values
+    # survived unchanged.
+    if n >= 3i32:
+        third: List[str] = rows[2i32]
+        if i32(i64(len(third))) >= 3i32:
+            println("third title: " + third[1i32])
+            println("third body: " + third[2i32])
+
+    # 6. column_names — discover schema without fetching rows.
+    cols: List[str] = sqlite3.column_names(conn, "SELECT * FROM notes")
+    cn: i32 = i32(i64(len(cols)))
+    println("columns: " + str(cn))
+    if cn >= 3i32:
+        println("col0: " + cols[0i32])
+        println("col1: " + cols[1i32])
+        println("col2: " + cols[2i32])
+
+    # 7. query_params — parameterised SELECT.
+    qparams: List[str] = []
+    qparams.append("O'Brien")
+    matches: List[List[str]] = sqlite3.query_params(conn, "SELECT id, title FROM notes WHERE title = ?", qparams)
+    mn: i32 = i32(i64(len(matches)))
+    println("matches for O'Brien: " + str(mn))
+
+    # 8. changes — rows affected by the most recent INSERT/UPDATE/DELETE.
+    sqlite3.execute(conn, "UPDATE notes SET body = 'updated' WHERE id = 1")
+    affected: i32 = sqlite3.changes(conn)
+    println("rows updated: " + str(affected))
+
+    # 9. Error path — bad SQL raises ValueError.
+    try:
+        bad: List[List[str]] = sqlite3.query(conn, "SELECT FROM bogus")
+        println("UNREACHED")
+    except ValueError as e:
+        println("caught ValueError on bad SQL")
+
+    # 10. Close the connection.  Closing again is a no-op.
+    sqlite3.close(conn)
+    sqlite3.close(conn)
+
+    println("done")
+    return 0

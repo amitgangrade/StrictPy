@@ -823,6 +823,49 @@ pub enum NativeFn {
     QueuePqIsEmpty      = 437,
     // 438-439 reserved for v0.3 (e.g. pq_clear, pq_drain).
 
+    // ── 440-469: `sqlite3` module (M23 P3a-D) ───────────────────────────
+    // Backed by the `rusqlite` crate (with the `bundled` feature so
+    // libsqlite3.c is statically linked into the VM binary — no system
+    // SQLite required).  Connections are modelled as i64 handles into a
+    // `SharedVm.sqlite_connections` table; user code passes the handle
+    // through every API call.  All cell values are stringified on
+    // output: INTEGER -> "42", REAL -> "3.14", TEXT -> the text, NULL ->
+    // the empty string, BLOB -> base16 of the bytes (rare in v0.2
+    // because programs can't construct BLOBs without a real `bytes`
+    // type).  Parameter binding always treats arguments as TEXT; SQLite
+    // applies its usual type-coercion rules when comparing against
+    // INTEGER / REAL columns.  See spec §9.24.
+    //
+    // The "all results as str" simplification covers ~every config-store
+    // / cache / queue-table use case; programs that need typed result
+    // columns (BLOBs in particular) wait for v0.3's `bytes` type.
+    /// `sqlite3.connect(path: str) -> i64` — open or create the DB file.
+    /// Pass `":memory:"` for an in-memory DB.  Raises IOError on failure.
+    Sqlite3Connect          = 440,
+    /// `sqlite3.close(conn: i64) -> None` — release the connection.
+    Sqlite3Close            = 441,
+    /// `sqlite3.execute(conn: i64, sql: str) -> None` — run a statement
+    /// that returns no rows.  Raises ValueError on SQL error.
+    Sqlite3Execute          = 442,
+    /// `sqlite3.execute_params(conn: i64, sql: str, params: List[str])
+    /// -> None` — same as `execute` but with `?` placeholders bound from
+    /// `params` (all bound as TEXT in v0.2).
+    Sqlite3ExecuteParams    = 443,
+    /// `sqlite3.query(conn: i64, sql: str) -> List[List[str]]` — run a
+    /// SELECT and return all rows.  Each cell is stringified.
+    Sqlite3Query            = 444,
+    /// `sqlite3.query_params(conn: i64, sql: str, params: List[str]) ->
+    /// List[List[str]]` — same as `query` with bound parameters.
+    Sqlite3QueryParams      = 445,
+    /// `sqlite3.last_insert_rowid(conn: i64) -> i64`.
+    Sqlite3LastInsertRowid  = 446,
+    /// `sqlite3.changes(conn: i64) -> i32` — rows affected by the most
+    /// recent INSERT/UPDATE/DELETE.
+    Sqlite3Changes          = 447,
+    /// `sqlite3.column_names(conn: i64, sql: str) -> List[str]` — prepare
+    /// the statement and return its column-name vector (no rows fetched).
+    Sqlite3ColumnNames      = 448,
+
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
     /// encounters. The VM treats this as a runtime error.
@@ -1131,6 +1174,16 @@ impl NativeFn {
             435 => Some(Self::QueuePqPeekMinStr),
             436 => Some(Self::QueuePqLen),
             437 => Some(Self::QueuePqIsEmpty),
+            // M23 P3a-D: sqlite3 module (440-448, 9 ids; 449-469 reserved).
+            440 => Some(Self::Sqlite3Connect),
+            441 => Some(Self::Sqlite3Close),
+            442 => Some(Self::Sqlite3Execute),
+            443 => Some(Self::Sqlite3ExecuteParams),
+            444 => Some(Self::Sqlite3Query),
+            445 => Some(Self::Sqlite3QueryParams),
+            446 => Some(Self::Sqlite3LastInsertRowid),
+            447 => Some(Self::Sqlite3Changes),
+            448 => Some(Self::Sqlite3ColumnNames),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

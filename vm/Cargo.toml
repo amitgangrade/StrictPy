@@ -43,6 +43,12 @@ md-5 = "0.10"
 sha1 = "0.10"
 sha2 = "0.10"
 hmac = "0.12"
+# M23 P3a-D: sqlite3 stdlib module.  `rusqlite` is the standard Rust
+# SQLite binding; the `bundled` feature ships libsqlite3.c statically
+# linked so we don't depend on a system-installed SQLite (keeps the
+# build hermetic on Windows/Linux/macOS at the cost of ~30s extra C
+# compile on first build, cached thereafter).
+rusqlite = { version = "0.32", features = ["bundled"] }
 cranelift = { version = "0.115", optional = true }
 cranelift-jit = { version = "0.115", optional = true }
 cranelift-codegen = { version = "0.115", optional = true }

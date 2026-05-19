@@ -2496,6 +2496,105 @@ impl Resolver {
             ],
         };
         self.stdlib_modules.insert("queue".into(), queue_mod);
+
+        // ── M23 P3a-D: `sqlite3` module ────────────────────────────────
+        // Backed by the `rusqlite` crate (with the `bundled` feature so
+        // the binary ships its own libsqlite3.c).  Connections are i64
+        // handles into a per-process slot table on `SharedVm`; user
+        // code passes the handle through every API call.  All query
+        // result cells are stringified — INTEGER → "42", REAL → "3.14",
+        // TEXT → the text, NULL → "" — and parameter binding always
+        // treats bound values as TEXT.  See spec §9.24.
+        const SQLITE3_CONNECT: u32             = 440;
+        const SQLITE3_CLOSE: u32               = 441;
+        const SQLITE3_EXECUTE: u32             = 442;
+        const SQLITE3_EXECUTE_PARAMS: u32      = 443;
+        const SQLITE3_QUERY: u32               = 444;
+        const SQLITE3_QUERY_PARAMS: u32        = 445;
+        const SQLITE3_LAST_INSERT_ROWID: u32   = 446;
+        const SQLITE3_CHANGES: u32             = 447;
+        const SQLITE3_COLUMN_NAMES: u32        = 448;
+
+        let list_list_str_ty_sqlite = Ty::Generic {
+            base: TypeCtor::List,
+            args: vec![list_str_ty.clone()],
+        };
+
+        let sqlite3_mod = StdlibModule {
+            name: "sqlite3".into(),
+            items: vec![
+                StdlibItem {
+                    name: "connect".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], i64_ty.clone()),
+                    native_id: SQLITE3_CONNECT,
+                },
+                StdlibItem {
+                    name: "close".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], unit_ty.clone()),
+                    native_id: SQLITE3_CLOSE,
+                },
+                StdlibItem {
+                    name: "execute".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![i64_ty.clone(), str_ty.clone()],
+                        unit_ty.clone(),
+                    ),
+                    native_id: SQLITE3_EXECUTE,
+                },
+                StdlibItem {
+                    name: "execute_params".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![i64_ty.clone(), str_ty.clone(), list_str_ty.clone()],
+                        unit_ty.clone(),
+                    ),
+                    native_id: SQLITE3_EXECUTE_PARAMS,
+                },
+                StdlibItem {
+                    name: "query".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![i64_ty.clone(), str_ty.clone()],
+                        list_list_str_ty_sqlite.clone(),
+                    ),
+                    native_id: SQLITE3_QUERY,
+                },
+                StdlibItem {
+                    name: "query_params".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![i64_ty.clone(), str_ty.clone(), list_str_ty.clone()],
+                        list_list_str_ty_sqlite.clone(),
+                    ),
+                    native_id: SQLITE3_QUERY_PARAMS,
+                },
+                StdlibItem {
+                    name: "last_insert_rowid".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i64_ty.clone()),
+                    native_id: SQLITE3_LAST_INSERT_ROWID,
+                },
+                StdlibItem {
+                    name: "changes".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i32_ty.clone()),
+                    native_id: SQLITE3_CHANGES,
+                },
+                StdlibItem {
+                    name: "column_names".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![i64_ty.clone(), str_ty.clone()],
+                        list_str_ty.clone(),
+                    ),
+                    native_id: SQLITE3_COLUMN_NAMES,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("sqlite3".into(), sqlite3_mod);
     }
 
     // ─────────────────────────────────────────────────────────────────────

@@ -2265,6 +2265,97 @@ number. Backed by `BinaryHeap<Reverse<...>>`.
 v0.2 doesn't ship: `pq_clear`, `pq_drain`, bounded queues, blocking
 push, decrease-key. v0.3.
 
+### 9.29 Module `sqlite3` (v0.2 — M23 P3a-D)
+
+SQLite via the `rusqlite` crate, statically linked through the
+`bundled` feature so libsqlite3.c ships inside the VM binary — there
+is no dependency on a system SQLite install on any platform.
+
+Connections are modelled as `i64` handles into a per-process slot
+table on `SharedVm`. User code receives a handle from `connect`,
+passes it through every other API call, and releases it via `close`.
+
+```
+fn connect(path: str) -> i64
+fn close(conn: i64) -> None
+fn execute(conn: i64, sql: str) -> None
+fn execute_params(conn: i64, sql: str, params: List[str]) -> None
+fn query(conn: i64, sql: str) -> List[List[str]]
+fn query_params(conn: i64, sql: str, params: List[str]) -> List[List[str]]
+fn last_insert_rowid(conn: i64) -> i64
+fn changes(conn: i64) -> i32
+fn column_names(conn: i64, sql: str) -> List[str]
+```
+
+Semantics:
+
+* `connect(path)` opens or creates the database file.  The special
+  path `":memory:"` opens an ephemeral, in-process database (matching
+  the underlying SQLite semantics).  Raises `IOError` on filesystem
+  / permission failure.
+* `close(conn)` releases the underlying connection.  Calling `close`
+  on an already-closed (or zero) handle is a no-op — mirrors Python's
+  `Connection.close()`.
+* `execute(conn, sql)` runs a no-row statement (`CREATE`, `INSERT`,
+  `UPDATE`, `DELETE`, `BEGIN`, `COMMIT`, etc.).  Use raw `BEGIN` /
+  `COMMIT` / `ROLLBACK` SQL for transactions in v0.2; there's no
+  separate transaction handle.
+* `execute_params(conn, sql, params)` runs a no-row statement with
+  `?` placeholders bound from `params`.  Each parameter is bound as
+  `TEXT` — SQLite's normal type-coercion rules apply when the bound
+  value is compared against an INTEGER / REAL column.  Parameter
+  binding is the SQL-injection-safe path: a value of `"'; drop table
+  notes;--"` is stored as literal text, never parsed as SQL.
+* `query(conn, sql)` and `query_params(conn, sql, params)` run a
+  row-returning statement and materialise the whole result set as a
+  `List[List[str]]`.  Every cell is stringified by type:
+    * `INTEGER` → decimal text (`42` → `"42"`)
+    * `REAL`    → `format!("{}", f64)` (`3.5` → `"3.5"`)
+    * `TEXT`    → the text as-is
+    * `NULL`    → the empty string `""`
+    * `BLOB`    → lowercase hex of the bytes
+  This stringified-result simplification covers ~every config-store
+  and cache use case; programs that genuinely need typed cells (BLOBs
+  in particular) wait for v0.3's `bytes` type.
+* `last_insert_rowid(conn)` returns the rowid of the most recent
+  successful INSERT on this connection (per SQLite's
+  `sqlite3_last_insert_rowid()` semantics).
+* `changes(conn)` returns the number of rows affected by the most
+  recent INSERT / UPDATE / DELETE.  Returns `0` if no row-modifying
+  statement has run.
+* `column_names(conn, sql)` prepares the SQL but does not iterate
+  rows; returns just the result-set column names.  Useful for
+  schema discovery against `SELECT *`.
+
+Errors:
+
+* Invalid or closed connection handle → `ValueError`.
+* SQL prepare / execute / row-fetch failure → `ValueError` with the
+  underlying SQLite message in the body.
+* `connect` filesystem failures → `IOError`.
+
+What v0.2 does **not** ship: prepared-statement caching (each call
+re-prepares); typed result rows (everything is `str` — see the
+stringification rules above); a `Connection`/`Cursor` class surface
+(needs stdlib-class registration, deferred to v0.3); explicit
+transaction or savepoint handles (use raw `BEGIN`/`COMMIT`/`ROLLBACK`
+SQL); `executemany`; row iterators (the whole result set comes back
+as `List[List[str]]`); BLOB streaming; user-defined functions / hooks
+(would need closure-across-NativeFn-boundary support, deferred);
+parameter binding to non-`str` types directly (workaround: format the
+value into a `str` first — SQLite coerces back to INTEGER / REAL on
+the column side).
+
+Concurrency: connections live in `SharedVm.sqlite_connections` behind
+a mutex.  The native-handler glue briefly locks the table to look up
+the connection, takes it out, drops the table lock, runs the SQL,
+and puts the connection back.  Sibling `connect` / `close` calls on
+other threads can therefore run in parallel with a long-running
+query.  Re-entrant use of the *same* connection handle inside a
+single SQL call's lifetime (e.g. a callback that queries again on the
+same conn) is a runtime error ("connection in use") rather than a
+deadlock — but v0.2 has no callback / hook surface so user code can't
+hit this path organically.
 
 ---
 
