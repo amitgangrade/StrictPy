@@ -16,8 +16,8 @@ Read it first — every design decision below traces back to a section of the sp
 │       ├── opcode.rs     Bytecode opcode enum (spec §13)
 │       ├── file_format.rs `.spyc` header, constant tags, sentinels (spec §12)
 │       └── type_tag.rs   Inline operand type tags (spec §13.3.6)
-├── compiler/             `spyc` — compiles .spy → .spyc
-├── vm/                   `spy`  — loads and runs .spyc
+├── compiler/             compiler library (frontend → bytecode emitter)
+├── vm/                   `spy` — single unified CLI (compile + run)
 └── examples/             Sample StrictPy programs
 ```
 
@@ -42,11 +42,22 @@ cargo build
 cargo test
 ```
 
-Compile and run an example:
+Run an example — `spy` accepts `.spy` sources directly (compile-if-stale +
+run, with bytecode cached in `__spycache__/`) or precompiled `.spyc`
+modules:
 
 ```powershell
-cargo run --bin spyc -- examples/hello.spy -o hello.spyc
-cargo run --bin spy  -- hello.spyc
+# Python-style: source in, compile-and-run, cache to __spycache__/.
+cargo run --bin spy -- examples/hello.spy
+
+# Already-compiled .spyc bytecode runs the same way.
+cargo run --bin spy -- examples/hello.spyc
+
+# Compile only, no execute (analogue of `python -m py_compile`).
+cargo run --bin spy -- --compile-only examples/hello.spy
+
+# Inline mode (analogue of `python -c "..."`).
+cargo run --bin spy -- -c 'fn main() -> i32:\n    println("hi")\n    return 0'
 ```
 
 ## Implementation status
@@ -100,15 +111,20 @@ Following the milestones in spec §19:
 `cargo build --release` then any of the 7 examples:
 
 ```powershell
-./target/release/spyc.exe examples/hello.spy      -o hello.spyc      ; ./target/release/spy.exe hello.spyc
-./target/release/spyc.exe examples/fib.spy        -o fib.spyc        ; ./target/release/spy.exe fib.spyc
-./target/release/spyc.exe examples/dot.spy        -o dot.spyc        ; ./target/release/spy.exe dot.spyc
-./target/release/spyc.exe examples/tree.spy       -o tree.spyc       ; ./target/release/spy.exe tree.spyc
-./target/release/spyc.exe examples/mandelbrot.spy -o mandelbrot.spyc ; ./target/release/spy.exe mandelbrot.spyc
-./target/release/spyc.exe examples/producer.spy   -o producer.spyc   ; ./target/release/spy.exe producer.spyc
+# M25+ unified CLI: spy <file.spy> compiles-if-stale and runs.
+./target/release/spy.exe examples/hello.spy
+./target/release/spy.exe examples/fib.spy
+./target/release/spy.exe examples/dot.spy
+./target/release/spy.exe examples/tree.spy
+./target/release/spy.exe examples/mandelbrot.spy
+./target/release/spy.exe examples/producer.spy
 # wordcount needs an input.txt in the cwd:
 echo "the quick brown fox the lazy dog the quick fox" > input.txt
-./target/release/spyc.exe examples/wordcount.spy  -o wordcount.spyc  ; ./target/release/spy.exe wordcount.spyc
+./target/release/spy.exe examples/wordcount.spy
+
+# Precompiled .spyc files (legacy two-step workflow) still run unchanged:
+./target/release/spy.exe --compile-only examples/hello.spy -o hello.spyc
+./target/release/spy.exe hello.spyc
 ```
 
 All 7 produce real output:

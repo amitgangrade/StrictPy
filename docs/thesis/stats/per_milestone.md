@@ -35,6 +35,7 @@ Benchmark data: `bench/history/`.
 | **M22** | **468** | **17,656** | **10,603** | **9,218** | 0 | 0 | 0 | 16/0/0 | 13.1 |
 | **M23** | **553** | **18,800** | **12,200** | **9,700** | 1 | 1 | 0 | 16/0/0 | 13.1 |
 | **M24** | **578** | 18,900 | 12,200 | **11,200** | 1 | 1 | 0 | 16/0/0 | 13.1 |
+| **M25** | **586** | 18,895 | 12,397 | 11,200 | 0 | 0 | 0 | 16/0/0 | 13.1 |
 
 Notes:
 - LOC is at end-of-milestone; M1's LOC are mostly lexer+parser+pretty (already in their final shape).
@@ -63,6 +64,7 @@ See `bench/history/` for the underlying JSON.
 | M22 (Phase 2 stdlib, 4× parallel) | 16 | 0 | 0 | 13.1 ms | (9 more stdlib modules; first parallel-agent round) | — |
 | M23 (Phase 3a stdlib, 4× parallel) | 16 | 0 | 0 | 13.1 ms | (7 more stdlib modules; second parallel-agent round) | — |
 | M24 (Phase 3a stress, 4× parallel) | 16 | 0 | 0 | 13.1 ms | (4 stress programs + BUG-039 fix; no codegen affecting perf) | — |
+| M25 (unified `spy` CLI) | 16 | 0 | 0 | 13.1 ms | (CLI refactor only — no codegen, lib API, or VM core changes) | — |
 
 \* M7-unfair: Python timing included parse+compile time. Methodology bug
 caught and fixed at M10-prep; the M7-fair snapshot is the honest baseline.

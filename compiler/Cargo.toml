@@ -10,9 +10,11 @@ description = "StrictPy compiler frontend, IR, and bytecode emitter"
 name = "strictpy_compiler"
 path = "src/lib.rs"
 
-[[bin]]
-name = "spyc"
-path = "src/main.rs"
+# M25: the standalone `spyc` binary is gone.  Compile-only invocations
+# are now `spy --compile-only file.spy [-o output.spyc]`, served by the
+# single unified `spy` binary in the vm crate.  The compiler library
+# (`compile_file` / `compile_source`) remains the canonical API and is
+# unchanged.
 
 [dependencies]
 strictpy-shared.workspace = true

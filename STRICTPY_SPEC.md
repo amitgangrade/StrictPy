@@ -1136,7 +1136,7 @@ for the larger M20 batch (`os`, `os.path`, `io`, `json`, `re`, `time`,
 `random`, `math+`).
 
 ```
-argv:     List[str]      # program args; argv[0] is the .spyc path
+argv:     List[str]      # program args; argv[0] is the script path the user typed
 platform: str            # "windows" | "linux" | "macos" | "unknown"
 version:  str            # banner string, e.g. "StrictPy v0.2"
 
@@ -1148,7 +1148,10 @@ Semantics:
 * `sys.argv` — lazy `List[str]`. Materialised on first read by the VM
   and cached so subsequent reads return the same heap object (allowing
   `sys.argv.append(...)` to be visible across the program).
-  `argv[0]` is conventionally the path to the `.spyc` that was invoked.
+  `argv[0]` is conventionally the script path the user typed at the
+  command line: the `.spy` source for `spy script.spy`, the `.spyc`
+  for `spy module.spyc`, or the literal string `"-c"` for `spy -c
+  "code"` (matching CPython's convention).
 * `sys.exit(code)` — terminates the program with the given exit code.
   **Not catchable.** Calling `sys.exit` from inside a `try ... except
   Exception:` walks straight past the handler (mirrors Python:
@@ -2477,6 +2480,49 @@ Stmt =
 9. **Null-check elimination** after narrowing
 10. **Register allocation** (linear-scan)
 11. **Peephole pass** on bytecode
+
+### 10.8 Command-line driver (v0.2 — M25)
+
+StrictPy ships a single `spy` binary modelled on CPython's `python`
+command. There is no separate compiler binary — compile-only invocations
+are served via the `--compile-only` flag.
+
+```
+spy SCRIPT [ARGS...]                # compile-if-stale + run
+spy -c CODE [ARGS...]               # compile inline + run
+spy --compile-only SCRIPT [-o OUT]  # compile only; do not execute
+```
+
+* **`SCRIPT`** may end in `.spy` (StrictPy source) or `.spyc` (already-
+  compiled bytecode). The driver dispatches on the extension:
+    * `.spy` — compile if the cache is missing or stale, then run.
+    * `.spyc` — load and run directly; no cache lookup.
+  Any other extension is an error.
+* **Bytecode cache** — when `.spy` source is given, the driver caches
+  the produced bytecode at `<dir-of-source>/__spycache__/<basename>.spyc`
+  (mirroring CPython's `__pycache__/foo.cpython-NNN.pyc` convention).
+  The cache directory is created on first run if absent.
+* **Staleness rule** — the cache is reused iff the cached `.spyc`
+  exists AND `source mtime <= cache mtime`. Any inequality the other
+  way forces a recompile. This is the same rule CPython uses for
+  `.pyc` files (modulo CPython's magic-number / size / hash variants).
+  Cache rewrites are atomic-ish: `compile_file` writes the new bytes
+  via a single `fs::write` call.
+* **`-c CODE`** — compiles the literal string as a one-shot StrictPy
+  program and runs it. The program must define `fn main() -> i32:`.
+  `-c` is never cached.
+* **`--compile-only SCRIPT [-o OUT]`** — produces a `.spyc` and exits.
+  When `-o OUT` is omitted, the output goes to the same
+  `__spycache__/<basename>.spyc` path the run mode would use. The
+  source is NOT executed. This is the analogue of
+  `python -m py_compile script.py`.
+* **`sys.argv[0]`** is the script path the user typed (NOT the
+  cached `.spyc` path). For `-c` mode it is the literal string
+  `"-c"`. Trailing tokens become `sys.argv[1..]`.
+
+The compiler exposes the same operations as a library
+(`strictpy_compiler::compile_file` / `compile_source`) for in-process
+tooling that wants to skip the binary.
 
 ---
 

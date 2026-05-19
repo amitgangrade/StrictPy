@@ -67,3 +67,6 @@ the time it lands.
 | `m24_b.md` | M24-B | Stress: event_log CLI (sqlite3 + datetime + argparse + io + pathlib + re). 14/14 probes PASS. **Found BUG-039** (`k in Dict[str,*]` always false) + segfault sibling on Dict[i64,_]. |
 | `m24_c.md` | M24-C | Stress: parallel test_runner (subprocess + threading + queue + sqlite3 + time). 10/10 PASS. Real parallelism verified: 3.62×-5.75× speedup at N=4. |
 | `m24_d.md` | M24-D | Stress: fs_migrator (pathlib + os + datetime + subprocess + io). 10/10 PASS. Documented missing stdlib primitives (os.mtime, os.size, re capture groups). |
+
+(M25 was a single-conversation orchestrator refactor — no sub-agents,
+no agent report. See `docs/thesis/milestones/m25_unified_cli.md`.)

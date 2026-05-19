@@ -24,6 +24,12 @@ jit = ["dep:cranelift", "dep:cranelift-jit", "dep:cranelift-module", "dep:cranel
 
 [dependencies]
 strictpy-shared.workspace = true
+# M25: the `spy` binary now also compiles `.spy` sources (with
+# __spycache__ caching) and inline `-c "code"` snippets, so the
+# compiler crate is a regular dependency rather than just a
+# dev-dep.  The library itself does NOT call into compiler — only
+# `spy`'s main.rs does — so the lib's build surface is unchanged.
+strictpy-compiler = { path = "../compiler" }
 anyhow.workspace = true
 thiserror.workspace = true
 clap.workspace = true
@@ -55,5 +61,6 @@ cranelift-codegen = { version = "0.115", optional = true }
 cranelift-frontend = { version = "0.115", optional = true }
 cranelift-module = { version = "0.115", optional = true }
 
-[dev-dependencies]
-strictpy-compiler = { path = "../compiler" }
+# M25: strictpy-compiler is now in [dependencies], so no
+# dev-dependency entry is needed.  Test code that calls
+# `strictpy_compiler::compile_source` continues to work unchanged.

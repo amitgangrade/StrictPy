@@ -1023,6 +1023,74 @@ caught all four pattern instances at once if run after M2.
 
 ---
 
+## M25 — Unified `spy` CLI (2026-05-19)
+
+User request: "Python has a single command to both compile and execute;
+StrictPy has separate executables. Make StrictPy analogous to Python."
+
+### Decisions reached before coding
+
+Four clarifying questions resolved up front (rather than mid-implementation):
+
+| Decision | Choice |
+|---|---|
+| Binary name | **Single `spy` only** — remove `spyc` entirely; `spy --compile-only` covers compile-only workflows |
+| Cache location | **`__spycache__/foo.spyc`** next to source (Python's `__pycache__` shape) |
+| Staleness rule | **Source mtime > cache mtime** (Python's rule) |
+| Inline `-c "code"` | **Yes, include now** (matches `python -c`) |
+
+### What landed
+
+```
+spy SCRIPT [ARGS...]              # compile-if-stale + run
+spy -c CODE [ARGS...]             # compile inline + run
+spy --compile-only SCRIPT [-o OUT]
+```
+
+- `compiler/Cargo.toml` `[[bin]] name = "spyc"` removed; `compiler/src/main.rs`
+  deleted. Library API (`compile_file` / `compile_source`) unchanged.
+- `strictpy-compiler` promoted from `[dev-dependencies]` to
+  `[dependencies]` in `vm/Cargo.toml`. The previously circular
+  dev-dep edge (`compiler ↔ vm`) becomes a clean DAG: `compiler ← vm`.
+- `vm/src/lib.rs` gains
+  `run_bytes_with_args(bytes, argv0, args)`; `run_file_with_args`
+  now delegates to it. `-c` mode never touches the filesystem.
+- `vm/src/main.rs` rewritten with clap-driven Python-style CLI
+  (~210 LOC); helpers for `cached_spyc_path` and `needs_recompile`.
+- `compiler/tests/m25_unified_cli.rs` adds 8 integration tests
+  covering all four CLI shapes + stale-cache recompile + fresh-cache
+  reuse + trailing args + unknown-extension error.
+
+### Tests + size
+
+- **Tests**: 578 → 586 (+8 M25 tests). Zero regressions.
+- **VM LOC**: +~150 (new main.rs CLI surface).
+- **Compiler LOC**: -32 (deleted main.rs).
+- **Examples**: unchanged at 70. M25 ships no new `.spy` programs.
+- **Stdlib modules**: unchanged at 24.
+- **Bench**: not re-run (no codegen change; pure I/O glue).
+
+### Why a one-conversation refactor, not parallel agents
+
+Touched 6 files with high cross-coupling: two Cargo manifests, lib API,
+CLI binary, integration tests, plus spec + README. Parallel agents
+would each need the same global context, and the integration cost
+would have dominated the parallelism gain. A focused single-threaded
+session got it through in ~30 min including the test fixture
+debugging (Rust raw string vs line-continuation indentation).
+
+### Caveats deferred to v0.3
+
+- Cross-process cache write race (two simultaneous `spy hello.spy`
+  invocations can both write the same `.spyc`; bytes are identical so
+  benign, but on Windows the second can briefly fail).
+- Read-only source directory falls back to a temp-dir cache in
+  Python; StrictPy currently errors instead.
+- `.spyc` cache key doesn't yet include a build identifier; clearing
+  `__spycache__/` after a major upgrade is currently manual.
+
+---
+
 ## What this trajectory shows
 
 - **Bugs found scales with running real programs, not with writing tests.**

@@ -52,12 +52,27 @@ pub fn run_file(path: &Path) -> Result<i32, VmError> {
 /// after that — the trailing args the user typed on the command line.
 pub fn run_file_with_args(path: &Path, args: Vec<String>) -> Result<i32, VmError> {
     let bytes = std::fs::read(path).map_err(VmError::Io)?;
-    let module = loader::load(&bytes)?;
+    run_bytes_with_args(&bytes, path.to_string_lossy().into_owned(), args)
+}
+
+/// Like [`run_file_with_args`] but takes an already-loaded `.spyc`
+/// byte buffer.  Used by the M25 unified `spy` CLI when compiling
+/// `.spy` sources in memory (the `-c` inline-execute path skips
+/// touching the filesystem altogether).
+///
+/// `argv0` is the program path placed at `sys.argv[0]`; for inline
+/// `-c` mode this is conventionally the literal string `"-c"`,
+/// matching CPython.
+pub fn run_bytes_with_args(
+    bytes: &[u8],
+    argv0: String,
+    args: Vec<String>,
+) -> Result<i32, VmError> {
+    let module = loader::load(bytes)?;
     let mut interp = interp::Interpreter::new(module);
     builtins::register(&mut interp);
-    // Build the argv: [program-path, ...args]
     let mut argv = Vec::with_capacity(args.len() + 1);
-    argv.push(path.to_string_lossy().into_owned());
+    argv.push(argv0);
     argv.extend(args);
     interp.set_argv(argv);
     match interp.run_main() {
