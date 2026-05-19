@@ -55,3 +55,7 @@ the time it lands.
 | `m20a_os_path_io.md` | M20a | os + path + io stdlib (23 NativeFns). Found **BUG-037** incidentally (?? null-coalesce always-fallback). |
 | `m20b_time_random_math.md` | M20b | time + random + math stdlib (31 NativeFns). Numerical Recipes LCG; hand-rolled civil_from_days for ISO formatting. |
 | `m20c_json_re.md` | M20c | json + re stdlib (12 NativeFns). serde_json + regex crates added only to vm/Cargo.toml. **Phase 1 stdlib complete.** |
+| `m22_p2a.md` | M22 P2A | argparse + collections + csv (26 NativeFns, 250-280). First parallel worktree-isolated stdlib agent. ArgParser as Dict[str, str] shim pending v0.3 stdlib classes. |
+| `m22_p2b.md` | M22 P2B | base64 + hashlib (9 NativeFns, 290-304). 5 new crate deps in vm/Cargo.toml: base64, sha1, sha2, md-5, hmac. Zero incidental bugs. |
+| `m22_p2c.md` | M22 P2C | itertools + statistics (20 NativeFns, 310-329). Monomorphic per-type variants matching M20b random.*. Zero incidental bugs. |
+| `m22_p2d.md` | M22 P2D | struct + urllib_parse (18 NativeFns, 330-347). `str`-as-byte-buffer encoding for binary IO. Self-fixed an `OBJECT_HEADER_SIZE` mismatch. |

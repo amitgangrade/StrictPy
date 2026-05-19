@@ -739,6 +739,99 @@ real script in a Python-shaped language with no dynamism.
 
 ---
 
+## M22 — Phase 2 stdlib (first parallel-agent stdlib round) (2026-05-19)
+
+Phase 2 of the stdlib sprint. **9 modules shipped in parallel** via 4
+worktree-isolated agents, ~1.5 hours of parallel agent compute. The
+biggest wall-clock acceleration of any round since M11's class-system
+overhaul, and the first time the project ran parallel stdlib agents.
+
+Modules: **argparse, collections, csv, base64, hashlib, itertools,
+statistics, struct, urllib_parse**. 73 new NativeFn IDs (250-347).
+
+### Agent allocation
+
+- **P2A** (argparse + collections + csv): 26 NativeFn IDs (250-280).
+  Highest-ROI module — pre-M22 every CLI tool hand-parsed sys.argv.
+- **P2B** (base64 + hashlib): 9 IDs (290-304). Added 5 crates to
+  `vm/Cargo.toml`: base64, sha1, sha2, md-5, hmac.
+- **P2C** (itertools + statistics): 20 IDs (310-329). Monomorphic
+  per-type variants matching the M20b random.* pattern.
+- **P2D** (struct + urllib_parse): 18 IDs (330-347). `str`-as-byte-buffer
+  encoding (each char is a codepoint 0-255) for binary IO. Self-found
+  and fixed an `OBJECT_HEADER_SIZE` mismatch (was 24, should be 16).
+
+### The worktree-isolation pattern
+
+First use of the Agent tool's `isolation: worktree` mode in this
+project. Each agent ran in its own git worktree branch
+(`worktree-agent-<id>`) and saw a clean repo at M22-round commit time;
+they couldn't see each other's writes.
+
+After all four reported complete, the orchestrator cherry-picked the
+four commits onto main in order P2C → P2D → P2B → P2A. The first
+cherry-pick was clean; the next three conflicted on the four shared
+files (`resolver.rs` / `native.rs` / `builtins.rs` / `STRICTPY_SPEC.md`).
+Resolution was mechanical: each agent appended to the same point in
+each file, so the merge was "keep both, in some order." Spec section
+numbers had to be renumbered (all four agents independently picked
+§9.15+).
+
+Total integration overhead: ~30 minutes of orchestrator time + one
+build per cherry-pick to confirm the resolution was syntactically
+correct. **The wall-clock saving from parallel agents (~3.5 hours)
+significantly exceeded the integration cost (~30 minutes).**
+
+### Zero-incidental-bug streak
+
+The 9 modules shipped with zero new bugs. Counting from M19:
+
+| Sub-milestone | Modules | Bugs found |
+|---|---|---:|
+| M19 (sys) | 1 | 0 |
+| M20a (os, path, io) | 3 | 1 (BUG-037, found incidentally) |
+| M20b (time, random, math) | 3 | 0 |
+| M20c (json, re) | 2 | 0 |
+| M21 (BUG-037 fix + minigrep) | 0 | 0 |
+| **M22 (9 modules)** | **9** | **0** |
+
+Six consecutive sub-milestones shipping 18 stdlib modules with one
+bug found — and that bug was a placeholder lowering from the M0-era
+parser, not a Phase 1/2 regression. The M19 stdlib-module-table seam
+proved to be the load-bearing infrastructure: once it landed, new
+modules slot in without disturbing resolver/typecheck/IR.
+
+### Tests + size
+
+- **Tests**: 379 → 468 (+89 across the four agents).
+- **Examples**: 46 → 55 (+9 example programs, one per module —
+  argparse_demo, word_count, csv_demo, base64_demo, hashlib_demo,
+  itertools_demo, stats_demo, struct_demo, url_demo).
+- **Spec**: §9.15-§9.23 added (9 new module sections).
+
+### Phase 1 + Phase 2 stdlib summary
+
+17 stdlib modules total over 4 milestones (M19-M22):
+
+| Module | Phase | Wall-clock |
+|---|---|---|
+| sys | M19 | ~3 hr (foundational) |
+| os, path, io | M20a | ~2 hr |
+| time, random, math | M20b | ~2.5 hr |
+| json, re | M20c | ~1.5 hr |
+| argparse, collections, csv | M22 P2A | ~1.5 hr (parallel) |
+| base64, hashlib | M22 P2B | ~1 hr (parallel) |
+| itertools, statistics | M22 P2C | ~1.5 hr (parallel) |
+| struct, urllib_parse | M22 P2D | ~1.5 hr (parallel) |
+
+The language is now usable for the kinds of scripts and tools real
+Python users write: CLI parsing (argparse), data processing (csv +
+itertools + statistics), encoding (base64 + hashlib + struct), web
+(urllib_parse). Networking primitives (socket, http_client, ssl) are
+the next big Phase 3 push.
+
+---
+
 ## What this trajectory shows
 
 - **Bugs found scales with running real programs, not with writing tests.**
