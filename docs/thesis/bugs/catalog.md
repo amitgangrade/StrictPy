@@ -8,7 +8,7 @@ discovered, milestone fixed (or "deferred" with pointer to
 
 | Category | Found | Fixed | Deferred |
 |---|---:|---:|---:|
-| Silent miscompile (codegen) | 8 | 8 | 0 |
+| Silent miscompile (codegen) | 9 | 9 | 0 |
 | Vacuous output (IR lowering punt) | 3 | 3 | 0 |
 | Vtable / inheritance | 7 | 7 | 0 |
 | Typechecker rejects valid code | 3 | 3 | 0 |
@@ -18,7 +18,7 @@ discovered, milestone fixed (or "deferred" with pointer to
 | Parser / lexer | 1 | 0 | 1 |
 | Formatting / spec consistency | 1 | 1 | 0 |
 | Spec/runtime drift | 1 | 1 | 0 |
-| **Total** | **33** | **32** | **1** |
+| **Total** | **34** | **33** | **1** |
 
 Post-M12 state (2026-05-18):
 
@@ -169,6 +169,36 @@ Post-M23 state (2026-05-19 even later):
   (M23) with **two incidental bugs total** (BUG-037 in M20a, the
   resolver-shadow fix in M23). The M19 `seed_stdlib_modules`
   infrastructure continues to hold.
+
+Post-M24 state (2026-05-19 even-even later):
+
+- M24 stress round (Phase 3a surface) — 4 parallel worktree agents
+  wrote real programs combining subprocess + threading + queue +
+  sqlite + datetime + pathlib. Total ~1500 LOC.
+- M24-A (job_scheduler): 9/9 probes PASS, 0 bugs.
+- M24-B (event_log): 14/14 probes PASS, **found BUG-039** —
+  `key in Dict[str, *]` always returned false. **Fourth instance of
+  the placeholder-lowering pattern** (after BUG-008, BUG-034,
+  BUG-037). Fixed inline in M24 by dispatching the `In`/`NotIn` IR
+  lowering on the RHS container type.
+- M24-C (test_runner): 10/10 probes PASS, 0 bugs. Real parallelism
+  verified — 3 runs gave N=4/N=1 speedups of 3.62×, 5.75×, 2.64×.
+- M24-D (fs_migrator): 10/10 probes PASS, 0 bugs. Documented v0.2
+  stdlib gaps for Phase 3b: `os.mtime` / `os.size` / `pathlib.stat`,
+  `os.rmdir`, `re.find_all` capture groups, `pathlib.normalise`,
+  `subprocess` env-var injection.
+- M24 stress-round bug rate: **1 bug across 4 programs** (~1500 LOC).
+  Trend: M10=17, M11=6, M12=2, M18=1, M24=1. ROI has flattened —
+  one bug per ~1000 LOC of stress code.
+- The placeholder-lowering pattern now has FOUR instances. Same
+  shape every time: a binary operator with a missing branch in IR
+  lowering. The thesis methodology section should call out a
+  "mechanical audit" candidate: every binary-op match arm in
+  `compiler/src/ir.rs::emit_binop` should be verified to dispatch
+  on operand types, not just emit a hardcoded IROp.
+- Bug totals: 34 found, 33 fixed, 1 deferred (still only BUG-028).
+- Tests: 553 → 578 (+25 from M24's new examples + regression). 24
+  stdlib modules unchanged (M24 added no new modules).
 
 ## Full catalog
 
@@ -437,6 +467,15 @@ Post-M23 state (2026-05-19 even later):
 - **Fix**: M21 rewrote the lowering to mirror the M13 `lower_short_circuit` pattern: pre-seed a result slot with `lhs`, test `RefEq(lhs, none)`, branch on the test, evaluate `rhs` only in the "lhs was none" block, overwrite the slot, merge. Slot-based phi via ReadLocal/WriteLocal — no new IR ops or VM opcodes. **Critical correctness**: `rhs` is now evaluated ONLY when `lhs IS none` (short-circuit semantics), matching Python's `or`-fallback expectation.
 - **Status**: fixed in M21. Tests: `vm/tests/m21_null_coalesce.rs` (6 tests including the rhs-must-not-trap and rhs-must-execute cases).
 - **Severity**: medium — every program using `??` was silently wrong. Pattern lesson (now three instances in the catalog): **placeholder IR lowerings for new operators silently miscompile until a stress test organically uses them**. BUG-008 (`is not` was `RefEq` not `not RefEq`), BUG-034 (`str !=` had no `is_str` branch, fell to pointer compare), BUG-037 (`??` was Copy(rhs) only). All three: the parser accepted the operator, the typechecker accepted it, the lowering shipped a placeholder, no test had hit the non-trivial path.
+
+#### BUG-039 — `key in container` always returns false (Dict[str, *])
+- **Found**: M24-B (event_log stress agent — probe 10's hour-bucket histogram silently produced empty buckets because `bucket in seen` was always false).
+- **Symptom**: `key in d` for `d: Dict[str, V]` returns false even when `d[key]` immediately returns the value just set. Confirmed across `Dict[str, str]`, `Dict[str, i64]`, `Dict[str, i32]`, `Dict[str, bool]`. Programs using `in` as a membership check silently went through the "missing" branch every time. Programs using `dict.has(k)` or `dict.get(k) is not none` (the M10 BUG-020 workaround) were unaffected.
+- **Related**: `<i64> in Dict[i64, i64]` segfaults the VM (exit 139). Distinct symptom but related root cause — pre-fix the IR lowered `In` to `IROp::IEq` (compare two u64s, no segfault), but post-fix dispatching to `NativeFn::DictHas` calls `arg_str(args, 1)` which dereferences the i64 as a `*const StringRepr`. This is a SEPARATE latent bug: `Dict[non-str, _]` is not supported by the M5 Dict runtime (the underlying `HashMap` is keyed by `String`). My fix dispatches DictHas only when key type is `str`; for non-str Dict the placeholder is preserved (still wrong, but doesn't segfault).
+- **Root cause**: `compiler/src/ir.rs::emit_binop` had `AstBinOp::In => IROp::IEq, // placeholder` and `AstBinOp::NotIn => IROp::INe, // placeholder` — comparing the key against the container's heap pointer. Always false for any separately-allocated key.
+- **Fix**: dispatch the `In` lowering on the RHS (container) type. `key in Dict[str, V]` → `NativeFn::DictHas(dict, key)`; `x in Set[T]` → `NativeFn::SetHas(set, x)`. `NotIn` mirrors `In` then emits `BoolNot`. List membership (`x in list`) is still placeholder — needs a `NativeFn::ListContains` or inline linear scan; v0.3.
+- **Status**: fixed in M24. Tests: `vm/tests/m24_in_operator.rs` (5 tests — present-key, missing-key, variable key, Dict[str, *] across value types, churn).
+- **Severity**: medium-high. Every program using `in` on a Dict silently went the wrong way. Same shape as BUG-008 / BUG-034 / BUG-037 — placeholder IR lowering for a binary operator. **This is the FOURTH instance of the pattern.** The thesis methodology section should call out an audit candidate: every binary-op match arm in `emit_binop` should be verified to dispatch on operand types where the operator's semantics depend on type (every comparison, every container membership, every short-circuit), not just emit a hardcoded IROp.
 
 ## Lessons from the catalog
 

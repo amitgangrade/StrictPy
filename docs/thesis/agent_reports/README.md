@@ -63,3 +63,7 @@ the time it lands.
 | `m23_p3a_b.md` | M23 P3a-B | datetime (22 NativeFns, 390-411). Hand-rolled `civil_from_days` + platform-specific local_offset via FFI; no chrono dep. |
 | `m23_p3a_c.md` | M23 P3a-C | threading.Lock + Semaphore + queue.PriorityQueue (18 NativeFns, 420-437). Three new SharedVm slot tables. Incidental resolver fix for stdlib-module shadowing of legacy `from X import Y` prelude bindings. |
 | `m23_p3a_d.md` | M23 P3a-D | sqlite3 (9 NativeFns, 440-448) via rusqlite-bundled. Stringified result cells; v0.3 typed rows. |
+| `m24_a.md` | M24-A | Stress: background job_scheduler (subprocess + threading.Lock + queue.PriorityQueue + datetime). 9/9 probes PASS, 0 bugs. |
+| `m24_b.md` | M24-B | Stress: event_log CLI (sqlite3 + datetime + argparse + io + pathlib + re). 14/14 probes PASS. **Found BUG-039** (`k in Dict[str,*]` always false) + segfault sibling on Dict[i64,_]. |
+| `m24_c.md` | M24-C | Stress: parallel test_runner (subprocess + threading + queue + sqlite3 + time). 10/10 PASS. Real parallelism verified: 3.62×-5.75× speedup at N=4. |
+| `m24_d.md` | M24-D | Stress: fs_migrator (pathlib + os + datetime + subprocess + io). 10/10 PASS. Documented missing stdlib primitives (os.mtime, os.size, re capture groups). |

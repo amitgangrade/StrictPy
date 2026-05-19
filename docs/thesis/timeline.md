@@ -933,6 +933,96 @@ Networking (socket, http_client, ssl) is the next big gap — Phase 3b.
 
 ---
 
+## M24 — Phase 3a stress round (2026-05-19)
+
+First stress round on the Phase 3a surface. 4 parallel worktree-isolated
+agents wrote ~1500 LOC of real programs that combine
+subprocess + threading + queue + sqlite3 + datetime + pathlib in ways
+the per-module unit tests didn't.
+
+### Agents + outcomes
+
+- **M24-A** (job_scheduler.spy): background scheduler combining
+  subprocess + threading.Lock + queue.PriorityQueue + datetime. 9/9
+  probes PASS. **0 bugs.**
+- **M24-B** (event_log.spy): SQLite-backed event log CLI combining
+  sqlite3 + datetime + argparse + io + pathlib + re. 14/14 probes
+  PASS. **Found BUG-039** — `key in Dict[str, *]` always returned
+  false. Plus a related segfault on `<i64> in Dict[i64, i64]`
+  (separate latent issue: M5 Dict runtime is hardcoded to str keys).
+- **M24-C** (test_runner.spy): parallel test runner combining
+  subprocess + threading + queue + sqlite3 + time. 10/10 probes PASS.
+  **Real parallelism verified** — 3 runs gave N=4/N=1 speedups of
+  3.62×, 5.75×, 2.64×.
+- **M24-D** (fs_migrator.spy): filesystem migration tool combining
+  pathlib + os + datetime + subprocess + io. 10/10 probes PASS. **0
+  bugs**, but **documented missing stdlib primitives** for Phase 3b:
+  `os.mtime`, `os.size`, `pathlib.stat`, `os.rmdir`, `re.find_all`
+  capture groups, `pathlib.normalise`, `subprocess` env-var injection.
+
+### BUG-039 — fourth placeholder-lowering instance
+
+The headline finding. `compiler/src/ir.rs::emit_binop` had
+`AstBinOp::In => IROp::IEq, // placeholder` — comparing the key
+against the container's heap pointer as i64. Always false for any
+separately-allocated key.
+
+This is the **fourth instance** of the placeholder-lowering pattern:
+
+| Bug | Operator | Placeholder | Fixed in |
+|---|---|---|---|
+| BUG-008 | `is not` | `RefEq` (not `not RefEq`) | M10 |
+| BUG-034 | `str !=` | `INe` (no `is_str` branch) | M12 |
+| BUG-037 | `??` (null-coalesce) | `Copy(rhs)` | M21 |
+| **BUG-039** | **`in` / `not in`** | **`IEq` / `INe`** | **M24** |
+
+Same shape every time: a binary operator with a missing branch in
+its IR lowering. Every operator whose semantics depend on operand
+type needs to dispatch on type, not emit a hardcoded IROp.
+
+Fix in M24: `In` lowering now dispatches on the RHS (container)
+type. `key in Dict[str, V]` → `NativeFn::DictHas(dict, key)`;
+`x in Set[T]` → `NativeFn::SetHas(set, x)`. `NotIn` mirrors then
+emits `BoolNot`. List membership and non-str-keyed Dict still
+placeholder (v0.3 work).
+
+### Worktree integration quirk
+
+All four agents finished their work but **ran out of compute budget
+at the final `git commit` step**. The orchestrator committed each
+worktree's tree on the agent's behalf, then cherry-picked onto main.
+Pattern note: future agent briefs should explicitly call out "commit
+EARLY, before writing the long report" — the agents wrote 500-1000
+word reports last and exhausted budget before getting back to
+`git commit`.
+
+### Stress-round bug-rate trajectory
+
+| Round | Programs | Bugs found |
+|---|---|---:|
+| M10 (round 1) | 6 | 17 |
+| M11 (round 2) | 5 | 6 |
+| M12 (round 3) | 3 | 2 |
+| M18 (round 4) | 4 (M13-M17 surface) | 1 |
+| **M24 (round 5)** | 4 (Phase 3a surface) | **1** |
+
+The curve is flat at 1 bug per round of ~1000-1500 LOC since M18.
+That's a stable signal: the language is in steady state — stress
+tests still find things, but the things they find are localized
+(BUG-037 was a placeholder, BUG-039 is a placeholder; not
+architectural). The methodology section should call out the
+"placeholder-lowering audit" as a mechanical pass that would have
+caught all four pattern instances at once if run after M2.
+
+### Tests + size
+
+- **Tests**: 553 → 578 (+25 from new examples + BUG-039 regression).
+- **Examples**: 62 → 70 (+8 — job_scheduler, event_log, test_runner,
+  fs_migrator, plus probe files).
+- **Stdlib modules**: unchanged at 24. M24 was stress + bug fix only.
+
+---
+
 ## What this trajectory shows
 
 - **Bugs found scales with running real programs, not with writing tests.**
