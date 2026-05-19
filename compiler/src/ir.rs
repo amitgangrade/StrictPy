@@ -2737,8 +2737,89 @@ fn emit_binop(
                 ValueKind::Op { op: IROp::BoolNot, args: vec![eq] },
             );
         }
-        AstBinOp::In => IROp::IEq,      // placeholder
-        AstBinOp::NotIn => IROp::INe,   // placeholder
+        AstBinOp::In => {
+            // M24 fix (BUG-039): `key in container` previously lowered to
+            // `IEq` — comparing the key against the container's heap pointer
+            // as i64. Always false for any separately-allocated key, and
+            // segfaulted for `<i64> in Dict[i64, _]` (the IEq bit pattern
+            // happened to look like a heap pointer that something dereferenced).
+            // Same shape as BUG-008 (`is not` was `RefEq`), BUG-034 (`str !=`
+            // had no is_str branch), BUG-037 (`??` was Copy(rhs)). FOURTH
+            // instance of the placeholder-lowering pattern; every comparison
+            // operator's IR lowering needs both forms tested.
+            //
+            // Dispatch by the RHS (container) type:
+            //   key in Dict[K, V] -> DictHas(dict, key)
+            //   x   in Set[T]     -> SetHas(set, x)
+            //   x   in List[T]    -> still placeholder (v0.3 work: linear
+            //                        scan or native NativeFn::ListContains).
+            // Note: M5 Dict runtime is hardcoded to string keys (DictHas
+            // calls arg_str on the key, so non-str keys segfault — distinct
+            // from BUG-039 but the M24-B agent's probe `_probe_dict_in_i64`
+            // exposed it). Only dispatch DictHas when the key type is str;
+            // for Dict[i64, _] etc. fall back to the old placeholder
+            // (returns false silently, same wrong behaviour as pre-fix, but
+            // doesn't segfault). Dict with non-str keys is itself v0.3.
+            let rhs_ty = find_value_ty(fb, r).unwrap_or(ty.clone());
+            let rhs_inner = match &rhs_ty {
+                Ty::Nullable(inner) => (**inner).clone(),
+                other => other.clone(),
+            };
+            match &rhs_inner {
+                Ty::Generic { base: TypeCtor::Dict, args }
+                    if matches!(args.first(), Some(Ty::Primitive(PrimTy::Str))) =>
+                {
+                    return fb.push_value(
+                        ty,
+                        ValueKind::Op {
+                            op: IROp::NativeCall { native_id: NativeFn::DictHas as u32 },
+                            args: vec![r, l],
+                        },
+                    );
+                }
+                Ty::Generic { base: TypeCtor::Set, .. } => {
+                    return fb.push_value(
+                        ty,
+                        ValueKind::Op {
+                            op: IROp::NativeCall { native_id: NativeFn::SetHas as u32 },
+                            args: vec![r, l],
+                        },
+                    );
+                }
+                _ => IROp::IEq, // list / non-str-keyed dict / others — still placeholder; v0.3
+            }
+        }
+        AstBinOp::NotIn => {
+            // Same dispatch as In, then BoolNot. Mirrors the IsNot precedent.
+            let rhs_ty = find_value_ty(fb, r).unwrap_or(ty.clone());
+            let rhs_inner = match &rhs_ty {
+                Ty::Nullable(inner) => (**inner).clone(),
+                other => other.clone(),
+            };
+            let native_id = match &rhs_inner {
+                Ty::Generic { base: TypeCtor::Dict, args }
+                    if matches!(args.first(), Some(Ty::Primitive(PrimTy::Str))) =>
+                {
+                    Some(NativeFn::DictHas as u32)
+                }
+                Ty::Generic { base: TypeCtor::Set, .. } => Some(NativeFn::SetHas as u32),
+                _ => None,
+            };
+            if let Some(native_id) = native_id {
+                let has = fb.push_value(
+                    Ty::Primitive(PrimTy::Bool),
+                    ValueKind::Op {
+                        op: IROp::NativeCall { native_id },
+                        args: vec![r, l],
+                    },
+                );
+                return fb.push_value(
+                    ty,
+                    ValueKind::Op { op: IROp::BoolNot, args: vec![has] },
+                );
+            }
+            IROp::INe // list/other — still placeholder; v0.3
+        }
         // M13 (BUG-035): `and` / `or` are intercepted in `lower_expr` for
         // `Expr::Binary` (BEFORE both operands get lowered) and routed to
         // `lower_short_circuit`. The bitwise fallback below is kept only

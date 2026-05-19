@@ -665,26 +665,18 @@ fn run_demo() -> i32:
         pyb_ok = false
     probe_print("Y year-boundary add_days(-1)", pyb_ok)
 
-    # ── New found bug: `in` returns false on Dict[str, *] ───────────────
-    # This is BUG-039 (M24-B finding).  Pin the broken behaviour so the
-    # demo loudly signals when it gets fixed.
+    # ── BUG-039 regression (fixed in M24) ────────────────────────────────
+    # `key in Dict[str, *]` used to always return false (placeholder IR
+    # lowering — same family as BUG-008 `is not`, BUG-034 `str !=`,
+    # BUG-037 `??`). Fixed in M24 by dispatching the IR `In` lowering on
+    # the RHS type: Dict[str, V] -> NativeFn::DictHas. PASS now means
+    # `in` works correctly (pre-fix, this probe FAILed).
     pbug_observed: bool = false
     bug_d: Dict[str, i64] = {}
     bug_d["x"] = 1i64
-    # Lookup via [] returns the right value.
-    if bug_d["x"] != 1i64:
-        pbug_observed = false
-    else:
-        # `in` is the buggy operator.  We expect false here today.
-        if "x" in bug_d:
-            # If we land here, the bug is FIXED.  Flip the sense.
-            pbug_observed = false
-        else:
-            pbug_observed = true
-    # We invert the report so PASS = "still broken as expected".
-    # Once the underlying fix lands, this probe will FLIP and that's
-    # the signal the regression test caught the fix.
-    probe_print("B BUG-039 'in' broken on Dict[str,*] (pin)", pbug_observed)
+    if bug_d["x"] == 1i64 and "x" in bug_d:
+        pbug_observed = true
+    probe_print("B BUG-039 'in' on Dict[str,*] now correct", pbug_observed)
 
     # sqlite3.connect to non-existent directory should raise IOError.
     pnd_ok: bool = false
