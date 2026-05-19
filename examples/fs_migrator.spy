@@ -1,0 +1,479 @@
+"""fs_migrator.spy — M24-D Phase 3a stress: filesystem migration tool.
+
+Walks a fixed test directory tree (created at startup, cleaned at end),
+classifies each file by modification age into {old, recent, medium}, and
+emits a tree-style report.  Exercises **pathlib + os + datetime +
+subprocess + io + sys** in combination to stress the M23 Phase 3a surface.
+
+The probes (numbered to match docs/thesis/agent_reports/m24_d.md):
+
+  1. Recursive `os.listdir` over a 3-level tree.
+  2. `pathlib.join` with mixed separators.
+  3. `pathlib.parts` round-trip — split + re-join consistency.
+  4. `pathlib.stem` / `pathlib.suffix` on multi-extension and dotfile edges.
+  5. `pathlib.with_suffix` on a file with no current extension.
+  6. `pathlib.relative_to` — happy path + not-a-subpath ValueError.
+  7. `datetime.diff_days` for file-age arithmetic.
+  8. `subprocess.run` invoking the platform-native mtime tool (stat / dir).
+  9. `pathlib.read_text` on a UTF-8 multibyte file (round-trip).
+ 10. `os.mkdir` + `os.remove` + `os.is_dir` dance — create, verify, remove.
+
+Headline finding: v0.2 stdlib has NO `os.mtime` or `pathlib.stat` —
+file metadata access requires shelling out, which is fragile cross-
+platform.  This program documents the workaround and proposes that
+P3b ship the missing primitive.
+
+Tests:
+  * `compiler/tests/fs_migrator_runs.rs` — subprocess assertion.
+"""
+
+import sys
+import os
+import pathlib
+import datetime
+import subprocess
+import re
+
+
+# ── Helpers ─────────────────────────────────────────────────────────────
+
+fn shell_prog() -> str:
+    if sys.platform == "windows":
+        return "cmd.exe"
+    return "sh"
+
+
+fn shell_argv(cmd: str) -> List[str]:
+    args: List[str] = []
+    if sys.platform == "windows":
+        args.append("/c")
+    else:
+        args.append("-c")
+    args.append(cmd)
+    return args
+
+
+fn mtime_via_subprocess(path: str) -> i64:
+    """Return file's mtime as unix epoch seconds, or -1 on parse failure.
+
+    Probe 8: there is no os.mtime / pathlib.stat in v0.2.  We spawn the
+    platform-native tool:
+      - Unix: `stat -c %Y <path>` → bare integer epoch seconds.
+      - Windows: `dir /T:W <path>` → locale-dependent date string that
+        is genuinely hard to parse generically.  We return -1 on Windows
+        as the documented fallback (program treats -1 as "unknown age").
+    """
+    if sys.platform == "windows":
+        # The `dir /T:W` output's date format is locale-dependent —
+        # could be MM/DD/YYYY (en-US), DD/MM/YYYY (en-GB), YYYY-MM-DD
+        # (some locales), or even YYYY/MM/DD.  We try the two common
+        # forms with a strict 4-digit year match.  This is exactly the
+        # fragility the report calls out as the headline finding —
+        # v0.2 needs a real `os.mtime` primitive.
+        #
+        # Path-quoting note: cmd.exe re-parses our argument string and
+        # gets confused by escaped quotes when passed through
+        # subprocess.run.  We omit quoting and rely on the test paths
+        # having no spaces.
+        cmd: str = "dir /T:W " + path
+        argv: List[str] = shell_argv(cmd)
+        r: Tuple[i32, str, str] = subprocess.run(shell_prog(), argv)
+        if r.0 != 0i32:
+            return -1i64
+        # Try slash-separated dates first (MM/DD/YYYY in en-US, or
+        # DD/MM/YYYY elsewhere).  We can't tell them apart from a
+        # single date — try one order, fall back to the other if
+        # from_ymd raises ValueError.  This is exactly the
+        # locale-fragility the headline finding calls out.
+        m: List[str] = re.find_all("[0-9]{2}/[0-9]{2}/[0-9]{4}", r.1)
+        if i64(len(m)) > 0i64:
+            bits: List[str] = m[0].split("/")
+            if i64(len(bits)) == 3i64:
+                p1: i64 = parse_i64(bits[0])
+                p2: i64 = parse_i64(bits[1])
+                yyyy: i64 = parse_i64(bits[2])
+                # Try (mm=p1, dd=p2) first; if it's out of range, swap.
+                try:
+                    return datetime.from_ymd(i32(yyyy), i32(p1), i32(p2))
+                except ValueError as e1:
+                    try:
+                        return datetime.from_ymd(i32(yyyy), i32(p2), i32(p1))
+                    except ValueError as e2:
+                        return -1i64
+        # Fall back: YYYY-MM-DD ISO-like format (some locales).
+        m2: List[str] = re.find_all("[0-9]{4}-[0-9]{2}-[0-9]{2}", r.1)
+        if i64(len(m2)) > 0i64:
+            bits2: List[str] = m2[0].split("-")
+            if i64(len(bits2)) == 3i64:
+                yyyy2: i64 = parse_i64(bits2[0])
+                mm2: i64 = parse_i64(bits2[1])
+                dd2: i64 = parse_i64(bits2[2])
+                try:
+                    return datetime.from_ymd(i32(yyyy2), i32(mm2), i32(dd2))
+                except ValueError as e3:
+                    return -1i64
+        return -1i64
+    # Unix branch: stat prints just the epoch seconds.
+    cmd2: str = "stat -c %Y \"" + path + "\""
+    argv2: List[str] = shell_argv(cmd2)
+    r2: Tuple[i32, str, str] = subprocess.run(shell_prog(), argv2)
+    if r2.0 != 0i32:
+        return -1i64
+    # Strip trailing newline.
+    out: str = r2.1
+    n: i64 = i64(len(out))
+    # Trim trailing whitespace bytes (newline/cr).
+    end: i64 = n
+    while end > 0i64:
+        c: str = out.slice(end - 1i64, end)
+        if c == "\n" or c == "\r" or c == " ":
+            end = end - 1i64
+        else:
+            break
+    trimmed: str = out.slice(0i64, end)
+    if i64(len(trimmed)) == 0i64:
+        return -1i64
+    return parse_i64(trimmed)
+
+
+fn classify_age(age_days: i64) -> str:
+    if age_days < 0i64:
+        return "unknown"
+    if age_days > 30i64:
+        return "old (>30 days)"
+    if age_days < 7i64:
+        return "recent (<7 days)"
+    return "medium"
+
+
+# ── Recursive walk ─────────────────────────────────────────────────────
+
+fn walk_collect(root: str, out: List[str], depth: i64) -> None:
+    """Recursive os.listdir-based walker.
+
+    v0.2 has no os.walk; we recurse on os.listdir + os.is_dir.  Probe 1
+    exercises this over a 3-level tree; the spec bounds recursion at
+    ~1024 frames (§14.2), so 3 levels is well within budget.
+    """
+    if depth > 16i64:
+        # Defensive bound — even though our test tree is only 3 deep,
+        # symlink loops or unexpected nesting shouldn't blow the stack.
+        return
+    try:
+        entries: List[str] = os.listdir(root)
+        n: i64 = i64(len(entries))
+        i: i64 = 0
+        while i < n:
+            full: str = pathlib.join(root, entries[i])
+            if os.is_dir(full):
+                walk_collect(full, out, depth + 1i64)
+            else:
+                out.append(full)
+            i = i + 1
+    except IOError as e:
+        println("walk: skipped " + root + " — " + e.message)
+
+
+# ── Probes ─────────────────────────────────────────────────────────────
+
+fn probe_pathlib_join_mixed(report: List[str]) -> None:
+    # Probe 2: how does pathlib.join handle mixed separators?
+    a: str = pathlib.join("foo/", "/bar")
+    b: str = pathlib.join("foo", "bar/baz")
+    # We don't assert exact output (separator is OS-native) — we assert
+    # that join doesn't crash and the result is non-empty.
+    if i64(len(a)) > 0i64 and i64(len(b)) > 0i64:
+        report.append("probe2.join_mixed=PASS a_len=" + str(len(a)) + " b_len=" + str(len(b)))
+    else:
+        report.append("probe2.join_mixed=FAIL")
+    # Document the actual outputs for the report.
+    report.append("probe2.a=" + a)
+    report.append("probe2.b=" + b)
+
+
+fn probe_pathlib_parts(report: List[str]) -> None:
+    # Probe 3: parts() round-trip.
+    p: str = pathlib.join(pathlib.join("a", "b"), "c.txt")
+    parts: List[str] = pathlib.parts(p)
+    n: i64 = i64(len(parts))
+    if n == 3i64 and parts[0] == "a" and parts[1] == "b" and parts[2] == "c.txt":
+        report.append("probe3.parts=PASS n=" + str(n))
+    else:
+        report.append("probe3.parts=FAIL n=" + str(n))
+        i: i64 = 0
+        while i < n:
+            report.append("  parts[" + str(i) + "]=" + parts[i])
+            i = i + 1
+
+
+fn probe_stem_suffix_edges(report: List[str]) -> None:
+    # Probe 4: stem/suffix edge cases.
+    s1: str = pathlib.stem("archive.tar.gz")
+    e1: str = pathlib.suffix("archive.tar.gz")
+    s2: str = pathlib.stem("README")
+    e2: str = pathlib.suffix("README")
+    s3: str = pathlib.stem(".bashrc")
+    e3: str = pathlib.suffix(".bashrc")
+
+    ok1: bool = s1 == "archive.tar" and e1 == ".gz"
+    ok2: bool = s2 == "README" and e2 == ""
+    ok3: bool = s3 == ".bashrc" and e3 == ""
+    if ok1 and ok2 and ok3:
+        report.append("probe4.stem_suffix=PASS")
+    else:
+        report.append("probe4.stem_suffix=FAIL")
+        report.append("  archive.tar.gz -> stem=" + s1 + " suffix=" + e1)
+        report.append("  README -> stem=" + s2 + " suffix=" + e2)
+        report.append("  .bashrc -> stem=" + s3 + " suffix=" + e3)
+
+
+fn probe_with_suffix_no_ext(report: List[str]) -> None:
+    # Probe 5: with_suffix on a file with no current extension.
+    a: str = pathlib.with_suffix("notes.txt", ".bak")
+    b: str = pathlib.with_suffix("notes", ".bak")
+    ok: bool = a == "notes.bak" and b == "notes.bak"
+    if ok:
+        report.append("probe5.with_suffix=PASS")
+    else:
+        report.append("probe5.with_suffix=FAIL a=" + a + " b=" + b)
+
+
+fn probe_relative_to(report: List[str]) -> None:
+    # Probe 6: relative_to + ValueError when base isn't a parent.
+    happy: str = pathlib.relative_to(pathlib.join("a", pathlib.join("b", "c.txt")), "a")
+    # Should look like "b/c.txt" on Unix, "b\c.txt" on Windows.  We
+    # check the basename only to stay portable.
+    if pathlib.name(happy) == "c.txt":
+        report.append("probe6.relative_to=PASS")
+    else:
+        report.append("probe6.relative_to=FAIL happy=" + happy)
+    caught: bool = false
+    try:
+        bad: str = pathlib.relative_to("x/y", "a/b")
+        report.append("  UNREACHED: " + bad)
+    except ValueError as e:
+        caught = true
+    if caught:
+        report.append("probe6.value_error=PASS")
+    else:
+        report.append("probe6.value_error=FAIL (no ValueError raised)")
+
+
+fn probe_datetime_diff(report: List[str]) -> None:
+    # Probe 7: known-answer diff_days.
+    a: i64 = datetime.from_ymd(2026, 5, 19)
+    b: i64 = datetime.from_ymd(2026, 4, 19)
+    diff: i64 = datetime.diff_days(a, b)
+    if diff == 30i64:
+        report.append("probe7.diff_days=PASS (May - April = 30)")
+    else:
+        report.append("probe7.diff_days=FAIL got=" + str(diff))
+    # Negative case — future minus past should be positive; past minus
+    # future should be negative.
+    neg: i64 = datetime.diff_days(b, a)
+    if neg == -30i64:
+        report.append("probe7.diff_days_negative=PASS")
+    else:
+        report.append("probe7.diff_days_negative=FAIL got=" + str(neg))
+
+
+fn probe_read_text_utf8(report: List[str], dir: str) -> None:
+    # Probe 9: read_text on a UTF-8 multibyte file.
+    p: str = pathlib.join(dir, "utf8_probe.txt")
+    # Greek alpha-beta-gamma (U+03B1 U+03B2 U+03B3) + em-dash + Han 中.
+    body: str = "alpha=α beta=β gamma=γ — 中文"
+    pathlib.write_text(p, body)
+    got: str = pathlib.read_text(p)
+    if got == body:
+        report.append("probe9.utf8_roundtrip=PASS len=" + str(len(got)))
+    else:
+        report.append("probe9.utf8_roundtrip=FAIL")
+    os.remove(p)
+
+
+fn probe_mkdir_remove(report: List[str], base: str) -> None:
+    # Probe 10: os.mkdir + os.is_dir + os.remove dance — but remove
+    # only works on files; for directories you'd need rmdir which
+    # v0.2 doesn't expose.  We test create-dir + is_dir, then
+    # create-file + remove-file + verify-gone.
+    d: str = pathlib.join(base, "_probe_subdir")
+    try:
+        os.mkdir(d)
+    except IOError as e:
+        # Already exists from a previous bad run — treat as setup ok.
+        pass
+    if os.is_dir(d):
+        report.append("probe10.mkdir=PASS")
+    else:
+        report.append("probe10.mkdir=FAIL")
+    f: str = pathlib.join(d, "victim.txt")
+    pathlib.write_text(f, "doomed\n")
+    if os.is_file(f):
+        report.append("probe10.write=PASS")
+    else:
+        report.append("probe10.write=FAIL")
+    os.remove(f)
+    if not os.is_file(f):
+        report.append("probe10.remove=PASS")
+    else:
+        report.append("probe10.remove=FAIL")
+    # We can't rmdir from v0.2 stdlib — leave the empty subdir for the
+    # outer cleanup to skip.  Document this as a finding.
+
+
+# ── Test-tree setup / teardown ─────────────────────────────────────────
+
+fn try_mkdir(p: str) -> None:
+    try:
+        os.mkdir(p)
+    except IOError as e:
+        # Already exists — ignore (idempotent setup).
+        pass
+
+
+fn setup_tree(root: str) -> None:
+    """Create a 3-level test tree with known files.
+
+    Layout:
+      root/
+        a.txt
+        notes.md
+        sub1/
+          inner.txt
+          archive.tar.gz
+          sub2/
+            deep.log
+    """
+    try_mkdir(root)
+    pathlib.write_text(pathlib.join(root, "a.txt"), "alpha\n")
+    pathlib.write_text(pathlib.join(root, "notes.md"), "# notes\n")
+    sub1: str = pathlib.join(root, "sub1")
+    try_mkdir(sub1)
+    pathlib.write_text(pathlib.join(sub1, "inner.txt"), "inner\n")
+    pathlib.write_text(pathlib.join(sub1, "archive.tar.gz"), "fake-gz\n")
+    sub2: str = pathlib.join(sub1, "sub2")
+    try_mkdir(sub2)
+    pathlib.write_text(pathlib.join(sub2, "deep.log"), "deep\n")
+
+
+fn cleanup_tree(root: str) -> None:
+    """Remove every file the walker can see, then leave dirs (v0.2
+    has no rmdir; the test asserts the file-level cleanup happened).
+    """
+    files: List[str] = []
+    walk_collect(root, files, 0i64)
+    n: i64 = i64(len(files))
+    i: i64 = 0
+    while i < n:
+        try:
+            os.remove(files[i])
+        except IOError as e:
+            println("cleanup: could not remove " + files[i])
+        i = i + 1
+
+
+# ── Main ───────────────────────────────────────────────────────────────
+
+fn main() -> i32:
+    println("== fs_migrator (M24-D) ==")
+    println("platform: " + sys.platform)
+
+    # Pin the "now" reference so age calculations are deterministic
+    # against the (just-created) test files.
+    now: i64 = datetime.now()
+    println("now: " + datetime.to_iso(now))
+
+    # The test directory lives under cwd to keep things hermetic.
+    test_root: str = "_m24_fs_migrator_tmp"
+    setup_tree(test_root)
+
+    # ── Walk the tree (probe 1). ───────────────────────────────────────
+    files: List[str] = []
+    walk_collect(test_root, files, 0i64)
+    nf: i64 = i64(len(files))
+    println("walked: " + str(nf) + " files")
+    if nf == 5i64:
+        println("probe1.recursive_listdir=PASS depth=3 files=5")
+    else:
+        println("probe1.recursive_listdir=FAIL got=" + str(nf))
+
+    # ── Run static probes (don't depend on the walked tree). ───────────
+    report: List[str] = []
+    probe_pathlib_join_mixed(report)
+    probe_pathlib_parts(report)
+    probe_stem_suffix_edges(report)
+    probe_with_suffix_no_ext(report)
+    probe_relative_to(report)
+    probe_datetime_diff(report)
+    probe_read_text_utf8(report, test_root)
+    probe_mkdir_remove(report, test_root)
+
+    # Emit collected probe results.
+    nr: i64 = i64(len(report))
+    i: i64 = 0
+    while i < nr:
+        println(report[i])
+        i = i + 1
+
+    # ── Per-file report (probe 8 — subprocess mtime + categorisation). ─
+    println("-- per-file report --")
+    j: i64 = 0
+    while j < nf:
+        path: str = files[j]
+        # Use pathlib for name/stem/suffix decomposition.
+        nm: str = pathlib.name(path)
+        st: str = pathlib.stem(nm)
+        sf: str = pathlib.suffix(nm)
+        # Probe 8 + probe 7: mtime via subprocess + age in days.
+        mtime: i64 = mtime_via_subprocess(path)
+        age_days: i64 = -1i64
+        if mtime >= 0i64:
+            secs: i64 = datetime.diff_seconds(now, mtime)
+            age_days = secs / 86400i64
+        cat: str = classify_age(age_days)
+        # Compose tree-style line.
+        println("  " + path + " -> name=" + nm + " stem=" + st + " suffix=" + sf + " age_days=" + str(age_days) + " cat=" + cat)
+        j = j + 1
+
+    # Probe 8 summary: did at least one mtime parse succeed?  Also
+    # capture the raw subprocess output for the first file so the
+    # cross-platform-fragility writeup can quote the actual format.
+    any_ok: bool = false
+    k: i64 = 0
+    while k < nf:
+        if mtime_via_subprocess(files[k]) >= 0i64:
+            any_ok = true
+            break
+        k = k + 1
+    if any_ok:
+        println("probe8.subprocess_mtime=PASS (at least one file)")
+    else:
+        println("probe8.subprocess_mtime=FAIL (parsing fragile cross-platform)")
+    # Dump the raw stat/dir output for the first file (diagnostic).
+    if nf > 0i64:
+        first_path: str = files[0]
+        if sys.platform == "windows":
+            dcmd: str = "dir /T:W " + first_path
+            dargv: List[str] = shell_argv(dcmd)
+            dr: Tuple[i32, str, str] = subprocess.run(shell_prog(), dargv)
+            println("probe8.raw.exit=" + str(dr.0))
+            println("probe8.raw.stdout=" + dr.1)
+            println("probe8.raw.stderr=" + dr.2)
+        else:
+            ucmd: str = "stat -c %Y \"" + first_path + "\""
+            uargv: List[str] = shell_argv(ucmd)
+            ur: Tuple[i32, str, str] = subprocess.run(shell_prog(), uargv)
+            println("probe8.raw.exit=" + str(ur.0))
+            println("probe8.raw.stdout=" + ur.1)
+
+    # ── Cleanup. ──────────────────────────────────────────────────────
+    cleanup_tree(test_root)
+    leftovers: List[str] = []
+    walk_collect(test_root, leftovers, 0i64)
+    if i64(len(leftovers)) == 0i64:
+        println("cleanup=PASS")
+    else:
+        println("cleanup=PARTIAL leftovers=" + str(len(leftovers)))
+
+    println("DONE")
+    return 0
