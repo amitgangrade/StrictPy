@@ -1,5 +1,17 @@
 # Pending changes to BLOG_POST.md
 
+> **STATUS (2026-05-19): APPLIED.** BLOG_POST.md was rewritten to
+> incorporate M10–M25. TL;DR table refreshed to post-M25 numbers
+> (fib(30) 13.1ms, 16/0/0); new sections added for M10–M12 stress
+> rounds, M13–M17 language completeness, M19–M23 stdlib sprint, M24
+> placeholder-lowering audit, M25 unified CLI; the "What I learned"
+> list expanded from 5 to 8 lessons; "what can't do" trimmed to
+> post-M25 reality (1 open bug, generic classes deferred, etc.);
+> reproducing-this section updated to M25 single-command workflow
+> and links to THESIS.md + docs/thesis/. The original planning notes
+> below are preserved as the historical record of how the rewrite
+> was scoped.
+
 Captured before session compaction. Goal: when the rewrite happens in a
 future session, this file + the current `BLOG_POST.md` + the thesis
 archive (`docs/thesis/`) are enough to produce the updated post.
