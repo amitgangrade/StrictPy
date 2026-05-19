@@ -1,0 +1,448 @@
+"""test_runner.spy — M24-C: parallel test runner.
+
+The most meta example: a small parallel test runner written in StrictPy,
+combining **subprocess + threading + queue + sqlite3** in a real-world
+dev-tool shape.
+
+## Architecture
+
+* A fixed list of tests (name + shell-command + expected exit code) is
+  stored in parallel `List[str]` / `List[i32]` arrays (StrictPy v0.2 has
+  no tuples-of-mixed-shape; the parallel-arrays-by-index pattern is the
+  usual workaround).
+* A `queue.PriorityQueue[str]` holds the test names, priority = the
+  alphabetical rank as `f64`.  Workers pop highest-priority (lowest f64
+  in min-heap terms) → tests run in deterministic alphabetical order
+  regardless of worker count.
+* `N` worker threads (default 4) each loop: try to pop a name; if empty,
+  exit; else find its row in the parallel arrays by linear scan, run
+  `subprocess.run` against `cmd /c <cmd>` (Windows) or `sh -c <cmd>`
+  (Unix), measure wall-clock via `time.monotonic()`, classify the
+  result, and INSERT into a shared in-memory SQLite table under a
+  `threading.Lock`.
+* Main thread joins all workers, then queries SQLite for the summary:
+  pass/fail counts and the slowest-3 tests.
+
+## Probes (all 10 documented in `docs/thesis/agent_reports/m24_c.md`)
+
+1. N=4 wall-clock vs N=1 (parallelism check).
+2. SQLite from N threads (Lock serialisation correctness).
+3. `time.monotonic()` across thread boundaries.
+4. PriorityQueue drained by N workers (no deadlock when empty).
+5. Subprocess on nonexistent program → IOError caught in worker.
+6. SQLite ORDER BY through query_params.
+7. 20 tests across 4 workers → all 20 rows present.
+8. Worker that hits a "fail" command continues with the next item.
+9. (Optional) subprocess.try_wait — skipped, see report.
+10. Counter + Lock as poor-man's join barrier — verified.
+
+## Cross-platform shell selection
+
+Windows: `cmd.exe /c <cmd>` ; uses `exit N` and `timeout /t /nobreak`
+Unix:    `sh -c <cmd>`       ; uses `exit N` and `sleep`
+
+The fast tests target ~0ms exec time (pure shell-builtin `exit N`).
+The slow tests target ~100ms via the platform's sleep primitive.
+"""
+
+import subprocess
+import sys
+import threading
+import queue
+import sqlite3
+import time
+from threading import Thread
+
+
+# ─── Test table ──────────────────────────────────────────────────────
+#
+# Parallel arrays keyed by index.  Each "test" is the tuple
+# (name, command-fragment, expected-exit, is-slow).
+#
+# 20 tests total: 14 "fast" (just `exit N`) and 6 "slow" (~100ms sleep).
+#
+
+fn build_test_table(names: List[str], cmds: List[str], exits: List[i32], slows: List[bool]) -> None:
+    # 14 fast tests:
+    add_test(names, cmds, exits, slows, "fast_pass_01", "exit 0", 0i32, false)
+    add_test(names, cmds, exits, slows, "fast_pass_02", "exit 0", 0i32, false)
+    add_test(names, cmds, exits, slows, "fast_pass_03", "exit 0", 0i32, false)
+    add_test(names, cmds, exits, slows, "fast_pass_04", "exit 0", 0i32, false)
+    add_test(names, cmds, exits, slows, "fast_pass_05", "exit 0", 0i32, false)
+    add_test(names, cmds, exits, slows, "fast_pass_06", "exit 0", 0i32, false)
+    add_test(names, cmds, exits, slows, "fast_pass_07", "exit 0", 0i32, false)
+    add_test(names, cmds, exits, slows, "fast_pass_08", "exit 0", 0i32, false)
+    add_test(names, cmds, exits, slows, "fast_fail_01", "exit 1", 1i32, false)
+    add_test(names, cmds, exits, slows, "fast_fail_02", "exit 7", 7i32, false)
+    add_test(names, cmds, exits, slows, "fast_fail_03", "exit 2", 2i32, false)
+    # Expected-pass but actually fails (status mismatch → recorded "fail").
+    add_test(names, cmds, exits, slows, "fast_mism_01", "exit 1", 0i32, false)
+    # Status mismatch in the other direction.
+    add_test(names, cmds, exits, slows, "fast_mism_02", "exit 0", 1i32, false)
+    add_test(names, cmds, exits, slows, "fast_pass_09", "exit 0", 0i32, false)
+    # 6 slow tests (~100ms each).  Platform-dependent command set below.
+    sleep_cmd: str = slow_sleep_cmd()
+    add_test(names, cmds, exits, slows, "slow_pass_01", sleep_cmd, 0i32, true)
+    add_test(names, cmds, exits, slows, "slow_pass_02", sleep_cmd, 0i32, true)
+    add_test(names, cmds, exits, slows, "slow_pass_03", sleep_cmd, 0i32, true)
+    add_test(names, cmds, exits, slows, "slow_pass_04", sleep_cmd, 0i32, true)
+    add_test(names, cmds, exits, slows, "slow_pass_05", sleep_cmd, 0i32, true)
+    add_test(names, cmds, exits, slows, "slow_pass_06", sleep_cmd, 0i32, true)
+
+
+fn add_test(names: List[str], cmds: List[str], exits: List[i32], slows: List[bool],
+            name: str, cmd: str, expected: i32, slow: bool) -> None:
+    names.append(name)
+    cmds.append(cmd)
+    exits.append(expected)
+    slows.append(slow)
+
+
+fn slow_sleep_cmd() -> str:
+    # ~100ms sleep on whatever shell we're invoking.
+    #   * Windows `timeout` has a 1-second floor; instead, ping localhost
+    #     with `-n 2 -w 1` which sleeps ~1s but blocks 100ms before the
+    #     first packet... unreliable.  Use cmd's busy-wait via `for /L`
+    #     no — that's CPU-hot.  Cleanest: invoke PowerShell -Command
+    #     "Start-Sleep -Milliseconds 100".  But that's heavy.
+    #   * The simplest cross-platform option is to call the **VM's own**
+    #     sleep via `spy.exe sleep_test.spyc`, but that's a recursive
+    #     dependency we don't want in a test runner demo.
+    #   * Pragmatic answer: Windows uses `timeout /t 1 /nobreak >nul`
+    #     (~1s, on the slow end) — yes, slower than 100ms.  Unix uses
+    #     `sleep 0.1` (~100ms).  This makes wall-clock comparison
+    #     somewhat platform-asymmetric, but parallelism (N=1 vs N=4)
+    #     still demonstrates clearly on either host.
+    if sys.platform == "windows":
+        return "timeout /t 1 /nobreak >nul"
+    return "sleep 0.1"
+
+
+# ─── Shell argv plumbing ────────────────────────────────────────────
+
+fn shell_prog() -> str:
+    if sys.platform == "windows":
+        return "cmd.exe"
+    return "sh"
+
+fn shell_argv(cmd: str) -> List[str]:
+    args: List[str] = []
+    if sys.platform == "windows":
+        args.append("/c")
+    else:
+        args.append("-c")
+    args.append(cmd)
+    return args
+
+
+# ─── Worker function ────────────────────────────────────────────────
+#
+# Each worker loops:
+#   1. acquire pq_lock
+#   2. if pq_is_empty → release, exit
+#   3. pq_pop_min_str → name
+#   4. release pq_lock
+#   5. find name in names[] → cmd, expected
+#   6. run subprocess.run, time it
+#   7. classify pass/fail
+#   8. INSERT under db_lock
+#   9. loop
+#
+# pq_lock is necessary because pop_min on an empty queue would raise
+# IndexError; without the lock, two workers can race on "is_empty?
+# yes, pop" — both see "not empty", both call pop, one succeeds and one
+# crashes.  (See probe #4 in the report.)
+#
+fn worker(worker_id: i32,
+          pq_handle: i64, pq_lock: i64,
+          names: List[str], cmds: List[str], exits: List[i32],
+          conn: i64, db_lock: i64,
+          done_counter: List[i32], done_lock: i64) -> None:
+    while true:
+        # ── Phase A: pop a name from the PQ under pq_lock ────────────
+        threading.lock_acquire(pq_lock)
+        is_empty: bool = queue.pq_is_empty(pq_handle)
+        name: str = ""
+        if is_empty:
+            threading.lock_release(pq_lock)
+            break
+        # Else pop.
+        top: Tuple[f64, str] = queue.pq_pop_min_str(pq_handle)
+        name = top.1
+        threading.lock_release(pq_lock)
+
+        # ── Phase B: look up cmd + expected ─────────────────────────
+        cmd: str = ""
+        expected: i32 = 0i32
+        found: bool = false
+        i: i32 = 0i32
+        nlen: i32 = i32(i64(len(names)))
+        while i < nlen:
+            if names[i] == name:
+                cmd = cmds[i]
+                expected = exits[i]
+                found = true
+                # don't break, keep i for diagnostics — but it's faster
+                # to break:
+                i = nlen
+            else:
+                i = i + 1i32
+        if not found:
+            # Should never happen — tests we pushed are the tests we
+            # registered.  Defensive insert as "fail" with no time.
+            insert_result(conn, db_lock, name, -1i32, 0i64, "fail")
+            continue
+
+        # ── Phase C: run + time ─────────────────────────────────────
+        prog: str = shell_prog()
+        argv: List[str] = shell_argv(cmd)
+        t0: f64 = time.monotonic()
+        exit_code: i32 = -1i32
+        status: str = "fail"
+        run_ok: bool = false
+        try:
+            r: Tuple[i32, str, str] = subprocess.run(prog, argv)
+            exit_code = r.0
+            run_ok = true
+        except IOError as e:
+            # Catastrophic spawn failure (e.g. cmd.exe missing on
+            # Windows).  Record as "fail" but continue with the next
+            # test — don't let the worker die.
+            exit_code = -2i32
+            status = "fail"
+        t1: f64 = time.monotonic()
+        duration_ms: i64 = i64((t1 - t0) * 1000.0)
+        if run_ok:
+            if exit_code == expected:
+                status = "pass"
+            else:
+                status = "fail"
+
+        # ── Phase D: insert under db_lock ───────────────────────────
+        insert_result(conn, db_lock, name, exit_code, duration_ms, status)
+
+    # Worker loop ended; bump the done counter under done_lock so the
+    # main thread can also verify "all N workers finished" without
+    # exclusively relying on Thread.join semantics.
+    threading.lock_acquire(done_lock)
+    done_counter[0] = done_counter[0] + 1i32
+    threading.lock_release(done_lock)
+
+
+fn insert_result(conn: i64, db_lock: i64, name: str,
+                 exit_code: i32, duration_ms: i64, status: str) -> None:
+    # Defensive: stringify all params, INSERT under db_lock.
+    threading.lock_acquire(db_lock)
+    try:
+        params: List[str] = []
+        params.append(name)
+        params.append(str(exit_code))
+        params.append(str(duration_ms))
+        params.append(status)
+        sqlite3.execute_params(
+            conn,
+            "INSERT INTO results (name, exit_code, duration_ms, status) VALUES (?, ?, ?, ?)",
+            params,
+        )
+    except ValueError as e:
+        # If sqlite raised, we still want to release the lock; main
+        # will notice the missing row in the count summary.
+        threading.lock_release(db_lock)
+        return
+    threading.lock_release(db_lock)
+
+
+# ─── Bonus probe: nonexistent program ───────────────────────────────
+
+fn probe_nonexistent_program() -> bool:
+    # subprocess.spawn on a clearly bogus program must raise IOError;
+    # the worker thread's IOError handler relies on this.  Run the
+    # check on the main thread before spawning workers so the failure
+    # mode is observable.
+    caught: bool = false
+    try:
+        h: i64 = subprocess.spawn("definitely_not_a_real_program_424242", [])
+        # If we got here, the spawn unexpectedly succeeded.  Wait it
+        # out so we don't leak.
+        c: i32 = subprocess.wait(h)
+        println("UNREACHED: probe spawn succeeded with code " + str(c))
+    except IOError as e:
+        caught = true
+    return caught
+
+
+# ─── Run the full suite once with N workers; return wall-ms ────────
+
+fn run_suite_once(num_workers: i32, names: List[str], cmds: List[str], exits: List[i32]) -> Tuple[i64, i64]:
+    # Returns (wall_clock_ms, num_rows_inserted)
+    conn: i64 = sqlite3.connect(":memory:")
+    sqlite3.execute(conn,
+        "CREATE TABLE results (name TEXT, exit_code INTEGER, duration_ms INTEGER, status TEXT)")
+    db_lock: i64 = threading.lock_new()
+    pq_lock: i64 = threading.lock_new()
+    done_lock: i64 = threading.lock_new()
+    done_counter: List[i32] = [0i32]
+
+    # Build the PQ from the names array.  Priority = index → workers
+    # pop in alphabetical order (we populated the names array that
+    # way) for deterministic ordering across runs regardless of N.
+    pq_handle: i64 = queue.pq_new_str()
+    i: i32 = 0i32
+    nlen: i32 = i32(i64(len(names)))
+    while i < nlen:
+        prio: f64 = f64(i)
+        queue.pq_push_str(pq_handle, prio, names[i])
+        i = i + 1i32
+
+    t0: f64 = time.monotonic()
+
+    # Spawn workers.  N goes 1..=4; we just-up-to-here unroll because
+    # StrictPy v0.2 has no `List[Thread]` (Thread is a class, list-of-class
+    # works, but `t.start()` is a method call so we'd need an index +
+    # explicit join).  Unrolling is fine for small N.
+    if num_workers == 1i32:
+        t1: Thread = Thread(fn() -> None: worker(1i32, pq_handle, pq_lock, names, cmds, exits, conn, db_lock, done_counter, done_lock))
+        t1.start()
+        t1.join()
+    else:
+        if num_workers == 2i32:
+            t1b: Thread = Thread(fn() -> None: worker(1i32, pq_handle, pq_lock, names, cmds, exits, conn, db_lock, done_counter, done_lock))
+            t2b: Thread = Thread(fn() -> None: worker(2i32, pq_handle, pq_lock, names, cmds, exits, conn, db_lock, done_counter, done_lock))
+            t1b.start()
+            t2b.start()
+            t1b.join()
+            t2b.join()
+        else:
+            # Default: 4 workers.
+            t1c: Thread = Thread(fn() -> None: worker(1i32, pq_handle, pq_lock, names, cmds, exits, conn, db_lock, done_counter, done_lock))
+            t2c: Thread = Thread(fn() -> None: worker(2i32, pq_handle, pq_lock, names, cmds, exits, conn, db_lock, done_counter, done_lock))
+            t3c: Thread = Thread(fn() -> None: worker(3i32, pq_handle, pq_lock, names, cmds, exits, conn, db_lock, done_counter, done_lock))
+            t4c: Thread = Thread(fn() -> None: worker(4i32, pq_handle, pq_lock, names, cmds, exits, conn, db_lock, done_counter, done_lock))
+            t1c.start()
+            t2c.start()
+            t3c.start()
+            t4c.start()
+            t1c.join()
+            t2c.join()
+            t3c.join()
+            t4c.join()
+
+    t1f: f64 = time.monotonic()
+    wall_ms: i64 = i64((t1f - t0) * 1000.0)
+
+    # Probe #10: done_counter equals num_workers.  Without explicit
+    # join, the counter could be < num_workers if main raced ahead.
+    # We DO call join above, so this MUST equal num_workers.
+    if done_counter[0] != num_workers:
+        println("WARN: done_counter=" + str(done_counter[0]) + " expected=" + str(num_workers))
+
+    # Count rows in the DB — must equal len(names).
+    cnt_rows: List[List[str]] = sqlite3.query(conn, "SELECT COUNT(*) FROM results")
+    row_count: i64 = 0i64
+    if len(cnt_rows) > 0:
+        first: List[str] = cnt_rows[0i32]
+        if len(first) > 0:
+            row_count = parse_i64(first[0i32])
+
+    # Save the final-suite stats for summary printing only when we ran
+    # with the canonical N=4 path.
+    if num_workers == 4i32:
+        emit_summary(conn)
+
+    sqlite3.close(conn)
+    return (wall_ms, row_count)
+
+
+fn emit_summary(conn: i64) -> None:
+    # Counts per status.
+    pass_n: i64 = count_status(conn, "pass")
+    fail_n: i64 = count_status(conn, "fail")
+    timeout_n: i64 = count_status(conn, "timeout")
+    println("summary.pass=" + str(pass_n))
+    println("summary.fail=" + str(fail_n))
+    println("summary.timeout=" + str(timeout_n))
+
+    # Slowest-3 by duration.  ORDER BY DESC LIMIT 3.
+    slow: List[List[str]] = sqlite3.query(conn,
+        "SELECT name, duration_ms FROM results ORDER BY duration_ms DESC LIMIT 3")
+    sn: i32 = i32(i64(len(slow)))
+    println("slowest.count=" + str(sn))
+    j: i32 = 0i32
+    while j < sn:
+        r: List[str] = slow[j]
+        if len(r) >= 2:
+            println("slowest." + str(j) + "=" + r[0i32] + ":" + r[1i32])
+        j = j + 1i32
+
+    # Slowest-3 via query_params — probe #6.  Same result; the LIMIT
+    # value is bound as a TEXT parameter ('3') and SQLite coerces it
+    # back to an integer on the LIMIT side.
+    p: List[str] = []
+    p.append("3")
+    slow2: List[List[str]] = sqlite3.query_params(conn,
+        "SELECT name, duration_ms FROM results ORDER BY duration_ms DESC LIMIT ?",
+        p)
+    println("slowest_via_params.count=" + str(i32(i64(len(slow2)))))
+
+
+fn count_status(conn: i64, status: str) -> i64:
+    p: List[str] = []
+    p.append(status)
+    rows: List[List[str]] = sqlite3.query_params(conn,
+        "SELECT COUNT(*) FROM results WHERE status = ?", p)
+    if len(rows) == 0:
+        return 0i64
+    first: List[str] = rows[0i32]
+    if len(first) == 0:
+        return 0i64
+    return parse_i64(first[0i32])
+
+
+# ─── main ───────────────────────────────────────────────────────────
+
+fn main() -> i32:
+    println("platform: " + sys.platform)
+
+    # ─── Build the test table ─────────────────────────────────────
+    names: List[str] = []
+    cmds: List[str] = []
+    exits: List[i32] = []
+    slows: List[bool] = []
+    build_test_table(names, cmds, exits, slows)
+    total: i32 = i32(i64(len(names)))
+    println("tests.total=" + str(total))
+
+    # ─── Probe #5: IOError on nonexistent program ─────────────────
+    if probe_nonexistent_program():
+        println("probe.nonexistent=ok")
+    else:
+        println("probe.nonexistent=FAIL")
+
+    # ─── N=4 canonical run ─────────────────────────────────────────
+    r4: Tuple[i64, i64] = run_suite_once(4i32, names, cmds, exits)
+    println("n4.wall_ms=" + str(r4.0))
+    println("n4.row_count=" + str(r4.1))
+
+    # ─── N=1 control run for parallelism measurement ──────────────
+    r1: Tuple[i64, i64] = run_suite_once(1i32, names, cmds, exits)
+    println("n1.wall_ms=" + str(r1.0))
+    println("n1.row_count=" + str(r1.1))
+
+    # Parallelism ratio: with 6 slow tests at ~100ms each, N=1 should
+    # take ~600ms (slow part) + small fast-part, N=4 should take
+    # ~150-200ms slow part.  The exact threshold is platform-dependent;
+    # we just emit the numbers and let the integration test assert
+    # something loose.
+    if r4.0 < r1.0:
+        println("parallelism=ok")
+    else:
+        println("parallelism=NONE")
+
+    # ─── Final sanity gate ─────────────────────────────────────────
+    if r1.1 == i64(total) and r4.1 == i64(total):
+        println("rows.ok=true")
+    else:
+        println("rows.ok=false")
+
+    println("done")
+    return 0
