@@ -59,3 +59,7 @@ the time it lands.
 | `m22_p2b.md` | M22 P2B | base64 + hashlib (9 NativeFns, 290-304). 5 new crate deps in vm/Cargo.toml: base64, sha1, sha2, md-5, hmac. Zero incidental bugs. |
 | `m22_p2c.md` | M22 P2C | itertools + statistics (20 NativeFns, 310-329). Monomorphic per-type variants matching M20b random.*. Zero incidental bugs. |
 | `m22_p2d.md` | M22 P2D | struct + urllib_parse (18 NativeFns, 330-347). `str`-as-byte-buffer encoding for binary IO. Self-fixed an `OBJECT_HEADER_SIZE` mismatch. |
+| `m23_p3a_a.md` | M23 P3a-A | subprocess + pathlib (20 NativeFns, 350-389). i64-handle process registry; flat-fn pathlib pending v0.3 stdlib classes. |
+| `m23_p3a_b.md` | M23 P3a-B | datetime (22 NativeFns, 390-411). Hand-rolled `civil_from_days` + platform-specific local_offset via FFI; no chrono dep. |
+| `m23_p3a_c.md` | M23 P3a-C | threading.Lock + Semaphore + queue.PriorityQueue (18 NativeFns, 420-437). Three new SharedVm slot tables. Incidental resolver fix for stdlib-module shadowing of legacy `from X import Y` prelude bindings. |
+| `m23_p3a_d.md` | M23 P3a-D | sqlite3 (9 NativeFns, 440-448) via rusqlite-bundled. Stringified result cells; v0.3 typed rows. |

@@ -146,6 +146,30 @@ Post-M22 state (2026-05-19):
 - Bug totals unchanged: **33 found, 32 fixed, 1 deferred** (still
   only BUG-028).
 
+Post-M23 state (2026-05-19 even later):
+
+- **One incidental bug found and fixed inline** (not numbered — too
+  small for the bug catalog; recorded here for the pattern). P3a-C's
+  registration of the new `threading` stdlib module shadowed the
+  existing `from threading import Thread` prelude binding because
+  `register_top_decls` errored on items not in `stdlib_modules`
+  before reaching the legacy prelude fall-through. Four-line resolver
+  fix: when an imported item isn't in stdlib_modules but IS already in
+  scope (legacy prelude), continue silently. **First prelude/stdlib
+  interaction bug found in 19 stdlib modules** — future stdlib
+  additions whose names match existing prelude bindings should watch
+  for this.
+- Phase 3a stdlib complete: subprocess, pathlib, datetime, threading,
+  queue, sqlite3. 7 modules + ~75 NativeFns (350-449) shipped via 4
+  parallel worktree agents (~80 min parallel + ~45 min orchestrator
+  integration).
+- Tests: 468 → 553 (+85). Stdlib modules: 17 → 24.
+- Bug totals: 33 found, 32 fixed, 1 deferred (still only BUG-028).
+- 23 of 24 stdlib modules now sit between Phase 1 (M19) and Phase 3a
+  (M23) with **two incidental bugs total** (BUG-037 in M20a, the
+  resolver-shadow fix in M23). The M19 `seed_stdlib_modules`
+  infrastructure continues to hold.
+
 ## Full catalog
 
 ### Critical: silent miscompiles

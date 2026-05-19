@@ -33,6 +33,7 @@ Benchmark data: `bench/history/`.
 | **M20c** | 370 | 16,650 | 8,400 | 8,350 | 0 | 0 | 0 | 16/0/0 | 13.1 |
 | **M21** | **379** | **16,823** | **8,789** | **8,467** | 0 | **1** | 0 | 16/0/0 | 13.1 |
 | **M22** | **468** | **17,656** | **10,603** | **9,218** | 0 | 0 | 0 | 16/0/0 | 13.1 |
+| **M23** | **553** | **18,800** | **12,200** | **9,700** | 1 | 1 | 0 | 16/0/0 | 13.1 |
 
 Notes:
 - LOC is at end-of-milestone; M1's LOC are mostly lexer+parser+pretty (already in their final shape).
@@ -59,6 +60,7 @@ See `bench/history/` for the underlying JSON.
 | M18 (round 4 stress test) | 16 | 0 | 0 | 13.1 ms | (correctness round; no perf delta) | — |
 | M19–M21 (Phase 1 stdlib) | 16 | 0 | 0 | 13.1 ms | (8 new stdlib modules; no codegen affecting perf) | — |
 | M22 (Phase 2 stdlib, 4× parallel) | 16 | 0 | 0 | 13.1 ms | (9 more stdlib modules; first parallel-agent round) | — |
+| M23 (Phase 3a stdlib, 4× parallel) | 16 | 0 | 0 | 13.1 ms | (7 more stdlib modules; second parallel-agent round) | — |
 
 \* M7-unfair: Python timing included parse+compile time. Methodology bug
 caught and fixed at M10-prep; the M7-fair snapshot is the honest baseline.

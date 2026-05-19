@@ -832,6 +832,107 @@ the next big Phase 3 push.
 
 ---
 
+## M23 — Phase 3a stdlib (system control + calendar + sync + DB) (2026-05-19)
+
+Second parallel-agent stdlib round. 4 worktree-isolated agents shipped
+7 modules in **~80 min parallel + ~45 min orchestrator integration**.
+First round to reach into OS FFI (subprocess, threading primitives,
+sqlite via rusqlite); the M19 stdlib seam absorbed it cleanly.
+
+### Agent allocation
+
+- **P3a-A** (subprocess + pathlib): 20 NativeFn IDs (350-389). Cross-
+  platform process spawn via Rust's `std::process::Command`; pathlib as
+  flat functions (typed `Path` class pending v0.3 stdlib-class
+  registration).
+- **P3a-B** (datetime): 22 NativeFn IDs (390-411). Calendar arithmetic
+  on top of M20b's `time` epoch primitives. Hand-rolled
+  `days_from_civil` (Howard Hinnant, public domain) to invert M20b's
+  `civil_from_days`. **Real platform `local_offset_minutes` via FFI**
+  (`GetTimeZoneInformation` on Windows; `localtime_r` on Unix) — no
+  chrono crate dep, just inline `extern` bindings.
+- **P3a-C** (threading.Lock + Semaphore + queue.PriorityQueue):
+  18 NativeFn IDs (420-437). Three new `SharedVm` slot tables (locks,
+  semaphores, priority_queues) following the channels/threads/dicts
+  pattern. Found **one incidental bug**: registering `threading` as a
+  stdlib module broke the existing `from threading import Thread`
+  prelude binding because the new-module-match arm errored before
+  reaching the legacy-prelude fall-through. Four-line resolver fix.
+- **P3a-D** (sqlite3): 9 NativeFn IDs (440-448) via the `rusqlite`
+  crate with the `bundled` feature (libsqlite3.c links statically;
+  no system SQLite dep). Connections as i64 handles into
+  `SharedVm.sqlite_connections`. All result cells stringified
+  (typed rows are v0.3 when `bytes` lands).
+
+### Integration cost
+
+Cherry-pick order P3a-A → B → C → D, smallest-conflict-first. Each
+subsequent cherry-pick added conflicts in the same 4 files
+(`resolver.rs`/`native.rs`/`builtins.rs`/`STRICTPY_SPEC.md`), plus
+P3a-C and P3a-D each added a new field to `SharedVm` (so `interp.rs`
+conflicted on the 3-field block).
+
+One unusual conflict: P3a-D's `sqlite3.column_names` handler got
+git-aligned with HEAD's `pathlib.read_lines` at a shared `let sp =
+interp.alloc_string(...) as u64;` line — the surrounding loop bodies
+look similar. Required manual reconstruction of pathlib_read_lines's
+tail (the `unsafe { list_push }; Ok(lst); }` lines) before the sqlite3
+section could be appended.
+
+Spec section renumbering: agents independently picked §9.24+. Final
+ordering: §9.24 subprocess, §9.25 pathlib, §9.26 datetime, §9.27
+threading, §9.28 queue, §9.29 sqlite3.
+
+### Three sub-milestones with consistent zero-bug streak; one find
+
+| Sub-milestone | Modules | Bugs found |
+|---|---|---:|
+| P3a-A (subprocess + pathlib) | 2 | 0 |
+| P3a-B (datetime) | 1 | 0 |
+| **P3a-C (threading + queue)** | 3 | **1** (resolver shadow fix) |
+| P3a-D (sqlite3) | 1 | 0 |
+
+The trend since M20 (one incidental bug per 2-4 sub-milestones)
+holds. The M19 stdlib-module-table is still the load-bearing
+infrastructure that lets new modules slot in without disturbing
+resolver/typecheck/IR — except in M23 P3a-C, where the new module
+name happened to collide with a legacy prelude binding. Documented
+fix; future stdlib modules avoid the same pitfall.
+
+### Phase 1 + 2 + 3a stdlib summary
+
+**24 stdlib modules** total over 5 milestones (M19-M23):
+
+- M19: sys
+- M20a: os, path, io
+- M20b: time, random, math
+- M20c: json, re
+- M22: argparse, collections, csv, base64, hashlib, itertools,
+  statistics, struct, urllib_parse
+- **M23: subprocess, pathlib, datetime, threading, queue, sqlite3**
+
+The language now reaches into:
+- CLI ergonomics (sys, argparse)
+- Data processing (csv, json, itertools, statistics)
+- Encoding/crypto (base64, hashlib, struct)
+- Text/regex (re, urllib_parse)
+- Filesystem + IO (os, path, io, pathlib)
+- Time + calendar (time, datetime)
+- System control (subprocess)
+- Concurrency primitives (threading, queue)
+- Persistence (sqlite3)
+
+Networking (socket, http_client, ssl) is the next big gap — Phase 3b.
+
+### Tests + size
+
+- **Tests**: 468 → 553 (+85 across the four agents).
+- **Examples**: 55 → 62 (+7 — subprocess_demo, pathlib_demo,
+  datetime_demo, threading_demo, queue_demo, sqlite_demo).
+- **Spec**: §9.24-§9.29 added (6 new module sections).
+
+---
+
 ## What this trajectory shows
 
 - **Bugs found scales with running real programs, not with writing tests.**
