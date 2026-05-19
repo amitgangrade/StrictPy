@@ -65,6 +65,7 @@ See `bench/history/` for the underlying JSON.
 | M23 (Phase 3a stdlib, 4× parallel) | 16 | 0 | 0 | 13.1 ms | (7 more stdlib modules; second parallel-agent round) | — |
 | M24 (Phase 3a stress, 4× parallel) | 16 | 0 | 0 | 13.1 ms | (4 stress programs + BUG-039 fix; no codegen affecting perf) | — |
 | M25 (unified `spy` CLI) | 16 | 0 | 0 | 13.1 ms | (CLI refactor only — no codegen, lib API, or VM core changes) | — |
+| M26 (extended bench: 5 compute + 5 stdlib, 30 cells) | 28 | 2 | 0 | 13.1 ms | **0.02× (heapsort 500k)** | **1.13× (btree 10k — narrow CPython win on allocation-bound shape)** |
 
 \* M7-unfair: Python timing included parse+compile time. Methodology bug
 caught and fixed at M10-prep; the M7-fair snapshot is the honest baseline.

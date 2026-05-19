@@ -1,0 +1,272 @@
+[
+  {
+    "name": "nqueens",
+    "size": "n8",
+    "spy_ms": 11.877199984155595,
+    "py_ms": 68.28419998055324,
+    "ratio": 0.1739377482278202,
+    "note": "",
+    "kind": "compute"
+  },
+  {
+    "name": "nqueens",
+    "size": "n10",
+    "spy_ms": 19.459900038782507,
+    "py_ms": 254.30880003841594,
+    "ratio": 0.07652074971783474,
+    "note": "",
+    "kind": "compute"
+  },
+  {
+    "name": "nqueens",
+    "size": "n12",
+    "spy_ms": 161.39180003665388,
+    "py_ms": 7011.111800034996,
+    "ratio": 0.0230194303898917,
+    "note": "",
+    "kind": "compute"
+  },
+  {
+    "name": "sieve",
+    "size": "100k",
+    "spy_ms": 16.294400033075362,
+    "py_ms": 76.61270000971854,
+    "ratio": 0.21268536458065532,
+    "note": "",
+    "kind": "compute"
+  },
+  {
+    "name": "sieve",
+    "size": "1M",
+    "spy_ms": 33.90999999828637,
+    "py_ms": 251.33609998738393,
+    "ratio": 0.13491893922118037,
+    "note": "",
+    "kind": "compute"
+  },
+  {
+    "name": "sieve",
+    "size": "5M",
+    "spy_ms": 163.94900000886992,
+    "py_ms": 821.2981999968179,
+    "ratio": 0.19962176954668248,
+    "note": "",
+    "kind": "compute"
+  },
+  {
+    "name": "matmul",
+    "size": "50",
+    "spy_ms": 14.16280004195869,
+    "py_ms": 86.58689999720082,
+    "ratio": 0.16356746854797372,
+    "note": "",
+    "kind": "compute"
+  },
+  {
+    "name": "matmul",
+    "size": "100",
+    "spy_ms": 15.4264000011608,
+    "py_ms": 143.3050000341609,
+    "ratio": 0.10764732561657632,
+    "note": "",
+    "kind": "compute"
+  },
+  {
+    "name": "matmul",
+    "size": "150",
+    "spy_ms": 26.39319997979328,
+    "py_ms": 332.22500002011657,
+    "ratio": 0.079443750404681,
+    "note": "",
+    "kind": "compute"
+  },
+  {
+    "name": "btree",
+    "size": "1k",
+    "spy_ms": 16.569900035392493,
+    "py_ms": 71.8374999705702,
+    "ratio": 0.23065808306498295,
+    "note": "",
+    "kind": "compute"
+  },
+  {
+    "name": "btree",
+    "size": "5k",
+    "spy_ms": 51.243700028862804,
+    "py_ms": 72.40569998975843,
+    "ratio": 0.7077301930112003,
+    "note": "",
+    "kind": "compute"
+  },
+  {
+    "name": "btree",
+    "size": "10k",
+    "spy_ms": 96.79009998217225,
+    "py_ms": 85.39249998284504,
+    "ratio": 1.1334730802074766,
+    "note": "",
+    "kind": "compute"
+  },
+  {
+    "name": "heapsort",
+    "size": "10k",
+    "spy_ms": 13.191399979405105,
+    "py_ms": 89.08910001628101,
+    "ratio": 0.14806974115794616,
+    "note": "",
+    "kind": "compute"
+  },
+  {
+    "name": "heapsort",
+    "size": "100k",
+    "spy_ms": 32.62610000092536,
+    "py_ms": 590.6966999755241,
+    "ratio": 0.055233252534299324,
+    "note": "",
+    "kind": "compute"
+  },
+  {
+    "name": "heapsort",
+    "size": "500k",
+    "spy_ms": 109.30349997943267,
+    "py_ms": 3365.175699989777,
+    "ratio": 0.03248077061169933,
+    "note": "",
+    "kind": "compute"
+  },
+  {
+    "name": "json",
+    "size": "small",
+    "spy_ms": 13.593200012110174,
+    "py_ms": 93.78830000059679,
+    "ratio": 0.14493492271449293,
+    "note": "",
+    "kind": "stdlib"
+  },
+  {
+    "name": "json",
+    "size": "medium",
+    "spy_ms": 28.669399966020137,
+    "py_ms": 115.8296000212431,
+    "ratio": 0.247513588588428,
+    "note": "",
+    "kind": "stdlib"
+  },
+  {
+    "name": "json",
+    "size": "large",
+    "spy_ms": 49.692399974446744,
+    "py_ms": 122.59710003854707,
+    "ratio": 0.4053309577373561,
+    "note": "",
+    "kind": "stdlib"
+  },
+  {
+    "name": "regex",
+    "size": "small",
+    "spy_ms": 22.807300032582134,
+    "py_ms": 99.09480001078919,
+    "ratio": 0.2301563758148655,
+    "note": "",
+    "kind": "stdlib"
+  },
+  {
+    "name": "regex",
+    "size": "medium",
+    "spy_ms": 36.95709997555241,
+    "py_ms": 112.5272999634035,
+    "ratio": 0.328427856951795,
+    "note": "",
+    "kind": "stdlib"
+  },
+  {
+    "name": "regex",
+    "size": "large",
+    "spy_ms": 49.45900000166148,
+    "py_ms": 142.8353000083007,
+    "ratio": 0.3462659440543565,
+    "note": "",
+    "kind": "stdlib"
+  },
+  {
+    "name": "sha256",
+    "size": "small",
+    "spy_ms": 12.554400018416345,
+    "py_ms": 69.24859998980537,
+    "ratio": 0.181294640184272,
+    "note": "",
+    "kind": "stdlib"
+  },
+  {
+    "name": "sha256",
+    "size": "medium",
+    "spy_ms": 15.795200015418231,
+    "py_ms": 76.40259998152032,
+    "ratio": 0.20673642021657188,
+    "note": "",
+    "kind": "stdlib"
+  },
+  {
+    "name": "sha256",
+    "size": "large",
+    "spy_ms": 23.803999996744096,
+    "py_ms": 96.42339998390526,
+    "ratio": 0.24686953582550913,
+    "note": "",
+    "kind": "stdlib"
+  },
+  {
+    "name": "csv",
+    "size": "small",
+    "spy_ms": 17.850800009910017,
+    "py_ms": 87.53620000788942,
+    "ratio": 0.2039247763588226,
+    "note": "",
+    "kind": "stdlib"
+  },
+  {
+    "name": "csv",
+    "size": "medium",
+    "spy_ms": 31.43659996567294,
+    "py_ms": 107.81030001817271,
+    "ratio": 0.29159180486812414,
+    "note": "",
+    "kind": "stdlib"
+  },
+  {
+    "name": "csv",
+    "size": "large",
+    "spy_ms": 134.6013000002131,
+    "py_ms": 148.49679998587817,
+    "ratio": 0.9064255930970464,
+    "note": "",
+    "kind": "stdlib"
+  },
+  {
+    "name": "sqlite",
+    "size": "small",
+    "spy_ms": 17.846299975644797,
+    "py_ms": 92.80560002662241,
+    "ratio": 0.1922976627544606,
+    "note": "",
+    "kind": "stdlib"
+  },
+  {
+    "name": "sqlite",
+    "size": "medium",
+    "spy_ms": 34.059999976307154,
+    "py_ms": 97.01719996519387,
+    "ratio": 0.35107176859903816,
+    "note": "",
+    "kind": "stdlib"
+  },
+  {
+    "name": "sqlite",
+    "size": "large",
+    "spy_ms": 99.25940004177392,
+    "py_ms": 133.10379994800314,
+    "ratio": 0.745729273548535,
+    "note": "",
+    "kind": "stdlib"
+  }
+]

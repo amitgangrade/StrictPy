@@ -13,6 +13,11 @@
 __pycache__/
 *.pyc
 
+# Bench harness regenerates these on every run (.spy, .py, .spyc, plus
+# input corpora .csv/.json/.txt). Not source; tracked snapshots live in
+# bench/history/*.json and the rendered .md reports.
+/bench/generated/
+
 # Transient artifacts produced by examples/safe_open.spy when the test
 # runs the example from the compiler crate's cwd. The example creates
 # these as input data; they're not part of the source tree.
