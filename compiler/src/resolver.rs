@@ -2140,6 +2140,194 @@ impl Resolver {
             ],
         };
         self.stdlib_modules.insert("pathlib".into(), pathlib_mod);
+
+        // ── M23 P3a-B: `datetime` module ──────────────────────────────
+        // Calendar arithmetic + ISO 8601 parse/format, layered on top
+        // of M20b's `time` epoch primitives.  Two value shapes — both
+        // plain `i64` in v0.2 (no stdlib classes yet; M20c's typed
+        // JsonValue / M22's ArgParser hit the same blocker):
+        //   - DateTime: unix-epoch seconds (UTC).
+        //   - Duration: seconds span.
+        // 22 ids consumed (390..=411); 412..=419 reserved for v0.3
+        // extensions (named timezones, fractional seconds, strftime).
+        const DT_NOW: u32              = 390;
+        const DT_FROM_UNIX: u32        = 391;
+        const DT_FROM_YMD: u32         = 392;
+        const DT_FROM_YMD_HMS: u32     = 393;
+        const DT_YEAR: u32             = 394;
+        const DT_MONTH: u32            = 395;
+        const DT_DAY: u32              = 396;
+        const DT_HOUR: u32             = 397;
+        const DT_MINUTE: u32           = 398;
+        const DT_SECOND: u32           = 399;
+        const DT_WEEKDAY: u32          = 400;
+        const DT_YMD: u32              = 401;
+        const DT_ADD_SECONDS: u32      = 402;
+        const DT_ADD_DAYS: u32         = 403;
+        const DT_DIFF_SECONDS: u32     = 404;
+        const DT_DIFF_DAYS: u32        = 405;
+        const DT_TO_ISO: u32           = 406;
+        const DT_TO_DATE_STR: u32      = 407;
+        const DT_TO_TIME_STR: u32      = 408;
+        const DT_FROM_ISO: u32         = 409;
+        const DT_FROM_DATE_STR: u32    = 410;
+        const DT_LOCAL_OFFSET_MIN: u32 = 411;
+
+        // i32_ty / i64_ty / str_ty / fn_ty are already in scope from
+        // earlier registrations in this fn.
+        let tuple_i32x3 = Ty::Tuple(vec![
+            i32_ty.clone(),
+            i32_ty.clone(),
+            i32_ty.clone(),
+        ]);
+
+        let datetime_mod = StdlibModule {
+            name: "datetime".into(),
+            items: vec![
+                StdlibItem {
+                    name: "now".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], i64_ty.clone()),
+                    native_id: DT_NOW,
+                },
+                StdlibItem {
+                    name: "from_unix".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i64_ty.clone()),
+                    native_id: DT_FROM_UNIX,
+                },
+                StdlibItem {
+                    name: "from_ymd".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![i32_ty.clone(), i32_ty.clone(), i32_ty.clone()],
+                        i64_ty.clone(),
+                    ),
+                    native_id: DT_FROM_YMD,
+                },
+                StdlibItem {
+                    name: "from_ymd_hms".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![
+                            i32_ty.clone(), i32_ty.clone(), i32_ty.clone(),
+                            i32_ty.clone(), i32_ty.clone(), i32_ty.clone(),
+                        ],
+                        i64_ty.clone(),
+                    ),
+                    native_id: DT_FROM_YMD_HMS,
+                },
+                StdlibItem {
+                    name: "year".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i32_ty.clone()),
+                    native_id: DT_YEAR,
+                },
+                StdlibItem {
+                    name: "month".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i32_ty.clone()),
+                    native_id: DT_MONTH,
+                },
+                StdlibItem {
+                    name: "day".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i32_ty.clone()),
+                    native_id: DT_DAY,
+                },
+                StdlibItem {
+                    name: "hour".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i32_ty.clone()),
+                    native_id: DT_HOUR,
+                },
+                StdlibItem {
+                    name: "minute".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i32_ty.clone()),
+                    native_id: DT_MINUTE,
+                },
+                StdlibItem {
+                    name: "second".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i32_ty.clone()),
+                    native_id: DT_SECOND,
+                },
+                StdlibItem {
+                    name: "weekday".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i32_ty.clone()),
+                    native_id: DT_WEEKDAY,
+                },
+                StdlibItem {
+                    name: "ymd".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], tuple_i32x3.clone()),
+                    native_id: DT_YMD,
+                },
+                StdlibItem {
+                    name: "add_seconds".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i64_ty.clone()], i64_ty.clone()),
+                    native_id: DT_ADD_SECONDS,
+                },
+                StdlibItem {
+                    name: "add_days".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i64_ty.clone()], i64_ty.clone()),
+                    native_id: DT_ADD_DAYS,
+                },
+                StdlibItem {
+                    name: "diff_seconds".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i64_ty.clone()], i64_ty.clone()),
+                    native_id: DT_DIFF_SECONDS,
+                },
+                StdlibItem {
+                    name: "diff_days".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i64_ty.clone()], i64_ty.clone()),
+                    native_id: DT_DIFF_DAYS,
+                },
+                StdlibItem {
+                    name: "to_iso".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], str_ty.clone()),
+                    native_id: DT_TO_ISO,
+                },
+                StdlibItem {
+                    name: "to_date_str".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], str_ty.clone()),
+                    native_id: DT_TO_DATE_STR,
+                },
+                StdlibItem {
+                    name: "to_time_str".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], str_ty.clone()),
+                    native_id: DT_TO_TIME_STR,
+                },
+                StdlibItem {
+                    name: "from_iso".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], i64_ty.clone()),
+                    native_id: DT_FROM_ISO,
+                },
+                StdlibItem {
+                    name: "from_date_str".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], i64_ty.clone()),
+                    native_id: DT_FROM_DATE_STR,
+                },
+                StdlibItem {
+                    name: "local_offset_minutes".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], i32_ty.clone()),
+                    native_id: DT_LOCAL_OFFSET_MIN,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("datetime".into(), datetime_mod);
     }
 
     // ─────────────────────────────────────────────────────────────────────

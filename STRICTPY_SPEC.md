@@ -1987,7 +1987,51 @@ fn try_wait(handle: i64) -> i32?
 fn kill(handle: i64) -> None
 ```
 
-Semantics:
+(Continued semantics below; datetime is renumbered as §9.26.)
+
+### 9.26 Module `datetime` (v0.2 — M23 P3a-B)
+
+Calendar arithmetic + ISO 8601 parse/format, layered on top of the
+M20b `time` module's epoch primitives.  Two value shapes — both
+represented as plain `i64` in v0.2 (no stdlib classes yet):
+
+* **`DateTime`** — a moment in time, as unix epoch seconds (UTC).
+  Negative values denote pre-1970 moments.  All arithmetic is
+  integer; fractional seconds are out of scope (use `time.now()`'s
+  f64 form for sub-second precision).
+* **`Duration`** — a span in seconds.  Same `i64` type — a
+  `Duration` is just the difference of two `DateTime` values.
+
+```
+fn now() -> i64                                  # unix epoch seconds (UTC)
+fn from_unix(secs: i64) -> i64                   # identity / type-assertion
+fn from_ymd(year: i32, month: i32, day: i32) -> i64
+fn from_ymd_hms(year, month, day, hour, minute, second: i32) -> i64
+
+fn year(dt: i64) -> i32
+fn month(dt: i64) -> i32                         # 1..=12
+fn day(dt: i64) -> i32                           # 1..=31
+fn hour(dt: i64) -> i32                          # 0..=23
+fn minute(dt: i64) -> i32                        # 0..=59
+fn second(dt: i64) -> i32                        # 0..=60 (leap sec allowed)
+fn weekday(dt: i64) -> i32                       # 0..=6, Monday=0 (ISO)
+fn ymd(dt: i64) -> Tuple[i32, i32, i32]          # (year, month, day)
+
+fn add_seconds(dt: i64, secs: i64) -> i64
+fn add_days(dt: i64, days: i64) -> i64
+fn diff_seconds(a: i64, b: i64) -> i64           # a - b
+fn diff_days(a: i64, b: i64) -> i64              # floor((a-b)/86400)
+
+fn to_iso(dt: i64) -> str                        # "YYYY-MM-DDTHH:MM:SSZ"
+fn to_date_str(dt: i64) -> str                   # "YYYY-MM-DD"
+fn to_time_str(dt: i64) -> str                   # "HH:MM:SS"
+fn from_iso(s: str) -> i64                       # parse ISO 8601
+fn from_date_str(s: str) -> i64                  # "YYYY-MM-DD" → UTC midnight
+
+fn local_offset_minutes() -> i32                 # process-local TZ offset
+```
+
+Semantics (subprocess):
 
 * `run(prog, args)` spawns `prog args...`, blocks until the child
   exits, captures both stdout and stderr, and returns the 3-tuple
@@ -2119,6 +2163,47 @@ What v0.2 does **not** ship:
 * **`symlink_to` / `readlink` / `resolve` (symlink-following
   `realpath`)**.  Deferred to v0.3; `absolute` is the lexical-only
   alternative.
+
+Semantics (datetime):
+
+* All `DateTime` values are UTC.  The interpretation as a civil date
+  uses the proleptic Gregorian calendar via Howard Hinnant's
+  public-domain `civil_from_days` / `days_from_civil` algorithms
+  (the same code path M20b uses for `time.format_iso`).
+* `from_ymd` and `from_ymd_hms` validate every field and raise
+  `ValueError` on out-of-range inputs (year not in `-10000..=10000`;
+  month not in `1..=12`; day not valid for the given month including
+  leap-year rules; hour `0..=23`; minute `0..=59`; second `0..=60`).
+* `weekday(dt)` returns ISO weekday — Monday is 0, Sunday is 6.  The
+  calculation uses `div_euclid`, so pre-1970 dates produce the right
+  weekday (e.g. 1969-12-31 → 2 for Wednesday).
+* `add_seconds` and `diff_seconds` use wrapping arithmetic; programs
+  passing pathological i64s get the silent wrap rather than a panic.
+  `add_days` saturates the seconds multiply at i64 range.
+* `diff_days(a, b)` uses floor division (Python's `//`), so a span
+  of `-12h` reports `-1` day (not `0`).
+* `to_iso` produces `"YYYY-MM-DDTHH:MM:SSZ"` (no fractional seconds,
+  always Zulu).  `from_iso` accepts that exact form plus
+  `"YYYY-MM-DDTHH:MM:SS+HH:MM"`, `"YYYY-MM-DDTHH:MM:SS-HH:MM"`,
+  `"YYYY-MM-DDTHH:MM:SS+HHMM"`, `"YYYY-MM-DDTHH:MM:SS"` (naive —
+  treated as UTC), the date-only form `"YYYY-MM-DD"`, and the
+  space-separated variant `"YYYY-MM-DD HH:MM:SS"`.  Malformed input
+  raises `ValueError`.
+* `local_offset_minutes()` captures the current process-local
+  timezone offset from UTC in minutes (e.g. `-480` for PST, `0` for
+  UTC).  Implementation is platform-specific FFI — no `chrono` or
+  `libc` crate dep.  On Windows it calls `GetTimeZoneInformation`;
+  on Unix it calls `localtime_r`.  On unsupported platforms it
+  falls back to `0` (UTC).  The value reflects "the offset right
+  now", so DST transitions during the program's lifetime are not
+  tracked retroactively.
+
+What v0.2 does **not** ship: named timezones (`"America/New_York"`
+— would need tzdata); fractional seconds (`DateTime` is integer; a
+v0.3 widening to `i64 ns` is the obvious upgrade); `strftime` /
+`strptime` format strings (use the fixed ISO format); historical
+timezone transitions; the `datetime.timedelta` class shape (use
+arithmetic on i64 seconds).
 
 ---
 

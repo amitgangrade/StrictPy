@@ -1,0 +1,109 @@
+"""datetime_demo.spy — calendar arithmetic + ISO parse/format (M23 P3a-B).
+
+Exercises:
+  * `import datetime` — M23 P3a-B stdlib module.
+  * `datetime.from_ymd(y, m, d)` — civil-date constructor (UTC midnight).
+  * `datetime.from_ymd_hms(...)` — full constructor.
+  * `datetime.to_iso(dt)` / `datetime.from_iso(s)` — round-trip an
+    ISO 8601 string.
+  * `datetime.add_days(dt, n)` / `datetime.diff_days(a, b)` — calendar
+    arithmetic over the integer-seconds DateTime shape.
+  * `datetime.ymd(dt)` — tuple-of-(year, month, day) extraction.
+  * `datetime.weekday(dt)` — ISO weekday (Monday=0).
+  * `datetime.local_offset_minutes()` — process-local TZ offset.
+  * Layer with `time.now()` is implicit — `datetime.now()` returns the
+    same wall-clock seconds (truncated to integer).
+
+Known-answer asserts:
+  * `from_ymd(1970, 1, 1)` == 0 (the unix epoch).
+  * `from_ymd(2000, 1, 1)` == 946684800.
+  * `to_iso(0)` == "1970-01-01T00:00:00Z".
+  * `weekday(from_ymd(2026, 5, 19))` == 1 (Tuesday).
+
+Tests:
+  * `vm/tests/m23_p3a_b_datetime.rs` — in-process unit asserts.
+  * `compiler/tests/datetime_demo_runs.rs` — subprocess assertion.
+"""
+
+import datetime
+
+fn main() -> i32:
+    # ── Known-answer asserts (pin the calendar arithmetic). ────────────
+    epoch: i64 = datetime.from_ymd(1970, 1, 1)
+    assert epoch == 0i64, "1970-01-01 should be epoch 0"
+
+    y2k: i64 = datetime.from_ymd(2000, 1, 1)
+    assert y2k == 946684800i64, "2000-01-01 should be 946684800"
+
+    iso_epoch: str = datetime.to_iso(0i64)
+    assert iso_epoch == "1970-01-01T00:00:00Z", "to_iso(0) mismatch"
+
+    today: i64 = datetime.from_ymd(2026, 5, 19)
+    wd: i32 = datetime.weekday(today)
+    assert wd == 1, "2026-05-19 should be a Tuesday (weekday=1)"
+
+    # ── Round-trip through ISO 8601. ──────────────────────────────────
+    dt: i64 = datetime.from_ymd_hms(2026, 5, 19, 14, 23, 11)
+    iso: str = datetime.to_iso(dt)
+    assert iso == "2026-05-19T14:23:11Z", "ISO format mismatch"
+    parsed: i64 = datetime.from_iso(iso)
+    assert parsed == dt, "ISO round-trip should preserve the moment"
+
+    # `from_iso` also accepts an offset suffix.
+    plus_tz: i64 = datetime.from_iso("2026-05-19T14:23:11+00:00")
+    assert plus_tz == dt, "+00:00 should match Z"
+
+    minus_tz: i64 = datetime.from_iso("2026-05-19T14:23:11-05:00")
+    # -05:00 means "local = UTC - 5h", so the UTC instant is 5h LATER.
+    assert minus_tz == dt + 5i64 * 3600i64, "TZ offset arithmetic"
+
+    # ── Date-only parse. ──────────────────────────────────────────────
+    date_only: i64 = datetime.from_iso("2026-05-19")
+    assert date_only == today, "date-only ISO should be UTC midnight"
+
+    date_only2: i64 = datetime.from_date_str("2026-05-19")
+    assert date_only2 == today, "from_date_str should match from_ymd"
+
+    # ── Calendar arithmetic — 30 days from a fixed reference. ─────────
+    thirty_later: i64 = datetime.add_days(today, 30i64)
+    diff: i64 = datetime.diff_days(thirty_later, today)
+    assert diff == 30i64, "diff_days should invert add_days"
+
+    # The 30-days-later date should be 2026-06-18.
+    later_iso: str = datetime.to_date_str(thirty_later)
+    assert later_iso == "2026-06-18", "today + 30 days should be 2026-06-18"
+
+    # ── add_seconds / diff_seconds. ───────────────────────────────────
+    hour_later: i64 = datetime.add_seconds(dt, 3600i64)
+    assert datetime.diff_seconds(hour_later, dt) == 3600i64, "+1h diff"
+    assert datetime.hour(hour_later) == 15, "+1h hour"
+    assert datetime.minute(hour_later) == 23, "minute unchanged"
+
+    # ── Component extraction. ─────────────────────────────────────────
+    ymd: Tuple[i32, i32, i32] = datetime.ymd(today)
+    assert ymd.0 == 2026, "year tuple slot"
+    assert ymd.1 == 5, "month tuple slot"
+    assert ymd.2 == 19, "day tuple slot"
+
+    assert datetime.year(today) == 2026, "year"
+    assert datetime.month(today) == 5, "month"
+    assert datetime.day(today) == 19, "day"
+
+    # ── Pretty-print. ─────────────────────────────────────────────────
+    println("date=" + datetime.to_date_str(today))
+    println("time=" + datetime.to_time_str(dt))
+    println("iso=" + iso)
+    println("weekday=" + str(wd))
+    println("days-in-30=" + str(diff))
+
+    # ── Local offset — value depends on the host TZ, just print it. ───
+    # We don't assert on the value (a CI box in PST sees -480, a CI box
+    # in UTC sees 0); we assert only that the value is in the realistic
+    # range [-720, 840] (minutes-from-UTC for known IANA zones).
+    off: i32 = datetime.local_offset_minutes()
+    in_range: bool = off >= -720 and off <= 840
+    assert in_range, "local offset should be a realistic TZ value"
+    println("local-offset-in-range=" + str(in_range))
+
+    println("OK")
+    return 0

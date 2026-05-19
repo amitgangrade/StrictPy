@@ -704,6 +704,70 @@ pub enum NativeFn {
     /// `csv.format_row(row: List[str]) -> str` — comma-joined, escaped.
     CsvFormatRow        = 280,
 
+    // ── 390–419: `datetime` module (M23 P3a-B) ──────────────────────────
+    // Calendar arithmetic + timezone-aware time, layered on top of the
+    // M20b `time` epoch primitives.  Both `DateTime` and `Duration` are
+    // plain `i64` in v0.2 (seconds since unix epoch / seconds span).  All
+    // calendar conversions reuse M20b's `civil_from_days` (and its inverse
+    // `days_from_civil`) — Howard Hinnant's public-domain algorithm.  No
+    // `chrono` dep; we stay vm-side-only.
+    /// `datetime.now() -> i64` — current unix epoch seconds (UTC).
+    DateTimeNow                 = 390,
+    /// `datetime.from_unix(secs: i64) -> i64` — identity assertion; any
+    /// `i64` is a valid DateTime by construction.
+    DateTimeFromUnix            = 391,
+    /// `datetime.from_ymd(year: i32, month: i32, day: i32) -> i64`.
+    /// Builds a DateTime from civil date at UTC midnight.  Raises
+    /// ValueError on invalid (year out of [-10000, 10000]; month not in
+    /// 1..=12; day out-of-range for month including leap years).
+    DateTimeFromYmd             = 392,
+    /// `datetime.from_ymd_hms(y, m, d, hour, minute, second) -> i64`.
+    /// Same validation + 0..=23 / 0..=59 / 0..=60 (leap second allowed).
+    DateTimeFromYmdHms          = 393,
+    /// `datetime.year(dt: i64) -> i32` — UTC year (may be negative).
+    DateTimeYear                = 394,
+    /// `datetime.month(dt: i64) -> i32` — UTC month, 1..=12.
+    DateTimeMonth               = 395,
+    /// `datetime.day(dt: i64) -> i32` — UTC day-of-month, 1..=31.
+    DateTimeDay                 = 396,
+    /// `datetime.hour(dt: i64) -> i32` — UTC hour, 0..=23.
+    DateTimeHour                = 397,
+    /// `datetime.minute(dt: i64) -> i32` — 0..=59.
+    DateTimeMinute              = 398,
+    /// `datetime.second(dt: i64) -> i32` — 0..=59 (or 60 for leap second).
+    DateTimeSecond              = 399,
+    /// `datetime.weekday(dt: i64) -> i32` — 0..=6, Monday=0 (ISO).
+    DateTimeWeekday             = 400,
+    /// `datetime.ymd(dt: i64) -> Tuple[i32, i32, i32]` — packed via
+    /// `alloc_tuple_obj` (the same path `path.splitext` uses).
+    DateTimeYmd                 = 401,
+    /// `datetime.add_seconds(dt: i64, secs: i64) -> i64`.
+    DateTimeAddSeconds          = 402,
+    /// `datetime.add_days(dt: i64, days: i64) -> i64`.
+    DateTimeAddDays             = 403,
+    /// `datetime.diff_seconds(a: i64, b: i64) -> i64` — `a - b`.
+    DateTimeDiffSeconds         = 404,
+    /// `datetime.diff_days(a: i64, b: i64) -> i64` — floor of `(a-b)/86400`.
+    DateTimeDiffDays            = 405,
+    /// `datetime.to_iso(dt: i64) -> str` — `"YYYY-MM-DDTHH:MM:SSZ"`.
+    DateTimeToIso               = 406,
+    /// `datetime.to_date_str(dt: i64) -> str` — `"YYYY-MM-DD"`.
+    DateTimeToDateStr           = 407,
+    /// `datetime.to_time_str(dt: i64) -> str` — `"HH:MM:SS"`.
+    DateTimeToTimeStr           = 408,
+    /// `datetime.from_iso(s: str) -> i64`.  Accepts `"YYYY-MM-DDTHH:MM:SSZ"`,
+    /// `"YYYY-MM-DDTHH:MM:SS+00:00"`, and `"YYYY-MM-DD"` (UTC midnight).
+    /// Raises ValueError on bad input.
+    DateTimeFromIso             = 409,
+    /// `datetime.from_date_str(s: str) -> i64` — `"YYYY-MM-DD"` → UTC midnight.
+    DateTimeFromDateStr         = 410,
+    /// `datetime.local_offset_minutes() -> i32` — process-local TZ offset
+    /// from UTC in minutes (e.g. -480 for PST).  Captures "what is the
+    /// offset now"; doesn't depend on a specific DateTime.
+    DateTimeLocalOffsetMinutes  = 411,
+    // 412-419 reserved for v0.3 (timezone-named DateTimes, fractional secs,
+    // strftime/strptime, etc.).
+
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
     /// encounters. The VM treats this as a runtime error.
@@ -970,6 +1034,29 @@ impl NativeFn {
             381 => Some(Self::PathlibReadText),
             382 => Some(Self::PathlibWriteText),
             383 => Some(Self::PathlibReadLines),
+            // M23 P3a-B: datetime module (390-411; 412-419 reserved).
+            390 => Some(Self::DateTimeNow),
+            391 => Some(Self::DateTimeFromUnix),
+            392 => Some(Self::DateTimeFromYmd),
+            393 => Some(Self::DateTimeFromYmdHms),
+            394 => Some(Self::DateTimeYear),
+            395 => Some(Self::DateTimeMonth),
+            396 => Some(Self::DateTimeDay),
+            397 => Some(Self::DateTimeHour),
+            398 => Some(Self::DateTimeMinute),
+            399 => Some(Self::DateTimeSecond),
+            400 => Some(Self::DateTimeWeekday),
+            401 => Some(Self::DateTimeYmd),
+            402 => Some(Self::DateTimeAddSeconds),
+            403 => Some(Self::DateTimeAddDays),
+            404 => Some(Self::DateTimeDiffSeconds),
+            405 => Some(Self::DateTimeDiffDays),
+            406 => Some(Self::DateTimeToIso),
+            407 => Some(Self::DateTimeToDateStr),
+            408 => Some(Self::DateTimeToTimeStr),
+            409 => Some(Self::DateTimeFromIso),
+            410 => Some(Self::DateTimeFromDateStr),
+            411 => Some(Self::DateTimeLocalOffsetMinutes),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

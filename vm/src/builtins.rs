@@ -3203,6 +3203,172 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             Ok(lst as u64)
         }
 
+        // ── M23 P3a-B: `datetime` module ───────────────────────────────
+        // Calendar arithmetic + ISO-8601 parse/format over unix-epoch
+        // seconds.  Reuses `civil_from_days` (from M20b) for epoch->ymd
+        // and a hand-rolled `days_from_civil` (Howard Hinnant, public
+        // domain) for ymd->epoch.  Both `DateTime` and `Duration` are
+        // plain `i64` in v0.2 — see spec §9.24.
+        NativeFn::DateTimeNow => {
+            // Wall-clock UTC seconds.  Anchored on SystemTime — matches
+            // `time.now()` (M20b) but truncated to integer seconds since
+            // `DateTime` is integer in v0.2.  Pre-epoch system clocks
+            // (rare; freshly imaged VMs) report 0.
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let secs = match SystemTime::now().duration_since(UNIX_EPOCH) {
+                Ok(d) => d.as_secs() as i64,
+                Err(e) => -(e.duration().as_secs() as i64),
+            };
+            Ok(secs as u64)
+        }
+        NativeFn::DateTimeFromUnix => {
+            // Identity — any i64 is a DateTime.  Kept as a separate
+            // native (rather than `Self::I64FromI64`) so call sites read
+            // as a type assertion and so the resolver can give it the
+            // right declared type.
+            Ok(arg_i64(args, 0) as u64)
+        }
+        NativeFn::DateTimeFromYmd => {
+            let y = arg_i64(args, 0) as i32;
+            let m = arg_i64(args, 1) as i32;
+            let d = arg_i64(args, 2) as i32;
+            let epoch = ymd_to_epoch_seconds(y, m, d, 0, 0, 0)?;
+            Ok(epoch as u64)
+        }
+        NativeFn::DateTimeFromYmdHms => {
+            let y = arg_i64(args, 0) as i32;
+            let mo = arg_i64(args, 1) as i32;
+            let d = arg_i64(args, 2) as i32;
+            let h = arg_i64(args, 3) as i32;
+            let mi = arg_i64(args, 4) as i32;
+            let s = arg_i64(args, 5) as i32;
+            let epoch = ymd_to_epoch_seconds(y, mo, d, h, mi, s)?;
+            Ok(epoch as u64)
+        }
+        NativeFn::DateTimeYear => {
+            let secs = arg_i64(args, 0);
+            let (y, _, _) = epoch_to_ymd(secs);
+            Ok((y as i32) as u32 as u64)
+        }
+        NativeFn::DateTimeMonth => {
+            let secs = arg_i64(args, 0);
+            let (_, m, _) = epoch_to_ymd(secs);
+            Ok((m as i32) as u32 as u64)
+        }
+        NativeFn::DateTimeDay => {
+            let secs = arg_i64(args, 0);
+            let (_, _, d) = epoch_to_ymd(secs);
+            Ok((d as i32) as u32 as u64)
+        }
+        NativeFn::DateTimeHour => {
+            let secs = arg_i64(args, 0);
+            let sec_of_day = secs.rem_euclid(86_400);
+            Ok(((sec_of_day / 3600) as i32) as u32 as u64)
+        }
+        NativeFn::DateTimeMinute => {
+            let secs = arg_i64(args, 0);
+            let sec_of_day = secs.rem_euclid(86_400);
+            Ok((((sec_of_day / 60) % 60) as i32) as u32 as u64)
+        }
+        NativeFn::DateTimeSecond => {
+            let secs = arg_i64(args, 0);
+            let sec_of_day = secs.rem_euclid(86_400);
+            Ok(((sec_of_day % 60) as i32) as u32 as u64)
+        }
+        NativeFn::DateTimeWeekday => {
+            // ISO weekday: Monday=0..Sunday=6.  1970-01-01 was a
+            // Thursday (=3).  We pin the calculation on `div_euclid`
+            // so pre-1970 dates land in the right slot.
+            let secs = arg_i64(args, 0);
+            let days = secs.div_euclid(86_400);
+            // (days + 3) gives Monday-anchored offset; rem_euclid keeps
+            // negative inputs in [0, 7).
+            let wd = (days + 3).rem_euclid(7) as i32;
+            Ok(wd as u32 as u64)
+        }
+        NativeFn::DateTimeYmd => {
+            let secs = arg_i64(args, 0);
+            let (y, m, d) = epoch_to_ymd(secs);
+            // Three i32 slots packed as u64.  Mirrors `re.find` / the
+            // tuple-of-i32 path that already exists for `path.splitext`.
+            let s0 = (y as i32) as u32 as u64;
+            let s1 = (m as i32) as u32 as u64;
+            let s2 = (d as i32) as u32 as u64;
+            let tup = interp.alloc_tuple_obj(&[s0, s1, s2]);
+            Ok(tup as u64)
+        }
+        NativeFn::DateTimeAddSeconds => {
+            let a = arg_i64(args, 0);
+            let b = arg_i64(args, 1);
+            Ok(a.wrapping_add(b) as u64)
+        }
+        NativeFn::DateTimeAddDays => {
+            let a = arg_i64(args, 0);
+            let days = arg_i64(args, 1);
+            // Saturate on overflow (programs that pass billions of days
+            // get the silent clamp rather than a panic in release
+            // builds; matches `time.sleep_s`'s saturation behaviour).
+            let secs = days.saturating_mul(86_400);
+            Ok(a.wrapping_add(secs) as u64)
+        }
+        NativeFn::DateTimeDiffSeconds => {
+            let a = arg_i64(args, 0);
+            let b = arg_i64(args, 1);
+            Ok(a.wrapping_sub(b) as u64)
+        }
+        NativeFn::DateTimeDiffDays => {
+            let a = arg_i64(args, 0);
+            let b = arg_i64(args, 1);
+            // Floor division — `div_euclid` for the right sign on
+            // negative spans (Python's `//` semantics).
+            let diff = a.wrapping_sub(b);
+            Ok(diff.div_euclid(86_400) as u64)
+        }
+        NativeFn::DateTimeToIso => {
+            // Reuse M20b's `format_epoch_iso` (it operates on f64; we
+            // round-trip our i64 through it).  Drops fractional secs
+            // by construction since our DateTime is integer-only.
+            let secs = arg_i64(args, 0);
+            let s = format_epoch_iso(secs as f64);
+            let p = interp.alloc_string(&s);
+            Ok(p as u64)
+        }
+        NativeFn::DateTimeToDateStr => {
+            let secs = arg_i64(args, 0);
+            let (y, m, d) = epoch_to_ymd(secs);
+            let s = format!("{:04}-{:02}-{:02}", y, m, d);
+            let p = interp.alloc_string(&s);
+            Ok(p as u64)
+        }
+        NativeFn::DateTimeToTimeStr => {
+            let secs = arg_i64(args, 0);
+            let sec_of_day = secs.rem_euclid(86_400);
+            let hh = sec_of_day / 3600;
+            let mm = (sec_of_day / 60) % 60;
+            let ss = sec_of_day % 60;
+            let s = format!("{:02}:{:02}:{:02}", hh, mm, ss);
+            let p = interp.alloc_string(&s);
+            Ok(p as u64)
+        }
+        NativeFn::DateTimeFromIso => {
+            let s = arg_str(args, 0);
+            let epoch = parse_iso_8601(&s)?;
+            Ok(epoch as u64)
+        }
+        NativeFn::DateTimeFromDateStr => {
+            let s = arg_str(args, 0);
+            let epoch = parse_iso_date(&s)?;
+            Ok(epoch as u64)
+        }
+        NativeFn::DateTimeLocalOffsetMinutes => {
+            // Process-local TZ offset (UTC minutes).  Implementation is
+            // platform-specific FFI — no `chrono` / `libc` dep.  On
+            // platforms where the call fails (or on cross-platform
+            // targets we don't compile for yet) we fall back to 0 (UTC).
+            let off = local_offset_minutes_now();
+            Ok((off as i32) as u32 as u64)
+        }
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
@@ -4354,6 +4520,397 @@ fn format_f64(v: f64) -> String {
         return format!("{v:.1}");
     }
     format!("{v}")
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// M23 P3a-B: datetime helpers
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Howard Hinnant's `days_from_civil` (public domain).  Inverse of
+/// `civil_from_days` (which lives in this file from M20b).  Converts a
+/// civil `(year, month, day)` to a signed count of days since the unix
+/// epoch (1970-01-01).  Handles pre-epoch dates correctly.  Caller has
+/// already validated the inputs.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64; // [0, 399]
+    let m_off = if m > 2 { m - 3 } else { m + 9 } as u64;
+    let doy = (153 * m_off + 2) / 5 + d as u64 - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe as i64 - 719_468
+}
+
+/// Days in a month, leap-aware.  Used by `from_ymd` validation.
+fn days_in_month(year: i32, month: i32) -> i32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            // Gregorian leap rule.
+            let y = year;
+            if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 { 29 } else { 28 }
+        }
+        _ => 0, // caller validates month range
+    }
+}
+
+/// Build a UTC epoch second from `(y, m, d, h, mi, s)`.  Validates
+/// every field; raises `ValueError` (the only exception type `from_ymd`
+/// / `from_ymd_hms` advertise) on out-of-range.
+fn ymd_to_epoch_seconds(
+    y: i32, m: i32, d: i32, h: i32, mi: i32, s: i32,
+) -> Result<i64, VmError> {
+    // Year range — wide but bounded.  Outside this, civil_from_days
+    // still gives a finite answer, but real programs almost never want
+    // years outside [-10000, 10000] and the limit catches typos.
+    if !(-10_000..=10_000).contains(&y) {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("datetime: year out of range: {y}"),
+        });
+    }
+    if !(1..=12).contains(&m) {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("datetime: month out of range (1..=12): {m}"),
+        });
+    }
+    let dim = days_in_month(y, m);
+    if !(1..=dim).contains(&d) {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "datetime: day out of range (1..={dim}) for {y:04}-{m:02}: {d}"
+            ),
+        });
+    }
+    if !(0..=23).contains(&h) {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("datetime: hour out of range (0..=23): {h}"),
+        });
+    }
+    if !(0..=59).contains(&mi) {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("datetime: minute out of range (0..=59): {mi}"),
+        });
+    }
+    if !(0..=60).contains(&s) {
+        // 60 allowed for the once-a-decade leap second.
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("datetime: second out of range (0..=60): {s}"),
+        });
+    }
+    let days = days_from_civil(y as i64, m as i64, d as i64);
+    let secs = days * 86_400
+        + (h as i64) * 3600
+        + (mi as i64) * 60
+        + (s as i64);
+    Ok(secs)
+}
+
+/// `secs` (unix epoch) -> `(year, month, day)`.  Wrapper around
+/// `civil_from_days` that handles the negative-seconds case correctly
+/// via `div_euclid`.
+fn epoch_to_ymd(secs: i64) -> (i64, u32, u32) {
+    let days = secs.div_euclid(86_400);
+    civil_from_days(days)
+}
+
+/// Parse an ISO 8601 date or datetime.  Accepts:
+///   - `"YYYY-MM-DD"` (UTC midnight; same as `from_date_str`)
+///   - `"YYYY-MM-DDTHH:MM:SS"`
+///   - `"YYYY-MM-DDTHH:MM:SSZ"`
+///   - `"YYYY-MM-DDTHH:MM:SS+HH:MM"` / `"...-HH:MM"`
+/// Fractional seconds are NOT supported (raises ValueError) — v0.2's
+/// DateTime is integer.  A space separator (`"YYYY-MM-DD HH:MM:SS"`)
+/// is also accepted as a common variant.
+fn parse_iso_8601(s: &str) -> Result<i64, VmError> {
+    let s = s.trim();
+    // Date-only form.
+    if s.len() == 10 {
+        return parse_iso_date(s);
+    }
+    // Require `YYYY-MM-DDTHH:MM:SS` or `YYYY-MM-DD HH:MM:SS` (length >= 19).
+    if s.len() < 19 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("datetime.from_iso: too short: {s:?}"),
+        });
+    }
+    let (date_part, rest) = s.split_at(10);
+    let sep = rest.as_bytes()[0];
+    if sep != b'T' && sep != b' ' {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "datetime.from_iso: expected `T` or space at position 10: {s:?}"
+            ),
+        });
+    }
+    let (y, mo, d) = parse_yyyy_mm_dd(date_part)?;
+    let time_str = &rest[1..];
+    if time_str.len() < 8 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("datetime.from_iso: time field too short: {s:?}"),
+        });
+    }
+    let (h, mi, sec) = parse_hh_mm_ss(&time_str[..8])?;
+    let tz = &time_str[8..];
+    // Compute UTC seconds from the parsed local date+time, then apply
+    // a tz offset if one is present.
+    let local_secs = ymd_to_epoch_seconds(y, mo, d, h, mi, sec)?;
+    let off_secs = parse_iso_tz_suffix(tz, s)?;
+    // ISO: `local = utc + offset`, so `utc = local - offset`.
+    Ok(local_secs - off_secs)
+}
+
+/// Parse the timezone suffix of an ISO 8601 string.  Accepted forms:
+///   - empty (naive — treated as UTC)
+///   - `"Z"` (UTC)
+///   - `"+HH:MM"` / `"-HH:MM"` (signed minutes from UTC)
+///   - `"+HHMM"` / `"-HHMM"` (compact form, also accepted)
+/// Returns the offset in seconds.
+fn parse_iso_tz_suffix(tz: &str, full: &str) -> Result<i64, VmError> {
+    if tz.is_empty() || tz == "Z" {
+        return Ok(0);
+    }
+    let bytes = tz.as_bytes();
+    if bytes[0] != b'+' && bytes[0] != b'-' {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "datetime.from_iso: unrecognised TZ suffix {tz:?} in {full:?}"
+            ),
+        });
+    }
+    let sign: i64 = if bytes[0] == b'+' { 1 } else { -1 };
+    let rest = &tz[1..];
+    let (hh, mm) = match rest.len() {
+        5 => {
+            // "HH:MM"
+            if rest.as_bytes()[2] != b':' {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "datetime.from_iso: malformed TZ {tz:?} in {full:?}"
+                    ),
+                });
+            }
+            (parse_uint(&rest[..2])?, parse_uint(&rest[3..])?)
+        }
+        4 => {
+            // "HHMM"
+            (parse_uint(&rest[..2])?, parse_uint(&rest[2..])?)
+        }
+        _ => {
+            return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!(
+                    "datetime.from_iso: malformed TZ {tz:?} in {full:?}"
+                ),
+            });
+        }
+    };
+    if hh > 23 || mm > 59 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("datetime.from_iso: TZ out of range: {tz:?}"),
+        });
+    }
+    Ok(sign * (hh as i64 * 3600 + mm as i64 * 60))
+}
+
+/// Parse `"YYYY-MM-DD"` to UTC midnight epoch seconds.
+fn parse_iso_date(s: &str) -> Result<i64, VmError> {
+    let s = s.trim();
+    if s.len() != 10 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("datetime: expected YYYY-MM-DD, got {s:?}"),
+        });
+    }
+    let (y, m, d) = parse_yyyy_mm_dd(s)?;
+    ymd_to_epoch_seconds(y, m, d, 0, 0, 0)
+}
+
+/// Parse `"YYYY-MM-DD"` to a `(y, m, d)` triple.  Length already
+/// checked by the caller.  Allows leading `-` for BCE years (e.g.
+/// `"-0044-03-15"` is the Ides of March, 44 BCE).
+fn parse_yyyy_mm_dd(s: &str) -> Result<(i32, i32, i32), VmError> {
+    let bytes = s.as_bytes();
+    // We expect exactly `YYYY-MM-DD` (10 chars).  A leading minus
+    // would shift positions — handle that as an explicit alternative
+    // form below.
+    let (year_str, rest) = if bytes[0] == b'-' {
+        if s.len() != 11 {
+            return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!("datetime: bad date format {s:?}"),
+            });
+        }
+        (&s[..5], &s[5..])
+    } else {
+        if s.len() != 10 {
+            return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!("datetime: bad date format {s:?}"),
+            });
+        }
+        (&s[..4], &s[4..])
+    };
+    if rest.as_bytes()[0] != b'-' || rest.as_bytes()[3] != b'-' {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("datetime: bad date format {s:?}"),
+        });
+    }
+    let y: i32 = if let Some(stripped) = year_str.strip_prefix('-') {
+        let n = parse_uint(stripped)? as i32;
+        -n
+    } else {
+        parse_uint(year_str)? as i32
+    };
+    let m = parse_uint(&rest[1..3])? as i32;
+    let d = parse_uint(&rest[4..6])? as i32;
+    Ok((y, m, d))
+}
+
+/// Parse `"HH:MM:SS"` to a `(h, m, s)` triple.  Length checked by
+/// caller.
+fn parse_hh_mm_ss(s: &str) -> Result<(i32, i32, i32), VmError> {
+    let bytes = s.as_bytes();
+    if bytes.len() != 8 || bytes[2] != b':' || bytes[5] != b':' {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("datetime: bad time format {s:?}"),
+        });
+    }
+    let h = parse_uint(&s[..2])? as i32;
+    let m = parse_uint(&s[3..5])? as i32;
+    let sec = parse_uint(&s[6..])? as i32;
+    Ok((h, m, sec))
+}
+
+/// Parse an ASCII decimal string as `u32`.  Returns `ValueError` on
+/// non-digit input.  Used by every date/time-component parser above.
+fn parse_uint(s: &str) -> Result<u32, VmError> {
+    if s.is_empty() {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "datetime: empty numeric field".into(),
+        });
+    }
+    let mut n: u32 = 0;
+    for b in s.bytes() {
+        if !b.is_ascii_digit() {
+            return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!(
+                    "datetime: non-digit in numeric field: {s:?}"
+                ),
+            });
+        }
+        n = n.saturating_mul(10).saturating_add((b - b'0') as u32);
+    }
+    Ok(n)
+}
+
+/// Process-local timezone offset from UTC in minutes.  Platform-specific
+/// FFI (no `chrono` / `libc` crate dep — matches the M20b "don't pull
+/// in 400KB of crates for one feature" stance).  On unsupported
+/// platforms, returns 0 (caller code is documented as UTC-fallback).
+#[cfg(target_os = "windows")]
+fn local_offset_minutes_now() -> i32 {
+    // `GetTimeZoneInformation` returns the bias (UTC = local + bias).
+    // We negate to match Python's convention (offset = local - UTC).
+    // Returns 0 if the API call fails for any reason.
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct SystemTime {
+        wYear: u16, wMonth: u16, wDayOfWeek: u16, wDay: u16,
+        wHour: u16, wMinute: u16, wSecond: u16, wMilliseconds: u16,
+    }
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct TimeZoneInformation {
+        Bias: i32,
+        StandardName: [u16; 32],
+        StandardDate: SystemTime,
+        StandardBias: i32,
+        DaylightName: [u16; 32],
+        DaylightDate: SystemTime,
+        DaylightBias: i32,
+    }
+    extern "system" {
+        fn GetTimeZoneInformation(tz: *mut TimeZoneInformation) -> u32;
+    }
+    const TIME_ZONE_ID_INVALID: u32 = 0xFFFF_FFFF;
+    const TIME_ZONE_ID_STANDARD: u32 = 1;
+    const TIME_ZONE_ID_DAYLIGHT: u32 = 2;
+
+    unsafe {
+        let mut tz: TimeZoneInformation = std::mem::zeroed();
+        let id = GetTimeZoneInformation(&mut tz as *mut _);
+        if id == TIME_ZONE_ID_INVALID {
+            return 0;
+        }
+        // `Bias` is in minutes; `UTC = local + Bias` so local-UTC = -Bias.
+        // Daylight/Standard bias is layered on top.
+        let total_bias = tz.Bias
+            + if id == TIME_ZONE_ID_DAYLIGHT {
+                tz.DaylightBias
+            } else if id == TIME_ZONE_ID_STANDARD {
+                tz.StandardBias
+            } else {
+                0
+            };
+        -total_bias
+    }
+}
+
+#[cfg(target_family = "unix")]
+fn local_offset_minutes_now() -> i32 {
+    // `localtime_r(time_t*, struct tm*)` fills a `struct tm` whose
+    // `tm_gmtoff` field holds the offset in seconds east of UTC.  We
+    // call it with the current SystemTime.
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct Tm {
+        tm_sec: i32, tm_min: i32, tm_hour: i32,
+        tm_mday: i32, tm_mon: i32, tm_year: i32,
+        tm_wday: i32, tm_yday: i32, tm_isdst: i32,
+        tm_gmtoff: i64, // seconds east of UTC; long on most LP64
+        tm_zone: *const i8,
+    }
+    extern "C" {
+        fn localtime_r(time: *const i64, result: *mut Tm) -> *mut Tm;
+    }
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    unsafe {
+        let mut tm: Tm = std::mem::zeroed();
+        let r = localtime_r(&now as *const i64, &mut tm as *mut Tm);
+        if r.is_null() {
+            return 0;
+        }
+        (tm.tm_gmtoff / 60) as i32
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_family = "unix")))]
+fn local_offset_minutes_now() -> i32 {
+    // TODO: real local-offset needs platform code or the `chrono` crate.
+    // On platforms we don't compile for (wasm32, etc.) we fall back to
+    // UTC — the caller is expected to treat 0 as "unknown / UTC".
+    0
 }
 
 #[cfg(test)]
