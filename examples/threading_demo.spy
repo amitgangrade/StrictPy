@@ -1,0 +1,69 @@
+"""threading_demo.spy — `threading.Lock` + `threading.Semaphore` (M23 P3a-C).
+
+Four worker threads hammer a shared counter (`List[i32]` of length 1, same
+shape as the existing M6 thread examples).  Each worker grabs a Lock,
+increments, releases.  Loop 100 times per worker.  After all join, the
+counter holds exactly 4 * 100 = 400 — the classic mutex correctness
+test: without the lock, lost updates would drop the final count well
+below 400 on every multi-core run.
+
+Also exercises `threading.Semaphore` with one initial permit.  A semaphore
+with N=1 behaves like a binary mutex; we run a brief warm-up that takes,
+processes, and releases a permit twice on the main thread.
+
+Tests:
+  * `compiler/tests/threading_demo_runs.rs` — subprocess assertion that
+    the counter ends at exactly 400.
+"""
+
+from threading import Thread
+import threading
+
+fn worker(counter: List[i32], lock_handle: i64) -> None:
+    i: i32 = 0
+    while i < 100:
+        threading.lock_acquire(lock_handle)
+        counter[0] = counter[0] + 1
+        threading.lock_release(lock_handle)
+        i = i + 1
+
+fn main() -> i32:
+    # Demonstrate Semaphore as a binary mutex (warm-up).
+    sem: i64 = threading.semaphore_new(1)
+    threading.semaphore_acquire(sem)
+    threading.semaphore_release(sem)
+    # try_acquire shouldn't block.
+    got: bool = threading.semaphore_try_acquire(sem)
+    if got:
+        threading.semaphore_release(sem)
+    println("semaphore-ok=" + str(got))
+
+    # Shared mutable counter — same shape as the existing M6 examples
+    # (a single-element List[i32]).  Each worker increments via the lock.
+    counter: List[i32] = [0]
+    lock_handle: i64 = threading.lock_new()
+
+    # lock_try_acquire on the fresh lock should succeed.
+    held: bool = threading.lock_try_acquire(lock_handle)
+    if held:
+        threading.lock_release(lock_handle)
+    println("try-acquire-fresh=" + str(held))
+
+    t1: Thread = Thread(fn() -> None: worker(counter, lock_handle))
+    t2: Thread = Thread(fn() -> None: worker(counter, lock_handle))
+    t3: Thread = Thread(fn() -> None: worker(counter, lock_handle))
+    t4: Thread = Thread(fn() -> None: worker(counter, lock_handle))
+
+    t1.start()
+    t2.start()
+    t3.start()
+    t4.start()
+
+    t1.join()
+    t2.join()
+    t3.join()
+    t4.join()
+
+    # Each of 4 workers incremented 100 times.
+    println("counter=" + str(counter[0]))
+    return 0

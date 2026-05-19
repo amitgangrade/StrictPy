@@ -3369,9 +3369,319 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             Ok((off as i32) as u32 as u64)
         }
 
+        // ── M23 P3a-C: threading.Lock / threading.Semaphore ────────────
+        // Locks are stored as `(owner: Option<ThreadId>, cv, gate)` in
+        // `SharedVm.locks`.  Acquire/release block via Condvar; the table
+        // mutex is held only to inspect/mutate `owner` — never while
+        // blocking on the cv, otherwise concurrent operations on other
+        // locks would starve.
+        NativeFn::ThreadingLockNew => {
+            let h = interp.alloc_lock_handle();
+            Ok(h as u64)
+        }
+        NativeFn::ThreadingLockAcquire => {
+            let handle = arg_i64(args, 0);
+            lock_acquire(interp, handle)
+        }
+        NativeFn::ThreadingLockRelease => {
+            let handle = arg_i64(args, 0);
+            lock_release(interp, handle)
+        }
+        NativeFn::ThreadingLockTryAcquire => {
+            let handle = arg_i64(args, 0);
+            lock_try_acquire(interp, handle)
+        }
+        NativeFn::ThreadingSemaphoreNew => {
+            let initial = arg_i64(args, 0) as i32;
+            let h = interp.alloc_semaphore_handle(initial);
+            Ok(h as u64)
+        }
+        NativeFn::ThreadingSemaphoreAcquire => {
+            let handle = arg_i64(args, 0);
+            semaphore_acquire(interp, handle)
+        }
+        NativeFn::ThreadingSemaphoreRelease => {
+            let handle = arg_i64(args, 0);
+            semaphore_release(interp, handle)
+        }
+        NativeFn::ThreadingSemaphoreTryAcquire => {
+            let handle = arg_i64(args, 0);
+            semaphore_try_acquire(interp, handle)
+        }
+
+        // ── M23 P3a-C: queue.PriorityQueue ─────────────────────────────
+        // `BinaryHeap` is a max-heap; we wrap priorities in `Reverse` (via
+        // the `F64Ord` shim in interp.rs) for min-heap semantics.  Tuple
+        // returns reuse M20a's `alloc_tuple_obj` — same pattern as
+        // path.splitext and re.find.
+        NativeFn::QueuePqNewI64 | NativeFn::QueuePqNewStr => {
+            let h = interp.alloc_pq_handle();
+            Ok(h as u64)
+        }
+        NativeFn::QueuePqPushI64 => {
+            let handle = arg_i64(args, 0);
+            let priority = arg_f64(args, 1);
+            let item = arg_u64(args, 2);
+            pq_push(interp, handle, priority, item)
+        }
+        NativeFn::QueuePqPushStr => {
+            let handle = arg_i64(args, 0);
+            let priority = arg_f64(args, 1);
+            let item = arg_u64(args, 2); // raw *StringRepr in u64 form
+            pq_push(interp, handle, priority, item)
+        }
+        NativeFn::QueuePqPopMinI64 => {
+            let handle = arg_i64(args, 0);
+            let (priority, item) = pq_pop_min(interp, handle, "pq_pop_min_i64")?;
+            let tup = interp.alloc_tuple_obj(&[priority.to_bits(), item]);
+            Ok(tup as u64)
+        }
+        NativeFn::QueuePqPopMinStr => {
+            let handle = arg_i64(args, 0);
+            let (priority, item) = pq_pop_min(interp, handle, "pq_pop_min_str")?;
+            let tup = interp.alloc_tuple_obj(&[priority.to_bits(), item]);
+            Ok(tup as u64)
+        }
+        NativeFn::QueuePqPeekMinI64 => {
+            let handle = arg_i64(args, 0);
+            let (priority, item) = pq_peek_min(interp, handle, "pq_peek_min_i64")?;
+            let tup = interp.alloc_tuple_obj(&[priority.to_bits(), item]);
+            Ok(tup as u64)
+        }
+        NativeFn::QueuePqPeekMinStr => {
+            let handle = arg_i64(args, 0);
+            let (priority, item) = pq_peek_min(interp, handle, "pq_peek_min_str")?;
+            let tup = interp.alloc_tuple_obj(&[priority.to_bits(), item]);
+            Ok(tup as u64)
+        }
+        NativeFn::QueuePqLen => {
+            let handle = arg_i64(args, 0);
+            let pqs = interp.shared.priority_queues.lock().unwrap();
+            let h = handle as usize;
+            if h == 0 || h >= pqs.len() || pqs[h].is_none() {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("pq_len: invalid priority-queue handle {handle}"),
+                });
+            }
+            let len = pqs[h].as_ref().unwrap().heap.len() as i32;
+            Ok(len as u32 as u64)
+        }
+        NativeFn::QueuePqIsEmpty => {
+            let handle = arg_i64(args, 0);
+            let pqs = interp.shared.priority_queues.lock().unwrap();
+            let h = handle as usize;
+            if h == 0 || h >= pqs.len() || pqs[h].is_none() {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("pq_is_empty: invalid priority-queue handle {handle}"),
+                });
+            }
+            let empty = pqs[h].as_ref().unwrap().heap.is_empty();
+            Ok(if empty { 1 } else { 0 })
+        }
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
+    }
+}
+
+// ─── M23 P3a-C: lock / semaphore / priority-queue helpers ─────────────
+
+/// Acquire a `threading.Lock`, blocking until available.  Uses the
+/// canonical Mutex+Condvar pattern: the `owner` predicate is guarded by
+/// the same `Mutex` that the `Condvar::wait` releases, so there's no
+/// missed-wakeup race window between checking the predicate and parking.
+/// The outer `SharedVm.locks` table mutex is held only to clone out the
+/// per-slot `Arc`s; never across a `wait`.
+///
+/// Non-recursive: if the current thread is already the owner, this
+/// **deadlocks** (waits forever).  That matches Python's `threading.Lock`
+/// (RLock is v0.3).
+fn lock_acquire(interp: &Interpreter, handle: i64) -> Result<u64, VmError> {
+    let me = std::thread::current().id();
+    let (owner_mu, cv) = lock_slot_clones(interp, handle, "lock_acquire")?;
+    let mut guard = owner_mu
+        .lock()
+        .map_err(|_| VmError::Trap("lock owner mutex poisoned".into()))?;
+    while guard.is_some() {
+        guard = cv
+            .wait(guard)
+            .map_err(|_| VmError::Trap("lock condvar poisoned".into()))?;
+    }
+    *guard = Some(me);
+    Ok(0)
+}
+
+/// Try to acquire without blocking.  Returns true (1) if acquired.
+fn lock_try_acquire(interp: &Interpreter, handle: i64) -> Result<u64, VmError> {
+    let me = std::thread::current().id();
+    let (owner_mu, _cv) = lock_slot_clones(interp, handle, "lock_try_acquire")?;
+    let mut guard = owner_mu
+        .lock()
+        .map_err(|_| VmError::Trap("lock owner mutex poisoned".into()))?;
+    if guard.is_none() {
+        *guard = Some(me);
+        Ok(1)
+    } else {
+        Ok(0)
+    }
+}
+
+/// Release a lock and wake one waiter.
+fn lock_release(interp: &Interpreter, handle: i64) -> Result<u64, VmError> {
+    let (owner_mu, cv) = lock_slot_clones(interp, handle, "lock_release")?;
+    {
+        let mut guard = owner_mu
+            .lock()
+            .map_err(|_| VmError::Trap("lock owner mutex poisoned".into()))?;
+        if guard.is_none() {
+            return Err(VmError::UncaughtException {
+                type_name: "RuntimeError".into(),
+                message: "lock_release: lock is not currently held".into(),
+            });
+        }
+        *guard = None;
+    }
+    // Wake one waiter — they'll re-check the owner field and either
+    // claim the lock or wait again.  `notify_one` (not `_all`) avoids
+    // a thundering-herd contention storm.
+    cv.notify_one();
+    Ok(0)
+}
+
+/// Snapshot the owner-mutex + cv of a lock slot for use after the table
+/// mutex is dropped.  Errors with ValueError on an invalid handle.
+fn lock_slot_clones(
+    interp: &Interpreter,
+    handle: i64,
+    who: &str,
+) -> Result<
+    (
+        std::sync::Arc<std::sync::Mutex<Option<std::thread::ThreadId>>>,
+        std::sync::Arc<std::sync::Condvar>,
+    ),
+    VmError,
+> {
+    let locks = interp.shared.locks.lock().unwrap();
+    let h = handle as usize;
+    let slot = locks
+        .get(h)
+        .and_then(|s| s.as_ref())
+        .ok_or_else(|| VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("{}: invalid lock handle {}", who, handle),
+        })?;
+    Ok((slot.owner.clone(), slot.cv.clone()))
+}
+
+/// Acquire a semaphore permit, blocking until one is available.
+fn semaphore_acquire(interp: &Interpreter, handle: i64) -> Result<u64, VmError> {
+    let (permits, cv) = sem_slot_clones(interp, handle, "semaphore_acquire")?;
+    let mut guard = permits.lock().map_err(|_| VmError::Trap("sem permits poisoned".into()))?;
+    while *guard <= 0 {
+        guard = cv
+            .wait(guard)
+            .map_err(|_| VmError::Trap("sem condvar poisoned".into()))?;
+    }
+    *guard -= 1;
+    Ok(0)
+}
+
+/// Try to acquire a permit without blocking.  Returns true if obtained.
+fn semaphore_try_acquire(interp: &Interpreter, handle: i64) -> Result<u64, VmError> {
+    let (permits, _cv) = sem_slot_clones(interp, handle, "semaphore_try_acquire")?;
+    let mut guard = permits.lock().map_err(|_| VmError::Trap("sem permits poisoned".into()))?;
+    if *guard > 0 {
+        *guard -= 1;
+        Ok(1)
+    } else {
+        Ok(0)
+    }
+}
+
+/// Increment permit count and wake one waiter.
+fn semaphore_release(interp: &Interpreter, handle: i64) -> Result<u64, VmError> {
+    let (permits, cv) = sem_slot_clones(interp, handle, "semaphore_release")?;
+    let mut guard = permits.lock().map_err(|_| VmError::Trap("sem permits poisoned".into()))?;
+    *guard += 1;
+    cv.notify_one();
+    Ok(0)
+}
+
+fn sem_slot_clones(
+    interp: &Interpreter,
+    handle: i64,
+    who: &str,
+) -> Result<(std::sync::Arc<std::sync::Mutex<i32>>, std::sync::Arc<std::sync::Condvar>), VmError> {
+    let sems = interp.shared.semaphores.lock().unwrap();
+    let h = handle as usize;
+    let slot = sems
+        .get(h)
+        .and_then(|s| s.as_ref())
+        .ok_or_else(|| VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("{}: invalid semaphore handle {}", who, handle),
+        })?;
+    Ok((slot.permits.clone(), slot.cv.clone()))
+}
+
+/// Push `(priority, item)` onto a priority queue.  `item` is opaque u64.
+fn pq_push(interp: &Interpreter, handle: i64, priority: f64, item: u64) -> Result<u64, VmError> {
+    use crate::interp::F64Ord;
+    let mut pqs = interp.shared.priority_queues.lock().unwrap();
+    let h = handle as usize;
+    let slot = pqs
+        .get_mut(h)
+        .and_then(|s| s.as_mut())
+        .ok_or_else(|| VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("pq_push: invalid priority-queue handle {handle}"),
+        })?;
+    let seq = slot.next_seq;
+    slot.next_seq = slot.next_seq.wrapping_add(1);
+    slot.heap.push((std::cmp::Reverse(F64Ord(priority)), std::cmp::Reverse(seq), item));
+    Ok(0)
+}
+
+/// Pop the min-priority entry.  IndexError on empty.
+fn pq_pop_min(interp: &Interpreter, handle: i64, who: &str) -> Result<(f64, u64), VmError> {
+    let mut pqs = interp.shared.priority_queues.lock().unwrap();
+    let h = handle as usize;
+    let slot = pqs
+        .get_mut(h)
+        .and_then(|s| s.as_mut())
+        .ok_or_else(|| VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("{}: invalid priority-queue handle {}", who, handle),
+        })?;
+    match slot.heap.pop() {
+        Some((std::cmp::Reverse(p), _seq, item)) => Ok((p.0, item)),
+        None => Err(VmError::UncaughtException {
+            type_name: "IndexError".into(),
+            message: format!("{}: queue is empty", who),
+        }),
+    }
+}
+
+/// Peek the min-priority entry without removing it.  IndexError on empty.
+fn pq_peek_min(interp: &Interpreter, handle: i64, who: &str) -> Result<(f64, u64), VmError> {
+    let pqs = interp.shared.priority_queues.lock().unwrap();
+    let h = handle as usize;
+    let slot = pqs
+        .get(h)
+        .and_then(|s| s.as_ref())
+        .ok_or_else(|| VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("{}: invalid priority-queue handle {}", who, handle),
+        })?;
+    match slot.heap.peek() {
+        Some((std::cmp::Reverse(p), _seq, item)) => Ok((p.0, *item)),
+        None => Err(VmError::UncaughtException {
+            type_name: "IndexError".into(),
+            message: format!("{}: queue is empty", who),
+        }),
     }
 }
 

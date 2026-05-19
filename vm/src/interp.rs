@@ -20,12 +20,13 @@
 //! object alive; this is safe (mark-sweep) but wastes a little memory.
 //! Precise stack maps are M6 work.
 
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 use std::fs::File as FsFile;
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use strictpy_shared::file_format::DISCARD_REG;
 use strictpy_shared::{NativeFn, Opcode, TypeTag};
@@ -116,6 +117,88 @@ pub struct DictSlot {
     pub data: HashMap<String, u64>,
 }
 
+/// M23 P3a-C: one slot in the VM's lock table.
+///
+/// The owner thread id lives inside its own `Mutex` — the same mutex
+/// the Condvar `wait`s on — so the standard "predicate guarded by the
+/// same mutex" Condvar pattern applies and there's no missed-wakeup
+/// race. The outer `SharedVm.locks` table mutex is held only to look
+/// up the slot's `Arc` clones; never during a `wait`.
+///
+/// We can't store a `MutexGuard` here directly (it borrows from the
+/// mutex) so we track held-state and the owner thread id by hand:
+/// an `Option<std::thread::ThreadId>` is `Some` while the lock is
+/// held, `None` otherwise.
+pub struct LockSlot {
+    /// Whoever is holding the lock (or `None`). `Condvar` waiters
+    /// re-check this on every wake-up.
+    pub owner: Arc<Mutex<Option<std::thread::ThreadId>>>,
+    /// `Condvar` paired with the `owner` mutex.  Released by
+    /// `lock_release` after setting `owner = None`.
+    pub cv: Arc<Condvar>,
+}
+
+/// M23 P3a-C: one slot in the VM's semaphore table. Permits live in the
+/// inner mutex; the condvar wakes one waiter per release. Same shape as
+/// `LockSlot` but with an explicit i32 counter.
+pub struct SemaphoreSlot {
+    pub permits: Arc<Mutex<i32>>,
+    pub cv: Arc<Condvar>,
+}
+
+/// M23 P3a-C: one slot in the VM's priority-queue table. Items are
+/// opaque `u64` payloads (i64 for `pq_*_i64`, `*StringRepr` for
+/// `pq_*_str`); the priority is an f64. `BinaryHeap` is a max-heap, so
+/// we wrap the priority in `Reverse` to get min-heap semantics, and we
+/// wrap that in a tuple `(Reverse<F64Ord>, u64)` so two items with the
+/// same priority compare by insertion order (FIFO tie-break).
+///
+/// We can't store raw `f64` in a `BinaryHeap` (it's not `Ord` because of
+/// NaN). We wrap it in `F64Ord` whose `Ord` impl treats NaN as greatest
+/// — the rare program that inserts NaN priorities still has well-defined
+/// behaviour. Insertion order is preserved by an auto-incrementing
+/// `u64` sequence number.
+pub struct PqSlot {
+    /// `BinaryHeap` of `(Reverse<F64Ord>, Reverse<seq>, item_u64)`.
+    /// `Reverse<seq>` so older inserts pop first within the same priority.
+    pub heap: BinaryHeap<(Reverse<F64Ord>, Reverse<u64>, u64)>,
+    pub next_seq: u64,
+}
+
+/// Wrapper providing `Ord` for `f64`. NaN sorts as the greatest value so
+/// the binary-heap invariant holds; programs shouldn't insert NaN
+/// priorities but if they do, NaN bubbles down to the bottom (max-priority
+/// side, i.e. last to pop in a min-heap).
+#[derive(Copy, Clone)]
+pub struct F64Ord(pub f64);
+
+impl PartialEq for F64Ord {
+    fn eq(&self, other: &Self) -> bool {
+        if self.0.is_nan() && other.0.is_nan() {
+            true
+        } else {
+            self.0 == other.0
+        }
+    }
+}
+impl Eq for F64Ord {}
+impl PartialOrd for F64Ord {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for F64Ord {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // NaN is treated as greatest.
+        match (self.0.is_nan(), other.0.is_nan()) {
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            (false, false) => self.0.partial_cmp(&other.0).unwrap_or(std::cmp::Ordering::Equal),
+        }
+    }
+}
+
 /// Bundle of [`RuntimeType`]s built once at module load and shared between
 /// every interpreter (parent + spawned thread workers) that runs against
 /// the same module. `Arc<TypeBundle>` is cheap to clone and free of locking.
@@ -151,6 +234,14 @@ pub struct SharedVm {
     pub channels: Arc<Mutex<Vec<Option<ChannelSlot>>>>,
     pub threads: Arc<Mutex<Vec<Option<ThreadSlot>>>>,
     pub dicts: Arc<Mutex<Vec<Option<DictSlot>>>>,
+    /// M23 P3a-C: `threading.Lock` slots. Index 0 is reserved (handle 0
+    /// would collide with "no lock"). Outer mutex guards the table; the
+    /// inner state is per-slot.
+    pub locks: Arc<Mutex<Vec<Option<LockSlot>>>>,
+    /// M23 P3a-C: `threading.Semaphore` slots. Index 0 reserved.
+    pub semaphores: Arc<Mutex<Vec<Option<SemaphoreSlot>>>>,
+    /// M23 P3a-C: `queue.PriorityQueue` slots. Index 0 reserved.
+    pub priority_queues: Arc<Mutex<Vec<Option<PqSlot>>>>,
     /// M7: shared stdout sink so spawned worker threads write to the same
     /// destination as the parent interpreter. Without this, the capture
     /// sink installed by `run_file_capture` only sees the parent's writes;
@@ -195,6 +286,9 @@ impl SharedVm {
             channels: Arc::new(Mutex::new(vec![None])),
             threads: Arc::new(Mutex::new(vec![None])),
             dicts: Arc::new(Mutex::new(vec![None])),
+            locks: Arc::new(Mutex::new(vec![None])),
+            semaphores: Arc::new(Mutex::new(vec![None])),
+            priority_queues: Arc::new(Mutex::new(vec![None])),
             stdout: Arc::new(Mutex::new(Box::new(RealStdout))),
             #[cfg(feature = "jit")]
             jit: None,
@@ -233,6 +327,9 @@ impl SharedVm {
             channels: Arc::new(Mutex::new(vec![None])),
             threads: Arc::new(Mutex::new(vec![None])),
             dicts: Arc::new(Mutex::new(vec![None])),
+            locks: Arc::new(Mutex::new(vec![None])),
+            semaphores: Arc::new(Mutex::new(vec![None])),
+            priority_queues: Arc::new(Mutex::new(vec![None])),
             stdout: Arc::new(Mutex::new(Box::new(RealStdout))),
             jit: Some(jit_cell),
             in_jit: AtomicUsize::new(0),
@@ -2059,6 +2156,40 @@ impl Interpreter {
             }
         }
         p
+    }
+
+    /// M23 P3a-C: allocate a fresh Lock slot, returning its i64 handle.
+    /// No heap representation — locks are pure handle-table objects.
+    pub(crate) fn alloc_lock_handle(&mut self) -> i64 {
+        let mut locks = self.shared.locks.lock().unwrap();
+        let h = locks.len() as i64;
+        locks.push(Some(LockSlot {
+            owner: Arc::new(Mutex::new(None)),
+            cv: Arc::new(Condvar::new()),
+        }));
+        h
+    }
+
+    /// M23 P3a-C: allocate a Semaphore slot with the given permit count.
+    pub(crate) fn alloc_semaphore_handle(&mut self, initial: i32) -> i64 {
+        let mut sems = self.shared.semaphores.lock().unwrap();
+        let h = sems.len() as i64;
+        sems.push(Some(SemaphoreSlot {
+            permits: Arc::new(Mutex::new(initial)),
+            cv: Arc::new(Condvar::new()),
+        }));
+        h
+    }
+
+    /// M23 P3a-C: allocate a fresh empty PriorityQueue slot.
+    pub(crate) fn alloc_pq_handle(&mut self) -> i64 {
+        let mut pqs = self.shared.priority_queues.lock().unwrap();
+        let h = pqs.len() as i64;
+        pqs.push(Some(PqSlot {
+            heap: BinaryHeap::new(),
+            next_seq: 0,
+        }));
+        h
     }
 
     /// Allocate a `DictRepr` backed by an empty side-table HashMap.

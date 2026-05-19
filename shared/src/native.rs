@@ -768,6 +768,61 @@ pub enum NativeFn {
     // 412-419 reserved for v0.3 (timezone-named DateTimes, fractional secs,
     // strftime/strptime, etc.).
 
+    // ── 420-439: M23 P3a-C — `threading` + `queue` ─────────────────────
+    // Synchronisation primitives that extend M6's Thread/Channel surface,
+    // and a generic min-priority-queue.  Lock + Semaphore live in slot
+    // tables on `SharedVm` (`locks`, `semaphores`); PriorityQueue lives
+    // in `priority_queues`.  Same opaque-i64-handle shape as the existing
+    // channels/dicts/files tables.
+    //
+    // Items 422 (lock_release) is non-recursive — Python's `threading.Lock`
+    // semantics, not `RLock` — so acquiring a held lock from the same
+    // thread DEADLOCKS.  `RLock`, `Event`, `Condition`, `Barrier` are v0.3.
+    /// `threading.lock_new() -> i64` — allocate a fresh unheld lock.
+    ThreadingLockNew         = 420,
+    /// `threading.lock_acquire(handle: i64) -> None` — block until acquired.
+    ThreadingLockAcquire     = 421,
+    /// `threading.lock_release(handle: i64) -> None` — raises RuntimeError
+    /// if the lock isn't currently held.
+    ThreadingLockRelease     = 422,
+    /// `threading.lock_try_acquire(handle: i64) -> bool` — non-blocking;
+    /// returns true if the lock was obtained.
+    ThreadingLockTryAcquire  = 423,
+    /// `threading.semaphore_new(initial: i32) -> i64` — N initial permits.
+    ThreadingSemaphoreNew         = 424,
+    /// `threading.semaphore_acquire(handle: i64) -> None` — block until a
+    /// permit is available.
+    ThreadingSemaphoreAcquire     = 425,
+    /// `threading.semaphore_release(handle: i64) -> None` — increment and
+    /// wake one waiter.
+    ThreadingSemaphoreRelease     = 426,
+    /// `threading.semaphore_try_acquire(handle: i64) -> bool` — non-blocking.
+    ThreadingSemaphoreTryAcquire  = 427,
+    /// `queue.pq_new_i64() -> i64` — fresh min-priority queue with i64 items.
+    QueuePqNewI64       = 428,
+    /// `queue.pq_push_i64(handle, priority: f64, item: i64) -> None`.
+    QueuePqPushI64      = 429,
+    /// `queue.pq_pop_min_i64(handle) -> Tuple[f64, i64]` — lowest priority.
+    /// Raises IndexError on empty.
+    QueuePqPopMinI64    = 430,
+    /// `queue.pq_peek_min_i64(handle) -> Tuple[f64, i64]` — non-destructive.
+    QueuePqPeekMinI64   = 431,
+    /// `queue.pq_new_str() -> i64` — fresh PQ with str items.
+    QueuePqNewStr       = 432,
+    /// `queue.pq_push_str(handle, priority: f64, item: str) -> None`.
+    QueuePqPushStr      = 433,
+    /// `queue.pq_pop_min_str(handle) -> Tuple[f64, str]`.
+    QueuePqPopMinStr    = 434,
+    /// `queue.pq_peek_min_str(handle) -> Tuple[f64, str]`.
+    QueuePqPeekMinStr   = 435,
+    /// `queue.pq_len(handle: i64) -> i32` — type-erased (works for both
+    /// i64 and str queues; the handle alone is enough since item payloads
+    /// are uniformly u64 slots).
+    QueuePqLen          = 436,
+    /// `queue.pq_is_empty(handle: i64) -> bool` — type-erased.
+    QueuePqIsEmpty      = 437,
+    // 438-439 reserved for v0.3 (e.g. pq_clear, pq_drain).
+
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
     /// encounters. The VM treats this as a runtime error.
@@ -1057,6 +1112,25 @@ impl NativeFn {
             409 => Some(Self::DateTimeFromIso),
             410 => Some(Self::DateTimeFromDateStr),
             411 => Some(Self::DateTimeLocalOffsetMinutes),
+            // M23 P3a-C: threading + queue (420-437).
+            420 => Some(Self::ThreadingLockNew),
+            421 => Some(Self::ThreadingLockAcquire),
+            422 => Some(Self::ThreadingLockRelease),
+            423 => Some(Self::ThreadingLockTryAcquire),
+            424 => Some(Self::ThreadingSemaphoreNew),
+            425 => Some(Self::ThreadingSemaphoreAcquire),
+            426 => Some(Self::ThreadingSemaphoreRelease),
+            427 => Some(Self::ThreadingSemaphoreTryAcquire),
+            428 => Some(Self::QueuePqNewI64),
+            429 => Some(Self::QueuePqPushI64),
+            430 => Some(Self::QueuePqPopMinI64),
+            431 => Some(Self::QueuePqPeekMinI64),
+            432 => Some(Self::QueuePqNewStr),
+            433 => Some(Self::QueuePqPushStr),
+            434 => Some(Self::QueuePqPopMinStr),
+            435 => Some(Self::QueuePqPeekMinStr),
+            436 => Some(Self::QueuePqLen),
+            437 => Some(Self::QueuePqIsEmpty),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

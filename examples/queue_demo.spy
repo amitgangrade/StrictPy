@@ -1,0 +1,76 @@
+"""queue_demo.spy — `queue.PriorityQueue` min-heap (M23 P3a-C).
+
+Two scenarios:
+
+  1. Numeric items.  Push 10 (priority, item) pairs with priorities in a
+     scrambled order.  Pop one at a time and verify the priorities come
+     out non-decreasing.
+
+  2. Named tasks.  A tiny priority-task scheduler: push 5 string-labelled
+     tasks with varying priorities, then drain them.  The output order
+     matches the priority order, NOT the insert order — that's the
+     point of a priority queue.
+
+Tests:
+  * `compiler/tests/queue_demo_runs.rs` — subprocess assertion of the
+    ordered drain output.
+"""
+
+import queue
+
+fn main() -> i32:
+    # ── Numeric PQ ────────────────────────────────────────────────
+    pq: i64 = queue.pq_new_i64()
+
+    # Push in scrambled order; priorities 0.5..=9.5 .
+    queue.pq_push_i64(pq, 7.5, 70i64)
+    queue.pq_push_i64(pq, 1.5, 10i64)
+    queue.pq_push_i64(pq, 9.5, 90i64)
+    queue.pq_push_i64(pq, 0.5, 0i64)
+    queue.pq_push_i64(pq, 4.5, 40i64)
+    queue.pq_push_i64(pq, 8.5, 80i64)
+    queue.pq_push_i64(pq, 2.5, 20i64)
+    queue.pq_push_i64(pq, 6.5, 60i64)
+    queue.pq_push_i64(pq, 3.5, 30i64)
+    queue.pq_push_i64(pq, 5.5, 50i64)
+
+    println("pq_len=" + str(queue.pq_len(pq)))
+    println("pq_empty=" + str(queue.pq_is_empty(pq)))
+
+    # Peek shouldn't pop.
+    peek_first: Tuple[f64, i64] = queue.pq_peek_min_i64(pq)
+    println("peek-priority=" + str(peek_first.0))
+    println("peek-item=" + str(peek_first.1))
+    println("after-peek-len=" + str(queue.pq_len(pq)))
+
+    # Drain — should come out in ascending priority order.
+    out: List[i64] = []
+    while not queue.pq_is_empty(pq):
+        top: Tuple[f64, i64] = queue.pq_pop_min_i64(pq)
+        out.append(top.1)
+
+    println("drained-count=" + str(len(out)))
+    # Items should be 0, 10, 20, 30, 40, 50, 60, 70, 80, 90.
+    expected: List[i64] = [0i64, 10i64, 20i64, 30i64, 40i64, 50i64, 60i64, 70i64, 80i64, 90i64]
+    j: i64 = 0i64
+    all_ok: bool = true
+    while j < len(out):
+        if out[j] != expected[j]:
+            all_ok = false
+        j = j + 1i64
+    println("numeric-pq-sorted=" + str(all_ok))
+
+    # ── Named-task scheduler ─────────────────────────────────────
+    sched: i64 = queue.pq_new_str()
+    queue.pq_push_str(sched, 3.0, "deploy")
+    queue.pq_push_str(sched, 1.0, "backup")
+    queue.pq_push_str(sched, 5.0, "cleanup")
+    queue.pq_push_str(sched, 2.0, "lint")
+    queue.pq_push_str(sched, 4.0, "test")
+
+    println("scheduled=" + str(queue.pq_len(sched)))
+    while not queue.pq_is_empty(sched):
+        t: Tuple[f64, str] = queue.pq_pop_min_str(sched)
+        println("run: " + t.1 + " (prio=" + str(t.0) + ")")
+
+    return 0

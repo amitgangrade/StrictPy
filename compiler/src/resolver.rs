@@ -2328,6 +2328,174 @@ impl Resolver {
             ],
         };
         self.stdlib_modules.insert("datetime".into(), datetime_mod);
+
+        // ── M23 P3a-C: `threading` module (synchronization primitives) ──
+        // Extends the existing M6 Thread/Channel runtime classes (which
+        // remain bound in the prelude — see `seed_prelude`) with proper
+        // Lock + Semaphore primitives.  Both are opaque i64 handles
+        // referring into `SharedVm.locks` / `SharedVm.semaphores` slot
+        // tables.  Choice of non-recursive `threading.Lock` semantics
+        // (acquiring a held lock from the same thread DEADLOCKS) matches
+        // Python's `threading.Lock`, not `RLock` — see spec §9.24.
+        //
+        // Note: the prelude's `Thread` and `Channel` classes win over
+        // any items we register here under the same name, because the
+        // resolver's import path (`register_top_decls`) checks for an
+        // existing scope binding first.  That's deliberate — `from
+        // threading import Thread` still binds the M6 class — and means
+        // our new items must use *new* names that don't shadow Thread /
+        // Channel methods.  None of the lock_* / semaphore_* names
+        // collide, so we're safe.
+        const THREADING_LOCK_NEW: u32              = 420;
+        const THREADING_LOCK_ACQUIRE: u32          = 421;
+        const THREADING_LOCK_RELEASE: u32          = 422;
+        const THREADING_LOCK_TRY_ACQUIRE: u32      = 423;
+        const THREADING_SEMAPHORE_NEW: u32         = 424;
+        const THREADING_SEMAPHORE_ACQUIRE: u32     = 425;
+        const THREADING_SEMAPHORE_RELEASE: u32     = 426;
+        const THREADING_SEMAPHORE_TRY_ACQUIRE: u32 = 427;
+
+        let threading_mod = StdlibModule {
+            name: "threading".into(),
+            items: vec![
+                StdlibItem {
+                    name: "lock_new".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], i64_ty.clone()),
+                    native_id: THREADING_LOCK_NEW,
+                },
+                StdlibItem {
+                    name: "lock_acquire".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], unit_ty.clone()),
+                    native_id: THREADING_LOCK_ACQUIRE,
+                },
+                StdlibItem {
+                    name: "lock_release".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], unit_ty.clone()),
+                    native_id: THREADING_LOCK_RELEASE,
+                },
+                StdlibItem {
+                    name: "lock_try_acquire".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], bool_ty.clone()),
+                    native_id: THREADING_LOCK_TRY_ACQUIRE,
+                },
+                StdlibItem {
+                    name: "semaphore_new".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i32_ty.clone()], i64_ty.clone()),
+                    native_id: THREADING_SEMAPHORE_NEW,
+                },
+                StdlibItem {
+                    name: "semaphore_acquire".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], unit_ty.clone()),
+                    native_id: THREADING_SEMAPHORE_ACQUIRE,
+                },
+                StdlibItem {
+                    name: "semaphore_release".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], unit_ty.clone()),
+                    native_id: THREADING_SEMAPHORE_RELEASE,
+                },
+                StdlibItem {
+                    name: "semaphore_try_acquire".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], bool_ty.clone()),
+                    native_id: THREADING_SEMAPHORE_TRY_ACQUIRE,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("threading".into(), threading_mod);
+
+        // ── M23 P3a-C: `queue` module (priority queue) ─────────────────
+        // Min-heap-based priority queue.  Two monomorphic variants ship
+        // for v0.2 (item: i64 + item: str) because stdlib functions are
+        // not generic (the M17 generic-fn worklist only sees user-defined
+        // .spy fns).  `pq_len` and `pq_is_empty` are type-erased — the
+        // handle alone is enough since the typechecker pins the call shape.
+        const QUEUE_PQ_NEW_I64: u32       = 428;
+        const QUEUE_PQ_PUSH_I64: u32      = 429;
+        const QUEUE_PQ_POP_MIN_I64: u32   = 430;
+        const QUEUE_PQ_PEEK_MIN_I64: u32  = 431;
+        const QUEUE_PQ_NEW_STR: u32       = 432;
+        const QUEUE_PQ_PUSH_STR: u32      = 433;
+        const QUEUE_PQ_POP_MIN_STR: u32   = 434;
+        const QUEUE_PQ_PEEK_MIN_STR: u32  = 435;
+        const QUEUE_PQ_LEN: u32           = 436;
+        const QUEUE_PQ_IS_EMPTY: u32      = 437;
+
+        let tuple_f64_i64_ty = Ty::Tuple(vec![f64_ty.clone(), i64_ty.clone()]);
+        let tuple_f64_str_ty = Ty::Tuple(vec![f64_ty.clone(), str_ty.clone()]);
+
+        let queue_mod = StdlibModule {
+            name: "queue".into(),
+            items: vec![
+                StdlibItem {
+                    name: "pq_new_i64".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], i64_ty.clone()),
+                    native_id: QUEUE_PQ_NEW_I64,
+                },
+                StdlibItem {
+                    name: "pq_push_i64".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), f64_ty.clone(), i64_ty.clone()], unit_ty.clone()),
+                    native_id: QUEUE_PQ_PUSH_I64,
+                },
+                StdlibItem {
+                    name: "pq_pop_min_i64".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], tuple_f64_i64_ty.clone()),
+                    native_id: QUEUE_PQ_POP_MIN_I64,
+                },
+                StdlibItem {
+                    name: "pq_peek_min_i64".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], tuple_f64_i64_ty.clone()),
+                    native_id: QUEUE_PQ_PEEK_MIN_I64,
+                },
+                StdlibItem {
+                    name: "pq_new_str".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], i64_ty.clone()),
+                    native_id: QUEUE_PQ_NEW_STR,
+                },
+                StdlibItem {
+                    name: "pq_push_str".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), f64_ty.clone(), str_ty.clone()], unit_ty.clone()),
+                    native_id: QUEUE_PQ_PUSH_STR,
+                },
+                StdlibItem {
+                    name: "pq_pop_min_str".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], tuple_f64_str_ty.clone()),
+                    native_id: QUEUE_PQ_POP_MIN_STR,
+                },
+                StdlibItem {
+                    name: "pq_peek_min_str".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], tuple_f64_str_ty.clone()),
+                    native_id: QUEUE_PQ_PEEK_MIN_STR,
+                },
+                StdlibItem {
+                    name: "pq_len".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i32_ty.clone()),
+                    native_id: QUEUE_PQ_LEN,
+                },
+                StdlibItem {
+                    name: "pq_is_empty".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], bool_ty.clone()),
+                    native_id: QUEUE_PQ_IS_EMPTY,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("queue".into(), queue_mod);
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -2602,7 +2770,20 @@ impl Resolver {
                     Some(m) => {
                         for it in &imp.items {
                             let local_name = it.alias.as_deref().unwrap_or(&it.name);
-                            let Some(item) = m.find(&it.name) else {
+                            // M23 P3a-C: when a module name is BOTH in the
+                            // prelude (legacy flat re-exports like
+                            // `threading.Thread` / `threading.Channel`) AND
+                            // registered in stdlib_modules (the new function
+                            // surface like `threading.lock_*`), prefer the
+                            // prelude binding for any name that's already in
+                            // scope.  Only fail if the name isn't in
+                            // stdlib_modules AND isn't in scope.
+                            let item = m.find(&it.name);
+                            if item.is_none() {
+                                if self.table.lookup(scope, local_name).is_some() {
+                                    // Pre-existing prelude binding wins.
+                                    continue;
+                                }
                                 return Err(Self::err_at(
                                     imp.span,
                                     codes::LINK_NO_SUCH_MODULE_ITEM,
@@ -2616,7 +2797,8 @@ impl Resolver {
                                             .join(", "),
                                     ),
                                 ));
-                            };
+                            }
+                            let item = item.unwrap();
                             if self.table.lookup(scope, local_name).is_some() {
                                 // Pre-existing prelude binding wins (legacy stdlib).
                                 continue;

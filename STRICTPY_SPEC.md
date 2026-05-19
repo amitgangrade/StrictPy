@@ -2205,6 +2205,67 @@ v0.3 widening to `i64 ns` is the obvious upgrade); `strftime` /
 timezone transitions; the `datetime.timedelta` class shape (use
 arithmetic on i64 seconds).
 
+### 9.27 Module `threading` — Lock + Semaphore (v0.2 — M23 P3a-C)
+
+Extends the M6 `Thread` / `Channel` runtime classes with the missing
+synchronisation primitives. Both `Lock` and `Semaphore` are opaque
+`i64` handles into per-process slot tables on `SharedVm`; the C-level
+storage uses `std::sync::Mutex` + `std::sync::Condvar`.
+
+```
+fn lock_new() -> i64
+fn lock_acquire(handle: i64) -> None
+fn lock_release(handle: i64) -> None
+fn lock_try_acquire(handle: i64) -> bool
+
+fn semaphore_new(initial: i32) -> i64
+fn semaphore_acquire(handle: i64) -> None
+fn semaphore_release(handle: i64) -> None
+fn semaphore_try_acquire(handle: i64) -> bool
+```
+
+`threading.Lock` semantics match Python's (not `RLock`): acquiring a
+held lock from the same thread DEADLOCKS. `lock_release` on a not-held
+lock raises `RuntimeError`. `lock_try_acquire` is non-blocking.
+
+`Semaphore` is counting: `semaphore_new(n)` allocates with N permits;
+acquire blocks when count is 0; release wakes one blocked acquirer.
+
+Concurrency-safe across M6 threads. Per-table mutex is dropped before
+parking on the condvar.
+
+What v0.2 doesn't ship: `RLock`, `Event`, `Condition`, `Barrier`,
+timed `acquire(timeout=...)`, `with`-statement sugar. v0.3.
+
+### 9.28 Module `queue` — PriorityQueue (v0.2 — M23 P3a-C)
+
+Min-priority queue with `f64` priorities. Items pinned to i64 or str
+per v0.2's lack of generic stdlib functions.
+
+```
+fn pq_new_i64() -> i64
+fn pq_push_i64(handle: i64, priority: f64, item: i64) -> None
+fn pq_pop_min_i64(handle: i64) -> Tuple[f64, i64]
+fn pq_peek_min_i64(handle: i64) -> Tuple[f64, i64]
+
+fn pq_new_str() -> i64
+fn pq_push_str(handle: i64, priority: f64, item: str) -> None
+fn pq_pop_min_str(handle: i64) -> Tuple[f64, str]
+fn pq_peek_min_str(handle: i64) -> Tuple[f64, str]
+
+fn pq_len(handle: i64) -> i32
+fn pq_is_empty(handle: i64) -> bool
+```
+
+Semantics: `pq_pop_min_*` pops the lowest-priority entry as
+`(priority, item)`. Raises `IndexError` on empty. Ties at equal
+priority break FIFO. NaN priorities sort as larger than any real
+number. Backed by `BinaryHeap<Reverse<...>>`.
+
+v0.2 doesn't ship: `pq_clear`, `pq_drain`, bounded queues, blocking
+push, decrease-key. v0.3.
+
+
 ---
 
 ## 10. Compiler Architecture
