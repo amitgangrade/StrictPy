@@ -5999,6 +5999,208 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
                 .load(std::sync::atomic::Ordering::SeqCst);
             Ok(if p3b_b_tls_getv { 1 } else { 0 })
         }
+        // ── M28 P3b-C: `http_client` module ────────────────────────────
+        // Synchronous HTTP/1.1 client via `ureq` (rustls TLS).  Each
+        // handler is stateless — opens a fresh socket per call.  4xx /
+        // 5xx responses are returned (not raised) so user code can
+        // handle them; transport errors raise IOError.  See spec §9.42.
+        NativeFn::HttpClientGet => {
+            let p3b_c_get_url = arg_str(args, 0);
+            let (p3b_c_get_status, p3b_c_get_body) =
+                p3b_c_simple_request(&p3b_c_get_url, "GET", "", "")?;
+            let p3b_c_get_body_ptr = interp.alloc_string(&p3b_c_get_body) as u64;
+            let p3b_c_get_tup = interp.alloc_tuple_obj(&[
+                p3b_c_get_status as u64,
+                p3b_c_get_body_ptr,
+            ]) as u64;
+            Ok(p3b_c_get_tup)
+        }
+        NativeFn::HttpClientPost => {
+            let p3b_c_post_url = arg_str(args, 0);
+            let p3b_c_post_body = arg_str(args, 1);
+            let p3b_c_post_ct = arg_str(args, 2);
+            let (p3b_c_post_status, p3b_c_post_body_resp) = p3b_c_simple_request(
+                &p3b_c_post_url,
+                "POST",
+                &p3b_c_post_body,
+                &p3b_c_post_ct,
+            )?;
+            let p3b_c_post_body_ptr = interp.alloc_string(&p3b_c_post_body_resp) as u64;
+            let p3b_c_post_tup = interp.alloc_tuple_obj(&[
+                p3b_c_post_status as u64,
+                p3b_c_post_body_ptr,
+            ]) as u64;
+            Ok(p3b_c_post_tup)
+        }
+        NativeFn::HttpClientPut => {
+            let p3b_c_put_url = arg_str(args, 0);
+            let p3b_c_put_body = arg_str(args, 1);
+            let p3b_c_put_ct = arg_str(args, 2);
+            let (p3b_c_put_status, p3b_c_put_body_resp) = p3b_c_simple_request(
+                &p3b_c_put_url,
+                "PUT",
+                &p3b_c_put_body,
+                &p3b_c_put_ct,
+            )?;
+            let p3b_c_put_body_ptr = interp.alloc_string(&p3b_c_put_body_resp) as u64;
+            let p3b_c_put_tup = interp.alloc_tuple_obj(&[
+                p3b_c_put_status as u64,
+                p3b_c_put_body_ptr,
+            ]) as u64;
+            Ok(p3b_c_put_tup)
+        }
+        NativeFn::HttpClientDelete => {
+            let p3b_c_del_url = arg_str(args, 0);
+            let (p3b_c_del_status, p3b_c_del_body) =
+                p3b_c_simple_request(&p3b_c_del_url, "DELETE", "", "")?;
+            let p3b_c_del_body_ptr = interp.alloc_string(&p3b_c_del_body) as u64;
+            let p3b_c_del_tup = interp.alloc_tuple_obj(&[
+                p3b_c_del_status as u64,
+                p3b_c_del_body_ptr,
+            ]) as u64;
+            Ok(p3b_c_del_tup)
+        }
+        NativeFn::HttpClientHead => {
+            let p3b_c_head_url = arg_str(args, 0);
+            // HEAD response by HTTP semantics has no body.  We still
+            // capture the status so callers can probe existence.
+            let (p3b_c_head_status, p3b_c_head_body) =
+                p3b_c_simple_request(&p3b_c_head_url, "HEAD", "", "")?;
+            let p3b_c_head_body_ptr = interp.alloc_string(&p3b_c_head_body) as u64;
+            let p3b_c_head_tup = interp.alloc_tuple_obj(&[
+                p3b_c_head_status as u64,
+                p3b_c_head_body_ptr,
+            ]) as u64;
+            Ok(p3b_c_head_tup)
+        }
+        NativeFn::HttpClientRequest => {
+            let p3b_c_req_method = arg_str(args, 0);
+            let p3b_c_req_url = arg_str(args, 1);
+            let p3b_c_req_body = arg_str(args, 2);
+            let p3b_c_req_headers = p3b_c_read_header_pairs(args, 3)?;
+            let p3b_c_req_timeout = arg_f64(args, 4);
+            let (p3b_c_req_status, _hdrs, p3b_c_req_body_resp) =
+                p3b_c_full_request(
+                    &p3b_c_req_method,
+                    &p3b_c_req_url,
+                    &p3b_c_req_body,
+                    &p3b_c_req_headers,
+                    p3b_c_req_timeout,
+                    false,
+                )?;
+            let p3b_c_req_body_ptr = interp.alloc_string(&p3b_c_req_body_resp) as u64;
+            let p3b_c_req_tup = interp.alloc_tuple_obj(&[
+                p3b_c_req_status as u64,
+                p3b_c_req_body_ptr,
+            ]) as u64;
+            Ok(p3b_c_req_tup)
+        }
+        NativeFn::HttpClientRequestWithHeaders => {
+            let p3b_c_rwh_method = arg_str(args, 0);
+            let p3b_c_rwh_url = arg_str(args, 1);
+            let p3b_c_rwh_body = arg_str(args, 2);
+            let p3b_c_rwh_headers = p3b_c_read_header_pairs(args, 3)?;
+            let p3b_c_rwh_timeout = arg_f64(args, 4);
+            let (p3b_c_rwh_status, p3b_c_rwh_resp_hdrs, p3b_c_rwh_body_resp) =
+                p3b_c_full_request(
+                    &p3b_c_rwh_method,
+                    &p3b_c_rwh_url,
+                    &p3b_c_rwh_body,
+                    &p3b_c_rwh_headers,
+                    p3b_c_rwh_timeout,
+                    true,
+                )?;
+            // Build the response-headers list.
+            let p3b_c_rwh_list = interp.alloc_list(p3b_c_rwh_resp_hdrs.len());
+            for (p3b_c_rwh_hdr_k, p3b_c_rwh_hdr_v) in p3b_c_rwh_resp_hdrs {
+                let p3b_c_rwh_k_ptr = interp.alloc_string(&p3b_c_rwh_hdr_k) as u64;
+                let p3b_c_rwh_v_ptr = interp.alloc_string(&p3b_c_rwh_hdr_v) as u64;
+                let p3b_c_rwh_pair = interp.alloc_tuple_obj(&[
+                    p3b_c_rwh_k_ptr,
+                    p3b_c_rwh_v_ptr,
+                ]) as u64;
+                // SAFETY: list freshly allocated, owned by us.
+                unsafe { interp.list_push(p3b_c_rwh_list, p3b_c_rwh_pair) };
+            }
+            let p3b_c_rwh_body_ptr = interp.alloc_string(&p3b_c_rwh_body_resp) as u64;
+            let p3b_c_rwh_tup = interp.alloc_tuple_obj(&[
+                p3b_c_rwh_status as u64,
+                p3b_c_rwh_list as u64,
+                p3b_c_rwh_body_ptr,
+            ]) as u64;
+            Ok(p3b_c_rwh_tup)
+        }
+        NativeFn::HttpClientUrlencode => {
+            let p3b_c_uenc_pairs = p3b_c_read_header_pairs(args, 0)?;
+            let mut p3b_c_uenc_parts: Vec<String> =
+                Vec::with_capacity(p3b_c_uenc_pairs.len());
+            for (p3b_c_uenc_k, p3b_c_uenc_v) in &p3b_c_uenc_pairs {
+                p3b_c_uenc_parts.push(format!(
+                    "{}={}",
+                    url_quote(p3b_c_uenc_k, false),
+                    url_quote(p3b_c_uenc_v, false)
+                ));
+            }
+            let p3b_c_uenc_joined = p3b_c_uenc_parts.join("&");
+            let p3b_c_uenc_ptr = interp.alloc_string(&p3b_c_uenc_joined);
+            Ok(p3b_c_uenc_ptr as u64)
+        }
+        NativeFn::HttpClientUrldecode => {
+            let p3b_c_udec_s = arg_str(args, 0);
+            let p3b_c_udec_out = url_unquote(&p3b_c_udec_s, false)?;
+            let p3b_c_udec_ptr = interp.alloc_string(&p3b_c_udec_out);
+            Ok(p3b_c_udec_ptr as u64)
+        }
+        NativeFn::HttpClientUrlParse => {
+            let p3b_c_upar_s = arg_str(args, 0);
+            let p3b_c_upar_parsed = url::Url::parse(&p3b_c_upar_s).map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("http_client.url_parse({:?}): {}", p3b_c_upar_s, e),
+                }
+            })?;
+            let p3b_c_upar_scheme = p3b_c_upar_parsed.scheme().to_string();
+            let p3b_c_upar_host = p3b_c_upar_parsed
+                .host_str()
+                .unwrap_or("")
+                .to_string();
+            let p3b_c_upar_port: i32 = match p3b_c_upar_parsed.port() {
+                Some(p) => p as i32,
+                None => match p3b_c_upar_scheme.as_str() {
+                    "https" => 443,
+                    "http" => 80,
+                    _ => 0,
+                },
+            };
+            let p3b_c_upar_path = {
+                let mut s = p3b_c_upar_parsed.path().to_string();
+                if let Some(q) = p3b_c_upar_parsed.query() {
+                    s.push('?');
+                    s.push_str(q);
+                }
+                if s.is_empty() {
+                    "/".to_string()
+                } else {
+                    s
+                }
+            };
+            let p3b_c_upar_scheme_ptr = interp.alloc_string(&p3b_c_upar_scheme) as u64;
+            let p3b_c_upar_host_ptr = interp.alloc_string(&p3b_c_upar_host) as u64;
+            let p3b_c_upar_path_ptr = interp.alloc_string(&p3b_c_upar_path) as u64;
+            let p3b_c_upar_tup = interp.alloc_tuple_obj(&[
+                p3b_c_upar_scheme_ptr,
+                p3b_c_upar_host_ptr,
+                p3b_c_upar_port as u64,
+                p3b_c_upar_path_ptr,
+            ]) as u64;
+            Ok(p3b_c_upar_tup)
+        }
+        NativeFn::HttpClientStatusText => {
+            let p3b_c_stt_code = arg_i64(args, 0) as i32;
+            let p3b_c_stt_text = http_status_text(p3b_c_stt_code);
+            let p3b_c_stt_ptr = interp.alloc_string(p3b_c_stt_text);
+            Ok(p3b_c_stt_ptr as u64)
+        }
 
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
@@ -6168,6 +6370,338 @@ mod ssl_no_verify {
                 SignatureScheme::ED448,
             ]
         }
+    }
+}
+
+// ─── M28 P3b-C: `http_client` module helpers ───────────────────────────
+
+/// Read a `List[Tuple[str, str]]` argument into a `Vec<(String, String)>`.
+/// Used by `http_client.urlencode`, `http_client.request*`.
+fn p3b_c_read_header_pairs(
+    args: &[u64],
+    i: usize,
+) -> Result<Vec<(String, String)>, VmError> {
+    let lst = arg_u64(args, i) as *const crate::object::ListRepr;
+    if lst.is_null() {
+        return Ok(Vec::new());
+    }
+    let mut out: Vec<(String, String)> = Vec::new();
+    // SAFETY: lst is heap-allocated by the VM.
+    unsafe {
+        let len = (*lst).length;
+        let data = (*lst).data as *const u64;
+        for j in 0..len {
+            let tup_ptr = std::ptr::read_unaligned(data.add(j)) as *const u8;
+            if tup_ptr.is_null() {
+                return Err(VmError::UncaughtException {
+                    type_name: "NullPointerError".into(),
+                    message: format!("http_client header pair #{j} is null"),
+                });
+            }
+            let slot0 = tup_ptr.add(OBJECT_HEADER_SIZE);
+            let slot1 = tup_ptr.add(OBJECT_HEADER_SIZE + 8);
+            let k_ptr = std::ptr::read_unaligned(slot0 as *const u64) as *const StringRepr;
+            let v_ptr = std::ptr::read_unaligned(slot1 as *const u64) as *const StringRepr;
+            out.push((read_str(k_ptr), read_str(v_ptr)));
+        }
+    }
+    Ok(out)
+}
+
+/// Send a simple request with no custom headers and the default 30s
+/// timeout.  `body` and `content_type` are only used for methods that
+/// carry a body (POST/PUT); for GET/DELETE/HEAD they are ignored.
+fn p3b_c_simple_request(
+    url: &str,
+    method: &str,
+    body: &str,
+    content_type: &str,
+) -> Result<(i32, String), VmError> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent("StrictPy/0.2 http_client")
+        .build();
+    let req = agent.request(method, url);
+    let resp_result = if method == "POST" || method == "PUT" {
+        let req = if content_type.is_empty() {
+            req
+        } else {
+            req.set("Content-Type", content_type)
+        };
+        req.send_string(body)
+    } else {
+        req.call()
+    };
+    p3b_c_decode_response(resp_result, url, method)
+}
+
+/// Configurable request with custom headers and timeout.  When
+/// `return_headers` is true the response headers are collected (used by
+/// `request_with_headers`); otherwise an empty vec is returned to skip
+/// the allocation.
+fn p3b_c_full_request(
+    method: &str,
+    url: &str,
+    body: &str,
+    headers: &[(String, String)],
+    timeout_secs: f64,
+    return_headers: bool,
+) -> Result<(i32, Vec<(String, String)>, String), VmError> {
+    // Clamp the timeout: negative / zero means "use default 30s"; very
+    // large values are passed through (ureq tops out at u64 nanos).
+    let dur = if timeout_secs <= 0.0 || !timeout_secs.is_finite() {
+        std::time::Duration::from_secs(30)
+    } else {
+        std::time::Duration::from_secs_f64(timeout_secs)
+    };
+    let agent = ureq::AgentBuilder::new()
+        .timeout(dur)
+        .user_agent("StrictPy/0.2 http_client")
+        .build();
+    let mut req = agent.request(method, url);
+    let mut have_content_type = false;
+    for (k, v) in headers {
+        if k.eq_ignore_ascii_case("content-type") {
+            have_content_type = true;
+        }
+        req = req.set(k, v);
+    }
+    let resp_result = if method == "POST"
+        || method == "PUT"
+        || method == "PATCH"
+        || (!body.is_empty() && method != "GET" && method != "HEAD" && method != "DELETE")
+    {
+        // If the caller didn't set Content-Type but is sending a body,
+        // ureq leaves the field unset and the server defaults apply.
+        // We don't auto-inject one — matches `requests` semantics.
+        let _ = have_content_type;
+        req.send_string(body)
+    } else {
+        req.call()
+    };
+    // ureq::Response is not Clone, so we decode the response inline
+    // here (instead of delegating to `p3b_c_decode_response`) to
+    // capture both the headers and the body in one pass.
+    match resp_result {
+        Ok(resp) => {
+            let status = resp.status() as i32;
+            let resp_hdrs = if return_headers {
+                p3b_c_collect_response_headers(&resp)
+            } else {
+                Vec::new()
+            };
+            let body = p3b_c_read_response_body(resp, url, method)?;
+            Ok((status, resp_hdrs, body))
+        }
+        Err(ureq::Error::Status(code, resp)) => {
+            let status = code as i32;
+            let resp_hdrs = if return_headers {
+                p3b_c_collect_response_headers(&resp)
+            } else {
+                Vec::new()
+            };
+            let body = p3b_c_read_response_body_lossy(resp);
+            Ok((status, resp_hdrs, body))
+        }
+        Err(e) => Err(VmError::UncaughtException {
+            type_name: "IOError".into(),
+            message: format!(
+                "http_client.{}({:?}): {}",
+                method.to_lowercase(),
+                url,
+                e
+            ),
+        }),
+    }
+}
+
+/// Drain `resp`'s body capped at 64 MiB; lossy UTF-8 conversion.
+fn p3b_c_read_response_body(
+    resp: ureq::Response,
+    url: &str,
+    method: &str,
+) -> Result<String, VmError> {
+    const MAX_BODY: u64 = 64 * 1024 * 1024;
+    let mut reader = resp.into_reader().take(MAX_BODY);
+    let mut buf: Vec<u8> = Vec::new();
+    use std::io::Read;
+    reader.read_to_end(&mut buf).map_err(|e| VmError::UncaughtException {
+        type_name: "IOError".into(),
+        message: format!(
+            "http_client.{}({:?}): read body: {}",
+            method.to_lowercase(),
+            url,
+            e
+        ),
+    })?;
+    Ok(match String::from_utf8(buf) {
+        Ok(s) => s,
+        Err(e) => String::from_utf8_lossy(&e.into_bytes()).into_owned(),
+    })
+}
+
+/// Same as `p3b_c_read_response_body` but swallows IO errors (used on
+/// the 4xx/5xx branch where the body is best-effort).
+fn p3b_c_read_response_body_lossy(resp: ureq::Response) -> String {
+    const MAX_BODY: u64 = 64 * 1024 * 1024;
+    let mut reader = resp.into_reader().take(MAX_BODY);
+    let mut buf: Vec<u8> = Vec::new();
+    use std::io::Read;
+    let _ = reader.read_to_end(&mut buf);
+    match String::from_utf8(buf) {
+        Ok(s) => s,
+        Err(e) => String::from_utf8_lossy(&e.into_bytes()).into_owned(),
+    }
+}
+
+fn p3b_c_collect_response_headers(resp: &ureq::Response) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for name in resp.headers_names() {
+        if let Some(v) = resp.header(&name) {
+            out.push((name, v.to_string()));
+        }
+    }
+    out
+}
+
+/// Map a `ureq::Result<Response>` to a `(status, body_string)` pair.
+/// Network / DNS / TLS failures raise IOError.  4xx and 5xx responses
+/// are returned (not raised) — the caller can branch on the status
+/// integer.  Non-UTF-8 bodies are recovered lossily.
+fn p3b_c_decode_response(
+    result: Result<ureq::Response, ureq::Error>,
+    url: &str,
+    method: &str,
+) -> Result<(i32, String), VmError> {
+    match result {
+        Ok(resp) => {
+            let status = resp.status() as i32;
+            // Read up to a generous cap to protect against runaway bodies;
+            // 64 MiB matches what most stdlib HTTP libraries cap at by
+            // default.  Anything larger should use a streaming API (v0.3).
+            const MAX_BODY: u64 = 64 * 1024 * 1024;
+            let mut reader = resp.into_reader().take(MAX_BODY);
+            let mut buf: Vec<u8> = Vec::new();
+            use std::io::Read;
+            if let Err(e) = reader.read_to_end(&mut buf) {
+                return Err(VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!(
+                        "http_client.{}({:?}): read body: {}",
+                        method.to_lowercase(),
+                        url,
+                        e
+                    ),
+                });
+            }
+            let body = match String::from_utf8(buf) {
+                Ok(s) => s,
+                Err(e) => String::from_utf8_lossy(&e.into_bytes()).into_owned(),
+            };
+            Ok((status, body))
+        }
+        Err(ureq::Error::Status(code, resp)) => {
+            // 4xx / 5xx — read the body so user code can inspect it.
+            let status = code as i32;
+            const MAX_BODY: u64 = 64 * 1024 * 1024;
+            let mut reader = resp.into_reader().take(MAX_BODY);
+            let mut buf: Vec<u8> = Vec::new();
+            use std::io::Read;
+            let _ = reader.read_to_end(&mut buf);
+            let body = match String::from_utf8(buf) {
+                Ok(s) => s,
+                Err(e) => String::from_utf8_lossy(&e.into_bytes()).into_owned(),
+            };
+            Ok((status, body))
+        }
+        Err(e) => Err(VmError::UncaughtException {
+            type_name: "IOError".into(),
+            message: format!(
+                "http_client.{}({:?}): {}",
+                method.to_lowercase(),
+                url,
+                e
+            ),
+        }),
+    }
+}
+
+/// Static lookup table: HTTP status code → reason phrase.  Mirrors the
+/// IANA HTTP Status Code Registry (RFC 9110 §15).  Unknown codes
+/// return a generic class name based on the hundreds digit, matching
+/// how Python's `http.HTTPStatus` falls back.
+fn http_status_text(code: i32) -> &'static str {
+    match code {
+        100 => "Continue",
+        101 => "Switching Protocols",
+        102 => "Processing",
+        103 => "Early Hints",
+        200 => "OK",
+        201 => "Created",
+        202 => "Accepted",
+        203 => "Non-Authoritative Information",
+        204 => "No Content",
+        205 => "Reset Content",
+        206 => "Partial Content",
+        207 => "Multi-Status",
+        208 => "Already Reported",
+        226 => "IM Used",
+        300 => "Multiple Choices",
+        301 => "Moved Permanently",
+        302 => "Found",
+        303 => "See Other",
+        304 => "Not Modified",
+        305 => "Use Proxy",
+        307 => "Temporary Redirect",
+        308 => "Permanent Redirect",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        402 => "Payment Required",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        406 => "Not Acceptable",
+        407 => "Proxy Authentication Required",
+        408 => "Request Timeout",
+        409 => "Conflict",
+        410 => "Gone",
+        411 => "Length Required",
+        412 => "Precondition Failed",
+        413 => "Content Too Large",
+        414 => "URI Too Long",
+        415 => "Unsupported Media Type",
+        416 => "Range Not Satisfiable",
+        417 => "Expectation Failed",
+        418 => "I'm a teapot",
+        421 => "Misdirected Request",
+        422 => "Unprocessable Content",
+        423 => "Locked",
+        424 => "Failed Dependency",
+        425 => "Too Early",
+        426 => "Upgrade Required",
+        428 => "Precondition Required",
+        429 => "Too Many Requests",
+        431 => "Request Header Fields Too Large",
+        451 => "Unavailable For Legal Reasons",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        505 => "HTTP Version Not Supported",
+        506 => "Variant Also Negotiates",
+        507 => "Insufficient Storage",
+        508 => "Loop Detected",
+        510 => "Not Extended",
+        511 => "Network Authentication Required",
+        _ => match code / 100 {
+            1 => "Informational",
+            2 => "Success",
+            3 => "Redirection",
+            4 => "Client Error",
+            5 => "Server Error",
+            _ => "Unknown",
+        },
     }
 }
 

@@ -1218,6 +1218,45 @@ pub enum NativeFn {
     SslGetVerifyCerts   = 609,
     // 610-619 reserved for v0.3 (SNI override, ALPN, mutual auth,
     // server-side TLS, custom CA bundles, session resumption).
+    // ── 620–649: `http_client` module (M28 P3b-C) ──────────────────────
+    // Synchronous HTTP/1.1 client built on `ureq` (rustls for TLS).  All
+    // handlers are stateless — each call opens a fresh socket via ureq,
+    // sends the request, reads the response, closes.  No SharedVm slot
+    // table.  See spec §9.42.
+    /// `http_client.get(url: str) -> Tuple[i32, str]` — convenience
+    /// GET; auto-detects http:// vs https://; default timeout 30s.
+    HttpClientGet              = 620,
+    /// `http_client.post(url: str, body: str, content_type: str)
+    /// -> Tuple[i32, str]`.
+    HttpClientPost             = 621,
+    /// `http_client.put(url: str, body: str, content_type: str)
+    /// -> Tuple[i32, str]`.
+    HttpClientPut              = 622,
+    /// `http_client.delete(url: str) -> Tuple[i32, str]`.
+    HttpClientDelete           = 623,
+    /// `http_client.head(url: str) -> Tuple[i32, str]` — body is the
+    /// empty string by HTTP semantics.
+    HttpClientHead             = 624,
+    /// `http_client.request(method, url, body, headers, timeout_secs)
+    /// -> Tuple[i32, str]` — configurable request.  Headers are a
+    /// `List[Tuple[str, str]]` of (name, value) pairs.
+    HttpClientRequest          = 625,
+    /// `http_client.request_with_headers(method, url, body, headers,
+    /// timeout_secs) -> Tuple[i32, List[Tuple[str, str]], str]`.
+    HttpClientRequestWithHeaders = 626,
+    /// `http_client.urlencode(pairs: List[Tuple[str, str]]) -> str`
+    /// — `key=value&key2=value2`, percent-encoded.
+    HttpClientUrlencode        = 627,
+    /// `http_client.urldecode(s: str) -> str`.
+    HttpClientUrldecode        = 628,
+    /// `http_client.url_parse(url: str) -> Tuple[str, str, i32, str]`
+    /// — `(scheme, host, port, path_and_query)`.  Port defaults to
+    /// 80/443 based on scheme if missing.
+    HttpClientUrlParse         = 629,
+    /// `http_client.status_text(code: i32) -> str` — `200` → `"OK"`,
+    /// `404` → `"Not Found"`, etc.
+    HttpClientStatusText       = 630,
+    // 631-649 reserved for v0.3 (connection pooling, cookies, etc.).
 
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
@@ -1628,6 +1667,18 @@ impl NativeFn {
             607 => Some(Self::SslSetTimeoutSecs),
             608 => Some(Self::SslSetVerifyCerts),
             609 => Some(Self::SslGetVerifyCerts),
+            // M28 P3b-C: http_client module (620-630, 11 ids; 631-649 reserved).
+            620 => Some(Self::HttpClientGet),
+            621 => Some(Self::HttpClientPost),
+            622 => Some(Self::HttpClientPut),
+            623 => Some(Self::HttpClientDelete),
+            624 => Some(Self::HttpClientHead),
+            625 => Some(Self::HttpClientRequest),
+            626 => Some(Self::HttpClientRequestWithHeaders),
+            627 => Some(Self::HttpClientUrlencode),
+            628 => Some(Self::HttpClientUrldecode),
+            629 => Some(Self::HttpClientUrlParse),
+            630 => Some(Self::HttpClientStatusText),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

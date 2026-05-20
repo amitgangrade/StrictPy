@@ -3041,6 +3041,38 @@ fn peer_cert_subject(handle: i64) -> str
 fn set_timeout_secs(handle: i64, secs: f64) -> None
 fn set_verify_certs(enabled: bool) -> None
 fn get_verify_certs() -> bool
+### 9.42 Module `http_client` (v0.2 — M28 P3b-C)
+
+A synchronous HTTP/1.1 client backed by the `ureq` crate (which bundles
+`rustls` + `webpki-roots` for TLS).  Every call is stateless: a fresh
+TCP socket is opened, the request sent, the response read, and the
+socket closed.  No connection pooling, no cookie jar, no async runtime —
+those are v0.3 territory.  The module covers the 80% case (one-shot
+GETs and POSTs) with the convenience entry points and exposes a
+configurable form for everything else.
+
+```
+# Convenience methods (no custom headers, default 30s timeout)
+fn get(url: str) -> Tuple[i32, str]
+fn post(url: str, body: str, content_type: str) -> Tuple[i32, str]
+fn put(url: str, body: str, content_type: str) -> Tuple[i32, str]
+fn delete(url: str) -> Tuple[i32, str]
+fn head(url: str) -> Tuple[i32, str]
+
+# Configurable request (the 20% case)
+fn request(method: str, url: str, body: str,
+           headers: List[Tuple[str, str]],
+           timeout_secs: f64) -> Tuple[i32, str]
+fn request_with_headers(method: str, url: str, body: str,
+                        headers: List[Tuple[str, str]],
+                        timeout_secs: f64)
+    -> Tuple[i32, List[Tuple[str, str]], str]
+
+# Utilities
+fn urlencode(pairs: List[Tuple[str, str]]) -> str
+fn urldecode(s: str) -> str
+fn url_parse(url: str) -> Tuple[str, str, i32, str]
+fn status_text(code: i32) -> str
 ```
 
 Semantics:
@@ -3211,6 +3243,92 @@ Examples: `examples/ssl_demo.spy` round-trips messages (including a
 high-byte payload exercising the packed-byte convention) against a
 loopback echo server.  See `compiler/tests/ssl_demo_runs.rs` for the
 self-signed-cert server setup the test harness uses.
+* `get(url)` / `delete(url)` / `head(url)` — fire-and-forget request
+  with the default 30-second timeout and `User-Agent:
+  StrictPy/0.2 http_client`.  Returns `(status_code, body_str)`.
+  Auto-detects `http://` vs `https://` from the URL scheme (TLS is
+  transparent through rustls; no extra setup).  The body is returned
+  as UTF-8 `str`; non-UTF-8 bytes are recovered lossily (matches
+  Python `requests.text` with the default `apparent_encoding` path).
+* `post(url, body, content_type)` / `put(url, body, content_type)` —
+  send `body` as the request payload.  If `content_type` is the empty
+  string the `Content-Type` header is omitted (the server's default
+  applies).  Otherwise the header is set on the outgoing request.
+* `request(method, url, body, headers, timeout_secs)` — full control.
+  `method` is any HTTP verb (`"GET"`, `"POST"`, `"PATCH"`, …).
+  `headers` is a list of `(name, value)` tuples; identical names are
+  sent as separate header lines (no de-dup).  `timeout_secs <= 0` or
+  non-finite is replaced with the default 30s.  `body` is sent for
+  POST / PUT / PATCH; it's ignored for GET / HEAD / DELETE.
+* `request_with_headers(...)` — same as `request` but the response
+  headers are also returned, in receive order.  Header names follow
+  the casing the server sent (which for HTTP/1.1 is what the server
+  put on the wire; HTTP/2 + ureq's normalisation lowercases them).
+* `urlencode(pairs)` — render `pairs` as a query string
+  (`key=value&key2=value2`).  Both keys and values are percent-encoded
+  using the unreserved-character set from RFC 3986
+  (`A-Z a-z 0-9 - _ . ~`).  Spaces become `%20` (not `+`); programs
+  that want form-encoding (where spaces become `+`) should reach for
+  `urllib_parse.urlencode` instead.
+* `urldecode(s)` — inverse of `urlencode`'s per-component encoding.
+  `%HH` triples decode to single bytes; the resulting byte sequence
+  is interpreted as UTF-8.  Malformed `%XY` (non-hex digits) raises
+  `ValueError`.
+* `url_parse(url)` — parse `url` into `(scheme, host, port, path_and_query)`.
+  When the URL omits an explicit port, the default for the scheme is
+  filled in (`80` for `http`, `443` for `https`, `0` for anything
+  else).  `path_and_query` always begins with `/`; a bare host like
+  `"http://example.com"` yields `"/"` for this slot.  Malformed URLs
+  raise `ValueError`.
+* `status_text(code)` — IANA HTTP status reason phrase for the
+  supplied code (`200` → `"OK"`, `404` → `"Not Found"`, `418` →
+  `"I'm a teapot"`).  Unknown codes fall back to the class name based
+  on the hundreds digit (`"Informational"` / `"Success"` /
+  `"Redirection"` / `"Client Error"` / `"Server Error"`), matching
+  Python's `http.HTTPStatus` fallback.
+
+Errors:
+
+* Transport failure (DNS, TCP, TLS, timeout) → `IOError` with the
+  underlying ureq error message.
+* 4xx / 5xx responses are **not** raised — they are returned as the
+  status code so the caller can branch on them.  Matches `requests`'s
+  default behaviour (`raise_for_status` is opt-in).
+* `url_parse` on a malformed URL → `ValueError`.
+* `urldecode` on a malformed `%XY` escape → `ValueError`.
+
+Body cap: every response body is read up to a 64 MiB ceiling.  Larger
+responses are truncated.  Programs that need to stream multi-GiB
+responses should fall back to a v0.3 streaming API (out of scope for
+v0.2).
+
+What v0.2 does **not** ship:
+
+* **Connection pooling** — each call opens a fresh socket.  For
+  high-throughput callers, batch via threads (the GIL-equivalent
+  doesn't apply; the StrictPy interpreter releases the lock around
+  network I/O).
+* **Cookies / session state** — the `ureq` cookie store feature is
+  disabled.  Programs that need cookies should manage the `Cookie`
+  request header by hand via `request_with_headers`.
+* **Redirect-following customisation** — ureq follows up to 5
+  redirects by default; this is not configurable in v0.2.
+* **Chunked / streaming request bodies** — the body argument is
+  always a complete `str` sent with `Content-Length`.
+* **HTTP/2 or HTTP/3** — ureq is HTTP/1.1 only.  For HTTP/2-only
+  endpoints (rare in 2026) callers will see a 505 / TLS-ALPN
+  mismatch.
+* **Authentication helpers** — basic / bearer auth is just a
+  `("Authorization", "Bearer …")` header pair via `request_with_headers`.
+* **Proxy configuration** — ureq respects the `HTTP_PROXY` / `HTTPS_PROXY`
+  / `NO_PROXY` environment variables but exposes no programmatic
+  override.
+
+Testing pattern: integration tests should spawn a loopback HTTP
+server (`std::net::TcpListener::bind("127.0.0.1:0")`) inside the test
+harness and point StrictPy code at the bound port.  This avoids any
+public-network dependency.  See
+`compiler/tests/http_client_demo_runs.rs` for the canonical shape.
 
 ---
 

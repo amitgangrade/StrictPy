@@ -92,6 +92,15 @@ bzip2 = "0.4"
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "logging", "tls12"] }
 rustls-pki-types = "1"
 webpki-roots = "0.26"
+# M28 P3b-C: `http_client` stdlib module.  `ureq` is the canonical
+# synchronous HTTP/1.1 client for Rust; bundles rustls + webpki-roots
+# for TLS via the `tls` feature, has no async runtime, and is small
+# enough to keep the dep graph manageable.  `default-features = false`
+# drops the cookie store we don't need.  `url` for spec-correct
+# URL parsing (handles IPv6 literals, IDN, etc. — alternatives all
+# hand-roll variations of the RFC 3986 grammar).
+ureq = { version = "2", default-features = false, features = ["tls"] }
+url = "2"
 cranelift = { version = "0.115", optional = true }
 cranelift-jit = { version = "0.115", optional = true }
 cranelift-codegen = { version = "0.115", optional = true }

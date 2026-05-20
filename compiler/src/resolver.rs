@@ -3469,6 +3469,153 @@ impl Resolver {
             ],
         };
         self.stdlib_modules.insert("ssl".into(), p3b_b_ssl_mod);
+        // ── M28 P3b-C: `http_client` module ────────────────────────────
+        // Synchronous HTTP/1.1 client built on `ureq` + rustls.  The
+        // module is stateless — each call opens a fresh socket, sends
+        // the request, reads the response, closes.  See spec §9.42.
+        const HTTPC_GET: u32                   = 620;
+        const HTTPC_POST: u32                  = 621;
+        const HTTPC_PUT: u32                   = 622;
+        const HTTPC_DELETE: u32                = 623;
+        const HTTPC_HEAD: u32                  = 624;
+        const HTTPC_REQUEST: u32               = 625;
+        const HTTPC_REQUEST_WITH_HEADERS: u32  = 626;
+        const HTTPC_URLENCODE: u32             = 627;
+        const HTTPC_URLDECODE: u32             = 628;
+        const HTTPC_URL_PARSE: u32             = 629;
+        const HTTPC_STATUS_TEXT: u32           = 630;
+
+        let p3b_c_str_str_tuple_ty =
+            Ty::Tuple(vec![str_ty.clone(), str_ty.clone()]);
+        let p3b_c_list_str_str_tuple_ty = Ty::Generic {
+            base: TypeCtor::List,
+            args: vec![p3b_c_str_str_tuple_ty.clone()],
+        };
+        let p3b_c_status_body_tuple_ty =
+            Ty::Tuple(vec![i32_ty.clone(), str_ty.clone()]);
+        let p3b_c_status_hdrs_body_tuple_ty = Ty::Tuple(vec![
+            i32_ty.clone(),
+            p3b_c_list_str_str_tuple_ty.clone(),
+            str_ty.clone(),
+        ]);
+        let p3b_c_url_parse_tuple_ty = Ty::Tuple(vec![
+            str_ty.clone(),
+            str_ty.clone(),
+            i32_ty.clone(),
+            str_ty.clone(),
+        ]);
+
+        let http_client_mod = StdlibModule {
+            name: "http_client".into(),
+            items: vec![
+                StdlibItem {
+                    name: "get".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone()],
+                        p3b_c_status_body_tuple_ty.clone(),
+                    ),
+                    native_id: HTTPC_GET,
+                },
+                StdlibItem {
+                    name: "post".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), str_ty.clone(), str_ty.clone()],
+                        p3b_c_status_body_tuple_ty.clone(),
+                    ),
+                    native_id: HTTPC_POST,
+                },
+                StdlibItem {
+                    name: "put".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), str_ty.clone(), str_ty.clone()],
+                        p3b_c_status_body_tuple_ty.clone(),
+                    ),
+                    native_id: HTTPC_PUT,
+                },
+                StdlibItem {
+                    name: "delete".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone()],
+                        p3b_c_status_body_tuple_ty.clone(),
+                    ),
+                    native_id: HTTPC_DELETE,
+                },
+                StdlibItem {
+                    name: "head".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone()],
+                        p3b_c_status_body_tuple_ty.clone(),
+                    ),
+                    native_id: HTTPC_HEAD,
+                },
+                StdlibItem {
+                    name: "request".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![
+                            str_ty.clone(),                           // method
+                            str_ty.clone(),                           // url
+                            str_ty.clone(),                           // body
+                            p3b_c_list_str_str_tuple_ty.clone(),      // headers
+                            f64_ty.clone(),                           // timeout_secs
+                        ],
+                        p3b_c_status_body_tuple_ty.clone(),
+                    ),
+                    native_id: HTTPC_REQUEST,
+                },
+                StdlibItem {
+                    name: "request_with_headers".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![
+                            str_ty.clone(),
+                            str_ty.clone(),
+                            str_ty.clone(),
+                            p3b_c_list_str_str_tuple_ty.clone(),
+                            f64_ty.clone(),
+                        ],
+                        p3b_c_status_hdrs_body_tuple_ty.clone(),
+                    ),
+                    native_id: HTTPC_REQUEST_WITH_HEADERS,
+                },
+                StdlibItem {
+                    name: "urlencode".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![p3b_c_list_str_str_tuple_ty.clone()],
+                        str_ty.clone(),
+                    ),
+                    native_id: HTTPC_URLENCODE,
+                },
+                StdlibItem {
+                    name: "urldecode".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: HTTPC_URLDECODE,
+                },
+                StdlibItem {
+                    name: "url_parse".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone()],
+                        p3b_c_url_parse_tuple_ty.clone(),
+                    ),
+                    native_id: HTTPC_URL_PARSE,
+                },
+                StdlibItem {
+                    name: "status_text".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i32_ty.clone()], str_ty.clone()),
+                    native_id: HTTPC_STATUS_TEXT,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("http_client".into(), http_client_mod);
     }
 
 

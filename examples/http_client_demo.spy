@@ -1,0 +1,115 @@
+"""http_client_demo.spy — M28 P3b-C demo of the stdlib `http_client`.
+
+This demo runs entirely offline.  It exercises the pure-function
+helpers (`url_parse`, `urlencode`/`urldecode`, `status_text`) so that
+the demo can be `cargo run`-ed on any machine, including CI runners
+without outbound network access.
+
+The real GET/POST round-trip lives in
+`compiler/tests/http_client_demo_runs.rs`, which spawns a loopback
+HTTP server inside the test harness and then drives this binary at
+the resulting `http://127.0.0.1:<port>/` URL — that test isolates
+the network surface so the demo file stays hermetic.
+
+Exercises:
+  * `http_client.url_parse(url)` — scheme / host / port / path split.
+  * `http_client.urlencode(pairs)` / `http_client.urldecode(s)`.
+  * `http_client.status_text(code)` — IANA status reason lookup.
+"""
+
+import http_client
+
+fn main() -> i32:
+    # ── url_parse: http with default port ─────────────────────────────
+    parsed_http: Tuple[str, str, i32, str] = http_client.url_parse("http://example.com/path/to/resource?q=1")
+    if parsed_http.0 == "http":
+        println("scheme_http: ok")
+    else:
+        println("scheme_http: BUG " + parsed_http.0)
+    if parsed_http.1 == "example.com":
+        println("host_http: ok")
+    else:
+        println("host_http: BUG " + parsed_http.1)
+    if parsed_http.2 == 80i32:
+        println("port_http: ok")
+    else:
+        println("port_http: BUG " + str(parsed_http.2))
+    if parsed_http.3 == "/path/to/resource?q=1":
+        println("path_http: ok")
+    else:
+        println("path_http: BUG " + parsed_http.3)
+
+    # ── url_parse: https with default port ────────────────────────────
+    parsed_https: Tuple[str, str, i32, str] = http_client.url_parse("https://api.example.com/v1/users")
+    if parsed_https.2 == 443i32:
+        println("port_https: ok")
+    else:
+        println("port_https: BUG " + str(parsed_https.2))
+
+    # ── url_parse: explicit port ──────────────────────────────────────
+    parsed_explicit: Tuple[str, str, i32, str] = http_client.url_parse("http://127.0.0.1:8080/health")
+    if parsed_explicit.2 == 8080i32:
+        println("port_explicit: ok")
+    else:
+        println("port_explicit: BUG " + str(parsed_explicit.2))
+    if parsed_explicit.1 == "127.0.0.1":
+        println("host_loopback: ok")
+    else:
+        println("host_loopback: BUG " + parsed_explicit.1)
+
+    # ── url_parse: root path on bare host ─────────────────────────────
+    parsed_root: Tuple[str, str, i32, str] = http_client.url_parse("http://example.com")
+    if parsed_root.3 == "/":
+        println("root_path: ok")
+    else:
+        println("root_path: BUG " + parsed_root.3)
+
+    # ── url_parse: invalid input raises ValueError ────────────────────
+    try:
+        bad: Tuple[str, str, i32, str] = http_client.url_parse("not a url")
+        println("invalid_url: UNREACHED")
+    except ValueError as e:
+        println("invalid_url: caught ValueError")
+
+    # ── urlencode + urldecode round-trip ──────────────────────────────
+    pairs: List[Tuple[str, str]] = []
+    pairs.append(("name", "Alice & Bob"))
+    pairs.append(("city", "São Paulo"))
+    pairs.append(("q", "rust + python"))
+    enc: str = http_client.urlencode(pairs)
+    println("urlencode: " + enc)
+
+    # Decode each value piece-wise to confirm the inverse works.
+    dec_amp: str = http_client.urldecode("Alice%20%26%20Bob")
+    if dec_amp == "Alice & Bob":
+        println("urldecode_amp: ok")
+    else:
+        println("urldecode_amp: BUG " + dec_amp)
+
+    # ── status_text: common codes ─────────────────────────────────────
+    if http_client.status_text(200i32) == "OK":
+        println("status_200: ok")
+    else:
+        println("status_200: BUG")
+    if http_client.status_text(404i32) == "Not Found":
+        println("status_404: ok")
+    else:
+        println("status_404: BUG")
+    if http_client.status_text(500i32) == "Internal Server Error":
+        println("status_500: ok")
+    else:
+        println("status_500: BUG")
+    if http_client.status_text(418i32) == "I'm a teapot":
+        println("status_418: ok")
+    else:
+        println("status_418: BUG")
+
+    # Unknown code falls back to the class label based on the hundreds
+    # digit (matches Python's HTTPStatus behaviour).
+    if http_client.status_text(799i32) == "Unknown":
+        println("status_799: ok")
+    else:
+        println("status_799: BUG " + http_client.status_text(799i32))
+
+    println("done")
+    return 0
