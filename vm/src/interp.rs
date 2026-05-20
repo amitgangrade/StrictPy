@@ -290,6 +290,22 @@ pub struct SharedVm {
     /// M28 P3b-A: UDP socket slots. Slot 0 reserved.  `Arc`-wrapped for
     /// the same reason — `send_to` / `recv_from` take `&self`.
     pub udp_sockets: Arc<Mutex<Vec<Option<Arc<std::net::UdpSocket>>>>>,
+    /// M28 P3b-B: open TLS-over-TCP client connections, keyed by opaque
+    /// i64 handle.  Each entry is a `rustls::StreamOwned<ClientConnection,
+    /// TcpStream>` — the canonical "TLS over TCP" wrapper.  Indexed by
+    /// monotonically-increasing i64 so re-using a closed handle traps
+    /// instead of accidentally hitting a new connection.
+    pub tls_streams: std::sync::Mutex<
+        HashMap<i64, rustls::StreamOwned<rustls::ClientConnection, std::net::TcpStream>>,
+    >,
+    /// M28 P3b-B: monotonic allocator for `tls_streams` keys.  Starts at
+    /// 1 so handle 0 unambiguously means "no connection".
+    pub next_tls_id: std::sync::atomic::AtomicI64,
+    /// M28 P3b-B: global cert-verification toggle for subsequent
+    /// `ssl.connect` calls.  Default `true`; setting `false` installs a
+    /// "trust everything" verifier — STRICTLY for testing (loopback /
+    /// self-signed staging certs).
+    pub tls_verify: std::sync::atomic::AtomicBool,
     /// M7: shared stdout sink so spawned worker threads write to the same
     /// destination as the parent interpreter. Without this, the capture
     /// sink installed by `run_file_capture` only sees the parent's writes;
@@ -350,6 +366,13 @@ impl SharedVm {
             tcp_streams: Arc::new(Mutex::new(vec![None])),
             tcp_listeners: Arc::new(Mutex::new(vec![None])),
             udp_sockets: Arc::new(Mutex::new(vec![None])),
+            // M28 P3b-B: ssl module — empty handle map, next handle = 1
+            // (handle 0 is reserved as "no connection"), verify defaults
+            // to true (matches CPython's `ssl.create_default_context()`
+            // behaviour).
+            tls_streams: std::sync::Mutex::new(HashMap::new()),
+            next_tls_id: std::sync::atomic::AtomicI64::new(1),
+            tls_verify: std::sync::atomic::AtomicBool::new(true),
             stdout: Arc::new(Mutex::new(Box::new(RealStdout))),
             #[cfg(feature = "jit")]
             jit: None,
@@ -403,6 +426,10 @@ impl SharedVm {
             tcp_streams: Arc::new(Mutex::new(vec![None])),
             tcp_listeners: Arc::new(Mutex::new(vec![None])),
             udp_sockets: Arc::new(Mutex::new(vec![None])),
+            // M28 P3b-B: ssl module — see comment on the non-JIT ctor.
+            tls_streams: std::sync::Mutex::new(HashMap::new()),
+            next_tls_id: std::sync::atomic::AtomicI64::new(1),
+            tls_verify: std::sync::atomic::AtomicBool::new(true),
             stdout: Arc::new(Mutex::new(Box::new(RealStdout))),
             jit: Some(jit_cell),
             in_jit: AtomicUsize::new(0),

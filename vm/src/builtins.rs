@@ -5691,6 +5691,314 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             let p3b_a_sock_gn_sp = interp.alloc_string(&p3b_a_sock_gn_name);
             Ok(p3b_a_sock_gn_sp as u64)
         }
+        // ── M28 P3b-B: `ssl` module ─────────────────────────────────
+        // TLS-over-TCP client.  All connections live in
+        // `SharedVm.tls_streams` keyed by a monotonic i64 from
+        // `next_tls_id`.  We never re-use ids so a use-after-close is
+        // a clean ValueError instead of a silent hit on a new conn.
+        NativeFn::SslConnect => {
+            use std::io::Write;
+            let p3b_b_tls_connect_host = arg_str(args, 0);
+            let p3b_b_tls_connect_port = (arg_i64(args, 1) as i32) as u16;
+            // 1. Build a TLS client config.  The verify flag toggles
+            //    between the Mozilla root bundle (production default)
+            //    and a "trust everything" verifier (test-only — the
+            //    StrictPy program opts in via `ssl.set_verify_certs(false)`).
+            let p3b_b_tls_connect_verify =
+                interp.shared.tls_verify.load(std::sync::atomic::Ordering::SeqCst);
+            let p3b_b_tls_connect_provider =
+                std::sync::Arc::new(rustls::crypto::ring::default_provider());
+            let p3b_b_tls_connect_cfg: rustls::ClientConfig = if p3b_b_tls_connect_verify {
+                let mut p3b_b_tls_connect_roots = rustls::RootCertStore::empty();
+                p3b_b_tls_connect_roots
+                    .extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+                rustls::ClientConfig::builder_with_provider(p3b_b_tls_connect_provider)
+                    .with_safe_default_protocol_versions()
+                    .map_err(|e| VmError::UncaughtException {
+                        type_name: "IOError".into(),
+                        message: format!("ssl.connect: client config: {e}"),
+                    })?
+                    .with_root_certificates(p3b_b_tls_connect_roots)
+                    .with_no_client_auth()
+            } else {
+                rustls::ClientConfig::builder_with_provider(p3b_b_tls_connect_provider)
+                    .with_safe_default_protocol_versions()
+                    .map_err(|e| VmError::UncaughtException {
+                        type_name: "IOError".into(),
+                        message: format!("ssl.connect: client config: {e}"),
+                    })?
+                    .dangerous()
+                    .with_custom_certificate_verifier(std::sync::Arc::new(
+                        ssl_no_verify::NoVerify::new(),
+                    ))
+                    .with_no_client_auth()
+            };
+            // 2. Resolve the server name (SNI + cert-CN check) from the
+            //    user-supplied host string.  IPs are accepted; the
+            //    `try_from(&str)` impl handles "1.2.3.4" and
+            //    "example.com" identically.
+            let p3b_b_tls_connect_sname =
+                rustls::pki_types::ServerName::try_from(p3b_b_tls_connect_host.clone())
+                    .map_err(|e| VmError::UncaughtException {
+                        type_name: "IOError".into(),
+                        message: format!(
+                            "ssl.connect: invalid server name {:?}: {}",
+                            p3b_b_tls_connect_host, e
+                        ),
+                    })?;
+            // 3. Open the TCP socket.
+            let p3b_b_tls_connect_tcp = std::net::TcpStream::connect((
+                p3b_b_tls_connect_host.as_str(),
+                p3b_b_tls_connect_port,
+            ))
+            .map_err(|e| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!(
+                    "ssl.connect({:?}, {}): tcp: {}",
+                    p3b_b_tls_connect_host, p3b_b_tls_connect_port, e
+                ),
+            })?;
+            // 4. Build the TLS client conn + wrap.
+            let p3b_b_tls_connect_conn = rustls::ClientConnection::new(
+                std::sync::Arc::new(p3b_b_tls_connect_cfg),
+                p3b_b_tls_connect_sname,
+            )
+            .map_err(|e| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("ssl.connect: tls init: {e}"),
+            })?;
+            let mut p3b_b_tls_connect_stream =
+                rustls::StreamOwned::new(p3b_b_tls_connect_conn, p3b_b_tls_connect_tcp);
+            // 5. Force the handshake to complete now so a bad cert /
+            //    name-mismatch surfaces as an IOError out of connect()
+            //    rather than the first send().  `flush()` on a fresh
+            //    rustls stream drives the handshake to completion.
+            p3b_b_tls_connect_stream
+                .flush()
+                .map_err(|e| VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!(
+                        "ssl.connect({:?}, {}): handshake: {}",
+                        p3b_b_tls_connect_host, p3b_b_tls_connect_port, e
+                    ),
+                })?;
+            // 6. Stash the live stream + return a fresh handle.
+            let p3b_b_tls_connect_handle = interp
+                .shared
+                .next_tls_id
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            interp
+                .shared
+                .tls_streams
+                .lock()
+                .unwrap()
+                .insert(p3b_b_tls_connect_handle, p3b_b_tls_connect_stream);
+            Ok(p3b_b_tls_connect_handle as u64)
+        }
+        NativeFn::SslSend => {
+            use std::io::Write;
+            let p3b_b_tls_send_handle = arg_i64(args, 0);
+            let p3b_b_tls_send_data = arg_str(args, 1);
+            let p3b_b_tls_send_bytes = packed_str_to_bytes(
+                &p3b_b_tls_send_data,
+                0,
+                p3b_b_tls_send_data.chars().count(),
+                "ssl.send",
+            )?;
+            let mut p3b_b_tls_send_table = interp.shared.tls_streams.lock().unwrap();
+            let p3b_b_tls_send_stream = p3b_b_tls_send_table
+                .get_mut(&p3b_b_tls_send_handle)
+                .ok_or_else(|| VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "ssl.send: invalid or closed handle {}",
+                        p3b_b_tls_send_handle
+                    ),
+                })?;
+            p3b_b_tls_send_stream
+                .write_all(&p3b_b_tls_send_bytes)
+                .map_err(|e| VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!("ssl.send: {e}"),
+                })?;
+            // write_all wrote the whole buffer or returned Err.
+            Ok((p3b_b_tls_send_bytes.len() as u32) as u64)
+        }
+        NativeFn::SslRecv => {
+            use std::io::Read;
+            let p3b_b_tls_recv_handle = arg_i64(args, 0);
+            let p3b_b_tls_recv_max = arg_i64(args, 1);
+            let p3b_b_tls_recv_cap = if p3b_b_tls_recv_max < 0 {
+                0usize
+            } else {
+                p3b_b_tls_recv_max as usize
+            };
+            let p3b_b_tls_recv_bytes = {
+                let mut p3b_b_tls_recv_table = interp.shared.tls_streams.lock().unwrap();
+                let p3b_b_tls_recv_stream = p3b_b_tls_recv_table
+                    .get_mut(&p3b_b_tls_recv_handle)
+                    .ok_or_else(|| VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "ssl.recv: invalid or closed handle {}",
+                            p3b_b_tls_recv_handle
+                        ),
+                    })?;
+                let mut p3b_b_tls_recv_buf = vec![0u8; p3b_b_tls_recv_cap];
+                if p3b_b_tls_recv_cap == 0 {
+                    Vec::new()
+                } else {
+                    let n = p3b_b_tls_recv_stream
+                        .read(&mut p3b_b_tls_recv_buf)
+                        .map_err(|e| VmError::UncaughtException {
+                            type_name: "IOError".into(),
+                            message: format!("ssl.recv: {e}"),
+                        })?;
+                    p3b_b_tls_recv_buf.truncate(n);
+                    p3b_b_tls_recv_buf
+                }
+            };
+            let p3b_b_tls_recv_str = bytes_to_packed_str(&p3b_b_tls_recv_bytes);
+            let p = interp.alloc_string(&p3b_b_tls_recv_str);
+            Ok(p as u64)
+        }
+        NativeFn::SslRecvExact => {
+            use std::io::Read;
+            let p3b_b_tls_rex_handle = arg_i64(args, 0);
+            let p3b_b_tls_rex_n = arg_i64(args, 1);
+            if p3b_b_tls_rex_n < 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("ssl.recv_exact: negative n {}", p3b_b_tls_rex_n),
+                });
+            }
+            let p3b_b_tls_rex_bytes = {
+                let mut p3b_b_tls_rex_table = interp.shared.tls_streams.lock().unwrap();
+                let p3b_b_tls_rex_stream = p3b_b_tls_rex_table
+                    .get_mut(&p3b_b_tls_rex_handle)
+                    .ok_or_else(|| VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "ssl.recv_exact: invalid or closed handle {}",
+                            p3b_b_tls_rex_handle
+                        ),
+                    })?;
+                let mut p3b_b_tls_rex_buf = vec![0u8; p3b_b_tls_rex_n as usize];
+                p3b_b_tls_rex_stream
+                    .read_exact(&mut p3b_b_tls_rex_buf)
+                    .map_err(|e| VmError::UncaughtException {
+                        type_name: "IOError".into(),
+                        message: format!(
+                            "ssl.recv_exact: short read of {} bytes: {}",
+                            p3b_b_tls_rex_n, e
+                        ),
+                    })?;
+                p3b_b_tls_rex_buf
+            };
+            let p3b_b_tls_rex_str = bytes_to_packed_str(&p3b_b_tls_rex_bytes);
+            let p = interp.alloc_string(&p3b_b_tls_rex_str);
+            Ok(p as u64)
+        }
+        NativeFn::SslClose => {
+            let p3b_b_tls_close_handle = arg_i64(args, 0);
+            if p3b_b_tls_close_handle <= 0 {
+                return Ok(0);
+            }
+            // Drop the stream; rustls's Drop sends close_notify on the
+            // underlying TCP socket and shuts it down.
+            interp
+                .shared
+                .tls_streams
+                .lock()
+                .unwrap()
+                .remove(&p3b_b_tls_close_handle);
+            Ok(0)
+        }
+        NativeFn::SslPeerAddr => {
+            let p3b_b_tls_paddr_handle = arg_i64(args, 0);
+            let p3b_b_tls_paddr_addr = {
+                let p3b_b_tls_paddr_table = interp.shared.tls_streams.lock().unwrap();
+                match p3b_b_tls_paddr_table.get(&p3b_b_tls_paddr_handle) {
+                    Some(s) => match s.sock.peer_addr() {
+                        Ok(a) => a.to_string(),
+                        Err(_) => String::new(),
+                    },
+                    None => String::new(),
+                }
+            };
+            let p = interp.alloc_string(&p3b_b_tls_paddr_addr);
+            Ok(p as u64)
+        }
+        NativeFn::SslPeerCertSubject => {
+            let p3b_b_tls_pcs_handle = arg_i64(args, 0);
+            let p3b_b_tls_pcs_subject = {
+                let p3b_b_tls_pcs_table = interp.shared.tls_streams.lock().unwrap();
+                match p3b_b_tls_pcs_table.get(&p3b_b_tls_pcs_handle) {
+                    Some(s) => {
+                        let certs = s.conn.peer_certificates();
+                        match certs.and_then(|c| c.first()) {
+                            Some(cert) => ssl_extract_subject_cn(cert.as_ref())
+                                .unwrap_or_default(),
+                            None => String::new(),
+                        }
+                    }
+                    None => String::new(),
+                }
+            };
+            let p = interp.alloc_string(&p3b_b_tls_pcs_subject);
+            Ok(p as u64)
+        }
+        NativeFn::SslSetTimeoutSecs => {
+            let p3b_b_tls_tmo_handle = arg_i64(args, 0);
+            let p3b_b_tls_tmo_secs = arg_f64(args, 1);
+            let p3b_b_tls_tmo_dur = if p3b_b_tls_tmo_secs <= 0.0
+                || !p3b_b_tls_tmo_secs.is_finite()
+            {
+                None
+            } else {
+                Some(std::time::Duration::from_secs_f64(p3b_b_tls_tmo_secs))
+            };
+            let p3b_b_tls_tmo_table = interp.shared.tls_streams.lock().unwrap();
+            let p3b_b_tls_tmo_stream = p3b_b_tls_tmo_table
+                .get(&p3b_b_tls_tmo_handle)
+                .ok_or_else(|| VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "ssl.set_timeout_secs: invalid or closed handle {}",
+                        p3b_b_tls_tmo_handle
+                    ),
+                })?;
+            p3b_b_tls_tmo_stream
+                .sock
+                .set_read_timeout(p3b_b_tls_tmo_dur)
+                .map_err(|e| VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!("ssl.set_timeout_secs: read: {e}"),
+                })?;
+            p3b_b_tls_tmo_stream
+                .sock
+                .set_write_timeout(p3b_b_tls_tmo_dur)
+                .map_err(|e| VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!("ssl.set_timeout_secs: write: {e}"),
+                })?;
+            Ok(0)
+        }
+        NativeFn::SslSetVerifyCerts => {
+            let p3b_b_tls_setv_enabled = arg_u64(args, 0) != 0;
+            interp
+                .shared
+                .tls_verify
+                .store(p3b_b_tls_setv_enabled, std::sync::atomic::Ordering::SeqCst);
+            Ok(0)
+        }
+        NativeFn::SslGetVerifyCerts => {
+            let p3b_b_tls_getv = interp
+                .shared
+                .tls_verify
+                .load(std::sync::atomic::Ordering::SeqCst);
+            Ok(if p3b_b_tls_getv { 1 } else { 0 })
+        }
 
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
@@ -5751,6 +6059,116 @@ fn arc_udp_socket(
         message: format!("{}: handle {} is closed", who, handle),
     })?;
     Ok(sock.clone())
+}
+
+// ─── M28 P3b-B: ssl helpers ─────────────────────────────────────────────
+
+/// Extract the Common Name (CN) attribute from a DER-encoded X.509
+/// certificate subject.  This is a best-effort parser: we scan for the
+/// CN OID (2.5.4.3, encoded as 06 03 55 04 03) and read the following
+/// ASN.1 string.  Empty if the cert has no CN attribute (some certs use
+/// SAN only).  Returns None on any parse failure — the caller substitutes
+/// an empty string, matching the documented surface ("" if none).
+fn ssl_extract_subject_cn(der: &[u8]) -> Option<String> {
+    // CN OID DER encoding: 06 03 55 04 03 (tag=OID, len=3, 2.5.4.3).
+    const CN_OID: [u8; 5] = [0x06, 0x03, 0x55, 0x04, 0x03];
+    let mut i = 0usize;
+    while i + CN_OID.len() < der.len() {
+        if der[i..i + CN_OID.len()] == CN_OID {
+            // Following the OID is the string tag (12=UTF8String,
+            // 13=PrintableString, 16=IA5String, 1E=BMPString, etc.) +
+            // length + bytes.
+            let p = i + CN_OID.len();
+            if p + 2 > der.len() {
+                return None;
+            }
+            let tag = der[p];
+            let len = der[p + 1] as usize;
+            // Reject definite-form long lengths (>= 0x80) — we don't
+            // bother handling multi-byte lengths since CN values are
+            // tiny in practice.
+            if len >= 0x80 {
+                return None;
+            }
+            let s_start = p + 2;
+            let s_end = s_start.checked_add(len)?;
+            if s_end > der.len() {
+                return None;
+            }
+            let bytes = &der[s_start..s_end];
+            return match tag {
+                0x0C | 0x13 | 0x16 => Some(String::from_utf8_lossy(bytes).into_owned()),
+                _ => Some(String::from_utf8_lossy(bytes).into_owned()),
+            };
+        }
+        i += 1;
+    }
+    None
+}
+
+/// "Trust everything" verifier used when `ssl.set_verify_certs(false)`
+/// is in effect.  Strictly for testing against self-signed loopback
+/// servers — never use in production code.
+mod ssl_no_verify {
+    use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use rustls::{DigitallySignedStruct, Error, SignatureScheme};
+
+    #[derive(Debug)]
+    pub struct NoVerify;
+
+    impl NoVerify {
+        pub fn new() -> Self {
+            Self
+        }
+    }
+
+    impl ServerCertVerifier for NoVerify {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: UnixTime,
+        ) -> Result<ServerCertVerified, Error> {
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            vec![
+                SignatureScheme::RSA_PKCS1_SHA256,
+                SignatureScheme::RSA_PKCS1_SHA384,
+                SignatureScheme::RSA_PKCS1_SHA512,
+                SignatureScheme::ECDSA_NISTP256_SHA256,
+                SignatureScheme::ECDSA_NISTP384_SHA384,
+                SignatureScheme::ECDSA_NISTP521_SHA512,
+                SignatureScheme::RSA_PSS_SHA256,
+                SignatureScheme::RSA_PSS_SHA384,
+                SignatureScheme::RSA_PSS_SHA512,
+                SignatureScheme::ED25519,
+                SignatureScheme::ED448,
+            ]
+        }
+    }
 }
 
 // ─── M27 P3c-E: `logging` module helpers ───────────────────────────────

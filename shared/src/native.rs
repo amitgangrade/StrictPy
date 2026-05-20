@@ -1174,6 +1174,51 @@ pub enum NativeFn {
     TarfileIsTarfile    = 537,
     // 538-549 reserved.
 
+    // ── 600-619: `ssl` module (M28 P3b-B) ──────────────────────────────
+    // TLS-over-TCP client.  Each open connection is an opaque i64 handle
+    // into `SharedVm.tls_streams`, holding a
+    // `rustls::StreamOwned<ClientConnection, TcpStream>` — the canonical
+    // "TLS over TCP" wrapper that implements Read+Write.  Sends/receives
+    // round-trip through the str-as-byte-buffer convention (each
+    // codepoint 0..=255 maps 1:1 to a byte; same trick `struct` /
+    // `zipfile` / `tarfile` use).  See spec §9.41.
+    /// `ssl.connect(host: str, port: i32) -> i64` — open a TCP socket
+    /// and perform a TLS handshake against `host:port`.  Returns an
+    /// opaque connection handle.  Raises IOError on TCP / TLS failure.
+    SslConnect          = 600,
+    /// `ssl.send(handle: i64, data: str) -> i32` — encrypt + send `data`
+    /// (interpreted as packed bytes).  Returns the number of plaintext
+    /// bytes written.
+    SslSend             = 601,
+    /// `ssl.recv(handle: i64, max_bytes: i32) -> str` — decrypt up to
+    /// `max_bytes` of incoming data; returns a packed-byte str.  A zero-
+    /// length result indicates clean EOF (peer closed the connection).
+    SslRecv             = 602,
+    /// `ssl.recv_exact(handle: i64, n: i32) -> str` — read exactly `n`
+    /// bytes or raise IOError on short read / EOF.
+    SslRecvExact        = 603,
+    /// `ssl.close(handle: i64) -> None` — send close_notify, drop the
+    /// handle.  No-op on zero / already-closed handles.
+    SslClose            = 604,
+    /// `ssl.peer_addr(handle: i64) -> str` — "ip:port" of the remote
+    /// endpoint.  Empty string if the handle is closed.
+    SslPeerAddr         = 605,
+    /// `ssl.peer_cert_subject(handle: i64) -> str` — the subject CN of
+    /// the peer's certificate (best-effort parse out of the DER subject).
+    /// Empty string if no cert or no CN attribute.
+    SslPeerCertSubject  = 606,
+    /// `ssl.set_timeout_secs(handle: i64, secs: f64) -> None` — apply
+    /// the timeout to both read and write on the underlying TCP socket.
+    /// `secs <= 0.0` clears the timeout.
+    SslSetTimeoutSecs   = 607,
+    /// `ssl.set_verify_certs(enabled: bool) -> None` — global flag,
+    /// affects subsequent `connect` calls.  Default true.
+    SslSetVerifyCerts   = 608,
+    /// `ssl.get_verify_certs() -> bool` — read the global flag back.
+    SslGetVerifyCerts   = 609,
+    // 610-619 reserved for v0.3 (SNI override, ALPN, mutual auth,
+    // server-side TLS, custom CA bundles, session resumption).
+
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
     /// encounters. The VM treats this as a runtime error.
@@ -1572,6 +1617,17 @@ impl NativeFn {
             586 => Some(Self::SocketGethostbyname),
             587 => Some(Self::SocketResolve),
             588 => Some(Self::SocketGethostname),
+            // M28 P3b-B: ssl module (600-609; 610-619 reserved).
+            600 => Some(Self::SslConnect),
+            601 => Some(Self::SslSend),
+            602 => Some(Self::SslRecv),
+            603 => Some(Self::SslRecvExact),
+            604 => Some(Self::SslClose),
+            605 => Some(Self::SslPeerAddr),
+            606 => Some(Self::SslPeerCertSubject),
+            607 => Some(Self::SslSetTimeoutSecs),
+            608 => Some(Self::SslSetVerifyCerts),
+            609 => Some(Self::SslGetVerifyCerts),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

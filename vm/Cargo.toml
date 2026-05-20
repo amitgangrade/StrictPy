@@ -81,6 +81,17 @@ zip = "2"
 tar = "0.4"
 flate2 = "1"
 bzip2 = "0.4"
+# M28 P3b-B: `ssl` stdlib module.  `rustls` is the standard pure-Rust
+# TLS implementation; `rustls-pki-types` carries the `ServerName` /
+# `CertificateDer` types its 0.23 API uses; `webpki-roots` ships the
+# Mozilla CA bundle statically embedded so trust-store lookup needs no
+# OS interaction.  We pin to the `ring` crypto provider (vs. aws-lc-rs)
+# because it's pure Rust on every host without a system C toolchain
+# wiring — `aws-lc-sys` requires CMake + NASM on Windows.  All
+# transitive deps are pure Rust at this point.
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "logging", "tls12"] }
+rustls-pki-types = "1"
+webpki-roots = "0.26"
 cranelift = { version = "0.115", optional = true }
 cranelift-jit = { version = "0.115", optional = true }
 cranelift-codegen = { version = "0.115", optional = true }

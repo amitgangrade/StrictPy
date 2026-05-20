@@ -25,3 +25,10 @@ byteorder.workspace = true
 
 [dev-dependencies]
 strictpy-vm = { path = "../vm" }
+# M28 P3b-B: rcgen generates a self-signed cert at test time for the
+# `ssl_demo` integration test's loopback TLS server.  rustls is used
+# on the server side too (the demo's StrictPy code is the client).
+# The `ring`-backed rustls keeps the build pure-Rust on all hosts.
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring", "pem"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "logging", "tls12"] }
+rustls-pki-types = "1"

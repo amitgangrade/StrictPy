@@ -3000,6 +3000,18 @@ and Windows.
 ```
 # TCP client
 fn connect_tcp(host: str, port: i32) -> i64
+### 9.41 Module `ssl` (v0.2 — M28 P3b-B)
+
+TLS-over-TCP client.  Wraps the pure-Rust `rustls` 0.23 crate with the
+`ring` crypto provider so the build needs no system OpenSSL.  Trust
+defaults to the Mozilla root bundle that `webpki-roots` ships
+statically — the same set CPython falls back to on systems without a
+configured trust store.  Connections are opaque `i64` handles into a
+per-process slot map on `SharedVm.tls_streams`, identical in shape to
+the `sqlite3` / `zipfile` / `tarfile` handle convention.
+
+```
+fn connect(host: str, port: i32) -> i64
 fn send(handle: i64, data: str) -> i32
 fn recv(handle: i64, max_bytes: i32) -> str
 fn recv_exact(handle: i64, n: i32) -> str
@@ -3024,6 +3036,11 @@ fn udp_close(handle: i64) -> None
 fn gethostbyname(host: str) -> str
 fn resolve(host: str, port: i32) -> List[str]
 fn gethostname() -> str
+fn peer_addr(handle: i64) -> str
+fn peer_cert_subject(handle: i64) -> str
+fn set_timeout_secs(handle: i64, secs: f64) -> None
+fn set_verify_certs(enabled: bool) -> None
+fn get_verify_certs() -> bool
 ```
 
 Semantics:
@@ -3123,6 +3140,77 @@ same mechanism as `threading.Lock` (the slot tables live behind
 inner stream borrow but each gets a self-consistent byte chunk;
 interleaved bytes would only happen if the application protocol
 violates message framing rather than from the runtime.
+* `connect(host, port)` opens a `TcpStream` to `host:port`, builds a
+  `rustls::ClientConnection` using the current verify flag, wraps the
+  pair in a `StreamOwned`, and forces the handshake to completion
+  with a `flush()`.  Any TCP, name-resolution, or TLS-handshake
+  failure raises `IOError`.  The returned handle is a monotonic i64
+  starting at 1; handles are never re-used inside the same process,
+  so a use-after-close raises `ValueError` instead of accidentally
+  reaching a fresh connection.
+* `send(handle, data)` decodes `data` as a packed-byte string (each
+  codepoint must be 0..255 — same str-as-byte-buffer convention as
+  `struct` / `zipfile`) and writes all bytes; returns the number of
+  plaintext bytes written.  Raises `ValueError` if a codepoint is
+  out of range, `IOError` on socket / TLS failure.
+* `recv(handle, max_bytes)` reads up to `max_bytes` plaintext bytes
+  from the stream and returns them as a packed-byte str.  A zero-
+  length result signals clean EOF (peer sent close_notify).
+* `recv_exact(handle, n)` reads exactly `n` plaintext bytes or raises
+  `IOError` on short read / EOF.  `n < 0` raises `ValueError`.
+* `close(handle)` drops the underlying stream, which causes `rustls`
+  to write `close_notify` and shut down the TCP socket.  Calling
+  `close` on handle `0` or on an already-closed handle is a no-op.
+* `peer_addr(handle)` returns the remote endpoint formatted as
+  `"<ip>:<port>"` (IPv4) or `"[<ip>]:<port>"` (IPv6, matching
+  `std::net::SocketAddr::Display`).  Empty string if the handle is
+  closed.
+* `peer_cert_subject(handle)` returns the subject Common Name (CN)
+  attribute extracted from the peer certificate's DER subject, or
+  the empty string if the peer presented no cert (extremely rare)
+  or the cert has no CN attribute (modern certs sometimes rely on
+  Subject Alternative Names only).  v0.2 does not expose the full
+  SAN list, the issuer, the validity window, or the serial number
+  — `peer_cert_subject` is a presence-check shortcut, not a full
+  certificate-inspection API.
+* `set_timeout_secs(handle, secs)` applies the same duration to both
+  the underlying TCP socket's read and write deadlines.  `secs <=
+  0.0` or non-finite clears the timeout (blocking forever).  Raises
+  `ValueError` for invalid handles.
+* `set_verify_certs(enabled)` is a **process-global** flag that
+  affects only subsequent `connect` calls.  Default `true`.
+  Setting it to `false` installs a "trust everything" verifier;
+  this is strictly for testing against self-signed loopback /
+  staging certificates.  Production code that needs alternative
+  trust should use the per-connection custom-CA API once it lands
+  in v0.3 (ID 610 is reserved).
+* `get_verify_certs()` reads the current flag.
+
+Concurrency: the handle map lives behind a single `std::sync::Mutex`
+on `SharedVm`.  `connect` / `close` calls are short and only contend
+on the map lock; the actual I/O happens after the lock is released
+(the handler holds the slot's stream by `&mut`, blocking sibling
+operations on the *same* handle but not on other handles).
+
+What v0.2 does **not** ship:
+
+* Server-side TLS (`ssl.accept` / `ssl.bind`).  IDs 610+ are reserved
+  for it.
+* Mutual auth (client certificates).  The `with_no_client_auth()`
+  builder is hard-coded.
+* Per-connection custom CA / pinned certificate verification.  The
+  verify flag is binary (full Mozilla bundle vs trust everything);
+  per-connection custom verifiers are v0.3.
+* SNI override (the SNI name always equals the `host` argument).
+* ALPN negotiation, session resumption, custom cipher-suite lists.
+* `unwrap_socket` / `wrap_socket` decomposition (no underlying
+  `socket` stdlib module exists in v0.2; `ssl.connect` bundles TCP
+  + TLS setup into one call).
+
+Examples: `examples/ssl_demo.spy` round-trips messages (including a
+high-byte payload exercising the packed-byte convention) against a
+loopback echo server.  See `compiler/tests/ssl_demo_runs.rs` for the
+self-signed-cert server setup the test harness uses.
 
 ---
 

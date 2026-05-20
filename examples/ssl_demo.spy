@@ -1,0 +1,125 @@
+"""ssl_demo.spy — M28 P3b-B demo of the stdlib `ssl` module.
+
+Reads a host + port from sys.argv (the integration test spawns a
+loopback TLS echo server and passes "127.0.0.1 <chosen_port>"); turns
+verify off so the self-signed test cert is accepted; sends a few
+messages and asserts each echoes back byte-for-byte (including a
+high-byte payload that exercises the packed-byte round-trip).
+
+This is the network-bound side of the agent — the test harness in
+compiler/tests/ssl_demo_runs.rs spawns the server, generates the
+self-signed cert with rcgen, and only then invokes spy.exe with the
+chosen port on argv.  The demo never reaches the public internet.
+"""
+
+import ssl
+import sys
+
+fn main() -> i32:
+    # ── 0. Parse host + port from argv ────────────────────────────
+    # argv[0] is the program path (per CPython convention); argv[1]
+    # is the host, argv[2] is the port.  Bail with a clear message
+    # if the caller forgot to pass them — this is a demo, not a
+    # user-facing tool, so a hard exit is fine.
+    argv: List[str] = sys.argv
+    if i32(i64(len(argv))) < 3i32:
+        println("usage: ssl_demo <host> <port>")
+        return 1
+    host: str = argv[1]
+    port: i32 = i32(parse_i64(argv[2]))
+
+    # ── 1. Disable cert verification (test-only) ──────────────────
+    # The loopback server in the test uses a self-signed cert with
+    # CN="localhost", which the Mozilla root bundle obviously
+    # doesn't sign.  Reading the flag back tests get_verify_certs.
+    ssl.set_verify_certs(false)
+    if ssl.get_verify_certs():
+        println("verify: BUG still on")
+    else:
+        println("verify: off")
+
+    # ── 2. Open the TLS connection ────────────────────────────────
+    conn: i64 = ssl.connect(host, port)
+    println("connected: " + str(conn > 0i64))
+
+    # 10-second deadline on both directions — the echo server should
+    # respond in microseconds so anything longer is a real hang.
+    ssl.set_timeout_secs(conn, 10.0)
+
+    # peer_addr should look like "127.0.0.1:<port>".  We just check
+    # that it contains the expected host substring to stay tolerant
+    # of IPv4 vs IPv6 representation.
+    paddr: str = ssl.peer_addr(conn)
+    if i64(len(paddr)) > 0i64:
+        println("peer_addr: nonempty")
+    else:
+        println("peer_addr: BUG empty")
+
+    # peer_cert_subject — the demo cert is created with CN=localhost.
+    # Empty string is acceptable (some certs only have SAN entries
+    # with no Subject CN), so we just print whatever we got.
+    subject: str = ssl.peer_cert_subject(conn)
+    println("subject_len: " + str(i32(i64(len(subject)))))
+
+    # ── 3. Round-trip plain ASCII ─────────────────────────────────
+    msg_a: str = "hello, ssl\n"
+    n_a: i32 = ssl.send(conn, msg_a)
+    println("sent_a: " + str(n_a))
+    rt_a: str = ssl.recv_exact(conn, i32(i64(len(msg_a))))
+    if rt_a == msg_a:
+        println("rt_a: ok")
+    else:
+        println("rt_a: BUG")
+
+    # ── 4. Round-trip a high-byte payload ─────────────────────────
+    # Build a 64-byte buffer mixing every byte 192..255 (the high
+    # half of Latin-1) — this is the regime where naive UTF-8 mishaps
+    # would corrupt the round-trip.
+    payload: str = ""
+    i: i32 = 192i32
+    while i < 256i32:
+        payload = payload + str(char(i))
+        i = i + 1i32
+    n_b: i32 = ssl.send(conn, payload)
+    println("sent_b: " + str(n_b))
+    rt_b: str = ssl.recv_exact(conn, i32(i64(len(payload))))
+    if rt_b == payload:
+        println("rt_b: ok")
+    else:
+        println("rt_b: BUG len=" + str(i32(i64(len(rt_b)))))
+
+    # ── 5. Probe recv with a tighter bound ───────────────────────
+    # Send a longer message but ask for at most 8 bytes — the result
+    # should be 1..8 bytes (TLS records can fragment).
+    msg_c: str = "abcdefghij"
+    ssl.send(conn, msg_c)
+    chunk: str = ssl.recv(conn, 8i32)
+    chunk_len: i32 = i32(i64(len(chunk)))
+    if chunk_len >= 1i32:
+        if chunk_len <= 8i32:
+            println("recv_bound: ok")
+        else:
+            println("recv_bound: BUG too long " + str(chunk_len))
+    else:
+        println("recv_bound: BUG empty")
+    # Drain whatever's left so the server side doesn't block.
+    remaining: i32 = i32(i64(len(msg_c))) - chunk_len
+    if remaining > 0i32:
+        leftover: str = ssl.recv_exact(conn, remaining)
+        println("drained: " + str(i32(i64(len(leftover)))))
+
+    # ── 6. Close cleanly ──────────────────────────────────────────
+    ssl.close(conn)
+    # Closing again is a documented no-op.
+    ssl.close(conn)
+    println("closed")
+
+    # ── 7. Operating on a closed handle is a ValueError ──────────
+    try:
+        bad: i32 = ssl.send(conn, "x")
+        println("post_close: UNREACHED")
+    except ValueError as e:
+        println("post_close: caught ValueError")
+
+    println("done")
+    return 0

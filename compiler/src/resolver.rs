@@ -3387,7 +3387,90 @@ impl Resolver {
             ],
         };
         self.stdlib_modules.insert("socket".into(), p3b_a_socket_mod);
+        // ── M28 P3b-B: `ssl` module ────────────────────────────────────
+        // TLS-over-TCP client.  Opens an encrypted connection in one
+        // shot (TCP socket + TLS handshake bundled), returning an i64
+        // handle that the rest of the surface uses for send / recv /
+        // close.  See spec §9.41.
+        const SSL_CONNECT: u32              = 600;
+        const SSL_SEND: u32                 = 601;
+        const SSL_RECV: u32                 = 602;
+        const SSL_RECV_EXACT: u32           = 603;
+        const SSL_CLOSE: u32                = 604;
+        const SSL_PEER_ADDR: u32            = 605;
+        const SSL_PEER_CERT_SUBJECT: u32    = 606;
+        const SSL_SET_TIMEOUT_SECS: u32     = 607;
+        const SSL_SET_VERIFY_CERTS: u32     = 608;
+        const SSL_GET_VERIFY_CERTS: u32     = 609;
+
+        let p3b_b_ssl_mod = StdlibModule {
+            name: "ssl".into(),
+            items: vec![
+                StdlibItem {
+                    name: "connect".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone(), i32_ty.clone()], i64_ty.clone()),
+                    native_id: SSL_CONNECT,
+                },
+                StdlibItem {
+                    name: "send".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), str_ty.clone()], i32_ty.clone()),
+                    native_id: SSL_SEND,
+                },
+                StdlibItem {
+                    name: "recv".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i32_ty.clone()], str_ty.clone()),
+                    native_id: SSL_RECV,
+                },
+                StdlibItem {
+                    name: "recv_exact".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i32_ty.clone()], str_ty.clone()),
+                    native_id: SSL_RECV_EXACT,
+                },
+                StdlibItem {
+                    name: "close".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], unit_ty.clone()),
+                    native_id: SSL_CLOSE,
+                },
+                StdlibItem {
+                    name: "peer_addr".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], str_ty.clone()),
+                    native_id: SSL_PEER_ADDR,
+                },
+                StdlibItem {
+                    name: "peer_cert_subject".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], str_ty.clone()),
+                    native_id: SSL_PEER_CERT_SUBJECT,
+                },
+                StdlibItem {
+                    name: "set_timeout_secs".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), f64_ty.clone()], unit_ty.clone()),
+                    native_id: SSL_SET_TIMEOUT_SECS,
+                },
+                StdlibItem {
+                    name: "set_verify_certs".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![bool_ty.clone()], unit_ty.clone()),
+                    native_id: SSL_SET_VERIFY_CERTS,
+                },
+                StdlibItem {
+                    name: "get_verify_certs".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], bool_ty.clone()),
+                    native_id: SSL_GET_VERIFY_CERTS,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("ssl".into(), p3b_b_ssl_mod);
     }
+
 
     // ─────────────────────────────────────────────────────────────────────
     //  Prelude (spec §9.1 — extended for what the v0.1 examples need)
