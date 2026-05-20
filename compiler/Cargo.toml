@@ -32,3 +32,8 @@ strictpy-vm = { path = "../vm" }
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring", "pem"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "logging", "tls12"] }
 rustls-pki-types = "1"
+rustls-pemfile = "2"
+# M29: ureq drives the webserver integration test as the HTTP client.
+# Same crate the runtime http_client module uses, so no extra crate
+# graph cost.
+ureq = { version = "2", default-features = false, features = ["tls"] }

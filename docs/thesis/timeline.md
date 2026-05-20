@@ -1117,6 +1117,131 @@ No language/compiler changes; new pure-bench infrastructure only.
 
 ---
 
+## M29 — Webserver framework stress test (2026-05-20)
+
+The largest single-program stress test of the project to date. A
+complete HTTP/1.1 + HTTPS web framework (Sinatra/Flask-shaped) plus a
+real TODO API app — ~1,446 LOC of StrictPy in one file
+(`examples/webserver/todo_app.spy`). Optionally HTTPS via the new
+M28.5 server-side TLS.
+
+### Headline finding: zero new bugs in M28/M28.5 networking
+
+**First stress round in project history that found zero bugs in the
+target surface.** A 1500-LOC program exercising socket.accept +
+socket.recv + socket.send + socket.close + bidirectional TLS across
+50 concurrent connections, with thousands of requests in the
+performance probe, surfaced no networking-stack bugs. Compare to M10
+(17 bugs), M11 (6), M12 (2), M18 (1), M24 (1), M27 (1).
+
+Two contributing factors: smaller target surface than prior rounds (3
+networking modules + threading + sqlite + json/csv); plus unusually
+disciplined agents in M28/M28.5 (P3b-A self-caught a deadlock,
+P3b-B/D had clean Lesson 1 discipline) — tighter incoming surface,
+less integration drift, fewer latent issues to surface later.
+
+### Stress-test findings — language ergonomics (not bugs)
+
+4 v0.2 gaps surfaced by building the framework, all documented:
+
+1. **No typed JsonValue tree in stdlib** — the biggest pain. POST body
+   parser hand-walks canonical compact form (~70 LOC); a typed sum
+   type in v0.3 drops this to ~10 LOC of pattern matching.
+2. **`from` is a reserved word** even as a parameter name. Renamed
+   to `start`/`end`. Could be tightened (only conflicts in import
+   context).
+3. **No expression-level `T?` unwrap operator.** Workaround:
+   `if x is not none: ...`. v0.3 ergonomics.
+4. **BUG-039 still bites for non-str Dict keys** — already deferred.
+
+These are **library-density gaps, not language-feature gaps**.
+
+### What it exercises (every major piece in one program)
+
+- Networking: M28 socket + M28 ssl client + M28.5 ssl server +
+  M28 http_client (in the test harness)
+- Concurrency: M6 Thread + M23 threading.Lock + threading.Semaphore
+- Storage: M23 sqlite3 (CRUD on a todos table)
+- Data: M22 json + urllib_parse + M28 http_client.urlencode
+- Observability: M27 logging
+- Time: M20b time.monotonic + hand-rolled HTTP-Date
+- Language: M11 classes, M14 tuples, M15 try/except, §8.6 closures
+
+### Performance (ballpark)
+
+| Endpoint | HTTP | HTTPS |
+|---|---:|---:|
+| /health (no I/O) | ~2200 req/s | ~800 req/s |
+| GET /api/todos (1 SQLite query) | ~1500 req/s | ~700 req/s |
+| POST /api/todos (1 SQLite insert) | ~1100 req/s | ~600 req/s |
+
+**Within 2× of Flask + gunicorn** without async I/O, JIT warmup, or
+connection pooling. The remaining gap is the async event loop (v0.3).
+
+### Methodology: Lesson 1 escalation continues to deliver
+
+The agent followed the strengthened brief perfectly: 4 commits, all
+before 80% of budget; first commit (framework skeleton) at ~15%. The
+M28 Lesson 1 escalation now has 4 data points (P3b-A, P3b-B, P3b-D,
+M29) of clean checkpoint discipline. Numerical thresholds work.
+
+### LOC comparison
+
+| Component | StrictPy | Python+Flask |
+|---|---:|---:|
+| Framework | ~620 LOC | ~250 LOC |
+| HTTP parser | ~200 LOC | 0 (stdlib `http.server`) |
+| JSON tree | ~70 LOC | 0 (stdlib `json.loads`) |
+| HTTP-Date | ~20 LOC | 0 (`email.utils.formatdate`) |
+| Str helpers | ~50 LOC | 0 (stdlib) |
+| Demo handlers | ~200 LOC | ~50 LOC |
+| **Total** | **~1,160 LOC** | **~300 LOC** |
+
+The 4× gap is library density, not language-feature gap. v0.3 stdlib
+classes (typed JsonValue, Request/Response) would close ~half of it.
+
+### Tests + size
+
+- Tests: 634 → 647 (+13).
+- Examples: 85 → 87.
+- Stdlib modules: unchanged at 36 — M29 builds on existing surface.
+
+### The single-sentence finding
+
+**StrictPy has enough surface, today, to build a non-trivial real
+program — and the language survived the test cleanly. The remaining
+gaps are library density, not architectural.**
+
+---
+
+## M28.5 — Server-side TLS (2026-05-20)
+
+Closes the v0.2 networking gap. Single focused agent extends the M28
+`ssl` module with server-side TLS so StrictPy can build HTTPS servers
+by composing `socket.listen_tcp` + `ssl.accept_tls` + the existing
+client-side `ssl.send`/`recv`/`close`.
+
+3 new NativeFns in the 610-612 range (P3b-B's reserved space): 
+`SslLoadServerConfig`, `SslAcceptTls`, `SslFreeServerConfig`. New
+crate dep: `rustls-pemfile`. §9.41 amended in place — no new spec
+section number.
+
+Design: Option A from the brief — parallel `tls_server_streams` table
+next to the existing client-side `tls_streams`. Server handles
+allocated from id range ≥ 1,000,000; existing
+`ssl.send`/`recv`/`close`/`peer_addr` handlers extended in-place to
+dispatch on handle value. Zero edits to P3b-B's client-side logic.
+
+Patch applied cleanly with no conflicts and no manual brace fixes —
+the agent's clean discipline (distinctive `p3b_d_` prefix on all
+locals + canonical closing-brace shape + additive-only changes to
+shared dispatch handlers) eliminated the orchestrator overhead that
+M27 and M28 P3b-B/C had needed.
+
+Tests: 634 → 636 (+2: `https_server_demo_compiles` + `_runs_via_spy_exe`).
+
+---
+
 ## M28 — Phase 3b stdlib (2026-05-20)
 
 The biggest single domain remaining at end of M27: networking.

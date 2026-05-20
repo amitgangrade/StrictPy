@@ -1,0 +1,1446 @@
+"""todo_app.spy — M29 web framework + TODO demo, all in one file.
+
+User-defined .spy modules are deferred to v0.3 (STRICTPY_SPEC.md §6.7),
+so the framework code and the demo app live in a single file.  Roughly
+half the file is reusable framework (HTTP/1.1 parser/writer, router,
+accept-loop) and half is the TODO app specifics (sqlite storage +
+handlers).  See `docs/thesis/agent_reports/m29_webserver.md` for the
+narrative companion.
+
+Sub-systems, in declaration order:
+  1.  Generic helpers      (substring, parse_i32, etc.)
+  2.  HTTP/1.1 protocol    (parse request, format response)
+  3.  Routing              (linear table of method-path-handler triples)
+  4.  Server               (accept loop, thread-per-connection)
+  5.  TODO storage + UI    (sqlite + JSON + minimal HTML)
+  6.  main()               (arg parsing, server start)
+
+CLI:
+    spy todo_app.spyc [--host HOST] [--port PORT] [--db PATH] [--tls CERT KEY]
+
+If `--tls cert.pem key.pem` is supplied the server uses HTTPS; otherwise
+plain HTTP/1.1.  Default host is 127.0.0.1, default port is 0 (the OS
+picks one, and the chosen port is printed to stdout as `PORT=NNNN` for
+the integration test to scrape).
+
+v0.2 limits we accept:
+  * No chunked transfer-encoding: requests are Content-Length-framed.
+  * No keep-alive: we always reply with `Connection: close`.
+  * No multipart bodies: form bodies are `application/x-www-form-urlencoded`.
+  * Header lookup is case-INSENSITIVE (we lowercase on parse).
+  * Concurrency is thread-per-connection, bounded by a Semaphore.
+
+This program exercises:
+  * M11 classes (Request / Response / Route / RouteTable / Server)
+  * M14 tuples (parser return shapes)
+  * M15 try/except (handler error capture, 500 fallback)
+  * M16 match (status-text family — see `status_phrase`)
+  * Phase 3a/3b/3c stdlib: socket, ssl, sqlite3, threading, json,
+    http_client (for urldecode), datetime, logging, time, sys, io, os.
+"""
+
+import sys
+import io
+import os
+import socket
+import ssl
+import sqlite3
+import threading
+import http_client
+import json
+import datetime
+import time
+import logging
+import pathlib
+from threading import Thread
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 0. Constants (CONFIG)
+# ─────────────────────────────────────────────────────────────────────
+
+
+fn max_request_bytes() -> i32:
+    """Hard cap on accepted request size (header + body).  64 KiB."""
+    return 65536i32
+
+
+fn header_buffer_bytes() -> i32:
+    """Maximum bytes we'll read trying to find the header/body split."""
+    return 8192i32
+
+
+fn max_concurrent_connections() -> i32:
+    """Cap on simultaneous in-flight connections (Semaphore permits)."""
+    return 50i32
+
+
+fn server_signature() -> str:
+    """Value of the `Server:` response header."""
+    return "StrictPy-webserver/0.1"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 1. Generic helpers
+# ─────────────────────────────────────────────────────────────────────
+
+
+fn substring(s: str, start: i32, end: i32) -> str:
+    """`s[start:end]` via str.slice (which takes i64 args)."""
+    n: i32 = i32(i64(len(s)))
+    if start < 0i32:
+        start = 0i32
+    if end > n:
+        end = n
+    if end <= start:
+        return ""
+    return s.slice(i64(start), i64(end))
+
+
+fn byte_at(s: str, i: i32) -> i32:
+    """Numeric value of the codepoint at `s[i]` (0..255 in str-as-bytes)."""
+    return i32(i64(s[i]))
+
+
+fn ascii_lower_char(c: i32) -> i32:
+    if c >= 65i32 and c <= 90i32:
+        return c + 32i32
+    return c
+
+
+fn ascii_lower(s: str) -> str:
+    """ASCII-only `s.lower()` (sufficient for HTTP header names)."""
+    n: i32 = i32(i64(len(s)))
+    out: str = ""
+    i: i32 = 0i32
+    while i < n:
+        c: i32 = ascii_lower_char(byte_at(s, i))
+        out = out + str(char(c))
+        i = i + 1i32
+    return out
+
+
+fn index_of(s: str, needle: str, start_at: i32) -> i32:
+    """Return the first index >= `start_at` where `needle` occurs in `s`, or -1."""
+    sn: i32 = i32(i64(len(s)))
+    nn: i32 = i32(i64(len(needle)))
+    if nn == 0i32:
+        return start_at
+    if nn > sn:
+        return -1i32
+    i: i32 = start_at
+    while i <= sn - nn:
+        j: i32 = 0i32
+        ok: bool = true
+        while j < nn:
+            if byte_at(s, i + j) != byte_at(needle, j):
+                ok = false
+                j = nn
+            else:
+                j = j + 1i32
+        if ok:
+            return i
+        i = i + 1i32
+    return -1i32
+
+
+fn contains(s: str, needle: str) -> bool:
+    return index_of(s, needle, 0i32) >= 0i32
+
+
+fn starts_with(s: str, prefix: str) -> bool:
+    sn: i32 = i32(i64(len(s)))
+    pn: i32 = i32(i64(len(prefix)))
+    if pn > sn:
+        return false
+    i: i32 = 0i32
+    while i < pn:
+        if byte_at(s, i) != byte_at(prefix, i):
+            return false
+        i = i + 1i32
+    return true
+
+
+fn is_ascii_ws(c: i32) -> bool:
+    return c == 32i32 or c == 9i32 or c == 13i32 or c == 10i32
+
+
+fn trim_ascii(s: str) -> str:
+    """Strip leading/trailing ASCII whitespace (space, tab, CR, LF)."""
+    n: i32 = i32(i64(len(s)))
+    start: i32 = 0i32
+    while start < n and is_ascii_ws(byte_at(s, start)):
+        start = start + 1i32
+    end: i32 = n
+    while end > start and is_ascii_ws(byte_at(s, end - 1i32)):
+        end = end - 1i32
+    return substring(s, start, end)
+
+
+fn parse_i32_safe(s: str) -> Tuple[bool, i32]:
+    """Parse a decimal i32 from `s`; (true, value) on success, (false, 0)
+    on any non-digit input or empty string.  Accepts a leading `-`."""
+    n: i32 = i32(i64(len(s)))
+    if n == 0i32:
+        return (false, 0i32)
+    i: i32 = 0i32
+    sign: i32 = 1i32
+    if byte_at(s, 0i32) == 45i32:
+        sign = -1i32
+        i = 1i32
+        if i == n:
+            return (false, 0i32)
+    val: i32 = 0i32
+    while i < n:
+        c: i32 = byte_at(s, i)
+        if c < 48i32 or c > 57i32:
+            return (false, 0i32)
+        val = val * 10i32 + (c - 48i32)
+        i = i + 1i32
+    return (true, sign * val)
+
+
+fn parse_i64_safe(s: str) -> Tuple[bool, i64]:
+    n: i32 = i32(i64(len(s)))
+    if n == 0i32:
+        return (false, 0i64)
+    i: i32 = 0i32
+    sign: i64 = 1i64
+    if byte_at(s, 0i32) == 45i32:
+        sign = -1i64
+        i = 1i32
+        if i == n:
+            return (false, 0i64)
+    val: i64 = 0i64
+    while i < n:
+        c: i32 = byte_at(s, i)
+        if c < 48i32 or c > 57i32:
+            return (false, 0i64)
+        val = val * 10i64 + i64(c - 48i32)
+        i = i + 1i32
+    return (true, sign * val)
+
+
+fn duration_ms_since(t0: f64) -> i32:
+    """Milliseconds elapsed since `t0` (a time.monotonic() value)."""
+    delta: f64 = time.monotonic() - t0
+    return i32(delta * 1000.0)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 2. HTTP/1.1 protocol — Request + Response classes + parser/writer
+# ─────────────────────────────────────────────────────────────────────
+
+
+final class Request:
+    method: str
+    path: str             # path portion only, no query string
+    query: str            # raw query string (no leading `?`); "" if absent
+    version: str          # "HTTP/1.1"
+    headers: Dict[str, str]   # keys lowercased; values trimmed
+    body: str             # raw bytes as str-as-byte-buffer
+
+    fn __init__(self) -> None:
+        self.method = ""
+        self.path = ""
+        self.query = ""
+        self.version = "HTTP/1.1"
+        self.headers = {}
+        self.body = ""
+
+
+fn req_get_header(req: Request, name: str) -> str:
+    """Case-insensitive header lookup; empty string when absent.
+
+    BUG-039 workaround: `name in req.headers` is unreliable on
+    `Dict[str, str]`, so we use `.get(...)` (returns `str?`).
+    """
+    key: str = ascii_lower(name)
+    v: str? = req.headers.get(key)
+    if v is not none:
+        return req.headers[key]
+    return ""
+
+
+fn req_content_length(req: Request) -> i32:
+    raw: str = req_get_header(req, "content-length")
+    if i64(len(raw)) == 0i64:
+        return 0i32
+    parsed: Tuple[bool, i32] = parse_i32_safe(raw)
+    if not parsed.0:
+        return 0i32
+    if parsed.1 < 0i32:
+        return 0i32
+    return parsed.1
+
+
+fn req_content_type(req: Request) -> str:
+    return req_get_header(req, "content-type")
+
+
+final class Response:
+    status: i32
+    headers: Dict[str, str]   # keys as user supplies; Server/Date/Content-Length added on write
+    body: str
+
+    fn __init__(self) -> None:
+        self.status = 200i32
+        self.headers = {}
+        self.body = ""
+
+
+fn resp_set_header(resp: Response, k: str, v: str) -> None:
+    resp.headers[k] = v
+    return
+
+
+fn resp_set_content_type(resp: Response, ct: str) -> None:
+    resp_set_header(resp, "Content-Type", ct)
+    return
+
+
+fn resp_text(status: i32, body: str) -> Response:
+    r: Response = Response()
+    r.status = status
+    r.body = body
+    resp_set_content_type(r, "text/plain; charset=utf-8")
+    return r
+
+
+fn resp_html(status: i32, body: str) -> Response:
+    r: Response = Response()
+    r.status = status
+    r.body = body
+    resp_set_content_type(r, "text/html; charset=utf-8")
+    return r
+
+
+fn resp_json(status: i32, body_json: str) -> Response:
+    r: Response = Response()
+    r.status = status
+    r.body = body_json
+    resp_set_content_type(r, "application/json")
+    return r
+
+
+# ── Status-line phrase ────────────────────────────────────────────────
+# We could reach into http_client.status_text, but that's the *client*-
+# side IANA table and includes some quirks we don't want (e.g. 418).
+# Keeping our own short table here.
+
+fn status_phrase(code: i32) -> str:
+    if code == 200i32:
+        return "OK"
+    if code == 201i32:
+        return "Created"
+    if code == 204i32:
+        return "No Content"
+    if code == 301i32:
+        return "Moved Permanently"
+    if code == 302i32:
+        return "Found"
+    if code == 304i32:
+        return "Not Modified"
+    if code == 400i32:
+        return "Bad Request"
+    if code == 401i32:
+        return "Unauthorized"
+    if code == 403i32:
+        return "Forbidden"
+    if code == 404i32:
+        return "Not Found"
+    if code == 405i32:
+        return "Method Not Allowed"
+    if code == 408i32:
+        return "Request Timeout"
+    if code == 411i32:
+        return "Length Required"
+    if code == 413i32:
+        return "Payload Too Large"
+    if code == 500i32:
+        return "Internal Server Error"
+    if code == 501i32:
+        return "Not Implemented"
+    if code == 503i32:
+        return "Service Unavailable"
+    return "Unknown"
+
+
+# ── HTTP-Date ─────────────────────────────────────────────────────────
+# IMF-fixdate per RFC 7231 §7.1.1.1 ("Sun, 06 Nov 1994 08:49:37 GMT").
+# datetime exposes seconds-since-epoch as i64; we lay out the calendar
+# fields by hand because v0.2 has no strftime.
+
+fn day_of_week_name(epoch: i64) -> str:
+    # 1970-01-01 was a Thursday; (epoch / 86400 + 4) mod 7 = 0 => Sun.
+    days: i64 = epoch / 86400i64
+    dow: i32 = i32((days + 4i64) % 7i64)
+    if dow < 0i32:
+        dow = dow + 7i32
+    if dow == 0i32:
+        return "Sun"
+    if dow == 1i32:
+        return "Mon"
+    if dow == 2i32:
+        return "Tue"
+    if dow == 3i32:
+        return "Wed"
+    if dow == 4i32:
+        return "Thu"
+    if dow == 5i32:
+        return "Fri"
+    return "Sat"
+
+
+fn two_digit(n: i32) -> str:
+    if n < 10i32:
+        return "0" + str(n)
+    return str(n)
+
+
+fn month_short(m: i32) -> str:
+    if m == 1i32:
+        return "Jan"
+    if m == 2i32:
+        return "Feb"
+    if m == 3i32:
+        return "Mar"
+    if m == 4i32:
+        return "Apr"
+    if m == 5i32:
+        return "May"
+    if m == 6i32:
+        return "Jun"
+    if m == 7i32:
+        return "Jul"
+    if m == 8i32:
+        return "Aug"
+    if m == 9i32:
+        return "Sep"
+    if m == 10i32:
+        return "Oct"
+    if m == 11i32:
+        return "Nov"
+    return "Dec"
+
+
+fn http_date_now() -> str:
+    epoch: i64 = datetime.now()
+    # datetime.to_iso gives us "2026-05-20T14:23:51Z" for UTC; we
+    # re-format into RFC 7231 IMF-fixdate.  Reach for the ISO parts
+    # rather than re-implementing the calendar by hand.
+    iso: str = datetime.to_iso(epoch)
+    # iso is exactly 20 bytes: "YYYY-MM-DDTHH:MM:SSZ"
+    if i64(len(iso)) < 20i64:
+        return "Thu, 01 Jan 1970 00:00:00 GMT"
+    year_parts: Tuple[bool, i32] = parse_i32_safe(substring(iso, 0i32, 4i32))
+    mon_parts: Tuple[bool, i32] = parse_i32_safe(substring(iso, 5i32, 7i32))
+    day_parts: Tuple[bool, i32] = parse_i32_safe(substring(iso, 8i32, 10i32))
+    hh: str = substring(iso, 11i32, 13i32)
+    mm: str = substring(iso, 14i32, 16i32)
+    ss: str = substring(iso, 17i32, 19i32)
+    dow: str = day_of_week_name(epoch)
+    if not year_parts.0 or not mon_parts.0 or not day_parts.0:
+        return "Thu, 01 Jan 1970 00:00:00 GMT"
+    return dow + ", " + two_digit(day_parts.1) + " " + month_short(mon_parts.1) + " " + str(year_parts.1) + " " + hh + ":" + mm + ":" + ss + " GMT"
+
+
+# ── Request parsing ───────────────────────────────────────────────────
+#
+# Strategy: read up to header_buffer_bytes() in a loop until we find the
+# "\r\n\r\n" header/body boundary, then parse the header block, then
+# read exactly content-length more bytes (if any).
+#
+# All reads/writes go through `wire_send` / `wire_recv` so the same code
+# works against plain `socket` and TLS-wrapped `ssl` handles — the
+# selector is the `is_tls: bool` parameter.
+
+fn wire_recv(handle: i64, max_bytes: i32, is_tls: bool) -> str:
+    if is_tls:
+        return ssl.recv(handle, max_bytes)
+    return socket.recv(handle, max_bytes)
+
+
+fn wire_send(handle: i64, data: str, is_tls: bool) -> i32:
+    if is_tls:
+        return ssl.send(handle, data)
+    return socket.send(handle, data)
+
+
+fn wire_close(handle: i64, is_tls: bool) -> None:
+    if is_tls:
+        ssl.close(handle)
+    else:
+        socket.close(handle)
+    return
+
+
+fn wire_set_timeout(handle: i64, secs: f64, is_tls: bool) -> None:
+    if is_tls:
+        ssl.set_timeout_secs(handle, secs)
+    else:
+        socket.set_timeout_secs(handle, secs)
+    return
+
+
+fn read_header_block(handle: i64, is_tls: bool) -> Tuple[bool, str, str]:
+    """Read until we see "\r\n\r\n".  Returns (ok, header_block, body_prefix).
+
+    `header_block` includes everything up to and including the final
+    `\r\n\r\n`.  `body_prefix` is whatever bytes came after the
+    boundary in the same physical chunk (a recv() can straddle the
+    line — TCP doesn't preserve message boundaries).
+
+    `ok == false` if EOF before we found the boundary or the buffer
+    exceeded header_buffer_bytes().
+    """
+    buf: str = ""
+    cap: i32 = header_buffer_bytes()
+    while true:
+        chunk: str = wire_recv(handle, 1024i32, is_tls)
+        if i64(len(chunk)) == 0i64:
+            # Peer closed before sending full headers.
+            return (false, "", "")
+        buf = buf + chunk
+        boundary: i32 = index_of(buf, "\r\n\r\n", 0i32)
+        if boundary >= 0i32:
+            header_block: str = substring(buf, 0i32, boundary + 4i32)
+            body_prefix: str = substring(buf, boundary + 4i32, i32(i64(len(buf))))
+            return (true, header_block, body_prefix)
+        if i32(i64(len(buf))) >= cap:
+            return (false, "", "")
+    return (false, "", "")
+
+
+fn parse_request_line(line: str, req: Request) -> bool:
+    """Split "METHOD path HTTP/1.1" into the three fields.  Mutates req."""
+    sp1: i32 = index_of(line, " ", 0i32)
+    if sp1 <= 0i32:
+        return false
+    sp2: i32 = index_of(line, " ", sp1 + 1i32)
+    if sp2 <= sp1 + 1i32:
+        return false
+    req.method = substring(line, 0i32, sp1)
+    raw_path: str = substring(line, sp1 + 1i32, sp2)
+    req.version = substring(line, sp2 + 1i32, i32(i64(len(line))))
+    # Split path / query on the first `?`.
+    q: i32 = index_of(raw_path, "?", 0i32)
+    if q >= 0i32:
+        req.path = substring(raw_path, 0i32, q)
+        req.query = substring(raw_path, q + 1i32, i32(i64(len(raw_path))))
+    else:
+        req.path = raw_path
+        req.query = ""
+    return true
+
+
+fn parse_headers_into(header_block: str, req: Request) -> bool:
+    """Walk header_block line-by-line, populating req.headers.  Assumes
+    header_block ends with `\r\n\r\n`."""
+    lines: List[str] = header_block.split("\r\n")
+    n: i32 = i32(i64(len(lines)))
+    # First non-empty line is the request line (already parsed).  Iterate
+    # from index 1 until we hit the trailing empty line (header/body
+    # split).
+    i: i32 = 1i32
+    while i < n:
+        line: str = lines[i]
+        if i64(len(line)) == 0i64:
+            i = i + 1i32
+            continue
+        colon: i32 = index_of(line, ":", 0i32)
+        if colon <= 0i32:
+            # Malformed header — fail the request.
+            return false
+        name: str = ascii_lower(substring(line, 0i32, colon))
+        value: str = trim_ascii(substring(line, colon + 1i32, i32(i64(len(line)))))
+        req.headers[name] = value
+        i = i + 1i32
+    return true
+
+
+fn parse_request(handle: i64, is_tls: bool) -> Tuple[bool, Request, i32]:
+    """Read one HTTP/1.1 request off the wire.
+
+    Returns (ok, request, error_status).  On the failure path the
+    request is partially-populated and error_status carries the
+    intended HTTP status code (400 = malformed, 411 = missing
+    content-length on POST, 413 = body too big).
+    """
+    req: Request = Request()
+
+    block_tup: Tuple[bool, str, str] = read_header_block(handle, is_tls)
+    if not block_tup.0:
+        return (false, req, 400i32)
+    header_block: str = block_tup.1
+    body_prefix: str = block_tup.2
+
+    # Pull the request line out of the header block (everything before
+    # the first \r\n).
+    crlf: i32 = index_of(header_block, "\r\n", 0i32)
+    if crlf < 0i32:
+        return (false, req, 400i32)
+    request_line: str = substring(header_block, 0i32, crlf)
+    if not parse_request_line(request_line, req):
+        return (false, req, 400i32)
+
+    # Split the header block at the first CRLF and parse the rest.
+    hdr_only: str = substring(header_block, crlf + 2i32, i32(i64(len(header_block))))
+    # Wrap the request line back in so parse_headers_into's split-by-CRLF
+    # logic counts correctly.
+    if not parse_headers_into(request_line + "\r\n" + hdr_only, req):
+        return (false, req, 400i32)
+
+    # Body, if any.  We only support Content-Length framing.
+    content_len: i32 = req_content_length(req)
+    if content_len > 0i32:
+        if content_len > max_request_bytes():
+            return (false, req, 413i32)
+        body: str = body_prefix
+        remaining: i32 = content_len - i32(i64(len(body)))
+        if remaining > 0i32:
+            extra: str = wire_recv(handle, remaining, is_tls)
+            body = body + extra
+            # Loop once more if the TCP read was short.  Defensive — most
+            # recvs on loopback satisfy the whole request in one go.
+            while i32(i64(len(body))) < content_len:
+                more: str = wire_recv(handle, content_len - i32(i64(len(body))), is_tls)
+                if i64(len(more)) == 0i64:
+                    return (false, req, 400i32)
+                body = body + more
+        req.body = body
+    else:
+        req.body = body_prefix  # Probably empty.
+
+    return (true, req, 200i32)
+
+
+# ── Response writing ──────────────────────────────────────────────────
+
+
+fn write_response(handle: i64, resp: Response, is_tls: bool) -> None:
+    """Serialize `resp` to the wire.  Always closes the connection
+    afterwards (no keep-alive in v0.2)."""
+    # Status line.
+    status_line: str = "HTTP/1.1 " + str(resp.status) + " " + status_phrase(resp.status) + "\r\n"
+
+    # Server / Date / Connection / Content-Length always set (overwriting
+    # any user attempt).  Content-Type only set by the user via
+    # resp_set_content_type if they wanted one; we don't default.
+    resp.headers["Server"] = server_signature()
+    resp.headers["Date"] = http_date_now()
+    resp.headers["Connection"] = "close"
+    resp.headers["Content-Length"] = str(i32(i64(len(resp.body))))
+
+    out: str = status_line
+    keys: List[str] = resp.headers.keys()
+    kn: i32 = i32(i64(len(keys)))
+    i: i32 = 0i32
+    while i < kn:
+        k: str = keys[i]
+        v: str = resp.headers[k]
+        out = out + k + ": " + v + "\r\n"
+        i = i + 1i32
+    out = out + "\r\n"
+    out = out + resp.body
+
+    # Write the whole buffer, looping if the underlying send is short.
+    total: i32 = i32(i64(len(out)))
+    sent_so_far: i32 = 0i32
+    while sent_so_far < total:
+        chunk: str = substring(out, sent_so_far, total)
+        n: i32 = wire_send(handle, chunk, is_tls)
+        if n <= 0i32:
+            return  # Peer hung up mid-write; nothing else we can do.
+        sent_so_far = sent_so_far + n
+    return
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 3. Routing
+# ─────────────────────────────────────────────────────────────────────
+#
+# Without generic classes, the Router is data-only: parallel arrays of
+# (method, pattern, handler-id).  Each handler is a numeric ID dispatched
+# via `dispatch_handler(id, req) -> Response`.  Closures-in-stdlib aren't
+# a thing, so a handler-id indirection is cleaner than wrapping every
+# handler in a singleton class.
+#
+# Patterns support exactly one wildcard form: a trailing `/<name>`
+# segment matches any single path segment, captured into req.headers
+# as `x-route-param-<name>` (header values are str, which keeps the
+# Dict shape uniform).
+
+final class Router:
+    methods: List[str]
+    patterns: List[str]
+    handler_ids: List[i32]
+
+    fn __init__(self) -> None:
+        self.methods = []
+        self.patterns = []
+        self.handler_ids = []
+
+
+fn router_add(r: Router, method: str, pattern: str, handler_id: i32) -> None:
+    r.methods.append(method)
+    r.patterns.append(pattern)
+    r.handler_ids.append(handler_id)
+    return
+
+
+fn match_route(pattern: str, path: str, req: Request) -> bool:
+    """Check whether `path` matches `pattern`.  On success, write any
+    captured parameter into req.headers as `x-route-param-<name>`.
+
+    Patterns:
+      * `/foo/bar`               — exact match.
+      * `/api/todos/<id>`        — last segment is a wildcard capture.
+      * `/static/<*rest>`        — trailing `<*rest>` captures the rest
+                                   of the path (greedy).
+    """
+    if pattern == path:
+        return true
+
+    # Greedy-tail pattern: must end in `<*name>`.
+    star_at: i32 = index_of(pattern, "<*", 0i32)
+    if star_at >= 0i32:
+        prefix: str = substring(pattern, 0i32, star_at)
+        if not starts_with(path, prefix):
+            return false
+        # Pattern must end in `>` after the name.
+        gt: i32 = index_of(pattern, ">", star_at)
+        if gt < 0i32:
+            return false
+        name: str = substring(pattern, star_at + 2i32, gt)
+        rest: str = substring(path, i32(i64(len(prefix))), i32(i64(len(path))))
+        req.headers["x-route-param-" + name] = rest
+        return true
+
+    # Single-segment wildcard: only one `<name>` capture, must be the
+    # last segment.
+    lt: i32 = index_of(pattern, "<", 0i32)
+    if lt < 0i32:
+        return false
+    gt2: i32 = index_of(pattern, ">", lt)
+    if gt2 < 0i32:
+        return false
+    prefix2: str = substring(pattern, 0i32, lt)
+    suffix2: str = substring(pattern, gt2 + 1i32, i32(i64(len(pattern))))
+    if i64(len(suffix2)) != 0i64:
+        # Patterns with anything after the capture (`/x/<a>/y`) not
+        # supported in v0.2.
+        return false
+    if not starts_with(path, prefix2):
+        return false
+    captured: str = substring(path, i32(i64(len(prefix2))), i32(i64(len(path))))
+    if i64(len(captured)) == 0i64:
+        return false
+    # Must not contain another `/` — single-segment capture only.
+    if contains(captured, "/"):
+        return false
+    name2: str = substring(pattern, lt + 1i32, gt2)
+    req.headers["x-route-param-" + name2] = captured
+    return true
+
+
+fn router_dispatch(r: Router, req: Request) -> Response:
+    """Linear-scan the route table.  Returns 404 / 405 / handler-result."""
+    n: i32 = i32(i64(len(r.patterns)))
+    i: i32 = 0i32
+    path_found: bool = false
+    while i < n:
+        if match_route(r.patterns[i], req.path, req):
+            path_found = true
+            if r.methods[i] == req.method:
+                hid: i32 = r.handler_ids[i]
+                return safe_dispatch(hid, req)
+        i = i + 1i32
+    if path_found:
+        return resp_text(405i32, "405 Method Not Allowed\n")
+    return resp_text(404i32, "404 Not Found\n")
+
+
+fn safe_dispatch(handler_id: i32, req: Request) -> Response:
+    """Call into the user handler with a try/except guard so a thrown
+    exception lands as a 500 rather than killing the connection thread."""
+    try:
+        return dispatch_handler(handler_id, req)
+    except IOError as e:
+        return resp_text(500i32, "500 Internal Server Error (IO): " + e.message + "\n")
+    except ValueError as e:
+        return resp_text(400i32, "400 Bad Request: " + e.message + "\n")
+    except Exception as e:
+        return resp_text(500i32, "500 Internal Server Error: " + e.type_name + ": " + e.message + "\n")
+
+
+# `dispatch_handler` is defined later, after the TODO-app handlers, so
+# the forward reference lands in the function table at IR time.  StrictPy
+# resolves names at module scope so the reference works either way.
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 4. Server — accept loop, thread-per-connection
+# ─────────────────────────────────────────────────────────────────────
+#
+# The router and the per-connection-thread permit-semaphore are passed
+# through as primitives (i64 handles + the Router class instance).  No
+# server-class is required — keeping the surface as plain functions
+# avoids the BUGS_KNOWN.md #1 sealed-class dispatch caveats and keeps
+# the thread-closure capture list explicit.
+
+fn handle_connection(handle: i64, peer: str, router: Router, sem: i64,
+                     access_lock: i64, is_tls: bool, db_path: str) -> None:
+    """Body of one connection-handling thread.
+
+    `sem` is the concurrency semaphore — released in *all* exit paths,
+    including the exception fallback, so a hung handler can't starve
+    the accept loop.
+
+    `db_path` and `access_lock` are passed through to handlers via the
+    request-state dict (`x-state-*` headers), since we can't reach
+    closures across the dispatch boundary.
+    """
+    t0: f64 = time.monotonic()
+    status_code: i32 = 0i32
+    method_logged: str = "?"
+    path_logged: str = "?"
+    try:
+        wire_set_timeout(handle, 30.0, is_tls)
+        parsed: Tuple[bool, Request, i32] = parse_request(handle, is_tls)
+        ok: bool = parsed.0
+        req: Request = parsed.1
+        err_status: i32 = parsed.2
+        if not ok:
+            resp: Response = resp_text(err_status, str(err_status) + " " + status_phrase(err_status) + "\n")
+            write_response(handle, resp, is_tls)
+            status_code = err_status
+            method_logged = req.method
+            path_logged = req.path
+        else:
+            # Thread state into the request via the headers Dict (which is
+            # already the universal req side-channel).  Handlers read it
+            # back via req_get_state.
+            req.headers["x-state-db-path"] = db_path
+            req.headers["x-state-access-lock"] = str(access_lock)
+            req.headers["x-state-peer"] = peer
+            method_logged = req.method
+            path_logged = req.path
+            resp2: Response = router_dispatch(router, req)
+            write_response(handle, resp2, is_tls)
+            status_code = resp2.status
+    except IOError as e:
+        # Peer hung up mid-exchange; nothing actionable.
+        status_code = 0i32
+    except Exception as e:
+        status_code = 599i32  # custom "internal failure outside handler"
+    # Always close + release the permit.
+    try:
+        wire_close(handle, is_tls)
+    except IOError as e2:
+        pass
+    threading.semaphore_release(sem)
+
+    # Access log.  Use the lock so concurrent threads don't interleave
+    # log lines mid-byte.  logging itself isn't documented as
+    # thread-safe in M27 P3c-E so we serialise.
+    threading.lock_acquire(access_lock)
+    elapsed: i32 = duration_ms_since(t0)
+    logging.info(method_logged + " " + path_logged + " -> " + str(status_code) + " (" + str(elapsed) + "ms) " + peer)
+    threading.lock_release(access_lock)
+    return
+
+
+fn accept_loop_plain(listener: i64, router: Router, sem: i64, access_lock: i64,
+                     db_path: str, max_accepts: i32) -> None:
+    """Accept connections on `listener` and dispatch one thread each.
+
+    `max_accepts == -1` means run forever.  Any positive value is the
+    cap — useful in tests where we want the server to drain after N
+    requests."""
+    served: i32 = 0i32
+    while max_accepts < 0i32 or served < max_accepts:
+        accepted: bool = false
+        handle: i64 = 0i64
+        peer: str = ""
+        try:
+            pair: Tuple[i64, str] = socket.accept(listener)
+            handle = pair.0
+            peer = pair.1
+            accepted = true
+        except IOError as e:
+            # Accept failed — likely the listener was closed (graceful
+            # shutdown).  Break out cleanly.
+            return
+        if not accepted:
+            return
+        threading.semaphore_acquire(sem)
+        t: Thread = Thread(
+            fn() -> None: handle_connection(handle, peer, router, sem, access_lock, false, db_path)
+        )
+        t.start()
+        served = served + 1i32
+    return
+
+
+fn accept_loop_tls(listener: i64, server_cfg: i64, router: Router, sem: i64,
+                   access_lock: i64, db_path: str, max_accepts: i32) -> None:
+    """Same shape as accept_loop_plain but uses `ssl.accept_tls` and
+    flags the connection handler as TLS."""
+    served: i32 = 0i32
+    while max_accepts < 0i32 or served < max_accepts:
+        accepted: bool = false
+        handle: i64 = 0i64
+        peer: str = ""
+        try:
+            pair: Tuple[i64, str] = ssl.accept_tls(listener, server_cfg)
+            handle = pair.0
+            peer = pair.1
+            accepted = true
+        except IOError as e:
+            return
+        if not accepted:
+            return
+        threading.semaphore_acquire(sem)
+        t: Thread = Thread(
+            fn() -> None: handle_connection(handle, peer, router, sem, access_lock, true, db_path)
+        )
+        t.start()
+        served = served + 1i32
+    return
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 5. TODO storage layer (SQLite)
+# ─────────────────────────────────────────────────────────────────────
+
+
+fn db_init(db_path: str) -> None:
+    """Create the todos table if it doesn't exist yet."""
+    conn: i64 = sqlite3.connect(db_path)
+    sqlite3.execute(conn, "CREATE TABLE IF NOT EXISTS todos (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, created_at TEXT NOT NULL)")
+    sqlite3.close(conn)
+    return
+
+
+fn db_list_todos(db_path: str) -> List[List[str]]:
+    """Return all rows, ordered by id ASC.  Each row is [id, text, created_at]."""
+    conn: i64 = sqlite3.connect(db_path)
+    rows: List[List[str]] = sqlite3.query(conn, "SELECT id, text, created_at FROM todos ORDER BY id ASC")
+    sqlite3.close(conn)
+    return rows
+
+
+fn db_insert_todo(db_path: str, text: str) -> i64:
+    """Insert a new row and return its rowid."""
+    conn: i64 = sqlite3.connect(db_path)
+    now_iso: str = datetime.to_iso(datetime.now())
+    params: List[str] = []
+    params.append(text)
+    params.append(now_iso)
+    sqlite3.execute_params(conn, "INSERT INTO todos (text, created_at) VALUES (?, ?)", params)
+    rid: i64 = sqlite3.last_insert_rowid(conn)
+    sqlite3.close(conn)
+    return rid
+
+
+fn db_delete_todo(db_path: str, todo_id: i64) -> i32:
+    """Delete the row with the given id.  Returns the number of rows affected."""
+    conn: i64 = sqlite3.connect(db_path)
+    params: List[str] = []
+    params.append(str(todo_id))
+    sqlite3.execute_params(conn, "DELETE FROM todos WHERE id = ?", params)
+    affected: i32 = sqlite3.changes(conn)
+    sqlite3.close(conn)
+    return affected
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 6. JSON helpers (json stdlib is read-only-ish in v0.2; we hand-format
+#    write output to keep the surface stable across versions)
+# ─────────────────────────────────────────────────────────────────────
+
+
+fn json_escape(s: str) -> str:
+    """Escape a str for safe embedding in a JSON string literal."""
+    n: i32 = i32(i64(len(s)))
+    out: str = ""
+    i: i32 = 0i32
+    while i < n:
+        c: i32 = byte_at(s, i)
+        if c == 34i32:           # "
+            out = out + "\\\""
+        elif c == 92i32:         # \
+            out = out + "\\\\"
+        elif c == 10i32:
+            out = out + "\\n"
+        elif c == 13i32:
+            out = out + "\\r"
+        elif c == 9i32:
+            out = out + "\\t"
+        elif c < 32i32:
+            # Control byte — write as \u00XX.
+            hi: i32 = c / 16i32
+            lo: i32 = c % 16i32
+            out = out + "\\u00" + hex_digit(hi) + hex_digit(lo)
+        else:
+            out = out + str(char(c))
+        i = i + 1i32
+    return out
+
+
+fn hex_digit(v: i32) -> str:
+    if v < 10i32:
+        return str(char(48i32 + v))
+    return str(char(87i32 + v))
+
+
+fn todos_to_json(rows: List[List[str]]) -> str:
+    """Render todo rows as a JSON array of objects."""
+    out: str = "["
+    n: i32 = i32(i64(len(rows)))
+    i: i32 = 0i32
+    while i < n:
+        row: List[str] = rows[i]
+        if i > 0i32:
+            out = out + ","
+        out = out + "{\"id\":" + row[0i32]
+        out = out + ",\"text\":\"" + json_escape(row[1i32]) + "\""
+        out = out + ",\"created_at\":\"" + json_escape(row[2i32]) + "\"}"
+        i = i + 1i32
+    out = out + "]"
+    return out
+
+
+fn html_escape(s: str) -> str:
+    """Escape HTML/XML special characters to entities."""
+    n: i32 = i32(i64(len(s)))
+    out: str = ""
+    i: i32 = 0i32
+    while i < n:
+        c: i32 = byte_at(s, i)
+        if c == 60i32:       # <
+            out = out + "&lt;"
+        elif c == 62i32:     # >
+            out = out + "&gt;"
+        elif c == 38i32:     # &
+            out = out + "&amp;"
+        elif c == 34i32:     # "
+            out = out + "&quot;"
+        elif c == 39i32:     # '
+            out = out + "&#39;"
+        else:
+            out = out + str(char(c))
+        i = i + 1i32
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 7. Demo app handlers (TODO + static)
+# ─────────────────────────────────────────────────────────────────────
+
+
+fn req_state_db(req: Request) -> str:
+    return req_get_header(req, "x-state-db-path")
+
+
+fn req_route_param(req: Request, name: str) -> str:
+    return req_get_header(req, "x-route-param-" + name)
+
+
+fn extract_json_text_field(body: str) -> Tuple[bool, str]:
+    """Pull the `text` field out of a JSON object like {"text":"..."}.
+
+    The stdlib's `json` module (M20c) is *validate-and-reserialize* —
+    it doesn't expose a typed JsonValue tree (deferred to v0.3).  So we
+    validate the body via `json.is_valid` (cheap correctness gate) and
+    then hand-walk the canonical compact form (which has predictable
+    whitespace + sorted keys) to extract the `text` field.
+    """
+    if not json.is_valid(body):
+        return (false, "")
+    # Re-serialize to canonical form: keys are sorted, whitespace is
+    # normalised away, escapes are RFC 8259 compliant.
+    compact: str = json.parse_to_string(body)
+    # Look for the literal `"text":"` prefix; on the canonical form it's
+    # always followed by the string-encoded value and a closing `"`.
+    needle: str = "\"text\":\""
+    at: i32 = index_of(compact, needle, 0i32)
+    if at < 0i32:
+        return (false, "")
+    start: i32 = at + i32(i64(len(needle)))
+    n: i32 = i32(i64(len(compact)))
+    # Walk until we find an unescaped closing quote.
+    i: i32 = start
+    out: str = ""
+    while i < n:
+        c: i32 = byte_at(compact, i)
+        if c == 92i32:  # backslash escape
+            if i + 1i32 >= n:
+                return (false, "")
+            nx: i32 = byte_at(compact, i + 1i32)
+            if nx == 110i32:           # \n
+                out = out + "\n"
+            elif nx == 114i32:         # \r
+                out = out + "\r"
+            elif nx == 116i32:         # \t
+                out = out + "\t"
+            elif nx == 34i32:          # \"
+                out = out + "\""
+            elif nx == 92i32:          # \\
+                out = out + "\\"
+            elif nx == 47i32:          # \/
+                out = out + "/"
+            elif nx == 117i32:         # \uXXXX
+                if i + 5i32 >= n:
+                    return (false, "")
+                hex_str: str = substring(compact, i + 2i32, i + 6i32)
+                cp: Tuple[bool, i32] = parse_hex_i32(hex_str)
+                if not cp.0:
+                    return (false, "")
+                # Only ASCII handled here (str-as-byte-buffer limits).
+                if cp.1 > 127i32:
+                    out = out + "?"
+                else:
+                    out = out + str(char(cp.1))
+                i = i + 6i32
+                continue
+            else:
+                out = out + str(char(nx))
+            i = i + 2i32
+        elif c == 34i32:               # closing quote
+            return (true, out)
+        else:
+            out = out + str(char(c))
+            i = i + 1i32
+    return (false, "")
+
+
+fn parse_hex_i32(s: str) -> Tuple[bool, i32]:
+    n: i32 = i32(i64(len(s)))
+    if n == 0i32:
+        return (false, 0i32)
+    val: i32 = 0i32
+    i: i32 = 0i32
+    while i < n:
+        c: i32 = byte_at(s, i)
+        d: i32 = -1i32
+        if c >= 48i32 and c <= 57i32:
+            d = c - 48i32
+        elif c >= 97i32 and c <= 102i32:
+            d = c - 97i32 + 10i32
+        elif c >= 65i32 and c <= 70i32:
+            d = c - 65i32 + 10i32
+        if d < 0i32:
+            return (false, 0i32)
+        val = val * 16i32 + d
+        i = i + 1i32
+    return (true, val)
+
+
+# Handler 1 — GET /  (HTML page with a TODO form)
+fn handle_home(req: Request) -> Response:
+    db: str = req_state_db(req)
+    rows: List[List[str]] = db_list_todos(db)
+    n: i32 = i32(i64(len(rows)))
+    html: str = "<!doctype html>\n<html><head><title>StrictPy TODO</title></head><body>\n"
+    html = html + "<h1>StrictPy TODO (" + str(n) + " items)</h1>\n"
+    html = html + "<form method=\"post\" action=\"/api/todos\" enctype=\"application/json\">\n"
+    html = html + "<input name=\"text\" placeholder=\"add an item\" />\n"
+    html = html + "<button type=\"submit\">Add</button>\n"
+    html = html + "</form>\n"
+    html = html + "<ul>\n"
+    i: i32 = 0i32
+    while i < n:
+        row: List[str] = rows[i]
+        html = html + "<li><span class=\"id\">#" + row[0i32] + "</span> "
+        html = html + "<span class=\"text\">" + html_escape(row[1i32]) + "</span>"
+        html = html + " <span class=\"date\">(" + html_escape(row[2i32]) + ")</span></li>\n"
+        i = i + 1i32
+    html = html + "</ul>\n"
+    html = html + "<p>API: GET /api/todos, POST /api/todos, DELETE /api/todos/&lt;id&gt;</p>\n"
+    html = html + "</body></html>\n"
+    return resp_html(200i32, html)
+
+
+# Handler 2 — GET /api/todos  (JSON list)
+fn handle_list_todos(req: Request) -> Response:
+    db: str = req_state_db(req)
+    rows: List[List[str]] = db_list_todos(db)
+    return resp_json(200i32, todos_to_json(rows))
+
+
+# Handler 3 — POST /api/todos  (create)
+fn handle_create_todo(req: Request) -> Response:
+    db: str = req_state_db(req)
+    parsed: Tuple[bool, str] = extract_json_text_field(req.body)
+    if not parsed.0:
+        return resp_json(400i32, "{\"error\":\"expected JSON {\\\"text\\\": \\\"...\\\"}\"}")
+    text: str = parsed.1
+    if i64(len(text)) == 0i64:
+        return resp_json(400i32, "{\"error\":\"text must be non-empty\"}")
+    if i64(len(text)) > 4096i64:
+        return resp_json(400i32, "{\"error\":\"text too long\"}")
+    rid: i64 = db_insert_todo(db, text)
+    body: str = "{\"id\":" + str(rid) + ",\"text\":\"" + json_escape(text) + "\"}"
+    return resp_json(201i32, body)
+
+
+# Handler 4 — DELETE /api/todos/<id>
+fn handle_delete_todo(req: Request) -> Response:
+    db: str = req_state_db(req)
+    id_text: str = req_route_param(req, "id")
+    if i64(len(id_text)) == 0i64:
+        return resp_json(400i32, "{\"error\":\"missing id\"}")
+    parsed: Tuple[bool, i64] = parse_i64_safe(id_text)
+    if not parsed.0:
+        return resp_json(400i32, "{\"error\":\"id must be a positive integer\"}")
+    affected: i32 = db_delete_todo(db, parsed.1)
+    if affected == 0i32:
+        return resp_json(404i32, "{\"error\":\"todo not found\"}")
+    return resp_json(200i32, "{\"deleted\":" + str(affected) + "}")
+
+
+# Handler 5 — GET /static/<*path>
+fn handle_static(req: Request) -> Response:
+    rest: str = req_route_param(req, "rest")
+    # Strip leading slash to flatten + reject any path-traversal attempt.
+    if contains(rest, ".."):
+        return resp_text(403i32, "403 Forbidden\n")
+    if contains(rest, "\\"):
+        return resp_text(403i32, "403 Forbidden\n")
+    target: str = "examples/webserver/static/" + rest
+    # Existence check first (raises IOError otherwise — fine, we'd
+    # rather a clean 404).
+    try:
+        data: str = pathlib.read_text(target)
+        ct: str = guess_content_type(rest)
+        r: Response = Response()
+        r.status = 200i32
+        r.body = data
+        resp_set_content_type(r, ct)
+        return r
+    except IOError as e:
+        return resp_text(404i32, "404 Not Found\n")
+
+
+fn guess_content_type(path: str) -> str:
+    """Naive ext-based content-type sniffer."""
+    n: i32 = i32(i64(len(path)))
+    if n < 4i32:
+        return "application/octet-stream"
+    if ends_with(path, ".html"):
+        return "text/html; charset=utf-8"
+    if ends_with(path, ".txt"):
+        return "text/plain; charset=utf-8"
+    if ends_with(path, ".css"):
+        return "text/css; charset=utf-8"
+    if ends_with(path, ".js"):
+        return "application/javascript"
+    if ends_with(path, ".json"):
+        return "application/json"
+    if ends_with(path, ".png"):
+        return "image/png"
+    if ends_with(path, ".jpg") or ends_with(path, ".jpeg"):
+        return "image/jpeg"
+    if ends_with(path, ".svg"):
+        return "image/svg+xml"
+    return "application/octet-stream"
+
+
+fn ends_with(s: str, suffix: str) -> bool:
+    sn: i32 = i32(i64(len(s)))
+    fn_: i32 = i32(i64(len(suffix)))
+    if fn_ > sn:
+        return false
+    i: i32 = 0i32
+    while i < fn_:
+        if byte_at(s, sn - fn_ + i) != byte_at(suffix, i):
+            return false
+        i = i + 1i32
+    return true
+
+
+# Handler 6 — GET /health  (a tiny machine-friendly liveness probe)
+fn handle_health(req: Request) -> Response:
+    return resp_json(200i32, "{\"status\":\"ok\",\"server\":\"" + server_signature() + "\"}")
+
+
+# Handler IDs.  Keep these in lockstep with the dispatcher below.
+fn handler_id_home() -> i32:
+    return 1i32
+
+
+fn handler_id_list_todos() -> i32:
+    return 2i32
+
+
+fn handler_id_create_todo() -> i32:
+    return 3i32
+
+
+fn handler_id_delete_todo() -> i32:
+    return 4i32
+
+
+fn handler_id_static() -> i32:
+    return 5i32
+
+
+fn handler_id_health() -> i32:
+    return 6i32
+
+
+fn dispatch_handler(id: i32, req: Request) -> Response:
+    """Map a handler-id to the actual handler call.
+
+    This is the indirection that lets the Router stay generic-class-free
+    (no `Handler` v-table per route).  Adding a route is two edits: one
+    here, one in `register_routes`.
+    """
+    if id == 1i32:
+        return handle_home(req)
+    if id == 2i32:
+        return handle_list_todos(req)
+    if id == 3i32:
+        return handle_create_todo(req)
+    if id == 4i32:
+        return handle_delete_todo(req)
+    if id == 5i32:
+        return handle_static(req)
+    if id == 6i32:
+        return handle_health(req)
+    return resp_text(501i32, "501 Not Implemented (handler " + str(id) + " unknown)\n")
+
+
+fn register_routes(r: Router) -> None:
+    router_add(r, "GET",    "/",                handler_id_home())
+    router_add(r, "GET",    "/api/todos",       handler_id_list_todos())
+    router_add(r, "POST",   "/api/todos",       handler_id_create_todo())
+    router_add(r, "DELETE", "/api/todos/<id>",  handler_id_delete_todo())
+    router_add(r, "GET",    "/static/<*rest>",  handler_id_static())
+    router_add(r, "GET",    "/health",          handler_id_health())
+    return
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 8. main
+# ─────────────────────────────────────────────────────────────────────
+
+
+fn print_help() -> None:
+    println("usage: todo_app [--host HOST] [--port PORT] [--db PATH] [--tls CERT KEY] [--max-accepts N]")
+    return
+
+
+fn parse_args() -> Dict[str, str]:
+    """Tiny ad-hoc arg parser; argparse is overkill here and the
+    surface is small enough to walk by hand."""
+    out: Dict[str, str] = {}
+    out["host"] = "127.0.0.1"
+    out["port"] = "0"
+    out["db"] = ":memory:"
+    out["tls"] = "false"
+    out["cert"] = ""
+    out["key"] = ""
+    out["max-accepts"] = "-1"
+
+    argv: List[str] = sys.argv
+    n: i32 = i32(i64(len(argv)))
+    i: i32 = 1i32
+    while i < n:
+        a: str = argv[i]
+        if a == "--host" and i + 1i32 < n:
+            out["host"] = argv[i + 1i32]
+            i = i + 2i32
+        elif a == "--port" and i + 1i32 < n:
+            out["port"] = argv[i + 1i32]
+            i = i + 2i32
+        elif a == "--db" and i + 1i32 < n:
+            out["db"] = argv[i + 1i32]
+            i = i + 2i32
+        elif a == "--max-accepts" and i + 1i32 < n:
+            out["max-accepts"] = argv[i + 1i32]
+            i = i + 2i32
+        elif a == "--tls" and i + 2i32 < n:
+            out["tls"] = "true"
+            out["cert"] = argv[i + 1i32]
+            out["key"] = argv[i + 2i32]
+            i = i + 3i32
+        elif a == "--help" or a == "-h":
+            print_help()
+            sys.exit(0)
+            return out
+        else:
+            io.write_stderr("todo_app: unknown arg: " + a + "\n")
+            print_help()
+            sys.exit(2)
+            return out
+    return out
+
+
+fn bind_listener(host: str, port: i32) -> Tuple[i64, i32]:
+    """Bind a TCP listener.  If `port == 0` walk a small range to find
+    a free loopback port (mirrors socket_demo / https_server_demo)."""
+    if port != 0i32:
+        l: i64 = socket.listen_tcp(host, port, 64i32)
+        return (l, port)
+    candidate: i32 = 50300i32
+    attempts: i32 = 0i32
+    while attempts < 32i32:
+        try:
+            l2: i64 = socket.listen_tcp(host, candidate, 64i32)
+            return (l2, candidate)
+        except IOError as e:
+            candidate = candidate + 1i32
+            attempts = attempts + 1i32
+    raise IOError("could not bind any port in range")
+    return (0i64, 0i32)
+
+
+fn main() -> i32:
+    args: Dict[str, str] = parse_args()
+    logging.basic_config("INFO")
+
+    host: str = args["host"]
+    port_parsed: Tuple[bool, i32] = parse_i32_safe(args["port"])
+    if not port_parsed.0:
+        io.write_stderr("todo_app: bad --port\n")
+        return 2
+    max_acc_parsed: Tuple[bool, i32] = parse_i32_safe(args["max-accepts"])
+    if not max_acc_parsed.0:
+        io.write_stderr("todo_app: bad --max-accepts\n")
+        return 2
+    max_accepts: i32 = max_acc_parsed.1
+    is_tls: bool = args["tls"] == "true"
+
+    db_path: str = args["db"]
+    db_init(db_path)
+
+    router: Router = Router()
+    register_routes(router)
+
+    sem: i64 = threading.semaphore_new(max_concurrent_connections())
+    access_lock: i64 = threading.lock_new()
+
+    binding: Tuple[i64, i32] = bind_listener(host, port_parsed.1)
+    listener: i64 = binding.0
+    chosen_port: i32 = binding.1
+
+    # PORT= line is the integration test's hook for picking up the
+    # OS-assigned port when --port 0 is used.  Print it before the
+    # blocking accept so the test harness can race-free pick it up.
+    println("PORT=" + str(chosen_port))
+    println("TLS=" + str(is_tls))
+    println("READY")
+
+    if is_tls:
+        server_cfg: i64 = ssl.load_server_config(args["cert"], args["key"])
+        accept_loop_tls(listener, server_cfg, router, sem, access_lock, db_path, max_accepts)
+        ssl.free_server_config(server_cfg)
+    else:
+        accept_loop_plain(listener, router, sem, access_lock, db_path, max_accepts)
+
+    socket.close_listener(listener)
+    println("SHUTDOWN")
+    return 0

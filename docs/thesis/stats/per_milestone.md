@@ -68,6 +68,8 @@ See `bench/history/` for the underlying JSON.
 | M26 (extended bench: 5 compute + 5 stdlib, 30 cells) | 28 | 2 | 0 | 13.1 ms | **0.02× (heapsort 500k)** | **1.13× (btree 10k — narrow CPython win on allocation-bound shape)** |
 | M27 (Phase 3c stdlib: 5 parallel agents, 9 modules) | 16 | 0 | 0 | 13.1 ms | (no codegen-affecting change; 33 stdlib modules total) | — |
 | M28 (Phase 3b stdlib: 3 parallel agents, 3 networking modules) | 16 | 0 | 0 | 13.1 ms | (no codegen-affecting change; 36 stdlib modules total — closes the networking gap) | — |
+| M28.5 (server-side TLS extension) | 16 | 0 | 0 | 13.1 ms | (single agent, 3 new NativeFns; closes the HTTPS-server gap) | — |
+| M29 (webserver framework stress test) | 16 | 0 | 0 | 13.1 ms | (1,446-LOC user-code framework; **zero new bugs** in M28/M28.5 — first stress round in project history with zero finds) | — |
 
 \* M7-unfair: Python timing included parse+compile time. Methodology bug
 caught and fixed at M10-prep; the M7-fair snapshot is the honest baseline.

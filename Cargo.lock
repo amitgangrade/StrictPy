@@ -1323,10 +1323,12 @@ dependencies = [
  "clap",
  "rcgen",
  "rustls",
+ "rustls-pemfile",
  "rustls-pki-types",
  "strictpy-shared",
  "strictpy-vm",
  "thiserror",
+ "ureq",
 ]
 
 [[package]]
