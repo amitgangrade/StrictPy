@@ -863,6 +863,83 @@ pub enum NativeFn {
     // 561-569 reserved for v0.3 (named loggers, structured records,
     // custom formatters, rotating-file handlers, etc.).
 
+    // ── 570-599: `socket` module (M28 P3b-A) ────────────────────────────
+    // Raw TCP/UDP networking. Backed by `std::net` (no new crate dep);
+    // every socket lives in one of three SharedVm slot tables
+    // (`tcp_streams`, `tcp_listeners`, `udp_sockets`) keyed by i64 handle.
+    // Slot 0 reserved per the usual convention so "handle == 0" means
+    // "no socket". IPv6 is supported transparently — `TcpStream::connect`
+    // accepts both v4 and v6 addresses; the only place IP family shows up
+    // is `gethostbyname`, which prefers the first IPv4 address (spec
+    // §9.40). Bytes ride on `str` with each codepoint a byte 0..255 (the
+    // same str-as-byte-buffer convention M22 `struct` and M27 `gzip`/`zip`
+    // already use). See spec §9.40.
+    /// `socket.connect_tcp(host: str, port: i32) -> i64` — open a TCP
+    /// connection to `host:port` and return its handle. Raises IOError
+    /// on resolution / connect failure.
+    SocketConnectTcp        = 570,
+    /// `socket.send(handle: i64, data: str) -> i32` — write the byte
+    /// buffer; return the number of bytes actually sent (may be less than
+    /// `len(data)` on partial writes; callers loop or use higher-level
+    /// helpers).
+    SocketSend              = 571,
+    /// `socket.recv(handle: i64, max_bytes: i32) -> str` — read up to
+    /// `max_bytes`; returns "" on EOF.
+    SocketRecv              = 572,
+    /// `socket.recv_exact(handle: i64, n: i32) -> str` — read exactly
+    /// `n` bytes or raise IOError on EOF / short read.
+    SocketRecvExact         = 573,
+    /// `socket.close(handle: i64) -> None` — shut down + drop the stream.
+    /// Calls `flush()` first to ensure pending bytes hit the wire (the
+    /// Windows close-drops-pending-bytes gotcha called out in §9.40).
+    SocketClose             = 574,
+    /// `socket.set_timeout_secs(handle: i64, secs: f64) -> None` — apply
+    /// the same duration to both read and write. Use `0.0` to clear
+    /// (block forever).
+    SocketSetTimeoutSecs    = 575,
+    /// `socket.peer_addr(handle: i64) -> str` — "ip:port" string for the
+    /// remote endpoint.
+    SocketPeerAddr          = 576,
+    /// `socket.local_addr(handle: i64) -> str` — "ip:port" for the local
+    /// endpoint.
+    SocketLocalAddr         = 577,
+    /// `socket.listen_tcp(host: str, port: i32, backlog: i32) -> i64` —
+    /// bind a TCP listener and return its handle. `backlog` currently
+    /// only informs the socket option; Rust's `TcpListener::bind` doesn't
+    /// expose `listen()`'s backlog directly, so it's accepted-but-ignored
+    /// on Windows (documented in spec).
+    SocketListenTcp         = 578,
+    /// `socket.accept(listener: i64) -> Tuple[i64, str]` — block until a
+    /// peer connects; return `(new_stream_handle, peer_addr_string)`.
+    SocketAccept            = 579,
+    /// `socket.close_listener(listener: i64) -> None`.
+    SocketCloseListener     = 580,
+    /// `socket.udp_socket() -> i64` — open a UDP socket bound to
+    /// "0.0.0.0:0" (OS-assigned port).
+    SocketUdpSocket         = 581,
+    /// `socket.udp_bind(host: str, port: i32) -> i64` — bind a UDP
+    /// socket to the given endpoint.
+    SocketUdpBind           = 582,
+    /// `socket.udp_send_to(handle: i64, data: str, host: str, port: i32)
+    /// -> i32` — single datagram send; returns the bytes sent.
+    SocketUdpSendTo         = 583,
+    /// `socket.udp_recv_from(handle: i64, max_bytes: i32) -> Tuple[str,
+    /// str, i32]` — receive one datagram; returns `(data, sender_host,
+    /// sender_port)`.
+    SocketUdpRecvFrom       = 584,
+    /// `socket.udp_close(handle: i64) -> None`.
+    SocketUdpClose          = 585,
+    /// `socket.gethostbyname(host: str) -> str` — DNS lookup; returns the
+    /// first IPv4 address (or first IPv6 if no v4) as a printable string.
+    SocketGethostbyname     = 586,
+    /// `socket.resolve(host: str, port: i32) -> List[str]` — return every
+    /// "ip:port" the resolver produces for the host.
+    SocketResolve           = 587,
+    /// `socket.gethostname() -> str` — local host name.
+    SocketGethostname       = 588,
+    // 589-599 reserved for v0.3 (set_nodelay, set_keepalive, shutdown,
+    // unix-domain sockets, raw-socket support, etc.).
+
     // ── 440-469: `sqlite3` module (M23 P3a-D) ───────────────────────────
     // Backed by the `rusqlite` crate (with the `bundled` feature so
     // libsqlite3.c is statically linked into the VM binary — no system
@@ -1475,6 +1552,26 @@ impl NativeFn {
             535 => Some(Self::TarfileWriteData),
             536 => Some(Self::TarfileClose),
             537 => Some(Self::TarfileIsTarfile),
+            // M28 P3b-A: socket module (570-588; 589-599 reserved).
+            570 => Some(Self::SocketConnectTcp),
+            571 => Some(Self::SocketSend),
+            572 => Some(Self::SocketRecv),
+            573 => Some(Self::SocketRecvExact),
+            574 => Some(Self::SocketClose),
+            575 => Some(Self::SocketSetTimeoutSecs),
+            576 => Some(Self::SocketPeerAddr),
+            577 => Some(Self::SocketLocalAddr),
+            578 => Some(Self::SocketListenTcp),
+            579 => Some(Self::SocketAccept),
+            580 => Some(Self::SocketCloseListener),
+            581 => Some(Self::SocketUdpSocket),
+            582 => Some(Self::SocketUdpBind),
+            583 => Some(Self::SocketUdpSendTo),
+            584 => Some(Self::SocketUdpRecvFrom),
+            585 => Some(Self::SocketUdpClose),
+            586 => Some(Self::SocketGethostbyname),
+            587 => Some(Self::SocketResolve),
+            588 => Some(Self::SocketGethostname),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

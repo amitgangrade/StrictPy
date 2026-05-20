@@ -275,6 +275,21 @@ pub struct SharedVm {
     /// (plain `File`, `GzEncoder<File>`, `BzEncoder<File>`).  Slot 0
     /// reserved.
     pub tar_writers: Arc<Mutex<Vec<Option<crate::TarWriteHandle>>>>,
+    /// M28 P3b-A: TCP stream slots (client + accepted-server sockets).
+    /// Slot 0 reserved as "no socket"; handles are simply `vec.len()`
+    /// pushes, matching the M27 zipfile/tarfile pattern.  Wrapped in an
+    /// `Arc` so callers can cheaply hand out a refcount without doing
+    /// a `try_clone()` syscall (and without holding the table mutex
+    /// across blocking I/O).  `TcpStream` implements `Read` / `Write`
+    /// for `&TcpStream`, so a shared `Arc` is enough — no inner
+    /// `Mutex<TcpStream>` needed.
+    pub tcp_streams: Arc<Mutex<Vec<Option<Arc<std::net::TcpStream>>>>>,
+    /// M28 P3b-A: TCP listener slots. Slot 0 reserved.  `Arc`-wrapped
+    /// for the same reason `tcp_streams` is — `accept()` takes `&self`.
+    pub tcp_listeners: Arc<Mutex<Vec<Option<Arc<std::net::TcpListener>>>>>,
+    /// M28 P3b-A: UDP socket slots. Slot 0 reserved.  `Arc`-wrapped for
+    /// the same reason — `send_to` / `recv_from` take `&self`.
+    pub udp_sockets: Arc<Mutex<Vec<Option<Arc<std::net::UdpSocket>>>>>,
     /// M7: shared stdout sink so spawned worker threads write to the same
     /// destination as the parent interpreter. Without this, the capture
     /// sink installed by `run_file_capture` only sees the parent's writes;
@@ -331,6 +346,10 @@ impl SharedVm {
             zip_writers: Arc::new(Mutex::new(vec![None])),
             tar_readers: Arc::new(Mutex::new(vec![None])),
             tar_writers: Arc::new(Mutex::new(vec![None])),
+            // M28 P3b-A: socket module slot tables.
+            tcp_streams: Arc::new(Mutex::new(vec![None])),
+            tcp_listeners: Arc::new(Mutex::new(vec![None])),
+            udp_sockets: Arc::new(Mutex::new(vec![None])),
             stdout: Arc::new(Mutex::new(Box::new(RealStdout))),
             #[cfg(feature = "jit")]
             jit: None,
@@ -380,6 +399,10 @@ impl SharedVm {
             zip_writers: Arc::new(Mutex::new(vec![None])),
             tar_readers: Arc::new(Mutex::new(vec![None])),
             tar_writers: Arc::new(Mutex::new(vec![None])),
+            // M28 P3b-A: socket module slot tables (JIT path mirror).
+            tcp_streams: Arc::new(Mutex::new(vec![None])),
+            tcp_listeners: Arc::new(Mutex::new(vec![None])),
+            udp_sockets: Arc::new(Mutex::new(vec![None])),
             stdout: Arc::new(Mutex::new(Box::new(RealStdout))),
             jit: Some(jit_cell),
             in_jit: AtomicUsize::new(0),

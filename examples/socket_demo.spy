@@ -1,0 +1,110 @@
+"""socket_demo.spy — M28 P3b-A demo of the stdlib `socket` module (TCP).
+
+Spins up a TCP listener on 127.0.0.1, then a worker thread connects,
+sends a request, the main thread accepts, echoes back, and the worker
+prints what it received.  All on loopback — no public-internet I/O.
+
+The dance:
+  * main thread: try to bind 127.0.0.1 on a fixed loopback port range
+    (50000..50015, well inside the IANA registered range — collisions
+    are rare but we retry).
+  * worker thread (closure capturing the shared cells): spin-wait
+    until the port is signalled, then connect_tcp + send "ping" +
+    recv_exact(4) + store reply.
+  * main thread: accept the connection, recv_exact(4), send "pong".
+  * main thread joins the worker, prints the reply.
+
+Tests:
+  * `compiler/tests/socket_demo_runs.rs` — subprocess assertion of
+    every line of expected output.
+"""
+
+from threading import Thread
+import socket
+
+fn worker(port_cell: List[i32], ready_cell: List[i32], reply_cell: List[str]) -> None:
+    # Spin-wait until main has signalled the port is bound.  Demo-
+    # grade busy-loop; the loopback handshake completes in
+    # microseconds so the wait is bounded by main reaching the
+    # `ready_cell[0] = 1i32` assignment below.
+    while ready_cell[0] == 0i32:
+        pass
+    port: i32 = port_cell[0]
+    handle: i64 = socket.connect_tcp("127.0.0.1", port)
+    # Generous timeout so a hung server fails fast rather than the
+    # test-runner timing out.
+    socket.set_timeout_secs(handle, 5.0)
+    sent: i32 = socket.send(handle, "ping")
+    if sent != 4i32:
+        println("worker-short-send=" + str(sent))
+    reply: str = socket.recv_exact(handle, 4i32)
+    reply_cell[0] = reply
+    socket.close(handle)
+
+fn main() -> i32:
+    # ── Resolver sanity probes ─────────────────────────────────────
+    resolved: str = socket.gethostbyname("localhost")
+    println("resolved-len-nonzero=" + str(len(resolved) > 0))
+
+    addrs: List[str] = socket.resolve("localhost", 0i32)
+    println("resolve-count-nonzero=" + str(len(addrs) > 0))
+
+    hn: str = socket.gethostname()
+    println("hostname-nonempty=" + str(len(hn) > 0))
+
+    # ── TCP echo round-trip ────────────────────────────────────────
+    # Walk a fixed range of loopback ports; the first one that binds
+    # is the one the worker will connect to.  16 candidates is more
+    # than enough for any sane CI host.
+    chosen_port: i32 = 0i32
+    listener: i64 = 0i64
+    attempt: i32 = 0i32
+    while attempt < 16i32 and chosen_port == 0i32:
+        candidate: i32 = 50000i32 + attempt
+        try:
+            listener = socket.listen_tcp("127.0.0.1", candidate, 8i32)
+            chosen_port = candidate
+        except IOError as e:
+            chosen_port = 0i32
+        attempt = attempt + 1i32
+
+    if chosen_port == 0i32:
+        println("could-not-bind-any-port")
+        return 1
+    println("bound-loopback=true")
+
+    # Shared cells captured by the worker closure.
+    port_cell: List[i32] = [chosen_port]
+    ready_cell: List[i32] = [1i32]
+    reply_cell: List[str] = [""]
+
+    t: Thread = Thread(fn() -> None: worker(port_cell, ready_cell, reply_cell))
+    t.start()
+
+    # accept() returns (handle, peer_addr); peer is on 127.0.0.1.
+    pair: Tuple[i64, str] = socket.accept(listener)
+    server_handle: i64 = pair.0
+    peer_addr: str = pair.1
+    println("peer-starts-with-127=" + str(peer_addr.slice(0i64, 4i64) == "127."))
+
+    # local_addr probe on the accepted stream — should be the
+    # listener's bound port.
+    local_addr: str = socket.local_addr(server_handle)
+    println("local-addr-nonempty=" + str(len(local_addr) > 0))
+
+    # Read request, write reply.
+    socket.set_timeout_secs(server_handle, 5.0)
+    req: str = socket.recv_exact(server_handle, 4i32)
+    println("got-request=" + req)
+    sent_back: i32 = socket.send(server_handle, "pong")
+    if sent_back != 4i32:
+        println("short-send-back=" + str(sent_back))
+
+    socket.close(server_handle)
+    socket.close_listener(listener)
+
+    t.join()
+
+    println("reply=" + reply_cell[0])
+    println("done")
+    return 0

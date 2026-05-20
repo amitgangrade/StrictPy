@@ -1,0 +1,65 @@
+"""socket_udp_demo.spy — M28 P3b-A UDP echo demo.
+
+Two UDP sockets on 127.0.0.1: one binds to a fixed port (the
+"server"), the other is unbound (the "client" — its kernel-assigned
+port is what the server replies to).  The client sends a single
+datagram; the server reads it, learns the client port via
+`udp_recv_from`'s sender tuple, and echoes back.
+"""
+
+import socket
+
+fn main() -> i32:
+    # Walk the same 50100..50115 range used in the TCP demo (disjoint
+    # to avoid same-program port-table contention).  First free port
+    # wins.  If none is free we abort cleanly.
+    chosen_port: i32 = 0i32
+    server: i64 = 0i64
+    attempt: i32 = 0i32
+    while attempt < 16i32 and chosen_port == 0i32:
+        candidate: i32 = 50100i32 + attempt
+        try:
+            server = socket.udp_bind("127.0.0.1", candidate)
+            chosen_port = candidate
+        except IOError as e:
+            chosen_port = 0i32
+        attempt = attempt + 1i32
+
+    if chosen_port == 0i32:
+        println("could-not-bind-udp")
+        return 1
+    println("udp-bound=true")
+
+    # An unbound client socket — get OS-assigned port.
+    client: i64 = socket.udp_socket()
+
+    # Apply 5s timeouts (no direct UDP timeout helper in v0.2; we'd
+    # need a `udp_set_timeout` to extend, deferred to v0.3).  For
+    # loopback in a single process this is fine.
+
+    # Send a 5-byte datagram from client to server.
+    sent: i32 = socket.udp_send_to(client, "hello", "127.0.0.1", chosen_port)
+    println("client-sent=" + str(sent))
+
+    # Server reads it and learns the client's port.
+    rx: Tuple[str, str, i32] = socket.udp_recv_from(server, 1024i32)
+    data: str = rx.0
+    src_host: str = rx.1
+    src_port: i32 = rx.2
+    println("server-recv=" + data)
+    println("src-host=" + src_host)
+    println("src-port-nonzero=" + str(src_port > 0i32))
+
+    # Server echoes back.
+    sent2: i32 = socket.udp_send_to(server, data, src_host, src_port)
+    println("server-echoed=" + str(sent2))
+
+    # Client receives the echo.
+    rx2: Tuple[str, str, i32] = socket.udp_recv_from(client, 1024i32)
+    echoed: str = rx2.0
+    println("client-echo=" + echoed)
+
+    socket.udp_close(server)
+    socket.udp_close(client)
+    println("done")
+    return 0

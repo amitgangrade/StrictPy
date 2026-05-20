@@ -3185,6 +3185,208 @@ impl Resolver {
             ],
         };
         self.stdlib_modules.insert("bz2".into(), bz2_mod);
+
+        // ── M28 P3b-A: `socket` module ─────────────────────────────────
+        // Raw TCP / UDP networking surface backed by `std::net`. Sockets
+        // are opaque i64 handles into one of three SharedVm slot tables
+        // (`tcp_streams`, `tcp_listeners`, `udp_sockets`). Bytes ride on
+        // `str` with each codepoint a byte 0..255 — same convention as
+        // `struct` (M22) and `gzip` / `zip` / `tar` (M27). See spec §9.40.
+        const SOCKET_CONNECT_TCP: u32        = 570;
+        const SOCKET_SEND: u32               = 571;
+        const SOCKET_RECV: u32               = 572;
+        const SOCKET_RECV_EXACT: u32         = 573;
+        const SOCKET_CLOSE: u32              = 574;
+        const SOCKET_SET_TIMEOUT_SECS: u32   = 575;
+        const SOCKET_PEER_ADDR: u32          = 576;
+        const SOCKET_LOCAL_ADDR: u32         = 577;
+        const SOCKET_LISTEN_TCP: u32         = 578;
+        const SOCKET_ACCEPT: u32             = 579;
+        const SOCKET_CLOSE_LISTENER: u32     = 580;
+        const SOCKET_UDP_SOCKET: u32         = 581;
+        const SOCKET_UDP_BIND: u32           = 582;
+        const SOCKET_UDP_SEND_TO: u32        = 583;
+        const SOCKET_UDP_RECV_FROM: u32      = 584;
+        const SOCKET_UDP_CLOSE: u32          = 585;
+        const SOCKET_GETHOSTBYNAME: u32      = 586;
+        const SOCKET_RESOLVE: u32            = 587;
+        const SOCKET_GETHOSTNAME: u32        = 588;
+
+        let i32_ty_sock = Ty::Primitive(PrimTy::I32);
+        let i64_ty_sock = Ty::Primitive(PrimTy::I64);
+        let f64_ty_sock = Ty::Primitive(PrimTy::F64);
+        let p3b_a_sock_accept_tuple = Ty::Tuple(vec![
+            i64_ty_sock.clone(),
+            str_ty.clone(),
+        ]);
+        let p3b_a_sock_udp_recv_tuple = Ty::Tuple(vec![
+            str_ty.clone(),
+            str_ty.clone(),
+            i32_ty_sock.clone(),
+        ]);
+
+        let p3b_a_socket_mod = StdlibModule {
+            name: "socket".into(),
+            items: vec![
+                StdlibItem {
+                    name: "connect_tcp".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), i32_ty_sock.clone()],
+                        i64_ty_sock.clone(),
+                    ),
+                    native_id: SOCKET_CONNECT_TCP,
+                },
+                StdlibItem {
+                    name: "send".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![i64_ty_sock.clone(), str_ty.clone()],
+                        i32_ty_sock.clone(),
+                    ),
+                    native_id: SOCKET_SEND,
+                },
+                StdlibItem {
+                    name: "recv".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![i64_ty_sock.clone(), i32_ty_sock.clone()],
+                        str_ty.clone(),
+                    ),
+                    native_id: SOCKET_RECV,
+                },
+                StdlibItem {
+                    name: "recv_exact".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![i64_ty_sock.clone(), i32_ty_sock.clone()],
+                        str_ty.clone(),
+                    ),
+                    native_id: SOCKET_RECV_EXACT,
+                },
+                StdlibItem {
+                    name: "close".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty_sock.clone()], unit_ty.clone()),
+                    native_id: SOCKET_CLOSE,
+                },
+                StdlibItem {
+                    name: "set_timeout_secs".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![i64_ty_sock.clone(), f64_ty_sock.clone()],
+                        unit_ty.clone(),
+                    ),
+                    native_id: SOCKET_SET_TIMEOUT_SECS,
+                },
+                StdlibItem {
+                    name: "peer_addr".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty_sock.clone()], str_ty.clone()),
+                    native_id: SOCKET_PEER_ADDR,
+                },
+                StdlibItem {
+                    name: "local_addr".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty_sock.clone()], str_ty.clone()),
+                    native_id: SOCKET_LOCAL_ADDR,
+                },
+                StdlibItem {
+                    name: "listen_tcp".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![
+                            str_ty.clone(),
+                            i32_ty_sock.clone(),
+                            i32_ty_sock.clone(),
+                        ],
+                        i64_ty_sock.clone(),
+                    ),
+                    native_id: SOCKET_LISTEN_TCP,
+                },
+                StdlibItem {
+                    name: "accept".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![i64_ty_sock.clone()],
+                        p3b_a_sock_accept_tuple.clone(),
+                    ),
+                    native_id: SOCKET_ACCEPT,
+                },
+                StdlibItem {
+                    name: "close_listener".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty_sock.clone()], unit_ty.clone()),
+                    native_id: SOCKET_CLOSE_LISTENER,
+                },
+                StdlibItem {
+                    name: "udp_socket".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], i64_ty_sock.clone()),
+                    native_id: SOCKET_UDP_SOCKET,
+                },
+                StdlibItem {
+                    name: "udp_bind".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), i32_ty_sock.clone()],
+                        i64_ty_sock.clone(),
+                    ),
+                    native_id: SOCKET_UDP_BIND,
+                },
+                StdlibItem {
+                    name: "udp_send_to".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![
+                            i64_ty_sock.clone(),
+                            str_ty.clone(),
+                            str_ty.clone(),
+                            i32_ty_sock.clone(),
+                        ],
+                        i32_ty_sock.clone(),
+                    ),
+                    native_id: SOCKET_UDP_SEND_TO,
+                },
+                StdlibItem {
+                    name: "udp_recv_from".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![i64_ty_sock.clone(), i32_ty_sock.clone()],
+                        p3b_a_sock_udp_recv_tuple.clone(),
+                    ),
+                    native_id: SOCKET_UDP_RECV_FROM,
+                },
+                StdlibItem {
+                    name: "udp_close".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty_sock.clone()], unit_ty.clone()),
+                    native_id: SOCKET_UDP_CLOSE,
+                },
+                StdlibItem {
+                    name: "gethostbyname".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: SOCKET_GETHOSTBYNAME,
+                },
+                StdlibItem {
+                    name: "resolve".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), i32_ty_sock.clone()],
+                        list_str_ty.clone(),
+                    ),
+                    native_id: SOCKET_RESOLVE,
+                },
+                StdlibItem {
+                    name: "gethostname".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], str_ty.clone()),
+                    native_id: SOCKET_GETHOSTNAME,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("socket".into(), p3b_a_socket_mod);
     }
 
     // ─────────────────────────────────────────────────────────────────────

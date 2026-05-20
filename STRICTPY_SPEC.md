@@ -2986,6 +2986,146 @@ the per-slot enum.
 
 ---
 
+### 9.40 Module `socket` (v0.2 — M28 P3b-A)
+
+Raw TCP / UDP networking layered on `std::net`.  Three opaque-handle
+slot tables on `SharedVm` (`tcp_streams`, `tcp_listeners`,
+`udp_sockets`) own the underlying OS file descriptors; user code only
+ever sees `i64` handles.  Bytes ride on `str` with each codepoint a
+byte 0..255 (the str-as-byte-buffer convention shared with
+`struct.pack`, `zipfile.read`, and `gzip.decompress`).  No new crate
+dep — `std::net` covers TCP / UDP / DNS resolution on Linux, macOS
+and Windows.
+
+```
+# TCP client
+fn connect_tcp(host: str, port: i32) -> i64
+fn send(handle: i64, data: str) -> i32
+fn recv(handle: i64, max_bytes: i32) -> str
+fn recv_exact(handle: i64, n: i32) -> str
+fn close(handle: i64) -> None
+fn set_timeout_secs(handle: i64, secs: f64) -> None
+fn peer_addr(handle: i64) -> str
+fn local_addr(handle: i64) -> str
+
+# TCP server
+fn listen_tcp(host: str, port: i32, backlog: i32) -> i64
+fn accept(listener: i64) -> Tuple[i64, str]   # (new_stream, peer_addr)
+fn close_listener(listener: i64) -> None
+
+# UDP
+fn udp_socket() -> i64
+fn udp_bind(host: str, port: i32) -> i64
+fn udp_send_to(handle: i64, data: str, host: str, port: i32) -> i32
+fn udp_recv_from(handle: i64, max_bytes: i32) -> Tuple[str, str, i32]
+fn udp_close(handle: i64) -> None
+
+# DNS / utility
+fn gethostbyname(host: str) -> str
+fn resolve(host: str, port: i32) -> List[str]
+fn gethostname() -> str
+```
+
+Semantics:
+
+* `connect_tcp(host, port)` resolves `host` to one or more addresses
+  and connects to the first one that succeeds (matches the standard
+  `TcpStream::connect` behaviour).  IPv6 is transparent — pass
+  `"::1"` for loopback or any v6 literal and the same code path is
+  used.  Raises `IOError` on resolution / connect failure.
+* `send(handle, data)` writes at most `len(data)` bytes; returns the
+  actual count.  May be less than `len(data)` on partial writes (rare
+  for small buffers on a healthy connection but possible for large
+  buffers on a slow link).  Callers should loop until satisfied or use
+  `recv_exact`'s siblings (a `send_all` helper is a v0.3 candidate).
+* `recv(handle, max_bytes)` reads up to `max_bytes`; returns the empty
+  string `""` on EOF (the peer cleanly closed).  Length of the
+  returned str is the actual byte count.
+* `recv_exact(handle, n)` reads exactly `n` bytes or raises `IOError`
+  on short read / EOF.  Useful for length-prefixed protocols.
+* `close(handle)` calls `flush()` then `shutdown(Both)` then drops the
+  socket.  The flush is load-bearing on Windows: closing a winsock
+  socket with bytes still buffered in user-space can drop them; the
+  explicit flush + shutdown sequence matches what every cross-platform
+  TCP example recommends.  Closing slot 0 / a zero / an already-closed
+  handle raises `ValueError`.
+* `set_timeout_secs(handle, secs)` applies the same duration to both
+  `set_read_timeout` and `set_write_timeout`.  `0.0` (or any
+  non-finite value) clears the timeout — `Inf` / `NaN` raises
+  `ValueError`.  Operations that time out raise `IOError`.
+* `peer_addr` / `local_addr` return printable `"ip:port"` strings
+  (IPv4 → `"127.0.0.1:53412"`, IPv6 → `"[::1]:53412"`).
+* `listen_tcp(host, port, backlog)` binds + listens; `backlog` is
+  accepted for API symmetry but Rust's `TcpListener::bind` does not
+  expose `listen()`'s backlog argument, so the parameter is currently
+  documented-but-not-enforced.  Use `port = 0` to ask the OS for an
+  ephemeral port; the bound port can be discovered via `local_addr`
+  on an accepted stream.
+* `accept(listener)` blocks until a peer connects and returns
+  `(new_stream_handle, peer_addr)`.  No timeout in v0.2 — callers who
+  need one should set `O_NONBLOCK` via a v0.3 `set_nonblocking` API
+  (deferred).  The returned stream inherits the listener's
+  blocking / timeout state.
+* `udp_socket()` binds to `0.0.0.0:0` (OS-assigned ephemeral v4
+  port); `udp_bind(host, port)` binds to a fixed endpoint.
+* `udp_send_to(handle, data, host, port)` sends one datagram; returns
+  the number of bytes the kernel queued (always equal to `len(data)`
+  for v4/v6 datagrams under MTU on loopback).
+* `udp_recv_from(handle, max_bytes)` returns `(data, src_host,
+  src_port)`.  `src_host` is the printable IP, NOT the resolved host
+  name (matches POSIX `recvfrom`'s behaviour).
+* `gethostbyname(host)` resolves and returns the first IPv4 address
+  if any v4 results came back, otherwise the first v6 address.  The
+  v4-preference is deliberate — most legacy / loopback code expects
+  `"127.0.0.1"` rather than `"::1"`.
+* `resolve(host, port)` returns every `"ip:port"` the system resolver
+  produced (v4 first, then v6 on most platforms).
+* `gethostname()` returns the local host name.  v0.2 uses the
+  `HOSTNAME` / `COMPUTERNAME` environment-variable fallback chain
+  (CPython's own gethostname has the same env-var fast-path); falls
+  back to `"localhost"` if neither is set.  A proper `gethostname(2)`
+  syscall wrapper is a v0.3 candidate (would need a thin libc shim
+  on Unix and `GetComputerNameW` on Windows).
+
+Errors:
+
+* Invalid / closed handle → `ValueError`.
+* DNS / connect / bind failure → `IOError`.
+* `recv_exact` short-read → `IOError`.
+* Out-of-range codepoint in `data` payload (any byte > 255) →
+  `ValueError`.
+* Non-finite or negative timeout → `ValueError`.
+
+Cross-platform notes:
+
+* Linux / macOS: `std::net` wraps the POSIX socket syscalls; no
+  surprises.
+* Windows: `std::net` uses winsock under the hood.  Two gotchas
+  baked into the API:
+  - `close` calls `flush()` first to avoid the close-drops-pending
+    -bytes behaviour described above.
+  - `recv_exact` on a peer-closed socket reports `UnexpectedEof`,
+    which we re-raise as `IOError` (same shape as the Unix path).
+* IPv6 is supported transparently on all three platforms; the API
+  does not split into v4 / v6 variants.
+
+What v0.2 does **not** ship: `set_nonblocking` / `set_nodelay` /
+`set_keepalive` (the M6 thread surface already covers the
+"don't block the main thread" use case); UNIX-domain sockets;
+TLS / SSL wrapping (callers should layer a TLS module on top, v0.3+);
+multicast / broadcast (the UDP surface is unicast-only in v0.2);
+`shutdown(Read)` / `shutdown(Write)` half-close (only `Both` via
+`close`); a `send_all` / `recv_into` helper.  All are v0.3 candidates.
+
+Concurrency: socket handles are safe to share across threads via the
+same mechanism as `threading.Lock` (the slot tables live behind
+`Mutex`).  Two threads `recv`-ing on the same handle serialise on the
+inner stream borrow but each gets a self-consistent byte chunk;
+interleaved bytes would only happen if the application protocol
+violates message framing rather than from the runtime.
+
+---
+
 ## 10. Compiler Architecture
 
 ### 10.1 Pipeline

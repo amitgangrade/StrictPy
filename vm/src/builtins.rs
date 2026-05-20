@@ -8,6 +8,8 @@
 //! rest trap with a clear "(M5)" marker so the M5 agent knows what to
 //! fill in.
 
+use std::sync::Arc;
+
 use strictpy_shared::NativeFn;
 
 use crate::error::VmError;
@@ -5066,10 +5068,689 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             Ok(if p3c_d_tar_is_ok { 1 } else { 0 })
         }
 
+        // ─── M28 P3b-A: `socket` module ───────────────────────────────
+        // Raw TCP/UDP. Sockets live in three SharedVm slot tables; bytes
+        // ride as str (codepoint == byte 0..255).  Variable prefix
+        // `p3b_a_` per the brief's Lesson 2 to dodge cherry-pick
+        // alignment.
+        NativeFn::SocketConnectTcp => {
+            let p3b_a_sock_ct_host = arg_str(args, 0);
+            let p3b_a_sock_ct_port = arg_i64(args, 1) as u16;
+            let p3b_a_sock_ct_stream = std::net::TcpStream::connect(
+                (p3b_a_sock_ct_host.as_str(), p3b_a_sock_ct_port),
+            )
+            .map_err(|e| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!(
+                    "socket.connect_tcp({:?}, {}): {}",
+                    p3b_a_sock_ct_host, p3b_a_sock_ct_port, e
+                ),
+            })?;
+            let mut p3b_a_sock_ct_table = interp.shared.tcp_streams.lock().unwrap();
+            let p3b_a_sock_ct_handle = p3b_a_sock_ct_table.len() as i64;
+            p3b_a_sock_ct_table.push(Some(Arc::new(p3b_a_sock_ct_stream)));
+            Ok(p3b_a_sock_ct_handle as u64)
+        }
+        NativeFn::SocketSend => {
+            use std::io::Write;
+            let p3b_a_sock_send_handle = arg_i64(args, 0);
+            let p3b_a_sock_send_data_str = arg_str(args, 1);
+            if p3b_a_sock_send_handle <= 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "socket.send: invalid handle {}",
+                        p3b_a_sock_send_handle
+                    ),
+                });
+            }
+            let p3b_a_sock_send_bytes = packed_str_to_bytes(
+                &p3b_a_sock_send_data_str,
+                0,
+                p3b_a_sock_send_data_str.chars().count(),
+                "socket.send",
+            )?;
+            // Clone the stream out of the slot so the table mutex isn't
+            // held across the blocking write — otherwise a concurrent
+            // recv on a sibling handle would deadlock on the same outer
+            // mutex.
+            let p3b_a_sock_send_stream_arc = arc_tcp_stream(
+                interp,
+                p3b_a_sock_send_handle,
+                "socket.send",
+            )?;
+            // `Write` is impl'd on `&TcpStream`, so write through the
+            // shared `Arc` without needing a mut binding.
+            let p3b_a_sock_send_n = (&*p3b_a_sock_send_stream_arc)
+                .write(&p3b_a_sock_send_bytes)
+                .map_err(|e| VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!("socket.send: {}", e),
+                })?;
+            Ok((p3b_a_sock_send_n as i32) as u32 as u64)
+        }
+        NativeFn::SocketRecv => {
+            use std::io::Read;
+            let p3b_a_sock_recv_handle = arg_i64(args, 0);
+            let p3b_a_sock_recv_max = arg_i64(args, 1) as i32;
+            if p3b_a_sock_recv_handle <= 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "socket.recv: invalid handle {}",
+                        p3b_a_sock_recv_handle
+                    ),
+                });
+            }
+            if p3b_a_sock_recv_max < 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "socket.recv: negative max_bytes {}",
+                        p3b_a_sock_recv_max
+                    ),
+                });
+            }
+            let p3b_a_sock_recv_bytes: Vec<u8> = {
+                // Clone the TcpStream out of the slot before doing the
+                // (blocking) read so a sibling send / accept doesn't
+                // deadlock on the table mutex.
+                let p3b_a_sock_recv_stream_arc = arc_tcp_stream(
+                    interp,
+                    p3b_a_sock_recv_handle,
+                    "socket.recv",
+                )?;
+                let mut p3b_a_sock_recv_buf = vec![0u8; p3b_a_sock_recv_max as usize];
+                let p3b_a_sock_recv_n = (&*p3b_a_sock_recv_stream_arc)
+                    .read(&mut p3b_a_sock_recv_buf)
+                    .map_err(|e| VmError::UncaughtException {
+                        type_name: "IOError".into(),
+                        message: format!("socket.recv: {}", e),
+                    })?;
+                p3b_a_sock_recv_buf.truncate(p3b_a_sock_recv_n);
+                p3b_a_sock_recv_buf
+            };
+            let p3b_a_sock_recv_str = bytes_to_packed_str(&p3b_a_sock_recv_bytes);
+            let p3b_a_sock_recv_sp = interp.alloc_string(&p3b_a_sock_recv_str);
+            Ok(p3b_a_sock_recv_sp as u64)
+        }
+        NativeFn::SocketRecvExact => {
+            use std::io::Read;
+            let p3b_a_sock_re_handle = arg_i64(args, 0);
+            let p3b_a_sock_re_n = arg_i64(args, 1) as i32;
+            if p3b_a_sock_re_handle <= 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "socket.recv_exact: invalid handle {}",
+                        p3b_a_sock_re_handle
+                    ),
+                });
+            }
+            if p3b_a_sock_re_n < 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "socket.recv_exact: negative n {}",
+                        p3b_a_sock_re_n
+                    ),
+                });
+            }
+            let p3b_a_sock_re_bytes: Vec<u8> = {
+                // Clone the stream out of the slot so this (blocking)
+                // read doesn't pin the table mutex.
+                let p3b_a_sock_re_stream_arc = arc_tcp_stream(
+                    interp,
+                    p3b_a_sock_re_handle,
+                    "socket.recv_exact",
+                )?;
+                let mut p3b_a_sock_re_buf = vec![0u8; p3b_a_sock_re_n as usize];
+                (&*p3b_a_sock_re_stream_arc)
+                    .read_exact(&mut p3b_a_sock_re_buf)
+                    .map_err(|e| VmError::UncaughtException {
+                        type_name: "IOError".into(),
+                        message: format!(
+                            "socket.recv_exact({}): {}",
+                            p3b_a_sock_re_n, e
+                        ),
+                    })?;
+                p3b_a_sock_re_buf
+            };
+            let p3b_a_sock_re_str = bytes_to_packed_str(&p3b_a_sock_re_bytes);
+            let p3b_a_sock_re_sp = interp.alloc_string(&p3b_a_sock_re_str);
+            Ok(p3b_a_sock_re_sp as u64)
+        }
+        NativeFn::SocketClose => {
+            use std::io::Write;
+            let p3b_a_sock_cl_handle = arg_i64(args, 0);
+            if p3b_a_sock_cl_handle <= 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "socket.close: invalid handle {}",
+                        p3b_a_sock_cl_handle
+                    ),
+                });
+            }
+            let mut p3b_a_sock_cl_table = interp.shared.tcp_streams.lock().unwrap();
+            let p3b_a_sock_cl_slot = p3b_a_sock_cl_table
+                .get_mut(p3b_a_sock_cl_handle as usize)
+                .ok_or_else(|| VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "socket.close: unknown handle {}",
+                        p3b_a_sock_cl_handle
+                    ),
+                })?;
+            if let Some(p3b_a_sock_cl_stream) = p3b_a_sock_cl_slot.take() {
+                // Windows can drop in-flight bytes on a close; flush
+                // first.  Both flush() and shutdown() are available on
+                // &TcpStream so the Arc doesn't need to be unique.
+                let _ = (&*p3b_a_sock_cl_stream).flush();
+                let _ = p3b_a_sock_cl_stream
+                    .shutdown(std::net::Shutdown::Both);
+                // The last Arc reference drops at end-of-scope; if
+                // another Arc clone is still alive (e.g. mid-read on
+                // another thread) the OS handle stays open until that
+                // read completes — `shutdown` above will have already
+                // unstuck a blocking read on this socket.
+            }
+            Ok(0)
+        }
+        NativeFn::SocketSetTimeoutSecs => {
+            let p3b_a_sock_st_handle = arg_i64(args, 0);
+            let p3b_a_sock_st_secs = arg_f64(args, 1);
+            if p3b_a_sock_st_handle <= 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "socket.set_timeout_secs: invalid handle {}",
+                        p3b_a_sock_st_handle
+                    ),
+                });
+            }
+            if !p3b_a_sock_st_secs.is_finite() || p3b_a_sock_st_secs < 0.0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "socket.set_timeout_secs: invalid secs {}",
+                        p3b_a_sock_st_secs
+                    ),
+                });
+            }
+            // 0.0 means "block forever" (None); anything else converts.
+            let p3b_a_sock_st_dur = if p3b_a_sock_st_secs == 0.0 {
+                None
+            } else {
+                Some(std::time::Duration::from_secs_f64(p3b_a_sock_st_secs))
+            };
+            // Grab a refcount and drop the table mutex before the
+            // setsockopt syscalls — same deadlock-avoidance rationale
+            // as the I/O methods.
+            let p3b_a_sock_st_stream_arc = arc_tcp_stream(
+                interp,
+                p3b_a_sock_st_handle,
+                "socket.set_timeout_secs",
+            )?;
+            p3b_a_sock_st_stream_arc
+                .set_read_timeout(p3b_a_sock_st_dur)
+                .map_err(|e| VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!("socket.set_timeout_secs (read): {}", e),
+                })?;
+            p3b_a_sock_st_stream_arc
+                .set_write_timeout(p3b_a_sock_st_dur)
+                .map_err(|e| VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!("socket.set_timeout_secs (write): {}", e),
+                })?;
+            Ok(0)
+        }
+        NativeFn::SocketPeerAddr => {
+            let p3b_a_sock_pa_handle = arg_i64(args, 0);
+            if p3b_a_sock_pa_handle <= 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "socket.peer_addr: invalid handle {}",
+                        p3b_a_sock_pa_handle
+                    ),
+                });
+            }
+            let p3b_a_sock_pa_addr_str = {
+                let p3b_a_sock_pa_stream_arc = arc_tcp_stream(
+                    interp,
+                    p3b_a_sock_pa_handle,
+                    "socket.peer_addr",
+                )?;
+                p3b_a_sock_pa_stream_arc
+                    .peer_addr()
+                    .map_err(|e| VmError::UncaughtException {
+                        type_name: "IOError".into(),
+                        message: format!("socket.peer_addr: {}", e),
+                    })?
+                    .to_string()
+            };
+            let p3b_a_sock_pa_sp = interp.alloc_string(&p3b_a_sock_pa_addr_str);
+            Ok(p3b_a_sock_pa_sp as u64)
+        }
+        NativeFn::SocketLocalAddr => {
+            let p3b_a_sock_la_handle = arg_i64(args, 0);
+            if p3b_a_sock_la_handle <= 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "socket.local_addr: invalid handle {}",
+                        p3b_a_sock_la_handle
+                    ),
+                });
+            }
+            let p3b_a_sock_la_addr_str = {
+                let p3b_a_sock_la_stream_arc = arc_tcp_stream(
+                    interp,
+                    p3b_a_sock_la_handle,
+                    "socket.local_addr",
+                )?;
+                p3b_a_sock_la_stream_arc
+                    .local_addr()
+                    .map_err(|e| VmError::UncaughtException {
+                        type_name: "IOError".into(),
+                        message: format!("socket.local_addr: {}", e),
+                    })?
+                    .to_string()
+            };
+            let p3b_a_sock_la_sp = interp.alloc_string(&p3b_a_sock_la_addr_str);
+            Ok(p3b_a_sock_la_sp as u64)
+        }
+        NativeFn::SocketListenTcp => {
+            let p3b_a_sock_lt_host = arg_str(args, 0);
+            let p3b_a_sock_lt_port = arg_i64(args, 1) as u16;
+            let _p3b_a_sock_lt_backlog = arg_i64(args, 2) as i32;
+            // `TcpListener::bind` issues both bind+listen with a
+            // platform-default backlog; the `backlog` arg is accepted
+            // for API symmetry with Python but Rust's std doesn't
+            // expose the backlog knob (would need libc::listen()).
+            let p3b_a_sock_lt_listener = std::net::TcpListener::bind(
+                (p3b_a_sock_lt_host.as_str(), p3b_a_sock_lt_port),
+            )
+            .map_err(|e| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!(
+                    "socket.listen_tcp({:?}, {}): {}",
+                    p3b_a_sock_lt_host, p3b_a_sock_lt_port, e
+                ),
+            })?;
+            let mut p3b_a_sock_lt_table =
+                interp.shared.tcp_listeners.lock().unwrap();
+            let p3b_a_sock_lt_handle = p3b_a_sock_lt_table.len() as i64;
+            p3b_a_sock_lt_table.push(Some(Arc::new(p3b_a_sock_lt_listener)));
+            Ok(p3b_a_sock_lt_handle as u64)
+        }
+        NativeFn::SocketAccept => {
+            let p3b_a_sock_ac_handle = arg_i64(args, 0);
+            if p3b_a_sock_ac_handle <= 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "socket.accept: invalid handle {}",
+                        p3b_a_sock_ac_handle
+                    ),
+                });
+            }
+            // Grab a refcount on the listener Arc and drop the table
+            // mutex before the (blocking) accept call.
+            let p3b_a_sock_ac_listener_arc = {
+                let p3b_a_sock_ac_table =
+                    interp.shared.tcp_listeners.lock().unwrap();
+                let p3b_a_sock_ac_slot = p3b_a_sock_ac_table
+                    .get(p3b_a_sock_ac_handle as usize)
+                    .ok_or_else(|| VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "socket.accept: unknown handle {}",
+                            p3b_a_sock_ac_handle
+                        ),
+                    })?;
+                let p3b_a_sock_ac_listener = p3b_a_sock_ac_slot.as_ref().ok_or_else(|| {
+                    VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "socket.accept: handle {} is closed",
+                            p3b_a_sock_ac_handle
+                        ),
+                    }
+                })?;
+                p3b_a_sock_ac_listener.clone()
+            };
+            let (p3b_a_sock_ac_stream, p3b_a_sock_ac_peer) =
+                p3b_a_sock_ac_listener_arc
+                    .accept()
+                    .map_err(|e| VmError::UncaughtException {
+                        type_name: "IOError".into(),
+                        message: format!("socket.accept: {}", e),
+                    })?;
+            let p3b_a_sock_ac_peer_str = p3b_a_sock_ac_peer.to_string();
+            let p3b_a_sock_ac_new_handle = {
+                let mut p3b_a_sock_ac_streams =
+                    interp.shared.tcp_streams.lock().unwrap();
+                let p3b_a_sock_ac_h = p3b_a_sock_ac_streams.len() as i64;
+                p3b_a_sock_ac_streams.push(Some(Arc::new(p3b_a_sock_ac_stream)));
+                p3b_a_sock_ac_h
+            };
+            let p3b_a_sock_ac_sp =
+                interp.alloc_string(&p3b_a_sock_ac_peer_str) as u64;
+            let p3b_a_sock_ac_tup = interp.alloc_tuple_obj(&[
+                p3b_a_sock_ac_new_handle as u64,
+                p3b_a_sock_ac_sp,
+            ]);
+            Ok(p3b_a_sock_ac_tup as u64)
+        }
+        NativeFn::SocketCloseListener => {
+            let p3b_a_sock_clu_handle = arg_i64(args, 0);
+            if p3b_a_sock_clu_handle <= 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "socket.close_listener: invalid handle {}",
+                        p3b_a_sock_clu_handle
+                    ),
+                });
+            }
+            let mut p3b_a_sock_clu_table =
+                interp.shared.tcp_listeners.lock().unwrap();
+            let p3b_a_sock_clu_slot = p3b_a_sock_clu_table
+                .get_mut(p3b_a_sock_clu_handle as usize)
+                .ok_or_else(|| VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "socket.close_listener: unknown handle {}",
+                        p3b_a_sock_clu_handle
+                    ),
+                })?;
+            let _ = p3b_a_sock_clu_slot.take();
+            Ok(0)
+        }
+        NativeFn::SocketUdpSocket => {
+            let p3b_a_sock_us = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!("socket.udp_socket: {}", e),
+                }
+            })?;
+            let mut p3b_a_sock_us_table = interp.shared.udp_sockets.lock().unwrap();
+            let p3b_a_sock_us_handle = p3b_a_sock_us_table.len() as i64;
+            p3b_a_sock_us_table.push(Some(Arc::new(p3b_a_sock_us)));
+            Ok(p3b_a_sock_us_handle as u64)
+        }
+        NativeFn::SocketUdpBind => {
+            let p3b_a_sock_ub_host = arg_str(args, 0);
+            let p3b_a_sock_ub_port = arg_i64(args, 1) as u16;
+            let p3b_a_sock_ub_sock = std::net::UdpSocket::bind((
+                p3b_a_sock_ub_host.as_str(),
+                p3b_a_sock_ub_port,
+            ))
+            .map_err(|e| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!(
+                    "socket.udp_bind({:?}, {}): {}",
+                    p3b_a_sock_ub_host, p3b_a_sock_ub_port, e
+                ),
+            })?;
+            let mut p3b_a_sock_ub_table = interp.shared.udp_sockets.lock().unwrap();
+            let p3b_a_sock_ub_handle = p3b_a_sock_ub_table.len() as i64;
+            p3b_a_sock_ub_table.push(Some(Arc::new(p3b_a_sock_ub_sock)));
+            Ok(p3b_a_sock_ub_handle as u64)
+        }
+        NativeFn::SocketUdpSendTo => {
+            let p3b_a_sock_us_handle = arg_i64(args, 0);
+            let p3b_a_sock_us_data_str = arg_str(args, 1);
+            let p3b_a_sock_us_host = arg_str(args, 2);
+            let p3b_a_sock_us_port = arg_i64(args, 3) as u16;
+            if p3b_a_sock_us_handle <= 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "socket.udp_send_to: invalid handle {}",
+                        p3b_a_sock_us_handle
+                    ),
+                });
+            }
+            let p3b_a_sock_us_bytes = packed_str_to_bytes(
+                &p3b_a_sock_us_data_str,
+                0,
+                p3b_a_sock_us_data_str.chars().count(),
+                "socket.udp_send_to",
+            )?;
+            let p3b_a_sock_us_sock_clone = arc_udp_socket(
+                interp,
+                p3b_a_sock_us_handle,
+                "socket.udp_send_to",
+            )?;
+            let p3b_a_sock_us_n = p3b_a_sock_us_sock_clone
+                .send_to(
+                    &p3b_a_sock_us_bytes,
+                    (p3b_a_sock_us_host.as_str(), p3b_a_sock_us_port),
+                )
+                .map_err(|e| VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!(
+                        "socket.udp_send_to({:?}, {}): {}",
+                        p3b_a_sock_us_host, p3b_a_sock_us_port, e
+                    ),
+                })?;
+            Ok((p3b_a_sock_us_n as i32) as u32 as u64)
+        }
+        NativeFn::SocketUdpRecvFrom => {
+            let p3b_a_sock_ur_handle = arg_i64(args, 0);
+            let p3b_a_sock_ur_max = arg_i64(args, 1) as i32;
+            if p3b_a_sock_ur_handle <= 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "socket.udp_recv_from: invalid handle {}",
+                        p3b_a_sock_ur_handle
+                    ),
+                });
+            }
+            if p3b_a_sock_ur_max < 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "socket.udp_recv_from: negative max_bytes {}",
+                        p3b_a_sock_ur_max
+                    ),
+                });
+            }
+            let (p3b_a_sock_ur_bytes, p3b_a_sock_ur_addr) = {
+                let p3b_a_sock_ur_sock_clone = arc_udp_socket(
+                    interp,
+                    p3b_a_sock_ur_handle,
+                    "socket.udp_recv_from",
+                )?;
+                let mut p3b_a_sock_ur_buf = vec![0u8; p3b_a_sock_ur_max as usize];
+                let (p3b_a_sock_ur_n, p3b_a_sock_ur_src) = p3b_a_sock_ur_sock_clone
+                    .recv_from(&mut p3b_a_sock_ur_buf)
+                    .map_err(|e| VmError::UncaughtException {
+                        type_name: "IOError".into(),
+                        message: format!("socket.udp_recv_from: {}", e),
+                    })?;
+                p3b_a_sock_ur_buf.truncate(p3b_a_sock_ur_n);
+                (p3b_a_sock_ur_buf, p3b_a_sock_ur_src)
+            };
+            let p3b_a_sock_ur_data_str = bytes_to_packed_str(&p3b_a_sock_ur_bytes);
+            let p3b_a_sock_ur_host_str = p3b_a_sock_ur_addr.ip().to_string();
+            let p3b_a_sock_ur_port = p3b_a_sock_ur_addr.port() as i32;
+            let p3b_a_sock_ur_data_sp =
+                interp.alloc_string(&p3b_a_sock_ur_data_str) as u64;
+            let p3b_a_sock_ur_host_sp =
+                interp.alloc_string(&p3b_a_sock_ur_host_str) as u64;
+            let p3b_a_sock_ur_port_slot =
+                (p3b_a_sock_ur_port as u32) as u64;
+            let p3b_a_sock_ur_tup = interp.alloc_tuple_obj(&[
+                p3b_a_sock_ur_data_sp,
+                p3b_a_sock_ur_host_sp,
+                p3b_a_sock_ur_port_slot,
+            ]);
+            Ok(p3b_a_sock_ur_tup as u64)
+        }
+        NativeFn::SocketUdpClose => {
+            let p3b_a_sock_uc_handle = arg_i64(args, 0);
+            if p3b_a_sock_uc_handle <= 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "socket.udp_close: invalid handle {}",
+                        p3b_a_sock_uc_handle
+                    ),
+                });
+            }
+            let mut p3b_a_sock_uc_table = interp.shared.udp_sockets.lock().unwrap();
+            let p3b_a_sock_uc_slot = p3b_a_sock_uc_table
+                .get_mut(p3b_a_sock_uc_handle as usize)
+                .ok_or_else(|| VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "socket.udp_close: unknown handle {}",
+                        p3b_a_sock_uc_handle
+                    ),
+                })?;
+            let _ = p3b_a_sock_uc_slot.take();
+            Ok(0)
+        }
+        NativeFn::SocketGethostbyname => {
+            use std::net::ToSocketAddrs;
+            let p3b_a_sock_gh_host = arg_str(args, 0);
+            // Resolve with a dummy port; iterate the addresses, prefer v4.
+            let p3b_a_sock_gh_iter =
+                (p3b_a_sock_gh_host.as_str(), 0u16).to_socket_addrs().map_err(|e| {
+                    VmError::UncaughtException {
+                        type_name: "IOError".into(),
+                        message: format!(
+                            "socket.gethostbyname({:?}): {}",
+                            p3b_a_sock_gh_host, e
+                        ),
+                    }
+                })?;
+            let mut p3b_a_sock_gh_first_v4: Option<String> = None;
+            let mut p3b_a_sock_gh_first_any: Option<String> = None;
+            for p3b_a_sock_gh_addr in p3b_a_sock_gh_iter {
+                let p3b_a_sock_gh_ip = p3b_a_sock_gh_addr.ip().to_string();
+                if p3b_a_sock_gh_first_any.is_none() {
+                    p3b_a_sock_gh_first_any = Some(p3b_a_sock_gh_ip.clone());
+                }
+                if p3b_a_sock_gh_addr.is_ipv4() && p3b_a_sock_gh_first_v4.is_none() {
+                    p3b_a_sock_gh_first_v4 = Some(p3b_a_sock_gh_ip);
+                    break;
+                }
+            }
+            let p3b_a_sock_gh_pick = p3b_a_sock_gh_first_v4
+                .or(p3b_a_sock_gh_first_any)
+                .ok_or_else(|| VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!(
+                        "socket.gethostbyname({:?}): no addresses returned",
+                        p3b_a_sock_gh_host
+                    ),
+                })?;
+            let p3b_a_sock_gh_sp = interp.alloc_string(&p3b_a_sock_gh_pick);
+            Ok(p3b_a_sock_gh_sp as u64)
+        }
+        NativeFn::SocketResolve => {
+            use std::net::ToSocketAddrs;
+            let p3b_a_sock_rv_host = arg_str(args, 0);
+            let p3b_a_sock_rv_port = arg_i64(args, 1) as u16;
+            let p3b_a_sock_rv_iter = (p3b_a_sock_rv_host.as_str(), p3b_a_sock_rv_port)
+                .to_socket_addrs()
+                .map_err(|e| VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!(
+                        "socket.resolve({:?}, {}): {}",
+                        p3b_a_sock_rv_host, p3b_a_sock_rv_port, e
+                    ),
+                })?;
+            let p3b_a_sock_rv_addrs: Vec<String> =
+                p3b_a_sock_rv_iter.map(|a| a.to_string()).collect();
+            let p3b_a_sock_rv_list = interp.alloc_list(p3b_a_sock_rv_addrs.len());
+            for p3b_a_sock_rv_entry in p3b_a_sock_rv_addrs {
+                let p3b_a_sock_rv_sp = interp.alloc_string(&p3b_a_sock_rv_entry) as u64;
+                // SAFETY: list freshly allocated; we own the only handle.
+                unsafe { interp.list_push(p3b_a_sock_rv_list, p3b_a_sock_rv_sp) };
+            }
+            Ok(p3b_a_sock_rv_list as u64)
+        }
+        NativeFn::SocketGethostname => {
+            // `std::net` doesn't expose gethostname; use the platform
+            // syscall via `hostname` lookup of "" or env. We use the
+            // env-var fallback chain that CPython uses internally: env
+            // COMPUTERNAME (Windows) / HOSTNAME (Unix) is a fast-path,
+            // falling back to a stable literal if neither is set so we
+            // never panic.
+            let p3b_a_sock_gn_name = std::env::var("HOSTNAME")
+                .or_else(|_| std::env::var("COMPUTERNAME"))
+                .unwrap_or_else(|_| "localhost".to_string());
+            let p3b_a_sock_gn_sp = interp.alloc_string(&p3b_a_sock_gn_name);
+            Ok(p3b_a_sock_gn_sp as u64)
+        }
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
     }
+}
+
+// ─── M28 P3b-A: `socket` module helpers ────────────────────────────────
+
+/// Bump the refcount on the `Arc<TcpStream>` at the given handle and
+/// release the table mutex before returning.  Callers do blocking I/O
+/// on `&*stream` (TcpStream implements `Read` / `Write` for `&Self`).
+///
+/// Holding the table mutex across a blocking `read` / `write` would
+/// instantly deadlock any sibling thread that tries to touch *any*
+/// other slot in the same table — including the very common "main
+/// does send while worker does recv" pattern the loopback echo demo
+/// exercises.  Wrapping the stream in an `Arc` means we don't pay the
+/// `WSADuplicateSocket` / `dup` syscall cost of `try_clone()` on every
+/// op — and, more importantly, we don't accidentally split socket
+/// options (timeouts in particular) across separate kernel duplicate
+/// handles, which the Windows winsock implementation is finicky about.
+fn arc_tcp_stream(
+    interp: &Interpreter,
+    handle: i64,
+    who: &str,
+) -> Result<Arc<std::net::TcpStream>, VmError> {
+    let table = interp.shared.tcp_streams.lock().unwrap();
+    let slot = table
+        .get(handle as usize)
+        .ok_or_else(|| VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("{}: unknown handle {}", who, handle),
+        })?;
+    let stream = slot.as_ref().ok_or_else(|| VmError::UncaughtException {
+        type_name: "ValueError".into(),
+        message: format!("{}: handle {} is closed", who, handle),
+    })?;
+    Ok(stream.clone())
+}
+
+/// Same as `arc_tcp_stream` but for `SharedVm.udp_sockets`.  See the
+/// comment above for the deadlock rationale.
+fn arc_udp_socket(
+    interp: &Interpreter,
+    handle: i64,
+    who: &str,
+) -> Result<Arc<std::net::UdpSocket>, VmError> {
+    let table = interp.shared.udp_sockets.lock().unwrap();
+    let slot = table
+        .get(handle as usize)
+        .ok_or_else(|| VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("{}: unknown handle {}", who, handle),
+        })?;
+    let sock = slot.as_ref().ok_or_else(|| VmError::UncaughtException {
+        type_name: "ValueError".into(),
+        message: format!("{}: handle {} is closed", who, handle),
+    })?;
+    Ok(sock.clone())
 }
 
 // ─── M27 P3c-E: `logging` module helpers ───────────────────────────────
