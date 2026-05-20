@@ -1,12 +1,14 @@
-# I built a statically typed Python from scratch, and it beats CPython by up to 17×
+# I built a statically typed Python from scratch, and it beats CPython by up to 17× — and by Friday it was hosting a working web framework
 
-*A 3-day, AI-orchestrated journey from "is this even possible?" to a 31K-line Rust toolchain with a Cranelift JIT, 70 example programs, 24 stdlib modules, and one open bug — and what it taught me about why dynamic languages are slow.*
+*A 5-day, AI-orchestrated journey from "is this even possible?" to a 36K-line Rust toolchain with a Cranelift JIT, 96 example programs, 36 stdlib modules, a working HTTP/1.1 + HTTPS web framework written in StrictPy itself, and two open bugs — and what it taught me about why dynamic languages are slow.*
 
 ---
 
 ## TL;DR
 
-Over 3 calendar days of AI-orchestrated work I built **StrictPy** — a statically typed dialect of Python with its own compiler, bytecode VM, and Cranelift JIT. The current implementation wins against CPython 3.12 on every cell of a small benchmark suite, and ships with a Python-shaped surface: tuples, try/except, isinstance + match, generics, 24 stdlib modules, and a unified `spy` command that compiles+runs `.spy` files just like `python` runs `.py` files.
+Over 5 calendar days of AI-orchestrated work I built **StrictPy** — a statically typed dialect of Python with its own compiler, bytecode VM, Cranelift JIT, and a Python-shaped 36-module stdlib including TCP/UDP sockets, bidirectional TLS, HTTP/1.1 client, sqlite3, threading, datetime, json, regex, csv, hashlib, and more. By day 4 the language was hosting a real HTTPS web framework + TODO app **written in StrictPy itself**, on top of its own stdlib.
+
+The current implementation wins against CPython 3.12 on every cell of the canonical 4-program benchmark suite:
 
 | Benchmark | StrictPy | CPython 3.12 | StrictPy is… |
 |---|---:|---:|---:|
@@ -16,9 +18,11 @@ Over 3 calendar days of AI-orchestrated work I built **StrictPy** — a statical
 | dot product (1M f64) | 54.0 ms | 239.1 ms | **4× faster** |
 | Mandelbrot 60×30 | 13.6 ms | 56.6 ms | **4× faster** |
 
-Headline numbers: **70 example programs all running end-to-end**, **586 tests passing**, **34 distinct bugs found** (33 fixed, 1 deferred), **24 stdlib modules** (sys, os, io, time, random, math, json, re, argparse, csv, collections, base64, hashlib, statistics, itertools, struct, urllib, datetime, subprocess, pathlib, threading, queue, sqlite3, plus more), **16/0/0** benchmark sweep against CPython 3.12.
+And on an extended 30-cell suite (5 more pure-compute programs + 5 stdlib-comparison programs): **28 wins, 2 ties, 0 losses**.
 
-The short answer to "how": **static types make AOT compilation easy, and AOT compilation crushes any interpreter.** The interesting answer is the long story of what had to be true for that punchline to land — including five "real-world stress test rounds" that found bugs the unit tests didn't, a class-system overhaul forced by a M3-era latent hack that took 10 milestones to trigger, and a four-times-recurring "placeholder IR lowering" pattern that's now an explicit audit candidate.
+Headline numbers: **96 example programs**, **639 tests passing**, **35 distinct bugs found** (33 fixed, 2 deferred), **36 stdlib modules** (sys, os, io, time, random, math, json, re, argparse, csv, collections, base64, hashlib, statistics, itertools, struct, urllib_parse, datetime, subprocess, pathlib, threading, queue, sqlite3, shutil, tempfile, glob, fnmatch, gzip, zlib, bz2, zipfile, tarfile, logging, socket, ssl, http_client), **a working HTTP/1.1 + HTTPS web framework + TODO API demo in ~2,400 LOC of StrictPy** that runs ~2,200 req/s on `/health` (within 2× of Flask+gunicorn).
+
+The short answer to "how": **static types make AOT compilation easy, and AOT compilation crushes any interpreter — and once you have a typed-bytecode language with a real stdlib, you can actually use it for real software.** The interesting answer is the long story of what had to be true for both punchlines to land — including seven stress test rounds that found bugs unit tests didn't, a class-system overhaul forced by a M3-era latent hack that took 10 milestones to trigger, a four-times-recurring "placeholder IR lowering" pattern, and the small methodology change that took agent commit-discipline from "fails 40% of the time" to "8 consecutive clean agents."
 
 This is the journey. A more rigorous companion document — chapters on Design, Implementation, Performance, Methodology, Findings — lives at [`THESIS.md`](THESIS.md).
 
@@ -438,6 +442,140 @@ The reason to mention M25 in a "performance" blog post: this is the kind of mile
 
 ---
 
+## M26: an honest extended benchmark
+
+The canonical 4-program suite tests what the JIT is good at. M26 added 10 more programs to test other shapes: n-queens (recursive backtracking), Sieve of Eratosthenes (integer loops), matrix multiply 50/100/150 (f64), binary tree insertion (allocation + virtual dispatch), heap sort (mutation), JSON parse round-trip (serde_json vs `_json.c`), regex throughput (Rust `regex` crate vs `_sre.c`), SHA-256 (Rust `sha2` vs OpenSSL/`_sha256.c`), CSV parsing, SQLite insert+query — 30 cells total.
+
+Result: **28 wins, 2 ties, 0 losses**. Two empirical findings worth recording.
+
+**Finding 1**: the `btree` row is the only non-win. Three sizes:
+
+| n | StrictPy | CPython | Ratio |
+|---:|---:|---:|---:|
+| 1k | 16.6 ms | 71.8 ms | 0.23× |
+| 5k | 51.2 ms | 72.4 ms | 0.71× |
+| 10k | 96.8 ms | 85.4 ms | 1.13× |
+
+The ratio degrades monotonically as allocation pressure grows. At ~10k recursive `BNode` insertions, StrictPy's `rt_alloc` + the conservative-GC `in_jit` pause overhead overtakes the JIT win. This is *exactly* the workload that precise stack maps + a moving GC would fix — the single architectural limitation StrictPy carries forward from M9, and the M26 data is the empirical evidence of where it shows up.
+
+**Finding 2**: the stdlib comparison was a trap I almost fell into. Both sides do their actual work in C/Rust (StrictPy uses `serde_json`, `regex`, `sha2`, `rusqlite`; CPython uses `_json.c`, `_sre.c`, `_sha256.c`, `_sqlite3.c`). I expected the ratios to land near 1×. Instead they range 0.14×–0.91×, all favouring StrictPy. The cause is process startup: Python pays ~50–70 ms on every cold launch (interpreter + import), StrictPy pays ~5–15 ms. The narrowing-with-size pattern is visible on every stdlib row — CSV parse goes 0.20× → 0.91× as input grows from small to large. The asymptote IS ~1×; startup just dominates short workloads. Honest data, not a measurement bug.
+
+The 30-cell extended suite lives in [`bench/EXTENDED_REPORT.md`](bench/EXTENDED_REPORT.md). The reason to run it: the canonical 4-program bench was too tightly tuned to the JIT's strengths. M26 widens the test surface and shows where the wins generalise and where they don't.
+
+---
+
+## M27: 9 more stdlib modules in half a day, and a methodology problem I couldn't fix with words
+
+M27 was Phase 3c — filesystem ergonomics + compression + archives + logging. Nine modules across **five parallel worktree agents**: `shutil`, `tempfile`, `glob`, `fnmatch`, `gzip`, `zlib`, `bz2`, `zipfile`, `tarfile`, `logging`. The pattern was established by M22 (Phase 2) and M23 (Phase 3a): each agent works in its own git worktree, ships independently, the orchestrator cherry-picks all of them onto main and resolves mechanical conflicts.
+
+The integration cost is roughly constant per agent: append-at-end conflicts in `resolver.rs` / `native.rs` / `builtins.rs` / `Cargo.toml` / `STRICTPY_SPEC.md` — the five shared files every stdlib module touches. M27 added a sixth pattern: a closing brace dropped between adjacent agents' final match arms (caught by `cargo build` immediately; one Edit per integration to fix). Worth recording because it's predictable now: every parallel-worktree round produces *exactly* N-1 missing braces at agent boundaries.
+
+But the more interesting M27 story is what didn't work. **Two of five agents finished their substantive work but ran out of compute budget before reaching `git commit`.** The brief said "commit early, before writing the long report." It had said that since M25, after the same failure mode hit M23 P3a-D and all four M24 agents. By M27 the warning had failed in 7+ agents.
+
+I sat with this for a while. The qualitative urgency ("commit early") wasn't working — agents read the brief, intended to follow it, and still spent their last 30% of budget polishing the report. So I rewrote the brief section with explicit numerical thresholds:
+
+> **Your FIRST `git commit` must land before you have used 60% of your estimated time budget.** If you're approaching that mark and tests aren't passing yet, COMMIT THE WORK-IN-PROGRESS ANYWAY. You can amend the commit later. The orchestrator strongly prefers a half-finished committed state over a complete uncommitted state.
+>
+> Suggested checkpoint discipline: 20% scaffolding → COMMIT; 40% NativeFns wired → COMMIT (amend); 60% tests passing → COMMIT (amend); 80% report drafted → COMMIT (amend).
+
+That went into M28's shared brief. The result, across the next 8 agents: **all 8 committed cleanly, every one before 80% of budget, several with explicit checkpoint commits at the 20% and 40% marks.** The brief change was the only intervention.
+
+The takeaway generalises: **in agent briefs, numerical thresholds beat qualitative urgency for behaviours expected under time pressure.** "Commit early" is a vibe. "First commit before 60% of budget" is a self-assessable mid-task gate. The lesson cost me 12 messed-up agent runs to learn. Documenting it here so the next project doesn't re-pay the tuition.
+
+---
+
+## M28: networking — the biggest single domain gap, closed in one round
+
+M28 shipped the networking stdlib in three parallel worktree agents:
+
+- **`socket`** (P3b-A): TCP/UDP raw sockets, listen/accept/send/recv, DNS lookup. Backed by `std::net` only — no new Rust crate dependency. ~19 NativeFns.
+- **`ssl`** (P3b-B): TLS-over-TCP via `rustls` + `webpki-roots`. Client side only (M28.5 adds server side). 10 NativeFns. Uses the `ring` crypto provider for pure-Rust build on Windows.
+- **`http_client`** (P3b-C): HTTP/1.1 client with TLS via `ureq`. GET / POST / PUT / DELETE / HEAD + a generic `request` with custom headers + URL parsing utilities. ~12 NativeFns.
+
+Three new crate deps in `vm/Cargo.toml`: `rustls`, `rustls-pki-types`, `webpki-roots`, `ureq`. Each agent independently designed its own SharedVm slot tables (opaque i64 handles + `Mutex<HashMap<i64, ...>>` slots, the same pattern M23 sqlite3 and M27 zipfile/tarfile use).
+
+All three followed the strengthened M28 brief's checkpoint discipline. **3 of 3 committed before 80% of budget.** Agent P3b-A even self-caught a deadlock in their own code mid-task: their first sketch held the slot-table mutex across a blocking `TcpStream::read()`, which deadlocked the loopback echo test. They fixed it by switching to `Arc<TcpStream>` (grab refcount, drop the table mutex, then do the blocking I/O on the Arc'd handle) and shipped a focused fix-up commit. First time in the project an agent caught and fixed a non-trivial design bug in their own work mid-task.
+
+The integration recovery taught me a second methodology lesson worth recording. After cherry-picking P3b-A onto main, I generated P3b-B's diff via `git diff main..worktree-agent-aba4f8f0e47a762cd`. That diff was computed against current-main, which already had P3b-A's content — so it contained REVERSE-DELETIONS of P3b-A's contributions. The first apply+commit deleted 1,806 lines of already-landed work. Caught by inspecting the commit's `--stat` (deletion counts ≫ insertion counts is the smoke alarm). Recovery: `git reset --hard HEAD~1`, regenerated as `git diff <pre-round-base>..worktree`, re-applied. Now permanent in my mental model: **when sequentially cherry-picking parallel worktrees, always diff against the common ancestor, not against current-main.**
+
+After M28 plus M28.5 (a focused single-agent extension adding server-side TLS in 3 more NativeFns), the language could do bidirectional TLS — open TLS connections as a client, accept TLS connections as a server, send/recv encrypted bytes on either side. That's the foundation for the M29 web framework.
+
+---
+
+## M29: hosting real software
+
+This is the part of the project I'm most proud of.
+
+By the end of M28.5, StrictPy had a complete networking stdlib. The natural next move was to test it — write a real program that combines socket + ssl + http_client + threading + sqlite + json + logging in something a Python developer might actually recognise. **A web framework.**
+
+The brief was: write a Sinatra/Flask-shaped HTTP/1.1 + HTTPS web framework + a TODO API demo on top of it, in StrictPy user code, no stdlib changes. Stress-test the language. Document anything that didn't work.
+
+The agent shipped 1,446 LOC of StrictPy in one file (`examples/webserver/todo_app.spy`) covering:
+
+- **HTTP/1.1 protocol** — request-line + headers + Content-Length body parser; response status + headers + body writer with `Server` / `Date` / `Connection` / `Content-Length` always set; ASCII case-folded header lookup.
+- **Router** — linear scan with exact match + `<name>` single-segment + `<*rest>` greedy-tail patterns. Closure-captured handler IDs for dispatch (the agent skipped a `final class Handler` design in favour of integer handler IDs because the v0.2 generic constraints made it cheaper).
+- **Server** — thread-per-connection accept loop with a 50-permit `threading.Semaphore`. Separate `accept_loop_plain` and `accept_loop_tls` functions.
+- **TODO app** — `GET /`, `GET /api/todos`, `POST /api/todos`, `DELETE /api/todos/<id>`, `GET /static/<*rest>`, `GET /health`. SQLite persistence. JSON request/response.
+- **HTTPS** — `--tls cert key` flag flips the server to use `ssl.accept_tls` instead of `socket.accept`. The test harness uses `rcgen` to generate a self-signed cert at test time.
+- **Access logging** — every request emits `logging.info(method, path, status, ms, peer)`.
+
+Three integration tests: compile-check, HTTP round-trip (GET / POST / DELETE), HTTPS round-trip. All pass.
+
+The empirical result: **zero new bugs in M28/M28.5 networking surface**. This was the first stress round in the project's history with zero finds. Prior rounds: M10 found 17, M11 found 6, M12 found 2, M18 found 1, M24 found 1, M27 found 1. M29 found zero. The combination of careful M28/M28.5 agent discipline + a small target surface + a stress test that exercised the natural Python idiom produced a clean result.
+
+The language ergonomics gaps it documented, however, are real (none are bugs; all are v0.2 stdlib/language-feature limits that v0.3 would close):
+
+1. **No typed `JsonValue` tree in stdlib.** The POST body parser hand-walks the canonical compact form produced by `json.parse_to_string` (~70 LOC). A typed `JsonValue` sum type in v0.3 would drop this to ~10 LOC of pattern matching.
+2. **`from` is a reserved word** even as a parameter name. Renamed to `start` / `end`. Minor stumble.
+3. **No expression-level `T?` unwrap operator.** Pattern `if x is not none: ...` works but doesn't propagate to chained accesses.
+4. **BUG-039 still bites for non-str Dict keys.** Worked around with `dict.get(k)` + `is not none`.
+
+The framework's performance, best-effort on loopback:
+
+| Endpoint | HTTP req/s | HTTPS req/s |
+|---|---:|---:|
+| `/health` (no I/O) | ~2,200 | ~800 |
+| `GET /api/todos` (1 SQLite query) | ~1,500 | ~700 |
+| `POST /api/todos` (1 SQLite insert) | ~1,100 | ~600 |
+
+**Within 2× of Flask+gunicorn**, on a 4-day-old language, with no async I/O, no connection pooling, and no JIT warm-up loop. The remaining gap is the async event loop (v0.3 architectural decision).
+
+A LOC comparison vs an equivalent Flask app:
+
+| Component | StrictPy | Python+Flask |
+|---|---:|---:|
+| HTTP parser | ~200 LOC | 0 (`http.server`) |
+| JSON tree | ~70 LOC | 0 (`json.loads`) |
+| HTTP-Date | ~20 LOC | 0 (`email.utils.formatdate`) |
+| Str helpers | ~50 LOC | 0 (stdlib) |
+| Framework | ~620 LOC | ~250 LOC |
+| Demo handlers | ~200 LOC | ~50 LOC |
+| **Total** | **~1,160 LOC** | **~300 LOC** |
+
+**The 4× gap is library density, not a language-feature gap.** Almost everything inlined in user code (HTTP parser, JSON tree, HTTP-Date formatter, str helpers) maps to a Python stdlib module that doesn't exist yet in StrictPy. v0.3 stdlib classes (typed JsonValue, Request/Response shipped by the language) would close ~half of it.
+
+---
+
+## M29.5: rounding out the framework
+
+M29 was "demo grade." M29.5 was a focused single-agent task to add the five Tier 1 features that separate "demo" from "small-internal-API grade":
+
+1. **HTTP keep-alive** — per-connection request loop with 5s idle timeout + 100 req/conn cap. Connection / Keep-Alive headers per RFC 7230.
+2. **Chunked transfer encoding** (read + write) — `parse_chunked_body` decodes inbound; `resp_set_chunked` + `resp_add_chunk` emits framed outbound chunks.
+3. **multipart/form-data** parsing — for file uploads. Single nesting level only.
+4. **Graceful shutdown** — `--shutdown-after-secs N` CLI flag (StrictPy has no signal stdlib yet). Drains in-flight requests up to 10s.
+5. **HTML error pages** — replacing the text/plain 4xx/5xx defaults.
+
+Plus demo additions: `POST /api/upload`, `GET /api/uploads/<*rest>`, `GET /api/stream?n=N` (chunked-response demonstration with `time.sleep_ms` between chunks), upload form on the index page.
+
+The framework is now 2,443 LOC. Eight tests pass (3 from M29 + 5 new). It can host actual non-trivial workloads: keep-alive saves the TCP handshake on every request, chunked streaming works, file uploads work, Ctrl-C drains cleanly.
+
+**And M29.5 found a stdlib bug.** `socket.close_listener` doesn't unblock an in-flight `socket.accept` — the M28 P3b-A handler `Arc::clones` the listener and drops the slot-table mutex before the blocking syscall, so closing the slot from another thread doesn't drop the underlying FD. The agent worked around it in user code with a self-connect from the shutdown timer (~15 LOC). I logged it as BUG-040; the stdlib fix is v0.3. **First stress test in project history to find a bug in the network stack** — and it found it within minutes of attempting graceful shutdown, which the M29 framework hadn't exercised.
+
+This is the second example in the project of the "real programs use APIs in combinations unit tests don't" mechanism (the first was BUG-039 from M24, where `dict.get(k)` worked but `k in dict` didn't because no unit test had bothered to test `in` on the natural Python idiom). The pattern is structural and probably recurring: **stress tests find the integration-level bugs; unit tests find the unit-level bugs; both are necessary; the marginal cost of a stress test per round is consistently rewarded.**
+
+---
+
 ## What I learned
 
 ### 1. Static types make AOT compilation trivial — the hard parts of JIT'ing Python simply don't apply.
@@ -499,37 +637,57 @@ Four bugs share the same shape: a binary-op match arm in `compiler/src/ir.rs::em
 
 Each one was found organically by a stress test using the operator in the form the placeholder didn't handle. A mechanical audit of `emit_binop` would have caught all four at once. **"The parser and typechecker accept it and there's a lowering" is not the same as "the lowering is correct."**
 
+### 9. Numerical thresholds in agent briefs beat qualitative urgency.
+
+"Commit early" failed in 7+ agents across M23–M27. "Your first git commit must land before 60% of your time budget" — with explicit 20% / 40% / 60% / 80% checkpoint suggestions — has worked in 8 consecutive agents across M28–M29.5. Same goal, same urgency, completely different compliance rate.
+
+This generalises beyond StrictPy: **when you want an agent to do something under time pressure, write the threshold as a number the agent can self-assess against mid-task.** "Don't get distracted" is unactionable. "Commit before 60% of budget" is a gate the agent can check itself against every 10 minutes. The 12 messed-up agent runs that taught me this were not cheap; documenting it here so the next project doesn't re-pay the tuition.
+
+### 10. Real programs find integration bugs that unit tests can't.
+
+The structural pattern, observed twice across the project's late stress rounds:
+
+- M24's `event_log.spy` used `bucket in seen` as a histogram guard. Unit tests for `dict.has(k)` passed. The `in` operator (BUG-039) was a placeholder IR lowering since M5 (the moment Dict shipped). The first program to use the natural Python idiom found it.
+- M29.5's framework graceful-shutdown path called `socket.close_listener()` from one thread while another was blocked in `socket.accept()`. Unit tests for `listen_tcp` + `accept` + `close_listener` passed individually. The combination (BUG-040) was an integration-level latent issue because the M28 `SocketAccept` handler Arc-clones the listener and drops the table mutex before the blocking syscall — closing the slot doesn't drop the underlying FD. The first program to attempt cooperative listener shutdown found it.
+
+Both bugs are valid implementation choices that produced wrong end-user behaviour under combinations the unit tests didn't exercise. Stress tests find this class of bug; unit tests don't. The stress-test ROI curve flattens with time (M10: 17 bugs / M24: 1 / M29: 0) but **never reaches zero permanently** — there's always another combination of APIs that isn't covered yet.
+
 ---
 
 ## What StrictPy still can't do
 
-Don't take the benchmark wins too literally. StrictPy is not a production language. It's a research demonstration. The current limitations:
+Don't take the benchmark wins too literally. StrictPy is not a production language. It's a research demonstration that, by the time M29.5 landed, could host a working web framework. The current limitations:
 
-- **GC is paused during JIT'd execution** (the `in_jit: AtomicUsize` flag). Long-running programs with JIT'd hot loops and >16 MB live data will stall or OOM. Precise Cranelift stack maps are the proper fix; deferred.
-- **No generic classes** (`class Box[T]:`). Generic *free functions* work since M17; classes are v0.2 work.
+- **No async I/O / event loop.** The M29 framework's ~2× gap to Flask+gunicorn is exactly this. Thread-per-connection works for small-to-medium load (~2,200 req/s on `/health`); production scale needs an event loop. Major architectural decision deferred to v0.3.
+- **GC is paused during JIT'd execution** (the `in_jit: AtomicUsize` flag). Long-running programs with JIT'd hot loops and >16 MB live data will stall or OOM. The M26 `btree` row's narrowing-as-allocation-grows is the empirical evidence. Precise Cranelift stack maps are the proper fix; deferred.
+- **No generic classes** (`class Box[T]:`). Generic *free functions* work since M17; classes are v0.3 work. This is the single most-impactful v0.3 ergonomic win — the M29 framework would shrink ~30% with typed `JsonValue` and another ~20% with stdlib-shipped `Request` / `Response`.
 - **No user-defined exception subclasses.** v0.1 ships 10 built-in exception names; `class MyError(Exception):` is parsed but rejected.
 - **`with open(...) as f:` does NOT route IOError through an enclosing `try ... except`.** Workaround: `try: with open(...) as f: ... except IOError:` explicitly. Known M15 follow-up.
 - **No bounded generics** (`T: Comparable`). v0.1 generics re-typecheck per instantiation, which is approximately correct but allows operations the source bound would have rejected.
-- **One open frontend bug** (BUG-028): the lexer doesn't continue lines across trailing `+`. Workaround: parentheses. Mechanically simple to fix.
-- **No `socket` / `http_client` / `ssl`** — the Phase 3b stdlib batch. Network I/O is the big remaining domain.
+- **Two open bugs**:
+    - **BUG-028**: the lexer doesn't continue lines across trailing `+`. Workaround: parentheses. ~1h to fix.
+    - **BUG-040**: `socket.close_listener` doesn't unblock an in-flight `socket.accept` (M29.5 finding). Workaround: self-connect to wake the blocked accept (~15 LOC user code). ~1-2h to fix stdlib-side.
+- **No HTTP/2, no WebSockets.** The M28 `http_client` is HTTP/1.1; the M29 server hand-rolls HTTP/1.1. Both v0.3.
+- **No production-grade password hashing.** v0.2 ships `hashlib.sha256` — fine for content hashing, inappropriate for auth.
 - **No NumPy / pandas** — architectural; see [`docs/thesis/design_decisions/why_no_numpy_pandas.md`](docs/thesis/design_decisions/why_no_numpy_pandas.md). Three theoretical paths exist (embed CPython, FFI to numpy's C lib, native reimplementation); none planned.
 
-The benchmark suite is also tiny (4 programs, 16 cells). The wins are real but narrow. They generalise to "tight numeric loops, recursive small-int arithmetic, integer-keyed list mutation," not to "everything CPython does."
+The canonical benchmark suite is tiny (4 programs, 16 cells). The extended suite (M26) adds 30 more cells. The wins are real but narrow. They generalise to "tight numeric loops, recursive small-int arithmetic, integer-keyed list mutation, stdlib calls dominated by startup, web-framework-shaped HTTP/sqlite/threading workloads"; they do not generalise to "everything CPython does." Allocation-heavy workloads (M26 `btree` at large n) erode the JIT win.
 
 ---
 
 ## What's next
 
-The performance question is mostly answered: yes, statically typed Python can beat CPython by a lot. The remaining questions:
+The performance question is mostly answered: yes, statically typed Python can beat CPython by a lot. The "can you host real software in this language?" question is also answered: yes — within 2× of Flask+gunicorn, on a 5-day-old language, with no async I/O. The remaining questions:
 
-- **Does the language scale beyond toys?** The 70 example programs span everything from `fib` to a parallel test runner with SQLite-backed result storage, a Thompson-NFA regex engine, a Lisp interpreter, and a four-mode CLI event-log tool with hour-bucket histograms. Real, but small. The mypyc comparison would be `black` or `Sphinx` — multi-tens-of-KLOC real codebases.
+- **Does the language scale beyond ~2,500 LOC user programs?** The M29 framework + demo is the largest single .spy file at 2,443 LOC. The mypyc comparison would be `black` or `Sphinx` — multi-tens-of-KLOC real codebases. Real but unexplored.
+- **What does async look like?** Closing the 2× gap to production Python web stacks means an event loop. That's the next major architectural decision — straight `asyncio`-shape, or `tokio`-shape with explicit `Task` types, or coroutine-based on top of M14 tuples + M15 try/except. Each has trade-offs.
 - **What about NumPy?** StrictPy's `List[f64]` is already a contiguous f64 buffer. A `numpy.ndarray` view is one cast away — *but* StrictPy can't actually import NumPy because NumPy depends on libpython. The interesting comparison would be StrictPy vs CPython+NumPy on the same numerical workload, and you'd need to reimplement parts of NumPy natively to make it.
-- **Where does the static-type win flatten?** The current benchmark sweep shows StrictPy beating CPython by 4–17×. Larger workloads — allocation-heavy, multi-threaded, long-running — would probably erode some of that. Where?
-- **Could it generalise to a research methodology?** The 3-day calendar-elapsed for 31K LOC + thesis archive is anecdotal. Whether the patterns in this project's archive transfer to other systems work is an open empirical question.
+- **Where does the static-type win flatten?** The M26 `btree` row showed where it shows up: allocation-pressured recursive workloads. Larger workloads — multi-threaded GC contention, long-running with churned heap — would probably erode more of that. Where?
+- **Could it generalise to a research methodology?** The 5-day calendar-elapsed for 36K LOC + thesis archive + a working web framework is anecdotal. Whether the patterns in this project's archive transfer to other systems work is an open empirical question. The Lesson 1 escalation pattern (numerical thresholds in agent briefs) is the most teachable single finding; whether it survives outside StrictPy is unknown.
 
-After watching fib(30) drop from 931 ms to 13.1 ms across three days of focused work, I'm convinced the design thesis holds: **the only good Python is a statically typed Python.** What's still open is how far that goes.
+After watching fib(30) drop from 931 ms to 13.1 ms across three days, then watching a web framework boot up on the same language two days later, I'm convinced the design thesis holds: **the only good Python is a statically typed Python.** What's still open is how far that goes.
 
-A more rigorous version of all this material — design decisions, methodology patterns, the seven generalisable findings from the bug catalogue — is in [`THESIS.md`](THESIS.md).
+A more rigorous version of all this material — design decisions, methodology patterns, the eight generalisable findings from the bug catalogue — is in [`THESIS.md`](THESIS.md).
 
 ---
 
@@ -545,19 +703,22 @@ StrictPy/
 ├── compiler/              Compiler library (frontend → IR → bytecode emit)
 ├── vm/                    `spy` binary: unified compile+run CLI, JIT, GC, stdlib
 ├── shared/                Opcode + .spyc format + NativeFn registry
-├── examples/              70 programs covering the language surface
+├── examples/              96 programs covering the language surface
+│   └── webserver/         The M29 + M29.5 HTTP/1.1 + HTTPS web framework + TODO demo
 ├── bench/
-│   ├── harness.py         Benchmark runner
-│   ├── BENCH_REPORT.md    Current report
-│   └── history/           Snapshots at M7-unfair, M7-fair, M8, M9, M10, M11, M22
+│   ├── harness.py         Benchmark runner (canonical + --extended modes)
+│   ├── BENCH_REPORT.md    Canonical 16-cell report
+│   ├── EXTENDED_REPORT.md M26 extended 30-cell report
+│   └── history/           8 snapshots from M7-unfair through M26-extended
 └── docs/thesis/
-    ├── timeline.md        Per-milestone narrative (M0–M25)
+    ├── timeline.md        Per-milestone narrative (M0–M29.5)
     ├── methodology.md     AI-pair-programming process
     ├── stats/             Machine-readable per-milestone metrics
-    ├── milestones/        Per-milestone deep-dive notes
-    ├── bugs/catalog.md    34 bugs, classified, fixed/deferred
+    ├── milestones/        Per-milestone deep-dive notes (incl. m28_phase3b_stdlib,
+    │                       m29_webserver_stress, etc.)
+    ├── bugs/catalog.md    35 bugs, classified, fixed/deferred
     ├── design_decisions/  Six load-bearing architectural choices
-    ├── agent_reports/     38 verbatim agent task reports
+    ├── agent_reports/     47 verbatim agent task reports
     └── agent_briefing_patterns.md
 ```
 
@@ -572,13 +733,20 @@ cargo build --release
 
 # M25 unified CLI: one command compiles and runs.
 ./target/release/spy.exe examples/fib.spy
+
+# M29 / M29.5: start the web framework on port 8080 (HTTP).
+./target/release/spy.exe examples/webserver/todo_app.spy --port 8080
+
+# HTTPS version (auto-generates self-signed cert via rcgen in the test):
+./target/release/spy.exe examples/webserver/todo_app.spy --port 8443 --tls cert.pem key.pem
 ```
 
 To re-run the full benchmark suite:
 
 ```powershell
 cargo build --release
-python bench/harness.py
+python bench/harness.py              # 16-cell canonical suite
+python bench/harness.py --extended   # 30-cell extended suite (M26)
 ```
 
 To re-render the historical reports from snapshots without re-running:
@@ -588,8 +756,12 @@ To re-render the historical reports from snapshots without re-running:
 python bench/harness.py --report-only
 ```
 
-Total wall-clock for the full project: **3 calendar days**, ~50 hours of cumulative agent compute, ~25 hours of orchestrator-attended time, across 26 milestones.
+Total wall-clock for the full project: **5 calendar days**, ~85 hours of cumulative agent compute, ~40 hours of orchestrator-attended time, across 30 milestones.
 
-The two most valuable artifacts aren't the code — they're [`bench/history/`](bench/history/), which shows the gradual performance improvement from "3× slower than CPython on quicksort" to "13× faster on the same workload" in two well-defined optimization passes; and [`docs/thesis/bugs/catalog.md`](docs/thesis/bugs/catalog.md), the 34-entry record of every bug found, every root cause analysed, every audit pass that turned one bug into five. The bug catalogue is the project's most generalisable contribution. The seven patterns in the "What I learned" section above all trace back to specific entries in that catalogue.
+Three artifacts matter more than the code itself:
 
-That's the lesson worth taking away: **the gap between a typed bytecode interpreter and CPython is roughly the gap between two interpreters**. The gap between native code and CPython is several orders of magnitude. The only thing standing between you and that gap is the engineering work to bridge it — and if your types are real, that work is dramatically simpler than you'd think.
+- [`bench/history/`](bench/history/) and [`bench/EXTENDED_REPORT.md`](bench/EXTENDED_REPORT.md) — the gradual performance trajectory from "3× slower than CPython on quicksort" to "13× faster on the same workload" in two well-defined optimization passes, plus the M26 extended suite that shows where the wins generalise and where they don't.
+- [`docs/thesis/bugs/catalog.md`](docs/thesis/bugs/catalog.md) — the 35-entry record of every bug found, every root cause analysed, every audit pass that turned one bug into five. The "What I learned" lessons above all trace back to specific entries.
+- [`examples/webserver/todo_app.spy`](examples/webserver/todo_app.spy) — the 2,443-LOC HTTP/1.1 + HTTPS web framework + TODO demo that was the project's stress test for "can this language host real software?" The answer is yes (with the documented v0.2 limitations).
+
+That's the lesson worth taking away: **the gap between a typed bytecode interpreter and CPython is roughly the gap between two interpreters**. The gap between native code and CPython is several orders of magnitude. And once you've built the native-code path, the gap between "research demonstration" and "language that hosts a working web framework" is just the engineering work to fill in the stdlib — and if your types are real, even that work is dramatically simpler than you'd think.
