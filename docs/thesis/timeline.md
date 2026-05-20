@@ -1117,6 +1117,83 @@ No language/compiler changes; new pure-bench infrastructure only.
 
 ---
 
+## M28 — Phase 3b stdlib (2026-05-20)
+
+The biggest single domain remaining at end of M27: networking.
+3 parallel worktree agents shipped 3 modules — socket (TCP/UDP raw
++ listen/accept), ssl (TLS-over-TCP via rustls), http_client
+(HTTP/1.1 via ureq).
+
+### Agents
+
+| Agent | Modules | NativeFns | New deps |
+|---|---|---:|---|
+| P3b-A | socket | 19 (570-588) | none (std::net) |
+| P3b-B | ssl | 10 (600-609) | rustls + rustls-pki-types + webpki-roots |
+| P3b-C | http_client | ~12 (620-649) | ureq |
+
+### The Lesson 1 escalation actually worked
+
+The brief's strengthened language — "**Your FIRST `git commit` must
+land before you have used 60% of your estimated time budget**" —
+moved the needle where 7+ prior agents had failed:
+
+- P3b-A: 2 commits (initial + self-fixed deadlock at ~40% of budget)
+- P3b-B: 2 commits (green-build checkpoint at ~30%, final at end)
+- P3b-C: 1 commit (committed before final test verification)
+
+3 of 3 agents shipped committed work, vs 3 of 5 (M27) and 0 of 4
+(M24). Explicit numerical thresholds in agent briefs move the needle
+where qualitative urgency ("commit early") doesn't.
+
+### Two integration disasters worth recording
+
+**Disaster 1**: P3b-B's diff generated against current-main (which
+already had P3b-A's content) contained REVERSE-DELETIONS of P3b-A's
+work. The first commit deleted 1806 lines. Caught by inspecting the
+`--stat` output. Recovery: `git reset --hard HEAD~1` + regenerate
+diff against the PRE-M28 base (c4fe0ce). **Pattern lesson**: when
+sequentially cherry-picking parallel worktrees, always diff against
+the common ancestor, not against current-main.
+
+**Disaster 2**: The keep-both auto-resolution placed P3b-B's `ssl`
+StdlibModule block AFTER the closing `}` of `seed_stdlib_modules`.
+Compile errors: "no method `seed_prelude` found for `Resolver`"
+because methods after the misplaced block fell outside the impl
+scope. Recovery: extract the ssl block from the worktree's
+resolver.rs, reset main's file, Python-scripted insertion before
+the function's closing brace.
+
+### The familiar closing-brace fix (third round in a row)
+
+`vm/src/builtins.rs` again needed 2 missing-`}` fixes between
+adjacent agents' match arms — plus a NEW variant: where P3b-B's
+`mod ssl_no_verify` ended and P3b-C's helper functions began, the
+keep-both dropped TWO closing braces (one for `impl
+ServerCertVerifier for NoVerify`, one for the `mod` block). Pattern
+escalation noted: every M27+ integration adds N-1 missing braces
+between adjacent agents.
+
+### What the language can now do
+
+After M28, the language has 36 stdlib modules and reaches into:
+TCP/UDP sockets, TLS, HTTPS clients, SQLite, threading, subprocess,
+filesystem (full surface — shutil + tempfile + glob + pathlib +
+os + io), compression + archives, JSON + regex + CSV, argparse +
+collections + itertools + statistics + struct, hashing + base64 +
+urllib_parse, datetime + time + random + math, logging. That is
+"everything a non-async CLI tool, log scraper, or API client
+needs" — the explicit gaps are async I/O, HTTP/2/WebSockets,
+generic classes, user-defined exception subclasses.
+
+### Tests + size
+
+- **Tests**: 621 → ~640 (+~20 new).
+- **Examples**: 79 → 85 (+6).
+- **Stdlib modules**: 33 → 36.
+
+---
+
 ## M27 — Phase 3c stdlib (2026-05-20)
 
 Filesystem ergonomics + compression + archives + logging — 9 stdlib
