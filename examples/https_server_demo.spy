@@ -1,0 +1,178 @@
+"""https_server_demo.spy — M28.5 P3b-D demo of server-side TLS.
+
+Spins up a tiny HTTPS-shaped server on 127.0.0.1, accepts ONE
+incoming TLS connection, reads a request, writes a canned response,
+closes.  A client thread in the same process then connects with
+ssl.connect, exchanges the request/response, and prints the result.
+
+The dance:
+  * argv[1] / argv[2] = cert_pem_path / key_pem_path (the test harness
+    generates a self-signed cert with rcgen and writes both PEMs to a
+    tempdir, then invokes spy.exe with those paths).
+  * main thread: load_server_config + listen_tcp on 127.0.0.1:0
+    (port 0 -> OS picks free port).  Local_addr of an accepted socket
+    isn't accessible until accept fires, but the brief's contract uses
+    a fixed port range so we walk it the same way socket_demo does.
+  * client thread (closure): spin-wait on a shared cell for the port,
+    then ssl.set_verify_certs(false) + ssl.connect + send "GET /\r\n\r\n"
+    + recv_exact a fixed-length canned response + report.
+  * main thread: ssl.accept_tls, recv_exact the request line, send
+    the canned response, close.
+  * join the client thread + print verdict.
+
+Tests:
+  * compiler/tests/https_server_demo_runs.rs — subprocess assertion of
+    every line of expected output.
+"""
+
+from threading import Thread
+import socket
+import ssl
+import sys
+
+
+fn client_worker(port_cell: List[i32], ready_cell: List[i32],
+                 reply_cell: List[str], status_cell: List[str]) -> None:
+    # Spin-wait until main signals the listener is bound + the cert is
+    # loaded.  Loopback handshake completes in microseconds so the wait
+    # is bounded by main reaching ready_cell[0] = 1i32.
+    while ready_cell[0] == 0i32:
+        pass
+    port: i32 = port_cell[0]
+
+    # The server presents a self-signed cert with CN=localhost; the
+    # Mozilla root bundle obviously doesn't sign it, so flip the global
+    # verify flag off for this loopback test.  Same convention M28
+    # P3b-B's ssl_demo uses.
+    ssl.set_verify_certs(false)
+    try:
+        conn: i64 = ssl.connect("127.0.0.1", port)
+        ssl.set_timeout_secs(conn, 10.0)
+        sent: i32 = ssl.send(conn, "GET / HTTP/1.0\r\n\r\n")
+        if sent < 1i32:
+            status_cell[0] = "client-short-send"
+            ssl.close(conn)
+            return
+        # The canned response from the server has a known fixed length;
+        # recv_exact gives us a deterministic round-trip without parsing
+        # HTTP framing.  The length is the byte count of the literal
+        # below — duplicated on both sides on purpose so a mismatch
+        # surfaces loud.
+        resp_len: i32 = 34i32
+        body: str = ssl.recv_exact(conn, resp_len)
+        reply_cell[0] = body
+        status_cell[0] = "ok"
+        ssl.close(conn)
+    except IOError as e:
+        status_cell[0] = "client-IOError"
+    except ValueError as e:
+        status_cell[0] = "client-ValueError"
+
+
+fn main() -> i32:
+    argv: List[str] = sys.argv
+    if i32(i64(len(argv))) < 3i32:
+        println("usage: https_server_demo <cert_pem> <key_pem>")
+        return 1
+    cert_path: str = argv[1]
+    key_path: str = argv[2]
+
+    # ── 1. Load the server-side TLS config from the supplied PEM files ──
+    server_cfg: i64 = ssl.load_server_config(cert_path, key_path)
+    if server_cfg <= 0i64:
+        println("load_server_config: BUG returned " + str(server_cfg))
+        return 1
+    println("server_cfg: loaded")
+
+    # ── 2. Bind a TCP listener on a fixed loopback port range ─────────
+    # Same pattern as socket_demo — walk a small range to dodge "port
+    # in use" collisions on shared CI hosts.  16 candidates is plenty.
+    chosen_port: i32 = 0i32
+    listener: i64 = 0i64
+    attempt: i32 = 0i32
+    while attempt < 16i32 and chosen_port == 0i32:
+        candidate: i32 = 50200i32 + attempt
+        try:
+            listener = socket.listen_tcp("127.0.0.1", candidate, 8i32)
+            chosen_port = candidate
+        except IOError as e:
+            chosen_port = 0i32
+        attempt = attempt + 1i32
+
+    if chosen_port == 0i32:
+        println("could-not-bind-any-port")
+        return 1
+    println("bound: true")
+
+    # ── 3. Spawn the client thread (it spins on ready_cell) ──────────
+    port_cell: List[i32] = [chosen_port]
+    ready_cell: List[i32] = [0i32]
+    reply_cell: List[str] = [""]
+    status_cell: List[str] = [""]
+
+    t: Thread = Thread(
+        fn() -> None: client_worker(port_cell, ready_cell, reply_cell, status_cell)
+    )
+    t.start()
+    # Release the client.
+    ready_cell[0] = 1i32
+
+    # ── 4. accept_tls + serve one request ────────────────────────────
+    pair: Tuple[i64, str] = ssl.accept_tls(listener, server_cfg)
+    server_handle: i64 = pair.0
+    peer: str = pair.1
+    if i64(len(peer)) > 0i64:
+        println("accepted: true")
+    else:
+        println("accepted: BUG empty peer")
+
+    # peer_addr on a server handle should give the client's "ip:port".
+    paddr: str = ssl.peer_addr(server_handle)
+    if i64(len(paddr)) > 0i64:
+        println("server.peer_addr: nonempty")
+    else:
+        println("server.peer_addr: BUG empty")
+
+    # Generous deadline so a hung client fails fast.
+    ssl.set_timeout_secs(server_handle, 10.0)
+
+    # The client sends a fixed-length GET line; recv_exact lets us avoid
+    # implementing HTTP line parsing for a demo.  "GET / HTTP/1.0\r\n\r\n"
+    # is 18 bytes.
+    request_len: i32 = 18i32
+    req: str = ssl.recv_exact(server_handle, request_len)
+    if i32(i64(len(req))) == request_len:
+        println("server.recv_exact: ok")
+    else:
+        println("server.recv_exact: BUG len=" + str(i32(i64(len(req)))))
+
+    # Canned response — 34 bytes (matches resp_len on the client).
+    response: str = "HTTP/1.0 200 OK\r\n\r\nhello, https!\r\n"
+    n_resp: i32 = ssl.send(server_handle, response)
+    if n_resp == 34i32:
+        println("server.send: ok")
+    else:
+        println("server.send: BUG n=" + str(n_resp))
+
+    # Clean shutdown of the server-side stream.
+    ssl.close(server_handle)
+    println("server.close: ok")
+
+    # Stop accepting + release the config.
+    socket.close_listener(listener)
+    ssl.free_server_config(server_cfg)
+
+    # ── 5. Wait for the client and assert the round-trip ─────────────
+    t.join()
+    if status_cell[0] == "ok":
+        println("client.status: ok")
+    else:
+        println("client.status: BUG " + status_cell[0])
+
+    if reply_cell[0] == response:
+        println("round_trip: ok")
+    else:
+        println("round_trip: BUG len=" + str(i32(i64(len(reply_cell[0])))))
+
+    println("done")
+    return 0

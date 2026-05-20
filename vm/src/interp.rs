@@ -306,6 +306,29 @@ pub struct SharedVm {
     /// "trust everything" verifier — STRICTLY for testing (loopback /
     /// self-signed staging certs).
     pub tls_verify: std::sync::atomic::AtomicBool,
+    /// M28.5 P3b-D: server-side TLS streams produced by `ssl.accept_tls`.
+    /// Parallel to `tls_streams` (which is client-only) — keyed by a
+    /// disjoint id range (`next_tls_server_id` starts at 1_000_000) so
+    /// the shared `ssl.send` / `recv` / `close` / `peer_addr` /
+    /// `set_timeout_secs` handlers can pick the right table by handle
+    /// value without consulting a tag.  Each entry holds a
+    /// `rustls::StreamOwned<ServerConnection, TcpStream>` — same shape
+    /// as the client side but with `ServerConnection` instead.
+    pub tls_server_streams: std::sync::Mutex<
+        HashMap<i64, rustls::StreamOwned<rustls::ServerConnection, std::net::TcpStream>>,
+    >,
+    /// M28.5 P3b-D: monotonic allocator for `tls_server_streams` keys.
+    /// Starts at 1_000_000 so server handles can never collide with
+    /// client handles from `next_tls_id` — a single i64 handle value
+    /// unambiguously identifies which table to look in.
+    pub next_tls_server_id: std::sync::atomic::AtomicI64,
+    /// M28.5 P3b-D: PEM-loaded cert + private-key bundles registered by
+    /// `ssl.load_server_config`.  Each entry is an `Arc<ServerConfig>`
+    /// so `accept_tls` can cheaply clone a refcount for the new
+    /// `ServerConnection` and the config remains valid for the lifetime
+    /// of every spawned session.  Slot 0 reserved as "no config".
+    pub tls_server_configs:
+        std::sync::Mutex<Vec<Option<std::sync::Arc<rustls::ServerConfig>>>>,
     /// M7: shared stdout sink so spawned worker threads write to the same
     /// destination as the parent interpreter. Without this, the capture
     /// sink installed by `run_file_capture` only sees the parent's writes;
@@ -373,6 +396,11 @@ impl SharedVm {
             tls_streams: std::sync::Mutex::new(HashMap::new()),
             next_tls_id: std::sync::atomic::AtomicI64::new(1),
             tls_verify: std::sync::atomic::AtomicBool::new(true),
+            // M28.5 P3b-D: server-side TLS — disjoint id range from
+            // client side so a single i64 handle picks its own table.
+            tls_server_streams: std::sync::Mutex::new(HashMap::new()),
+            next_tls_server_id: std::sync::atomic::AtomicI64::new(1_000_000),
+            tls_server_configs: std::sync::Mutex::new(vec![None]),
             stdout: Arc::new(Mutex::new(Box::new(RealStdout))),
             #[cfg(feature = "jit")]
             jit: None,
@@ -430,6 +458,10 @@ impl SharedVm {
             tls_streams: std::sync::Mutex::new(HashMap::new()),
             next_tls_id: std::sync::atomic::AtomicI64::new(1),
             tls_verify: std::sync::atomic::AtomicBool::new(true),
+            // M28.5 P3b-D: server-side TLS (JIT path mirror).
+            tls_server_streams: std::sync::Mutex::new(HashMap::new()),
+            next_tls_server_id: std::sync::atomic::AtomicI64::new(1_000_000),
+            tls_server_configs: std::sync::Mutex::new(vec![None]),
             stdout: Arc::new(Mutex::new(Box::new(RealStdout))),
             jit: Some(jit_cell),
             in_jit: AtomicUsize::new(0),

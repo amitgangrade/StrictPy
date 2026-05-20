@@ -3402,6 +3402,16 @@ impl Resolver {
         const SSL_SET_TIMEOUT_SECS: u32     = 607;
         const SSL_SET_VERIFY_CERTS: u32     = 608;
         const SSL_GET_VERIFY_CERTS: u32     = 609;
+        // M28.5 P3b-D: server-side TLS extension.  Lives in the same
+        // `ssl` module — `load_server_config` + `accept_tls` +
+        // `free_server_config` ride alongside the client-side surface.
+        const SSL_LOAD_SERVER_CONFIG: u32   = 610;
+        const SSL_ACCEPT_TLS: u32           = 611;
+        const SSL_FREE_SERVER_CONFIG: u32   = 612;
+        let p3b_d_ssl_accept_tuple = Ty::Tuple(vec![
+            i64_ty.clone(),
+            str_ty.clone(),
+        ]);
 
         let p3b_b_ssl_mod = StdlibModule {
             name: "ssl".into(),
@@ -3465,6 +3475,31 @@ impl Resolver {
                     kind: StdlibItemKind::Function,
                     ty: fn_ty(vec![], bool_ty.clone()),
                     native_id: SSL_GET_VERIFY_CERTS,
+                },
+                // ── M28.5 P3b-D: server-side TLS surface ──────────────
+                StdlibItem {
+                    name: "load_server_config".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), str_ty.clone()],
+                        i64_ty.clone(),
+                    ),
+                    native_id: SSL_LOAD_SERVER_CONFIG,
+                },
+                StdlibItem {
+                    name: "accept_tls".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![i64_ty.clone(), i64_ty.clone()],
+                        p3b_d_ssl_accept_tuple.clone(),
+                    ),
+                    native_id: SSL_ACCEPT_TLS,
+                },
+                StdlibItem {
+                    name: "free_server_config".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], unit_ty.clone()),
+                    native_id: SSL_FREE_SERVER_CONFIG,
                 },
             ],
         };

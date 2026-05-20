@@ -1216,8 +1216,40 @@ pub enum NativeFn {
     SslSetVerifyCerts   = 608,
     /// `ssl.get_verify_certs() -> bool` — read the global flag back.
     SslGetVerifyCerts   = 609,
-    // 610-619 reserved for v0.3 (SNI override, ALPN, mutual auth,
-    // server-side TLS, custom CA bundles, session resumption).
+    // ── M28.5 P3b-D: server-side TLS extension to the `ssl` module ─────
+    // Closes the gap M28 P3b-B deferred: accepting an inbound TCP
+    // connection on a `socket.listen_tcp` handle and presenting a
+    // PEM-loaded cert chain + private key to the peer.  Server-side
+    // TLS handles are issued from a separate id space (starting at
+    // 1_000_000 in `SharedVm.next_tls_server_id`) so the shared
+    // `ssl.send` / `ssl.recv` / `ssl.close` / `ssl.peer_addr` / etc.
+    // handlers can disambiguate them from client-side handles by
+    // value alone.  See spec §9.41.
+    /// `ssl.load_server_config(cert_pem_path: str, key_pem_path: str) -> i64`
+    /// — parse the PEM-encoded cert chain + private key from disk and
+    /// stash them in `SharedVm.tls_server_configs`.  Returns an opaque
+    /// config handle reusable across many `accept_tls` calls.  Raises
+    /// IOError on file-not-found, ValueError on PEM parse failure.
+    SslLoadServerConfig = 610,
+    /// `ssl.accept_tls(tcp_listener: i64, server_config: i64) -> Tuple[i64, str]`
+    /// — accept the next inbound TCP connection on the listener (a
+    /// handle returned by `socket.listen_tcp`), wrap it in a
+    /// server-side TLS handshake, and stash the resulting stream in
+    /// `SharedVm.tls_server_streams`.  Returns `(tls_handle, peer_addr)`.
+    /// The returned `tls_handle` is interchangeable with a client-side
+    /// `ssl.connect` handle from the caller's point of view —
+    /// `ssl.send` / `recv` / `recv_exact` / `close` / `peer_addr` /
+    /// `set_timeout_secs` all work.  Raises IOError on handshake
+    /// failure (bad client cert, protocol mismatch, etc.).
+    SslAcceptTls        = 611,
+    /// `ssl.free_server_config(config: i64) -> None` — drop a config
+    /// handle previously returned by `load_server_config`.  Existing
+    /// `accept_tls` streams keep an `Arc<ServerConfig>` of their own,
+    /// so freeing the config slot does NOT terminate in-flight sessions.
+    /// No-op on zero / unknown handles.
+    SslFreeServerConfig = 612,
+    // 613-619 reserved for v0.3 (SNI override, ALPN, mutual auth,
+    // per-connection CA bundles, session resumption, OCSP stapling).
     // ── 620–649: `http_client` module (M28 P3b-C) ──────────────────────
     // Synchronous HTTP/1.1 client built on `ureq` (rustls for TLS).  All
     // handlers are stateless — each call opens a fresh socket via ureq,
@@ -1667,6 +1699,9 @@ impl NativeFn {
             607 => Some(Self::SslSetTimeoutSecs),
             608 => Some(Self::SslSetVerifyCerts),
             609 => Some(Self::SslGetVerifyCerts),
+            610 => Some(Self::SslLoadServerConfig),
+            611 => Some(Self::SslAcceptTls),
+            612 => Some(Self::SslFreeServerConfig),
             // M28 P3b-C: http_client module (620-630, 11 ids; 631-649 reserved).
             620 => Some(Self::HttpClientGet),
             621 => Some(Self::HttpClientPost),

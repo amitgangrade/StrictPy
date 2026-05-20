@@ -92,6 +92,11 @@ bzip2 = "0.4"
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "logging", "tls12"] }
 rustls-pki-types = "1"
 webpki-roots = "0.26"
+# M28.5 P3b-D: server-side TLS adds PEM parsing for cert + private-key
+# files loaded by `ssl.load_server_config`.  `rustls-pemfile 2` exposes
+# the same `CertificateDer` / `PrivateKeyDer` types `rustls-pki-types`
+# already publishes, so no extra type-conversion bridging is needed.
+rustls-pemfile = "2"
 # M28 P3b-C: `http_client` stdlib module.  `ureq` is the canonical
 # synchronous HTTP/1.1 client for Rust; bundles rustls + webpki-roots
 # for TLS via the `tls` feature, has no async runtime, and is small

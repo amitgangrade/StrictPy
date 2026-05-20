@@ -5805,6 +5805,30 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
                 p3b_b_tls_send_data.chars().count(),
                 "ssl.send",
             )?;
+            // M28.5 P3b-D: handles in [1, 1_000_000) come from the
+            // client `connect` allocator; handles >= 1_000_000 come
+            // from the server `accept_tls` allocator.  Dispatch on
+            // value alone — no enum tag needed.
+            if p3b_b_tls_send_handle >= 1_000_000 {
+                let mut p3b_d_send_table =
+                    interp.shared.tls_server_streams.lock().unwrap();
+                let p3b_d_send_stream = p3b_d_send_table
+                    .get_mut(&p3b_b_tls_send_handle)
+                    .ok_or_else(|| VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "ssl.send: invalid or closed handle {}",
+                            p3b_b_tls_send_handle
+                        ),
+                    })?;
+                p3b_d_send_stream
+                    .write_all(&p3b_b_tls_send_bytes)
+                    .map_err(|e| VmError::UncaughtException {
+                        type_name: "IOError".into(),
+                        message: format!("ssl.send: {e}"),
+                    })?;
+                return Ok((p3b_b_tls_send_bytes.len() as u32) as u64);
+            }
             let mut p3b_b_tls_send_table = interp.shared.tls_streams.lock().unwrap();
             let p3b_b_tls_send_stream = p3b_b_tls_send_table
                 .get_mut(&p3b_b_tls_send_handle)
@@ -5833,7 +5857,33 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             } else {
                 p3b_b_tls_recv_max as usize
             };
-            let p3b_b_tls_recv_bytes = {
+            // M28.5 P3b-D: dispatch on handle id range.
+            let p3b_b_tls_recv_bytes = if p3b_b_tls_recv_handle >= 1_000_000 {
+                let mut p3b_d_recv_table =
+                    interp.shared.tls_server_streams.lock().unwrap();
+                let p3b_d_recv_stream = p3b_d_recv_table
+                    .get_mut(&p3b_b_tls_recv_handle)
+                    .ok_or_else(|| VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "ssl.recv: invalid or closed handle {}",
+                            p3b_b_tls_recv_handle
+                        ),
+                    })?;
+                let mut p3b_d_recv_buf = vec![0u8; p3b_b_tls_recv_cap];
+                if p3b_b_tls_recv_cap == 0 {
+                    Vec::new()
+                } else {
+                    let n = p3b_d_recv_stream
+                        .read(&mut p3b_d_recv_buf)
+                        .map_err(|e| VmError::UncaughtException {
+                            type_name: "IOError".into(),
+                            message: format!("ssl.recv: {e}"),
+                        })?;
+                    p3b_d_recv_buf.truncate(n);
+                    p3b_d_recv_buf
+                }
+            } else {
                 let mut p3b_b_tls_recv_table = interp.shared.tls_streams.lock().unwrap();
                 let p3b_b_tls_recv_stream = p3b_b_tls_recv_table
                     .get_mut(&p3b_b_tls_recv_handle)
@@ -5872,7 +5922,31 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
                     message: format!("ssl.recv_exact: negative n {}", p3b_b_tls_rex_n),
                 });
             }
-            let p3b_b_tls_rex_bytes = {
+            // M28.5 P3b-D: dispatch on handle id range.
+            let p3b_b_tls_rex_bytes = if p3b_b_tls_rex_handle >= 1_000_000 {
+                let mut p3b_d_rex_table =
+                    interp.shared.tls_server_streams.lock().unwrap();
+                let p3b_d_rex_stream = p3b_d_rex_table
+                    .get_mut(&p3b_b_tls_rex_handle)
+                    .ok_or_else(|| VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "ssl.recv_exact: invalid or closed handle {}",
+                            p3b_b_tls_rex_handle
+                        ),
+                    })?;
+                let mut p3b_d_rex_buf = vec![0u8; p3b_b_tls_rex_n as usize];
+                p3b_d_rex_stream
+                    .read_exact(&mut p3b_d_rex_buf)
+                    .map_err(|e| VmError::UncaughtException {
+                        type_name: "IOError".into(),
+                        message: format!(
+                            "ssl.recv_exact: short read of {} bytes: {}",
+                            p3b_b_tls_rex_n, e
+                        ),
+                    })?;
+                p3b_d_rex_buf
+            } else {
                 let mut p3b_b_tls_rex_table = interp.shared.tls_streams.lock().unwrap();
                 let p3b_b_tls_rex_stream = p3b_b_tls_rex_table
                     .get_mut(&p3b_b_tls_rex_handle)
@@ -5905,19 +5979,42 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
                 return Ok(0);
             }
             // Drop the stream; rustls's Drop sends close_notify on the
-            // underlying TCP socket and shuts it down.
-            interp
-                .shared
-                .tls_streams
-                .lock()
-                .unwrap()
-                .remove(&p3b_b_tls_close_handle);
+            // underlying TCP socket and shuts it down.  M28.5 P3b-D:
+            // server-side handles live in a separate table — dispatch
+            // on id range.
+            if p3b_b_tls_close_handle >= 1_000_000 {
+                interp
+                    .shared
+                    .tls_server_streams
+                    .lock()
+                    .unwrap()
+                    .remove(&p3b_b_tls_close_handle);
+            } else {
+                interp
+                    .shared
+                    .tls_streams
+                    .lock()
+                    .unwrap()
+                    .remove(&p3b_b_tls_close_handle);
+            }
             Ok(0)
         }
         NativeFn::SslPeerAddr => {
             let p3b_b_tls_paddr_handle = arg_i64(args, 0);
-            let p3b_b_tls_paddr_addr = {
-                let p3b_b_tls_paddr_table = interp.shared.tls_streams.lock().unwrap();
+            // M28.5 P3b-D: dispatch on handle id range.
+            let p3b_b_tls_paddr_addr = if p3b_b_tls_paddr_handle >= 1_000_000 {
+                let p3b_d_paddr_table =
+                    interp.shared.tls_server_streams.lock().unwrap();
+                match p3b_d_paddr_table.get(&p3b_b_tls_paddr_handle) {
+                    Some(s) => match s.sock.peer_addr() {
+                        Ok(a) => a.to_string(),
+                        Err(_) => String::new(),
+                    },
+                    None => String::new(),
+                }
+            } else {
+                let p3b_b_tls_paddr_table =
+                    interp.shared.tls_streams.lock().unwrap();
                 match p3b_b_tls_paddr_table.get(&p3b_b_tls_paddr_handle) {
                     Some(s) => match s.sock.peer_addr() {
                         Ok(a) => a.to_string(),
@@ -5931,7 +6028,27 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         }
         NativeFn::SslPeerCertSubject => {
             let p3b_b_tls_pcs_handle = arg_i64(args, 0);
-            let p3b_b_tls_pcs_subject = {
+            // M28.5 P3b-D: dispatch on handle id range.  For server-side
+            // handles, `peer_certificates` returns the *client*'s cert
+            // chain — typically None in v0.2 because the server config
+            // is built with `with_no_client_auth()` (mutual auth is
+            // v0.3).  Returning an empty string for that case is fine
+            // and matches the documented "empty if no cert" behaviour.
+            let p3b_b_tls_pcs_subject = if p3b_b_tls_pcs_handle >= 1_000_000 {
+                let p3b_d_pcs_table =
+                    interp.shared.tls_server_streams.lock().unwrap();
+                match p3b_d_pcs_table.get(&p3b_b_tls_pcs_handle) {
+                    Some(s) => {
+                        let certs = s.conn.peer_certificates();
+                        match certs.and_then(|c| c.first()) {
+                            Some(cert) => ssl_extract_subject_cn(cert.as_ref())
+                                .unwrap_or_default(),
+                            None => String::new(),
+                        }
+                    }
+                    None => String::new(),
+                }
+            } else {
                 let p3b_b_tls_pcs_table = interp.shared.tls_streams.lock().unwrap();
                 match p3b_b_tls_pcs_table.get(&p3b_b_tls_pcs_handle) {
                     Some(s) => {
@@ -5958,6 +6075,35 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             } else {
                 Some(std::time::Duration::from_secs_f64(p3b_b_tls_tmo_secs))
             };
+            // M28.5 P3b-D: dispatch on handle id range.
+            if p3b_b_tls_tmo_handle >= 1_000_000 {
+                let p3b_d_tmo_table =
+                    interp.shared.tls_server_streams.lock().unwrap();
+                let p3b_d_tmo_stream = p3b_d_tmo_table
+                    .get(&p3b_b_tls_tmo_handle)
+                    .ok_or_else(|| VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "ssl.set_timeout_secs: invalid or closed handle {}",
+                            p3b_b_tls_tmo_handle
+                        ),
+                    })?;
+                p3b_d_tmo_stream
+                    .sock
+                    .set_read_timeout(p3b_b_tls_tmo_dur)
+                    .map_err(|e| VmError::UncaughtException {
+                        type_name: "IOError".into(),
+                        message: format!("ssl.set_timeout_secs: read: {e}"),
+                    })?;
+                p3b_d_tmo_stream
+                    .sock
+                    .set_write_timeout(p3b_b_tls_tmo_dur)
+                    .map_err(|e| VmError::UncaughtException {
+                        type_name: "IOError".into(),
+                        message: format!("ssl.set_timeout_secs: write: {e}"),
+                    })?;
+                return Ok(0);
+            }
             let p3b_b_tls_tmo_table = interp.shared.tls_streams.lock().unwrap();
             let p3b_b_tls_tmo_stream = p3b_b_tls_tmo_table
                 .get(&p3b_b_tls_tmo_handle)
@@ -5998,6 +6144,234 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
                 .tls_verify
                 .load(std::sync::atomic::Ordering::SeqCst);
             Ok(if p3b_b_tls_getv { 1 } else { 0 })
+        }
+        // ── M28.5 P3b-D: server-side TLS extension to `ssl` ──────────
+        // Closes the v0.2 gap M28 P3b-B left for v0.3: accepting
+        // an incoming TCP connection on a `socket.listen_tcp` handle
+        // and presenting a PEM-loaded cert chain + private key to the
+        // peer.  Three new handlers; the rest of the ssl surface
+        // (send / recv / close / peer_addr / set_timeout_secs) was
+        // taught to dispatch on the handle's id range so server-side
+        // streams work transparently with the existing client API.
+        NativeFn::SslLoadServerConfig => {
+            // Read PEM-encoded cert chain + key from disk, build a
+            // rustls::ServerConfig with the ring crypto provider (same
+            // choice the client side made — keeps the build hermetic
+            // on Windows), and stash an Arc in `tls_server_configs`.
+            // Returns the slot index as a non-zero i64.
+            let p3b_d_lsc_cert_path = arg_str(args, 0);
+            let p3b_d_lsc_key_path = arg_str(args, 1);
+            let p3b_d_lsc_cert_bytes =
+                std::fs::read(&p3b_d_lsc_cert_path).map_err(|e| {
+                    VmError::UncaughtException {
+                        type_name: "IOError".into(),
+                        message: format!(
+                            "ssl.load_server_config: reading cert {:?}: {}",
+                            p3b_d_lsc_cert_path, e
+                        ),
+                    }
+                })?;
+            let p3b_d_lsc_key_bytes =
+                std::fs::read(&p3b_d_lsc_key_path).map_err(|e| {
+                    VmError::UncaughtException {
+                        type_name: "IOError".into(),
+                        message: format!(
+                            "ssl.load_server_config: reading key {:?}: {}",
+                            p3b_d_lsc_key_path, e
+                        ),
+                    }
+                })?;
+            let p3b_d_lsc_certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+                rustls_pemfile::certs(&mut &p3b_d_lsc_cert_bytes[..])
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "ssl.load_server_config: parsing cert PEM {:?}: {}",
+                            p3b_d_lsc_cert_path, e
+                        ),
+                    })?;
+            if p3b_d_lsc_certs.is_empty() {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "ssl.load_server_config: no certificates found in {:?}",
+                        p3b_d_lsc_cert_path
+                    ),
+                });
+            }
+            let p3b_d_lsc_key = rustls_pemfile::private_key(&mut &p3b_d_lsc_key_bytes[..])
+                .map_err(|e| VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "ssl.load_server_config: parsing key PEM {:?}: {}",
+                        p3b_d_lsc_key_path, e
+                    ),
+                })?
+                .ok_or_else(|| VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "ssl.load_server_config: no private key found in {:?}",
+                        p3b_d_lsc_key_path
+                    ),
+                })?;
+            let p3b_d_lsc_provider =
+                std::sync::Arc::new(rustls::crypto::ring::default_provider());
+            let p3b_d_lsc_cfg = rustls::ServerConfig::builder_with_provider(
+                p3b_d_lsc_provider,
+            )
+            .with_safe_default_protocol_versions()
+            .map_err(|e| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!(
+                    "ssl.load_server_config: server protocol versions: {e}"
+                ),
+            })?
+            .with_no_client_auth()
+            .with_single_cert(p3b_d_lsc_certs, p3b_d_lsc_key)
+            .map_err(|e| VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!(
+                    "ssl.load_server_config: cert+key install: {e}"
+                ),
+            })?;
+            let mut p3b_d_lsc_table =
+                interp.shared.tls_server_configs.lock().unwrap();
+            let p3b_d_lsc_handle = p3b_d_lsc_table.len() as i64;
+            p3b_d_lsc_table.push(Some(std::sync::Arc::new(p3b_d_lsc_cfg)));
+            Ok(p3b_d_lsc_handle as u64)
+        }
+        NativeFn::SslAcceptTls => {
+            use std::io::Write;
+            let p3b_d_acc_listener_handle = arg_i64(args, 0);
+            let p3b_d_acc_cfg_handle = arg_i64(args, 1);
+            // 1. Resolve the server config Arc.  Cheap clone — we drop
+            //    the configs-table mutex before any blocking I/O.
+            let p3b_d_acc_cfg_arc = {
+                let p3b_d_acc_cfg_table =
+                    interp.shared.tls_server_configs.lock().unwrap();
+                let p3b_d_acc_cfg_slot = p3b_d_acc_cfg_table
+                    .get(p3b_d_acc_cfg_handle as usize)
+                    .ok_or_else(|| VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "ssl.accept_tls: unknown server-config handle {}",
+                            p3b_d_acc_cfg_handle
+                        ),
+                    })?;
+                p3b_d_acc_cfg_slot
+                    .as_ref()
+                    .ok_or_else(|| VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "ssl.accept_tls: server-config handle {} is freed",
+                            p3b_d_acc_cfg_handle
+                        ),
+                    })?
+                    .clone()
+            };
+            // 2. Resolve the TCP listener Arc the same way (M28 P3b-A
+            //    laid this slot table down already).
+            if p3b_d_acc_listener_handle <= 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "ssl.accept_tls: invalid tcp_listener handle {}",
+                        p3b_d_acc_listener_handle
+                    ),
+                });
+            }
+            let p3b_d_acc_listener_arc = {
+                let p3b_d_acc_listener_table =
+                    interp.shared.tcp_listeners.lock().unwrap();
+                let p3b_d_acc_listener_slot = p3b_d_acc_listener_table
+                    .get(p3b_d_acc_listener_handle as usize)
+                    .ok_or_else(|| VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "ssl.accept_tls: unknown tcp_listener handle {}",
+                            p3b_d_acc_listener_handle
+                        ),
+                    })?;
+                p3b_d_acc_listener_slot
+                    .as_ref()
+                    .ok_or_else(|| VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "ssl.accept_tls: tcp_listener handle {} is closed",
+                            p3b_d_acc_listener_handle
+                        ),
+                    })?
+                    .clone()
+            };
+            // 3. Block on accept() (no locks held).
+            let (p3b_d_acc_tcp, p3b_d_acc_peer) =
+                p3b_d_acc_listener_arc.accept().map_err(|e| {
+                    VmError::UncaughtException {
+                        type_name: "IOError".into(),
+                        message: format!("ssl.accept_tls: accept: {e}"),
+                    }
+                })?;
+            let p3b_d_acc_peer_str = p3b_d_acc_peer.to_string();
+            // 4. Build the server-side rustls Connection + wrap.
+            let p3b_d_acc_conn =
+                rustls::ServerConnection::new(p3b_d_acc_cfg_arc).map_err(|e| {
+                    VmError::UncaughtException {
+                        type_name: "IOError".into(),
+                        message: format!("ssl.accept_tls: tls init: {e}"),
+                    }
+                })?;
+            let mut p3b_d_acc_stream =
+                rustls::StreamOwned::new(p3b_d_acc_conn, p3b_d_acc_tcp);
+            // 5. Force the handshake to completion now so a bad client
+            //    hello surfaces as IOError out of accept_tls() rather
+            //    than the first recv().  `flush()` drives the handshake
+            //    to completion the same way it does on the client side.
+            p3b_d_acc_stream
+                .flush()
+                .map_err(|e| VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!("ssl.accept_tls: handshake: {e}"),
+                })?;
+            // 6. Stash the stream + return (handle, peer_addr).  Server
+            //    handles draw from a disjoint id space (1_000_000+) so
+            //    the shared send/recv/close handlers can dispatch on
+            //    handle value alone — no enum tag, no double-lookup.
+            let p3b_d_acc_handle = interp
+                .shared
+                .next_tls_server_id
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            interp
+                .shared
+                .tls_server_streams
+                .lock()
+                .unwrap()
+                .insert(p3b_d_acc_handle, p3b_d_acc_stream);
+            let p3b_d_acc_sp =
+                interp.alloc_string(&p3b_d_acc_peer_str) as u64;
+            let p3b_d_acc_tup = interp.alloc_tuple_obj(&[
+                p3b_d_acc_handle as u64,
+                p3b_d_acc_sp,
+            ]);
+            Ok(p3b_d_acc_tup as u64)
+        }
+        NativeFn::SslFreeServerConfig => {
+            // Drop the slot's Arc.  Any live `accept_tls` stream still
+            // holds its own Arc on the same ServerConfig, so existing
+            // sessions keep running — only future accept_tls calls
+            // against this handle will fail.
+            let p3b_d_fsc_handle = arg_i64(args, 0);
+            if p3b_d_fsc_handle <= 0 {
+                return Ok(0);
+            }
+            let mut p3b_d_fsc_table =
+                interp.shared.tls_server_configs.lock().unwrap();
+            if let Some(p3b_d_fsc_slot) =
+                p3b_d_fsc_table.get_mut(p3b_d_fsc_handle as usize)
+            {
+                let _ = p3b_d_fsc_slot.take();
+            }
+            Ok(0)
         }
         // ── M28 P3b-C: `http_client` module ────────────────────────────
         // Synchronous HTTP/1.1 client via `ureq` (rustls TLS).  Each

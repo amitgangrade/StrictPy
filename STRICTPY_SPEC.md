@@ -3000,7 +3000,7 @@ and Windows.
 ```
 # TCP client
 fn connect_tcp(host: str, port: i32) -> i64
-### 9.41 Module `ssl` (v0.2 — M28 P3b-B)
+### 9.41 Module `ssl` (v0.2 — M28 P3b-B; server-side M28.5 P3b-D)
 
 TLS-over-TCP client.  Wraps the pure-Rust `rustls` 0.23 crate with the
 `ring` crypto provider so the build needs no system OpenSSL.  Trust
@@ -3224,25 +3224,149 @@ on the map lock; the actual I/O happens after the lock is released
 (the handler holds the slot's stream by `&mut`, blocking sibling
 operations on the *same* handle but not on other handles).
 
+#### Server-side TLS (M28.5 P3b-D)
+
+The client surface above bundles TCP + TLS into a single `connect`
+call because v0.2 has no separate `socket` module to plug into.
+M28 P3b-A then shipped the `socket` module (§9.40), and M28.5 P3b-D
+closes the v0.3-deferred gap: the StrictPy stdlib can now accept an
+inbound TCP connection on a `socket.listen_tcp` handle and present a
+PEM-loaded cert chain + private key to the peer.  The three new
+functions reuse the same opaque-handle convention as the rest of the
+module, slot into the IDs (610-612) the original P3b-B brief
+reserved, and produce handles that are interchangeable with
+`ssl.connect` handles from the caller's point of view — the existing
+`send` / `recv` / `recv_exact` / `close` / `peer_addr` /
+`peer_cert_subject` / `set_timeout_secs` work on either side.
+
+```
+fn load_server_config(cert_pem_path: str, key_pem_path: str) -> i64
+fn accept_tls(tcp_listener: i64, server_config: i64) -> Tuple[i64, str]
+fn free_server_config(config: i64) -> None
+```
+
+**Loading certs and keys.**
+`load_server_config(cert_pem_path, key_pem_path)` reads PEM-encoded
+data from the two paths, parses out the certificate chain and
+private key with `rustls-pemfile`, and builds a `rustls::ServerConfig`
+using the same `ring` crypto provider the client side does.  Returns
+an opaque non-zero `i64` config handle.  The config is reusable —
+one handle can back many `accept_tls` calls, so a long-running
+server loads its cert once at startup and uses that handle for every
+connection.  Errors:
+
+* `cert_pem_path` or `key_pem_path` not readable → `IOError`.
+* PEM parse failure / no certs / no private key → `ValueError`.
+* Cert + key signature-algorithm mismatch (e.g. RSA cert + ECDSA
+  key) → `ValueError`.
+
+The private key may be PKCS#1, PKCS#8, or SEC1 — `rustls-pemfile`'s
+`private_key` accepts all three (`-----BEGIN PRIVATE KEY-----`,
+`-----BEGIN RSA PRIVATE KEY-----`, `-----BEGIN EC PRIVATE KEY-----`).
+The cert file must contain at least one `-----BEGIN CERTIFICATE-----`
+block; intermediate chains are picked up in order if present.
+
+**`ssl.accept_tls` semantics.**
+`accept_tls(tcp_listener, server_config)` blocks until a peer
+connects to the listener, then performs a server-side TLS handshake
+using the supplied config.  The TCP listener must be a handle
+returned by `socket.listen_tcp` (§9.40); the config must be a
+handle returned by `load_server_config`.  Returns
+`(tls_handle, peer_addr)` where:
+
+* `tls_handle` is a fresh opaque `i64` allocated from a disjoint id
+  range (`>= 1_000_000`) so the shared `send` / `recv` / `close` /
+  etc. handlers can dispatch on handle value alone — a single
+  handle unambiguously identifies which slot table to look in.
+* `peer_addr` is the connecting client's `"ip:port"` (IPv4 →
+  `"127.0.0.1:53412"`; IPv6 → `"[::1]:53412"`), same format as
+  `socket.accept`.
+
+The handshake is driven to completion inside `accept_tls` (matching
+the client side's eager-handshake behaviour) so a bad client hello,
+protocol mismatch, or unexpected close surfaces as `IOError` here
+rather than at the first `send` / `recv`.  Errors:
+
+* Unknown / freed `server_config` handle → `ValueError`.
+* Unknown / closed `tcp_listener` handle → `ValueError`.
+* `accept()` syscall failure (rare on loopback; possible if the
+  listener was closed concurrently) → `IOError`.
+* TLS handshake failure (peer sent garbage, cipher-suite negotiation
+  failed, peer hung up mid-handshake) → `IOError`.
+
+After `accept_tls` returns, the returned handle behaves like any
+other ssl handle — `ssl.send(handle, ...)`, `ssl.recv(handle, n)`,
+`ssl.recv_exact(handle, n)`, `ssl.close(handle)`, `ssl.peer_addr(handle)`,
+`ssl.set_timeout_secs(handle, secs)` all work transparently.
+`peer_cert_subject(handle)` returns the empty string in v0.2 because
+the server config is built with `with_no_client_auth()` (mutual auth
+is a v0.3 candidate).
+
+**Releasing a config.**
+`free_server_config(handle)` drops the config slot.  Live `accept_tls`
+streams keep an internal `Arc<ServerConfig>` of their own, so
+freeing the config does *not* terminate in-flight sessions — only
+*future* `accept_tls` calls against the freed handle fail with
+`ValueError`.  Calling `free_server_config(0)` or freeing an already-
+freed handle is a no-op.  For a typical server (load cert once, run
+forever) `free_server_config` is unnecessary; it's available for
+programs that rotate certs at runtime.
+
+**Handle id ranges.**
+Client handles allocated by `connect` start at 1 and increment per
+process.  Server handles allocated by `accept_tls` start at
+1_000_000 and increment per process.  These id spaces are disjoint
+by construction, so any handle value alone tells the VM which slot
+table holds the stream.  This is why `ssl.send(handle, ...)` etc.
+need no separate "client-side" / "server-side" variants — the
+dispatch is on handle value, not API name.
+
+**HTTPS server pattern.**
+```
+import socket
+import ssl
+
+server_cfg: i64 = ssl.load_server_config("./server.crt", "./server.key")
+listener: i64 = socket.listen_tcp("0.0.0.0", 8443, 64i32)
+while true:
+    pair: Tuple[i64, str] = ssl.accept_tls(listener, server_cfg)
+    conn: i64 = pair.0
+    # ... read request, write response ...
+    ssl.close(conn)
+```
+
+The example `examples/https_server_demo.spy` runs the same pattern
+end-to-end inside a single process — a server thread (using
+`socket.listen_tcp` + `ssl.accept_tls`) and a client thread (using
+`ssl.connect` with `set_verify_certs(false)`) exchange one request
+and response.  `compiler/tests/https_server_demo_runs.rs` generates
+a self-signed cert at test time via `rcgen`, writes the PEMs to a
+tempdir, and asserts every waypoint of the demo round-trips
+correctly.
+
 What v0.2 does **not** ship:
 
-* Server-side TLS (`ssl.accept` / `ssl.bind`).  IDs 610+ are reserved
-  for it.
 * Mutual auth (client certificates).  The `with_no_client_auth()`
-  builder is hard-coded.
+  builder is hard-coded; mutual auth is a v0.3 candidate.
 * Per-connection custom CA / pinned certificate verification.  The
   verify flag is binary (full Mozilla bundle vs trust everything);
   per-connection custom verifiers are v0.3.
-* SNI override (the SNI name always equals the `host` argument).
-* ALPN negotiation, session resumption, custom cipher-suite lists.
-* `unwrap_socket` / `wrap_socket` decomposition (no underlying
-  `socket` stdlib module exists in v0.2; `ssl.connect` bundles TCP
-  + TLS setup into one call).
+* SNI override (the SNI name always equals the `host` argument on
+  the client side; server side uses the cert as-is).
+* ALPN negotiation, session resumption, custom cipher-suite lists,
+  OCSP stapling.
+* `unwrap_socket` / `wrap_socket` decomposition.  `ssl.connect` still
+  bundles TCP + TLS on the client side; `accept_tls` similarly
+  bundles the TCP `accept` with the TLS handshake (callers wanting
+  the plaintext socket back should reach for `socket.accept`
+  instead).
 
 Examples: `examples/ssl_demo.spy` round-trips messages (including a
 high-byte payload exercising the packed-byte convention) against a
 loopback echo server.  See `compiler/tests/ssl_demo_runs.rs` for the
 self-signed-cert server setup the test harness uses.
+`examples/https_server_demo.spy` exercises the server-side surface
+end-to-end with both client and server inside one StrictPy program.
 * `get(url)` / `delete(url)` / `head(url)` — fire-and-forget request
   with the default 30-second timeout and `User-Agent:
   StrictPy/0.2 http_client`.  Returns `(status_code, body_str)`.
