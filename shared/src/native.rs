@@ -1034,6 +1034,68 @@ pub enum NativeFn {
     Bz2Decompress        = 510,
     // 511-519 reserved for v0.3 streaming hashers (gzip.open / etc.)
     // and lzma/xz support if a real-world program needs them.
+    // ── 520-549: `zipfile` + `tarfile` modules (M27 P3c-D) ──────────────
+    // Both ride the same opaque-handle / slot-table pattern as sqlite3
+    // (M23 P3a-D).  Archive handles are i64 indexes into per-process
+    // `SharedVm.zip_readers` / `zip_writers` / `tar_readers` /
+    // `tar_writers` tables.  Entry contents round-trip through str
+    // (str-as-byte-buffer convention — codepoints 0..255 inclusive map
+    // 1:1 to bytes; v0.2 has no `bytes` type).  See spec §9.30 / §9.31.
+
+    // -- zipfile (520-529) ---------------------------------------------
+    /// `zipfile.open_read(path: str) -> i64` — open existing .zip for
+    /// reading.  Raises IOError on missing file / bad archive.
+    ZipfileOpenRead     = 520,
+    /// `zipfile.open_write(path: str) -> i64` — create new .zip for
+    /// writing (existing file is truncated).  Raises IOError on
+    /// permission failure.
+    ZipfileOpenWrite    = 521,
+    /// `zipfile.names(handle: i64) -> List[str]` — list entry names in a
+    /// read-mode archive.  ValueError if `handle` is for a write handle.
+    ZipfileNames        = 522,
+    /// `zipfile.read(handle: i64, name: str) -> str` — read entry as
+    /// bytes-packed-into-str.  Raises ValueError if entry missing.
+    ZipfileRead         = 523,
+    /// `zipfile.write(handle: i64, name: str, data: str) -> None` — add a
+    /// new entry to a write-mode archive.
+    ZipfileWrite        = 524,
+    /// `zipfile.close(handle: i64) -> None` — finalize and close.  No-op
+    /// on already-closed (or 0) handles.
+    ZipfileClose        = 525,
+    /// `zipfile.is_zipfile(path: str) -> bool` — quick local-file probe.
+    ZipfileIsZipfile    = 526,
+    /// `zipfile.info(handle: i64, name: str) -> Tuple[i64, i64, i64]` —
+    /// (compressed_size, uncompressed_size, crc32).  Returns
+    /// (-1, -1, -1) if entry missing.
+    ZipfileInfo         = 527,
+    // 528-529 reserved.
+
+    // -- tarfile (530-549) ---------------------------------------------
+    /// `tarfile.open_read(path: str, mode: str) -> i64` — mode is one of
+    /// "r", "r:gz", "r:bz2".  Loads entries into memory (v0.2 keeps the
+    /// whole archive resident — fine for the ~tens-of-MB scale typical
+    /// of build / log / backup archives).
+    TarfileOpenRead     = 530,
+    /// `tarfile.open_write(path: str, mode: str) -> i64` — mode is one of
+    /// "w", "w:gz", "w:bz2".
+    TarfileOpenWrite    = 531,
+    /// `tarfile.names(handle: i64) -> List[str]`.
+    TarfileNames        = 532,
+    /// `tarfile.read(handle: i64, name: str) -> str` — entry contents
+    /// as bytes-packed-into-str.
+    TarfileRead         = 533,
+    /// `tarfile.write_file(handle: i64, src_path: str, arcname: str)
+    /// -> None` — add a file from disk to a write archive.
+    TarfileWriteFile    = 534,
+    /// `tarfile.write_data(handle: i64, arcname: str, data: str)
+    /// -> None` — add in-memory data as an entry.
+    TarfileWriteData    = 535,
+    /// `tarfile.close(handle: i64) -> None`.
+    TarfileClose        = 536,
+    /// `tarfile.is_tarfile(path: str) -> bool` — peek the first 512
+    /// bytes and look for a tar header signature.
+    TarfileIsTarfile    = 537,
+    // 538-549 reserved.
 
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
@@ -1395,6 +1457,24 @@ impl NativeFn {
             508 => Some(Self::Bz2Compress),
             509 => Some(Self::Bz2CompressLevel),
             510 => Some(Self::Bz2Decompress),
+            // M27 P3c-D: zipfile (520-527; 528-529 reserved).
+            520 => Some(Self::ZipfileOpenRead),
+            521 => Some(Self::ZipfileOpenWrite),
+            522 => Some(Self::ZipfileNames),
+            523 => Some(Self::ZipfileRead),
+            524 => Some(Self::ZipfileWrite),
+            525 => Some(Self::ZipfileClose),
+            526 => Some(Self::ZipfileIsZipfile),
+            527 => Some(Self::ZipfileInfo),
+            // M27 P3c-D: tarfile (530-537; 538-549 reserved).
+            530 => Some(Self::TarfileOpenRead),
+            531 => Some(Self::TarfileOpenWrite),
+            532 => Some(Self::TarfileNames),
+            533 => Some(Self::TarfileRead),
+            534 => Some(Self::TarfileWriteFile),
+            535 => Some(Self::TarfileWriteData),
+            536 => Some(Self::TarfileClose),
+            537 => Some(Self::TarfileIsTarfile),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

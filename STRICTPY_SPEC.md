@@ -2832,6 +2832,160 @@ What v0.2 does **not** ship:
 
 ---
 
+### 9.30 Module `zipfile` (v0.2 — M27 P3c-D)
+
+A read+write surface for `.zip` archives, wrapping the pure-Rust `zip`
+crate.  Archives are referenced by opaque `i64` handles into a
+per-process slot table on `SharedVm`; separate slot tables guard read
+and write handles so closing one mode does not collide with the other.
+
+```
+fn open_read(path: str) -> i64
+fn open_write(path: str) -> i64
+fn names(handle: i64) -> List[str]
+fn read(handle: i64, name: str) -> str
+fn write(handle: i64, name: str, data: str) -> None
+fn close(handle: i64) -> None
+fn is_zipfile(path: str) -> bool
+fn info(handle: i64, name: str) -> Tuple[i64, i64, i64]
+```
+
+Semantics:
+
+* `open_read(path)` opens an existing zip for reading.  Raises
+  `IOError` if the file is missing, unreadable, or not a valid zip
+  archive.  The returned handle stays valid until `close` is called on
+  it (or the VM exits).
+* `open_write(path)` creates (or truncates) a zip file for writing.
+  New entries are appended with DEFLATE compression.  Raises `IOError`
+  on permission failure / unwritable path.
+* `names(handle)` returns the entry names of a read-mode archive in
+  whatever order the underlying central directory records them.
+  `ValueError` if the handle is invalid / closed.
+* `read(handle, name)` returns the entry's decompressed payload as a
+  `str` whose chars are each codepoint 0..255 — the str-as-byte-buffer
+  convention v0.2 uses for binary data (same trick `struct.pack` uses).
+  `len(s)` in chars equals the byte count.  Convert to UTF-8 text with
+  the standard codec helpers if the entry is known-textual.
+* `write(handle, name, data)` adds a new entry to a write-mode
+  archive.  `data` is interpreted as a packed-byte string (each char
+  must be a codepoint 0..255); use `bytes_to_packed_str`-equivalent
+  helpers if writing UTF-8 text data.
+* `close(handle)` finalizes the write central directory (for writers)
+  or drops the read handle.  Calling `close` on a zero or already-closed
+  handle is a no-op.
+* `is_zipfile(path)` returns `True` iff the file exists, is readable,
+  and parses as a valid zip archive.  Does not raise on missing files.
+* `info(handle, name)` returns `(compressed_size, uncompressed_size,
+  crc32)` as `i64`.  Returns `(-1, -1, -1)` if the entry does not
+  exist in the archive — chosen over raising so user code can probe
+  for an entry's presence without a try/except wrapper.
+
+Errors:
+
+* Invalid / closed handle → `ValueError`.
+* Filesystem open failure → `IOError`.
+* Entry-not-found in `read` → `ValueError` (it's an explicit lookup;
+  `info` returns `(-1, -1, -1)` for the probe shape).
+* Out-of-range codepoint in `write` data → `ValueError` (the
+  packed-byte invariant is broken).
+
+What v0.2 does **not** ship: append-mode (existing entries can't be
+modified — open a new writer + copy them over); zip64 streaming (entries
+must fit in memory at write time); password-protected entries; entry
+metadata beyond `info`'s triple (no timestamps, no per-entry compression
+mode choice — all writes go through DEFLATE); per-entry comments; the
+`Connection`/`Cursor`-style class surface (needs stdlib classes, v0.3).
+
+Concurrency: like `sqlite3`, the read and write slot tables live behind
+mutexes on `SharedVm`.  A long `read` on one handle does not block
+sibling `open_read` / `open_write` calls on other threads — but two
+threads holding the *same* handle and calling `read` concurrently
+serialise on the inner archive borrow.
+
+---
+
+### 9.31 Module `tarfile` (v0.2 — M27 P3c-D)
+
+A read+write surface for POSIX `.tar` archives, with optional gzip /
+bz2 transparent compression.  Wraps the pure-Rust `tar` crate plus
+`flate2` (gzip) and `bzip2` (bz2) as compression layers.  Mode strings
+match Python's `tarfile.open(name, mode)` exactly.
+
+```
+fn open_read(path: str, mode: str) -> i64
+fn open_write(path: str, mode: str) -> i64
+fn names(handle: i64) -> List[str]
+fn read(handle: i64, name: str) -> str
+fn write_file(handle: i64, src_path: str, arcname: str) -> None
+fn write_data(handle: i64, arcname: str, data: str) -> None
+fn close(handle: i64) -> None
+fn is_tarfile(path: str) -> bool
+```
+
+Semantics:
+
+* `open_read(path, mode)` opens an existing tar for reading.  `mode`
+  is one of:
+    * `"r"` — plain (uncompressed) tar.
+    * `"r:gz"` — gzip-wrapped.
+    * `"r:bz2"` — bz2-wrapped.
+  All entries are eagerly decoded into a `name -> bytes` map at open
+  time, so subsequent `read` calls are O(1) hashmap lookups.  This
+  keeps the API simple and works fine for the tens-of-MB scale typical
+  of build / log / backup archives; streaming-decode of arbitrarily
+  large archives is a v0.3 candidate.
+* `open_write(path, mode)` creates a new tar for writing.  `mode` is
+  one of `"w"`, `"w:gz"`, `"w:bz2"`.
+* `names(handle)` returns the entry names in the archive's natural
+  (declaration) order — tar files are streamed in that order and the
+  shape matches Python's `TarFile.getnames()`.  Only regular files are
+  listed (directory / symlink / device entries are skipped, since
+  `read` would return empty for them anyway and v0.2 has no `bytes`
+  type to distinguish "empty payload" from "not a file").
+* `read(handle, name)` returns the entry's decompressed payload as a
+  packed-byte `str` (same convention as `zipfile.read`).  `ValueError`
+  if the entry is not present.
+* `write_file(handle, src_path, arcname)` appends a file from disk to
+  the archive under `arcname`.  The on-disk file's mode bits and mtime
+  are recorded in the tar header.
+* `write_data(handle, arcname, data)` appends in-memory bytes (as a
+  packed-byte string) under `arcname` with mode `0o644` and the
+  current time stamped on the entry.
+* `close(handle)` finishes the tar stream (and the underlying gz / bz2
+  encoder, for compressed modes).  Closing a zero / already-closed
+  handle is a no-op.
+* `is_tarfile(path)` returns `True` iff the file exists and its first
+  512 bytes contain the `"ustar"` POSIX/GNU header magic at offset
+  257.  Deliberately does **not** probe gzipped / bz2'd tarballs —
+  callers who want that behaviour can compose `is_tarfile` after
+  decompressing the leading block themselves (the cost of a triple
+  decode-probe didn't seem worth wiring into v0.2).
+
+Errors:
+
+* Invalid / closed handle → `ValueError`.
+* Unsupported mode string → `ValueError`.
+* Filesystem open failure → `IOError`.
+* Entry-not-found in `read` → `ValueError`.
+* Out-of-range codepoint in `write_data` payload → `ValueError`.
+
+What v0.2 does **not** ship: streaming reads of very large archives
+(everything is loaded at open time — fine for the tens-of-MB scale;
+multi-GB archives wait for v0.3); per-entry uid/gid/owner-name
+customisation in `write_data` (mode bits are fixed at `0o644`); xz / lzma
+compression modes (the `tar` crate supports them via `xz2`; deferred
+until there's a use case); listing of directory / device / symlink
+entries (the v0.2 names list only contains regular files); appending
+to an existing tar (open a fresh writer and copy entries across).
+
+Concurrency: same shape as `zipfile` — per-table mutex, sibling
+`open` / `close` calls on other threads do not block a long-running
+`write_file`, but two threads writing to the *same* handle serialise on
+the per-slot enum.
+
+---
+
 ## 10. Compiler Architecture
 
 ### 10.1 Pipeline

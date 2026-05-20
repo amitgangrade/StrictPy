@@ -72,6 +72,13 @@ glob = "0.3"
 # also ships a CRC-32 implementation we reuse for `zlib.crc32`.
 # `bzip2` wraps the libbzip2 algorithm; we depend on the rust-only
 # fallback so no system libbz2 is required on Windows/Linux/macOS.
+# M27 P3c-D: zipfile + tarfile stdlib modules.  Both are pure Rust
+# (the `zip` crate handles DEFLATE in pure Rust; the `tar` crate
+# composes with `flate2` for gzip and `bzip2` for bz2 transparent
+# compression).  `flate2`'s default `miniz_oxide` backend is pure
+# Rust; `bzip2` links against libbz2 which is widely available.
+zip = "2"
+tar = "0.4"
 flate2 = "1"
 bzip2 = "0.4"
 cranelift = { version = "0.115", optional = true }

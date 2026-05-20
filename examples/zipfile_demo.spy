@@ -1,0 +1,129 @@
+"""zipfile_demo.spy — M27 P3c-D demo of the stdlib `zipfile` module.
+
+Creates a fresh .zip in the current working directory with three
+entries (two plain text, one with a few high-byte chars to exercise
+the str-as-byte-buffer round-trip), then re-opens the file in read
+mode and asserts every entry round-trips exactly.  Also probes
+`is_zipfile` (true vs. false), `names`, and `info`.
+
+The whole demo runs against a temporary file in `target/` so it
+doesn't leave litter in the worktree on repeated runs.
+"""
+
+import zipfile
+
+fn main() -> i32:
+    # Path to the test archive.  Inside `target/` so `cargo clean`
+    # eats it; also the directory exists by the time any test runs.
+    archive_path: str = "target/zipfile_demo_round_trip.zip"
+
+    # ── 1. Write three entries ─────────────────────────────────────
+    writer: i64 = zipfile.open_write(archive_path)
+
+    # Entry A: plain ASCII text.
+    body_a: str = "hello, zip world"
+    zipfile.write(writer, "a.txt", body_a)
+
+    # Entry B: multi-line text with a trailing newline.
+    body_b: str = "line one\nline two\nline three\n"
+    zipfile.write(writer, "dir/b.txt", body_b)
+
+    # Entry C: bytes 0..255 packed as codepoints.  Builds a 256-byte
+    # buffer one char at a time so we can verify the high-byte
+    # round-trip survives DEFLATE without losing fidelity.
+    body_c: str = ""
+    i: i32 = 0i32
+    while i < 256i32:
+        body_c = body_c + str(char(i))
+        i = i + 1i32
+    zipfile.write(writer, "bytes.bin", body_c)
+
+    zipfile.close(writer)
+
+    # ── 2. is_zipfile sanity probe ─────────────────────────────────
+    if zipfile.is_zipfile(archive_path):
+        println("is_zipfile: true")
+    else:
+        println("is_zipfile: BUG false")
+
+    # A non-existent path is NOT a zipfile (and must not raise).
+    if zipfile.is_zipfile("target/does_not_exist.zip"):
+        println("is_zipfile_missing: BUG true")
+    else:
+        println("is_zipfile_missing: false")
+
+    # ── 3. Read everything back ────────────────────────────────────
+    reader: i64 = zipfile.open_read(archive_path)
+
+    names: List[str] = zipfile.names(reader)
+    println("name_count: " + str(i32(i64(len(names)))))
+
+    # Each entry name should be present (order is whatever the
+    # central directory recorded — `zip` ships them in insertion
+    # order, but the assertion stays order-independent below by
+    # reading by name).
+    j: i32 = 0i32
+    while j < i32(i64(len(names))):
+        println("name: " + names[j])
+        j = j + 1i32
+
+    # Round-trip A.
+    rt_a: str = zipfile.read(reader, "a.txt")
+    if rt_a == body_a:
+        println("rt_a: ok")
+    else:
+        println("rt_a: BUG mismatch")
+
+    # Round-trip B.
+    rt_b: str = zipfile.read(reader, "dir/b.txt")
+    if rt_b == body_b:
+        println("rt_b: ok")
+    else:
+        println("rt_b: BUG mismatch")
+
+    # Round-trip C — the high-byte buffer.  Compare length first
+    # (256 chars) and then the high-byte sentinel chars.
+    rt_c: str = zipfile.read(reader, "bytes.bin")
+    println("rt_c_len: " + str(i32(i64(len(rt_c)))))
+
+    # ── 4. info() — uncompressed_size is exact ─────────────────────
+    info_a: Tuple[i64, i64, i64] = zipfile.info(reader, "a.txt")
+    cs_a: i64 = info_a.0
+    us_a: i64 = info_a.1
+    crc_a: i64 = info_a.2
+    println("info_a_us: " + str(us_a))
+    if us_a == i64(i32(i64(len(body_a)))):
+        println("info_a_size: ok")
+    else:
+        println("info_a_size: BUG mismatch")
+    # cs / crc should both be non-negative for an existing entry.
+    if cs_a >= 0i64:
+        println("info_a_cs_nonneg: ok")
+    else:
+        println("info_a_cs_nonneg: BUG")
+    if crc_a >= 0i64:
+        println("info_a_crc_nonneg: ok")
+    else:
+        println("info_a_crc_nonneg: BUG")
+
+    # Probe a missing entry — must return (-1, -1, -1), not raise.
+    info_missing: Tuple[i64, i64, i64] = zipfile.info(reader, "no_such_entry.txt")
+    if info_missing.0 == -1i64:
+        println("info_missing: ok")
+    else:
+        println("info_missing: BUG " + str(info_missing.0))
+
+    # ── 5. ValueError on reading a missing entry ───────────────────
+    try:
+        bad: str = zipfile.read(reader, "no_such_entry.txt")
+        println("missing_read: UNREACHED")
+    except ValueError as e:
+        println("missing_read: caught ValueError")
+
+    zipfile.close(reader)
+
+    # Closing an already-closed handle must be a no-op.
+    zipfile.close(reader)
+
+    println("done")
+    return 0

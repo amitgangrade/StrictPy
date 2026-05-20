@@ -1,0 +1,134 @@
+"""tarfile_demo.spy — M27 P3c-D demo of the stdlib `tarfile` module.
+
+Round-trips three tar archives:
+
+  1. Plain (mode `"w"` / `"r"`)
+  2. Gzip-wrapped (`"w:gz"` / `"r:gz"`)
+  3. Bz2-wrapped  (`"w:bz2"` / `"r:bz2"`) — optional; skipped if
+     `write_file` fails because the bz2 codec isn't available on
+     the build (it always is in this workspace).
+
+Each archive holds two in-memory entries written via `write_data`,
+and `read` is verified to return the original bytes.
+
+The demo also probes `is_tarfile` (true / false) and exercises the
+ValueError path on a non-existent entry.
+"""
+
+import tarfile
+
+fn main() -> i32:
+    # ── 1. Plain tar round-trip ────────────────────────────────────
+    plain_path: str = "target/tarfile_demo_plain.tar"
+
+    body_a: str = "tarfile body A - plain mode\n"
+    body_b: str = "tarfile body B - second entry\n"
+
+    pw: i64 = tarfile.open_write(plain_path, "w")
+    tarfile.write_data(pw, "a.txt", body_a)
+    tarfile.write_data(pw, "dir/b.txt", body_b)
+    tarfile.close(pw)
+
+    if tarfile.is_tarfile(plain_path):
+        println("plain_is_tarfile: ok")
+    else:
+        println("plain_is_tarfile: BUG")
+
+    pr: i64 = tarfile.open_read(plain_path, "r")
+    plain_names: List[str] = tarfile.names(pr)
+    println("plain_name_count: " + str(i32(i64(len(plain_names)))))
+    k: i32 = 0i32
+    while k < i32(i64(len(plain_names))):
+        println("plain_name: " + plain_names[k])
+        k = k + 1i32
+
+    rt_a: str = tarfile.read(pr, "a.txt")
+    if rt_a == body_a:
+        println("plain_rt_a: ok")
+    else:
+        println("plain_rt_a: BUG")
+
+    rt_b: str = tarfile.read(pr, "dir/b.txt")
+    if rt_b == body_b:
+        println("plain_rt_b: ok")
+    else:
+        println("plain_rt_b: BUG")
+
+    # Missing-entry probe raises ValueError.
+    try:
+        bad: str = tarfile.read(pr, "no_such_entry.txt")
+        println("plain_missing: UNREACHED")
+    except ValueError as e:
+        println("plain_missing: caught ValueError")
+
+    tarfile.close(pr)
+
+    # ── 2. Gzip-wrapped tar round-trip ─────────────────────────────
+    gz_path: str = "target/tarfile_demo_gz.tar.gz"
+
+    body_c: str = "tarfile body C - gz mode\n"
+    body_d: str = "tarfile body D - gz mode entry 2\n"
+
+    gw: i64 = tarfile.open_write(gz_path, "w:gz")
+    tarfile.write_data(gw, "c.txt", body_c)
+    tarfile.write_data(gw, "dir/d.txt", body_d)
+    tarfile.close(gw)
+
+    # is_tarfile on a gzipped file is FALSE (we only sniff the
+    # POSIX magic at offset 257, which a gz wrapper hides).  This is
+    # an intentional v0.2 limitation documented in spec §9.31.
+    if tarfile.is_tarfile(gz_path):
+        println("gz_is_tarfile_raw: BUG true")
+    else:
+        println("gz_is_tarfile_raw: false (expected)")
+
+    gr: i64 = tarfile.open_read(gz_path, "r:gz")
+    gz_names: List[str] = tarfile.names(gr)
+    println("gz_name_count: " + str(i32(i64(len(gz_names)))))
+
+    rt_c: str = tarfile.read(gr, "c.txt")
+    if rt_c == body_c:
+        println("gz_rt_c: ok")
+    else:
+        println("gz_rt_c: BUG")
+
+    rt_d: str = tarfile.read(gr, "dir/d.txt")
+    if rt_d == body_d:
+        println("gz_rt_d: ok")
+    else:
+        println("gz_rt_d: BUG")
+
+    tarfile.close(gr)
+
+    # ── 3. Bz2-wrapped tar round-trip ──────────────────────────────
+    bz2_path: str = "target/tarfile_demo_bz2.tar.bz2"
+
+    body_e: str = "tarfile body E - bz2 mode\n"
+
+    bw: i64 = tarfile.open_write(bz2_path, "w:bz2")
+    tarfile.write_data(bw, "e.txt", body_e)
+    tarfile.close(bw)
+
+    br: i64 = tarfile.open_read(bz2_path, "r:bz2")
+    rt_e: str = tarfile.read(br, "e.txt")
+    if rt_e == body_e:
+        println("bz2_rt_e: ok")
+    else:
+        println("bz2_rt_e: BUG")
+    tarfile.close(br)
+
+    # ── 4. Bad mode rejected with ValueError ───────────────────────
+    try:
+        bad_mode: i64 = tarfile.open_read(plain_path, "r:xz")
+        println("bad_mode: UNREACHED")
+    except ValueError as e:
+        println("bad_mode: caught ValueError")
+
+    # ── 5. is_tarfile on a missing file is false, not raised ───────
+    if tarfile.is_tarfile("target/does_not_exist.tar"):
+        println("missing_is_tarfile: BUG true")
+    else:
+        println("missing_is_tarfile: false")
+
+    println("done")
+    return 0

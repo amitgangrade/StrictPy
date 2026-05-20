@@ -40,6 +40,42 @@ use std::path::Path;
 
 pub use error::VmError;
 
+// ─── M27 P3c-D: tarfile handle enums ───────────────────────────────────
+//
+// `tar::Archive<R>` / `tar::Builder<W>` are generic over the reader /
+// writer flavour (plain file, gzip-wrapped, bz2-wrapped).  We can't
+// store a single generic type in a slot table, so each handle is an
+// enum that dispatches on the open mode the caller asked for.
+//
+// For *read* handles, the brief notes that v0.2 keeps the whole archive
+// resident in memory after open; that lets us decode the (possibly
+// gzip/bz2) wrapper exactly once at `open_read` time and serve all
+// subsequent `names` / `read` calls from a flat name -> bytes map.
+// Real-world tar files used for build / log / backup workflows live
+// happily inside a few tens of megabytes; streaming decoders would be
+// premature optimisation.
+
+/// In-memory representation of a successfully-opened tar archive.
+/// Entries are decoded once at open time so subsequent `read` calls are
+/// O(1) hashmap lookups regardless of compression mode.
+pub struct TarReadHandle {
+    pub entries: std::collections::HashMap<String, Vec<u8>>,
+    /// Preserve the original entry order — `tar` archives are streamed
+    /// in declaration order and Python's `tarfile.getnames()` reports
+    /// the same; HashMap iteration would scramble it.
+    pub order: Vec<String>,
+}
+
+/// Tar writer.  Holds one of three flavours depending on the mode
+/// string passed to `tarfile.open_write`.  `Plain` is a raw `tar::Builder`
+/// over the file; the gzip / bz2 variants wrap the file in an encoder
+/// first.  All three are dropped (and flushed) when `tarfile.close` runs.
+pub enum TarWriteHandle {
+    Plain(tar::Builder<std::fs::File>),
+    Gz(tar::Builder<flate2::write::GzEncoder<std::fs::File>>),
+    Bz2(tar::Builder<bzip2::write::BzEncoder<std::fs::File>>),
+}
+
 /// Load `.spyc` bytecode from `path`, link it, execute its `main` function,
 /// and return the integer exit code.
 pub fn run_file(path: &Path) -> Result<i32, VmError> {

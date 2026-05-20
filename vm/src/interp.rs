@@ -258,6 +258,23 @@ pub struct SharedVm {
     /// stderr is already line-atomic on short writes — so the lock holders
     /// are limited to programs that opted into file output.
     pub log_file: std::sync::Mutex<Option<std::fs::File>>,
+    /// M27 P3c-D: zipfile read-mode handles.  Each slot is a
+    /// `ZipArchive<File>` owning a borrow on the underlying file.  Slot 0
+    /// reserved as "no archive".
+    pub zip_readers: Arc<Mutex<Vec<Option<zip::ZipArchive<std::fs::File>>>>>,
+    /// M27 P3c-D: zipfile write-mode handles.  Each slot is a
+    /// `ZipWriter<File>`.  Slot 0 reserved.
+    pub zip_writers: Arc<Mutex<Vec<Option<zip::ZipWriter<std::fs::File>>>>>,
+    /// M27 P3c-D: tarfile read-mode handles.  Decoded into memory at
+    /// open time so subsequent `names` / `read` calls don't need to
+    /// re-stream the (possibly gzip / bz2) wrapped file.  Slot 0
+    /// reserved.
+    pub tar_readers: Arc<Mutex<Vec<Option<crate::TarReadHandle>>>>,
+    /// M27 P3c-D: tarfile write-mode handles.  Each slot is a
+    /// `tar::Builder<W>` where `W` is one of three writer flavours
+    /// (plain `File`, `GzEncoder<File>`, `BzEncoder<File>`).  Slot 0
+    /// reserved.
+    pub tar_writers: Arc<Mutex<Vec<Option<crate::TarWriteHandle>>>>,
     /// M7: shared stdout sink so spawned worker threads write to the same
     /// destination as the parent interpreter. Without this, the capture
     /// sink installed by `run_file_capture` only sees the parent's writes;
@@ -310,6 +327,10 @@ impl SharedVm {
             // basicConfig default); no file sink.
             log_level: std::sync::atomic::AtomicI32::new(30),
             log_file: std::sync::Mutex::new(None),
+            zip_readers: Arc::new(Mutex::new(vec![None])),
+            zip_writers: Arc::new(Mutex::new(vec![None])),
+            tar_readers: Arc::new(Mutex::new(vec![None])),
+            tar_writers: Arc::new(Mutex::new(vec![None])),
             stdout: Arc::new(Mutex::new(Box::new(RealStdout))),
             #[cfg(feature = "jit")]
             jit: None,
@@ -355,6 +376,10 @@ impl SharedVm {
             // M27 P3c-E: see comment on the non-JIT constructor.
             log_level: std::sync::atomic::AtomicI32::new(30),
             log_file: std::sync::Mutex::new(None),
+            zip_readers: Arc::new(Mutex::new(vec![None])),
+            zip_writers: Arc::new(Mutex::new(vec![None])),
+            tar_readers: Arc::new(Mutex::new(vec![None])),
+            tar_writers: Arc::new(Mutex::new(vec![None])),
             stdout: Arc::new(Mutex::new(Box::new(RealStdout))),
             jit: Some(jit_cell),
             in_jit: AtomicUsize::new(0),

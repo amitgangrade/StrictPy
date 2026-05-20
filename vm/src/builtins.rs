@@ -4343,6 +4343,728 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             let p = interp.alloc_string(&bytes_to_packed_str(&p3c_c_byte_out));
             Ok(p as u64)
         }
+        // ── M27 P3c-D: `zipfile` module ────────────────────────────────
+        // Wraps the pure-Rust `zip` crate.  Each open archive lives in a
+        // SharedVm slot table (zip_readers / zip_writers); user code
+        // holds an i64 handle.  Slot 0 is reserved as "no archive" so
+        // any zero/negative handle short-circuits to ValueError.
+        //
+        // Entry bytes round-trip as `str` via the str-as-byte-buffer
+        // convention (`bytes_to_packed_str` / `packed_str_to_bytes`)
+        // because v0.2 has no `bytes` type — see spec §9.30.  This is
+        // the same trick the M22 `struct` module already uses; programs
+        // that need to write or read binary blobs are encouraged to
+        // build them as packed strings on the way in / out.
+        NativeFn::ZipfileOpenRead => {
+            let p3c_d_zip_open_read_path = arg_str(args, 0);
+            let p3c_d_zip_open_read_file = std::fs::File::open(&p3c_d_zip_open_read_path).map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!(
+                        "zipfile.open_read({:?}): {}",
+                        p3c_d_zip_open_read_path, e
+                    ),
+                }
+            })?;
+            let p3c_d_zip_open_read_archive = zip::ZipArchive::new(p3c_d_zip_open_read_file).map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!(
+                        "zipfile.open_read({:?}): not a valid zip archive: {}",
+                        p3c_d_zip_open_read_path, e
+                    ),
+                }
+            })?;
+            let mut p3c_d_zip_open_read_table = interp.shared.zip_readers.lock().unwrap();
+            let p3c_d_zip_open_read_handle = p3c_d_zip_open_read_table.len() as i64;
+            p3c_d_zip_open_read_table.push(Some(p3c_d_zip_open_read_archive));
+            Ok(p3c_d_zip_open_read_handle as u64)
+        }
+        NativeFn::ZipfileOpenWrite => {
+            let p3c_d_zip_open_write_path = arg_str(args, 0);
+            let p3c_d_zip_open_write_file = std::fs::File::create(&p3c_d_zip_open_write_path).map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!(
+                        "zipfile.open_write({:?}): {}",
+                        p3c_d_zip_open_write_path, e
+                    ),
+                }
+            })?;
+            let p3c_d_zip_open_write_writer = zip::ZipWriter::new(p3c_d_zip_open_write_file);
+            let mut p3c_d_zip_open_write_table = interp.shared.zip_writers.lock().unwrap();
+            let p3c_d_zip_open_write_handle = p3c_d_zip_open_write_table.len() as i64;
+            p3c_d_zip_open_write_table.push(Some(p3c_d_zip_open_write_writer));
+            Ok(p3c_d_zip_open_write_handle as u64)
+        }
+        NativeFn::ZipfileNames => {
+            let p3c_d_zip_names_handle = arg_i64(args, 0);
+            if p3c_d_zip_names_handle <= 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "zipfile.names: invalid handle {}",
+                        p3c_d_zip_names_handle
+                    ),
+                });
+            }
+            let p3c_d_zip_names_collected: Vec<String> = {
+                let mut p3c_d_zip_names_table = interp.shared.zip_readers.lock().unwrap();
+                let p3c_d_zip_names_slot = p3c_d_zip_names_table
+                    .get_mut(p3c_d_zip_names_handle as usize)
+                    .ok_or_else(|| VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "zipfile.names: unknown handle {}",
+                            p3c_d_zip_names_handle
+                        ),
+                    })?;
+                let p3c_d_zip_names_arch = p3c_d_zip_names_slot.as_mut().ok_or_else(|| {
+                    VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "zipfile.names: handle {} is closed",
+                            p3c_d_zip_names_handle
+                        ),
+                    }
+                })?;
+                p3c_d_zip_names_arch
+                    .file_names()
+                    .map(|s| s.to_string())
+                    .collect()
+            };
+            let p3c_d_zip_names_list = interp.alloc_list(p3c_d_zip_names_collected.len());
+            for p3c_d_zip_names_entry in p3c_d_zip_names_collected {
+                let p3c_d_zip_names_sp = interp.alloc_string(&p3c_d_zip_names_entry) as u64;
+                // SAFETY: list freshly allocated, owned by us.
+                unsafe { interp.list_push(p3c_d_zip_names_list, p3c_d_zip_names_sp) };
+            }
+            Ok(p3c_d_zip_names_list as u64)
+        }
+        NativeFn::ZipfileRead => {
+            use std::io::Read;
+            let p3c_d_zip_read_handle = arg_i64(args, 0);
+            let p3c_d_zip_read_name = arg_str(args, 1);
+            if p3c_d_zip_read_handle <= 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "zipfile.read: invalid handle {}",
+                        p3c_d_zip_read_handle
+                    ),
+                });
+            }
+            let p3c_d_zip_read_bytes: Vec<u8> = {
+                let mut p3c_d_zip_read_table = interp.shared.zip_readers.lock().unwrap();
+                let p3c_d_zip_read_slot = p3c_d_zip_read_table
+                    .get_mut(p3c_d_zip_read_handle as usize)
+                    .ok_or_else(|| VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "zipfile.read: unknown handle {}",
+                            p3c_d_zip_read_handle
+                        ),
+                    })?;
+                let p3c_d_zip_read_arch = p3c_d_zip_read_slot.as_mut().ok_or_else(|| {
+                    VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "zipfile.read: handle {} is closed",
+                            p3c_d_zip_read_handle
+                        ),
+                    }
+                })?;
+                let mut p3c_d_zip_read_entry = p3c_d_zip_read_arch
+                    .by_name(&p3c_d_zip_read_name)
+                    .map_err(|e| VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "zipfile.read({:?}): {}",
+                            p3c_d_zip_read_name, e
+                        ),
+                    })?;
+                let mut p3c_d_zip_read_buf = Vec::with_capacity(p3c_d_zip_read_entry.size() as usize);
+                p3c_d_zip_read_entry
+                    .read_to_end(&mut p3c_d_zip_read_buf)
+                    .map_err(|e| VmError::UncaughtException {
+                        type_name: "IOError".into(),
+                        message: format!(
+                            "zipfile.read({:?}): {}",
+                            p3c_d_zip_read_name, e
+                        ),
+                    })?;
+                p3c_d_zip_read_buf
+            };
+            let p3c_d_zip_read_str = bytes_to_packed_str(&p3c_d_zip_read_bytes);
+            let p3c_d_zip_read_sp = interp.alloc_string(&p3c_d_zip_read_str);
+            Ok(p3c_d_zip_read_sp as u64)
+        }
+        NativeFn::ZipfileWrite => {
+            use std::io::Write;
+            let p3c_d_zip_write_handle = arg_i64(args, 0);
+            let p3c_d_zip_write_name = arg_str(args, 1);
+            let p3c_d_zip_write_data_str = arg_str(args, 2);
+            if p3c_d_zip_write_handle <= 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "zipfile.write: invalid handle {}",
+                        p3c_d_zip_write_handle
+                    ),
+                });
+            }
+            let p3c_d_zip_write_bytes = packed_str_to_bytes(
+                &p3c_d_zip_write_data_str,
+                0,
+                p3c_d_zip_write_data_str.chars().count(),
+                "zipfile.write",
+            )?;
+            let mut p3c_d_zip_write_table = interp.shared.zip_writers.lock().unwrap();
+            let p3c_d_zip_write_slot = p3c_d_zip_write_table
+                .get_mut(p3c_d_zip_write_handle as usize)
+                .ok_or_else(|| VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "zipfile.write: unknown handle {}",
+                        p3c_d_zip_write_handle
+                    ),
+                })?;
+            let p3c_d_zip_write_w = p3c_d_zip_write_slot.as_mut().ok_or_else(|| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "zipfile.write: handle {} is closed",
+                        p3c_d_zip_write_handle
+                    ),
+                }
+            })?;
+            let p3c_d_zip_write_opts: zip::write::FileOptions<()> =
+                zip::write::FileOptions::default()
+                    .compression_method(zip::CompressionMethod::Deflated);
+            p3c_d_zip_write_w
+                .start_file(p3c_d_zip_write_name.clone(), p3c_d_zip_write_opts)
+                .map_err(|e| VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!(
+                        "zipfile.write({:?}): start_file: {}",
+                        p3c_d_zip_write_name, e
+                    ),
+                })?;
+            p3c_d_zip_write_w
+                .write_all(&p3c_d_zip_write_bytes)
+                .map_err(|e| VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!(
+                        "zipfile.write({:?}): write_all: {}",
+                        p3c_d_zip_write_name, e
+                    ),
+                })?;
+            Ok(0)
+        }
+        NativeFn::ZipfileClose => {
+            let p3c_d_zip_close_handle = arg_i64(args, 0);
+            if p3c_d_zip_close_handle <= 0 {
+                return Ok(0);
+            }
+            // Close on a writer must finish() to flush central directory;
+            // close on a reader just drops the slot.  We try writers first
+            // (they're the ones that actually need flushing).
+            {
+                let mut p3c_d_zip_close_w_table = interp.shared.zip_writers.lock().unwrap();
+                if let Some(p3c_d_zip_close_w_slot) =
+                    p3c_d_zip_close_w_table.get_mut(p3c_d_zip_close_handle as usize)
+                {
+                    if let Some(p3c_d_zip_close_w) = p3c_d_zip_close_w_slot.take() {
+                        p3c_d_zip_close_w.finish().map_err(|e| VmError::UncaughtException {
+                            type_name: "IOError".into(),
+                            message: format!(
+                                "zipfile.close({}): finish: {}",
+                                p3c_d_zip_close_handle, e
+                            ),
+                        })?;
+                        return Ok(0);
+                    }
+                }
+            }
+            // Not a writer; try the reader table.
+            let mut p3c_d_zip_close_r_table = interp.shared.zip_readers.lock().unwrap();
+            if let Some(p3c_d_zip_close_r_slot) =
+                p3c_d_zip_close_r_table.get_mut(p3c_d_zip_close_handle as usize)
+            {
+                *p3c_d_zip_close_r_slot = None;
+            }
+            Ok(0)
+        }
+        NativeFn::ZipfileIsZipfile => {
+            let p3c_d_zip_is_path = arg_str(args, 0);
+            let p3c_d_zip_is_ok = match std::fs::File::open(&p3c_d_zip_is_path) {
+                Ok(p3c_d_zip_is_file) => zip::ZipArchive::new(p3c_d_zip_is_file).is_ok(),
+                Err(_) => false,
+            };
+            Ok(if p3c_d_zip_is_ok { 1 } else { 0 })
+        }
+        NativeFn::ZipfileInfo => {
+            let p3c_d_zip_info_handle = arg_i64(args, 0);
+            let p3c_d_zip_info_name = arg_str(args, 1);
+            // Missing entry / closed handle returns (-1, -1, -1) per the
+            // brief, rather than raising — keeps user code's "did this
+            // entry exist?" probe ergonomic without try/except wrapping.
+            let p3c_d_zip_info_triple: Option<(i64, i64, i64)> = if p3c_d_zip_info_handle <= 0 {
+                None
+            } else {
+                let mut p3c_d_zip_info_table = interp.shared.zip_readers.lock().unwrap();
+                let p3c_d_zip_info_slot_opt =
+                    p3c_d_zip_info_table.get_mut(p3c_d_zip_info_handle as usize);
+                match p3c_d_zip_info_slot_opt {
+                    Some(p3c_d_zip_info_slot) => match p3c_d_zip_info_slot.as_mut() {
+                        Some(p3c_d_zip_info_arch) => {
+                            match p3c_d_zip_info_arch.by_name(&p3c_d_zip_info_name) {
+                                Ok(p3c_d_zip_info_entry) => Some((
+                                    p3c_d_zip_info_entry.compressed_size() as i64,
+                                    p3c_d_zip_info_entry.size() as i64,
+                                    p3c_d_zip_info_entry.crc32() as i64,
+                                )),
+                                Err(_) => None,
+                            }
+                        }
+                        None => None,
+                    },
+                    None => None,
+                }
+            };
+            let (p3c_d_zip_info_cs, p3c_d_zip_info_us, p3c_d_zip_info_crc) =
+                p3c_d_zip_info_triple.unwrap_or((-1i64, -1i64, -1i64));
+            let p3c_d_zip_info_tup = interp.alloc_tuple_obj(&[
+                p3c_d_zip_info_cs as u64,
+                p3c_d_zip_info_us as u64,
+                p3c_d_zip_info_crc as u64,
+            ]);
+            Ok(p3c_d_zip_info_tup as u64)
+        }
+
+        // ── M27 P3c-D: `tarfile` module ────────────────────────────────
+        // Wraps the pure-Rust `tar` crate, with optional `flate2` (gz)
+        // and `bzip2` (bz2) transparent compression layered on top.
+        // Read-mode archives are eagerly decoded into a name -> bytes
+        // map at open time so later `read` calls are O(1) regardless of
+        // whether the on-disk archive is plain, gzipped, or bz2-encoded.
+        // Write-mode handles are an enum (`TarWriteHandle` in lib.rs)
+        // because each mode uses a differently-typed `tar::Builder<W>`.
+        // See spec §9.31.
+        NativeFn::TarfileOpenRead => {
+            use std::io::Read;
+            let p3c_d_tar_open_read_path = arg_str(args, 0);
+            let p3c_d_tar_open_read_mode = arg_str(args, 1);
+            let p3c_d_tar_open_read_file = std::fs::File::open(&p3c_d_tar_open_read_path).map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!(
+                        "tarfile.open_read({:?}, mode={:?}): {}",
+                        p3c_d_tar_open_read_path, p3c_d_tar_open_read_mode, e
+                    ),
+                }
+            })?;
+            let p3c_d_tar_open_read_reader: Box<dyn Read> = match p3c_d_tar_open_read_mode.as_str() {
+                "r" | "" => Box::new(p3c_d_tar_open_read_file),
+                "r:gz" => Box::new(flate2::read::GzDecoder::new(p3c_d_tar_open_read_file)),
+                "r:bz2" => Box::new(bzip2::read::BzDecoder::new(p3c_d_tar_open_read_file)),
+                other => {
+                    return Err(VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "tarfile.open_read: unsupported mode {:?} (want \"r\", \"r:gz\", or \"r:bz2\")",
+                            other
+                        ),
+                    });
+                }
+            };
+            let mut p3c_d_tar_open_read_archive = tar::Archive::new(p3c_d_tar_open_read_reader);
+            let mut p3c_d_tar_open_read_entries: std::collections::HashMap<String, Vec<u8>> =
+                std::collections::HashMap::new();
+            let mut p3c_d_tar_open_read_order: Vec<String> = Vec::new();
+            let p3c_d_tar_open_read_iter = p3c_d_tar_open_read_archive.entries().map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!(
+                        "tarfile.open_read({:?}): entries: {}",
+                        p3c_d_tar_open_read_path, e
+                    ),
+                }
+            })?;
+            for p3c_d_tar_open_read_item in p3c_d_tar_open_read_iter {
+                let mut p3c_d_tar_open_read_entry = p3c_d_tar_open_read_item.map_err(|e| {
+                    VmError::UncaughtException {
+                        type_name: "IOError".into(),
+                        message: format!(
+                            "tarfile.open_read({:?}): entry: {}",
+                            p3c_d_tar_open_read_path, e
+                        ),
+                    }
+                })?;
+                // Skip directory entries — `read()` on them returns
+                // empty anyway and `names()` only lists regular files
+                // (mirroring Python's tarfile.getnames which DOES list
+                // dirs, but our str-as-byte-buffer convention works
+                // better when the user can't accidentally read() a dir).
+                let p3c_d_tar_open_read_kind = p3c_d_tar_open_read_entry.header().entry_type();
+                if !p3c_d_tar_open_read_kind.is_file() {
+                    continue;
+                }
+                let p3c_d_tar_open_read_pname = p3c_d_tar_open_read_entry.path().map_err(|e| {
+                    VmError::UncaughtException {
+                        type_name: "IOError".into(),
+                        message: format!(
+                            "tarfile.open_read({:?}): path: {}",
+                            p3c_d_tar_open_read_path, e
+                        ),
+                    }
+                })?;
+                let p3c_d_tar_open_read_pstr = p3c_d_tar_open_read_pname.to_string_lossy().into_owned();
+                let mut p3c_d_tar_open_read_buf: Vec<u8> = Vec::new();
+                p3c_d_tar_open_read_entry
+                    .read_to_end(&mut p3c_d_tar_open_read_buf)
+                    .map_err(|e| VmError::UncaughtException {
+                        type_name: "IOError".into(),
+                        message: format!(
+                            "tarfile.open_read({:?}): read {}: {}",
+                            p3c_d_tar_open_read_path, p3c_d_tar_open_read_pstr, e
+                        ),
+                    })?;
+                if !p3c_d_tar_open_read_entries.contains_key(&p3c_d_tar_open_read_pstr) {
+                    p3c_d_tar_open_read_order.push(p3c_d_tar_open_read_pstr.clone());
+                }
+                p3c_d_tar_open_read_entries
+                    .insert(p3c_d_tar_open_read_pstr, p3c_d_tar_open_read_buf);
+            }
+            let p3c_d_tar_open_read_handle_val = {
+                let mut p3c_d_tar_open_read_table = interp.shared.tar_readers.lock().unwrap();
+                let p3c_d_tar_open_read_handle = p3c_d_tar_open_read_table.len() as i64;
+                p3c_d_tar_open_read_table.push(Some(crate::TarReadHandle {
+                    entries: p3c_d_tar_open_read_entries,
+                    order: p3c_d_tar_open_read_order,
+                }));
+                p3c_d_tar_open_read_handle
+            };
+            Ok(p3c_d_tar_open_read_handle_val as u64)
+        }
+        NativeFn::TarfileOpenWrite => {
+            let p3c_d_tar_open_write_path = arg_str(args, 0);
+            let p3c_d_tar_open_write_mode = arg_str(args, 1);
+            let p3c_d_tar_open_write_file = std::fs::File::create(&p3c_d_tar_open_write_path).map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!(
+                        "tarfile.open_write({:?}, mode={:?}): {}",
+                        p3c_d_tar_open_write_path, p3c_d_tar_open_write_mode, e
+                    ),
+                }
+            })?;
+            let p3c_d_tar_open_write_handle_obj = match p3c_d_tar_open_write_mode.as_str() {
+                "w" | "" => crate::TarWriteHandle::Plain(tar::Builder::new(p3c_d_tar_open_write_file)),
+                "w:gz" => {
+                    let p3c_d_tar_open_write_enc = flate2::write::GzEncoder::new(
+                        p3c_d_tar_open_write_file,
+                        flate2::Compression::default(),
+                    );
+                    crate::TarWriteHandle::Gz(tar::Builder::new(p3c_d_tar_open_write_enc))
+                }
+                "w:bz2" => {
+                    let p3c_d_tar_open_write_enc = bzip2::write::BzEncoder::new(
+                        p3c_d_tar_open_write_file,
+                        bzip2::Compression::default(),
+                    );
+                    crate::TarWriteHandle::Bz2(tar::Builder::new(p3c_d_tar_open_write_enc))
+                }
+                other => {
+                    return Err(VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "tarfile.open_write: unsupported mode {:?} (want \"w\", \"w:gz\", or \"w:bz2\")",
+                            other
+                        ),
+                    });
+                }
+            };
+            let mut p3c_d_tar_open_write_table = interp.shared.tar_writers.lock().unwrap();
+            let p3c_d_tar_open_write_handle = p3c_d_tar_open_write_table.len() as i64;
+            p3c_d_tar_open_write_table.push(Some(p3c_d_tar_open_write_handle_obj));
+            Ok(p3c_d_tar_open_write_handle as u64)
+        }
+        NativeFn::TarfileNames => {
+            let p3c_d_tar_names_handle = arg_i64(args, 0);
+            if p3c_d_tar_names_handle <= 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "tarfile.names: invalid handle {}",
+                        p3c_d_tar_names_handle
+                    ),
+                });
+            }
+            let p3c_d_tar_names_ordered: Vec<String> = {
+                let p3c_d_tar_names_table = interp.shared.tar_readers.lock().unwrap();
+                let p3c_d_tar_names_slot = p3c_d_tar_names_table
+                    .get(p3c_d_tar_names_handle as usize)
+                    .ok_or_else(|| VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "tarfile.names: unknown handle {}",
+                            p3c_d_tar_names_handle
+                        ),
+                    })?;
+                let p3c_d_tar_names_h = p3c_d_tar_names_slot.as_ref().ok_or_else(|| {
+                    VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "tarfile.names: handle {} is closed",
+                            p3c_d_tar_names_handle
+                        ),
+                    }
+                })?;
+                p3c_d_tar_names_h.order.clone()
+            };
+            let p3c_d_tar_names_list = interp.alloc_list(p3c_d_tar_names_ordered.len());
+            for p3c_d_tar_names_entry in p3c_d_tar_names_ordered {
+                let p3c_d_tar_names_sp = interp.alloc_string(&p3c_d_tar_names_entry) as u64;
+                // SAFETY: list freshly allocated, owned by us.
+                unsafe { interp.list_push(p3c_d_tar_names_list, p3c_d_tar_names_sp) };
+            }
+            Ok(p3c_d_tar_names_list as u64)
+        }
+        NativeFn::TarfileRead => {
+            let p3c_d_tar_read_handle = arg_i64(args, 0);
+            let p3c_d_tar_read_name = arg_str(args, 1);
+            if p3c_d_tar_read_handle <= 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "tarfile.read: invalid handle {}",
+                        p3c_d_tar_read_handle
+                    ),
+                });
+            }
+            let p3c_d_tar_read_bytes: Vec<u8> = {
+                let p3c_d_tar_read_table = interp.shared.tar_readers.lock().unwrap();
+                let p3c_d_tar_read_slot = p3c_d_tar_read_table
+                    .get(p3c_d_tar_read_handle as usize)
+                    .ok_or_else(|| VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "tarfile.read: unknown handle {}",
+                            p3c_d_tar_read_handle
+                        ),
+                    })?;
+                let p3c_d_tar_read_h = p3c_d_tar_read_slot.as_ref().ok_or_else(|| {
+                    VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "tarfile.read: handle {} is closed",
+                            p3c_d_tar_read_handle
+                        ),
+                    }
+                })?;
+                p3c_d_tar_read_h
+                    .entries
+                    .get(&p3c_d_tar_read_name)
+                    .cloned()
+                    .ok_or_else(|| VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "tarfile.read: entry {:?} not in archive",
+                            p3c_d_tar_read_name
+                        ),
+                    })?
+            };
+            let p3c_d_tar_read_str = bytes_to_packed_str(&p3c_d_tar_read_bytes);
+            let p3c_d_tar_read_sp = interp.alloc_string(&p3c_d_tar_read_str);
+            Ok(p3c_d_tar_read_sp as u64)
+        }
+        NativeFn::TarfileWriteFile => {
+            let p3c_d_tar_wf_handle = arg_i64(args, 0);
+            let p3c_d_tar_wf_src = arg_str(args, 1);
+            let p3c_d_tar_wf_arc = arg_str(args, 2);
+            if p3c_d_tar_wf_handle <= 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "tarfile.write_file: invalid handle {}",
+                        p3c_d_tar_wf_handle
+                    ),
+                });
+            }
+            let mut p3c_d_tar_wf_table = interp.shared.tar_writers.lock().unwrap();
+            let p3c_d_tar_wf_slot = p3c_d_tar_wf_table
+                .get_mut(p3c_d_tar_wf_handle as usize)
+                .ok_or_else(|| VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "tarfile.write_file: unknown handle {}",
+                        p3c_d_tar_wf_handle
+                    ),
+                })?;
+            let p3c_d_tar_wf_h = p3c_d_tar_wf_slot.as_mut().ok_or_else(|| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "tarfile.write_file: handle {} is closed",
+                        p3c_d_tar_wf_handle
+                    ),
+                }
+            })?;
+            let p3c_d_tar_wf_res = match p3c_d_tar_wf_h {
+                crate::TarWriteHandle::Plain(b) => {
+                    b.append_path_with_name(&p3c_d_tar_wf_src, &p3c_d_tar_wf_arc)
+                }
+                crate::TarWriteHandle::Gz(b) => {
+                    b.append_path_with_name(&p3c_d_tar_wf_src, &p3c_d_tar_wf_arc)
+                }
+                crate::TarWriteHandle::Bz2(b) => {
+                    b.append_path_with_name(&p3c_d_tar_wf_src, &p3c_d_tar_wf_arc)
+                }
+            };
+            p3c_d_tar_wf_res.map_err(|e| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!(
+                    "tarfile.write_file({:?} -> {:?}): {}",
+                    p3c_d_tar_wf_src, p3c_d_tar_wf_arc, e
+                ),
+            })?;
+            Ok(0)
+        }
+        NativeFn::TarfileWriteData => {
+            let p3c_d_tar_wd_handle = arg_i64(args, 0);
+            let p3c_d_tar_wd_arc = arg_str(args, 1);
+            let p3c_d_tar_wd_data_str = arg_str(args, 2);
+            if p3c_d_tar_wd_handle <= 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "tarfile.write_data: invalid handle {}",
+                        p3c_d_tar_wd_handle
+                    ),
+                });
+            }
+            let p3c_d_tar_wd_bytes = packed_str_to_bytes(
+                &p3c_d_tar_wd_data_str,
+                0,
+                p3c_d_tar_wd_data_str.chars().count(),
+                "tarfile.write_data",
+            )?;
+            let mut p3c_d_tar_wd_header = tar::Header::new_gnu();
+            p3c_d_tar_wd_header.set_size(p3c_d_tar_wd_bytes.len() as u64);
+            p3c_d_tar_wd_header.set_mode(0o644);
+            p3c_d_tar_wd_header.set_cksum();
+            let mut p3c_d_tar_wd_table = interp.shared.tar_writers.lock().unwrap();
+            let p3c_d_tar_wd_slot = p3c_d_tar_wd_table
+                .get_mut(p3c_d_tar_wd_handle as usize)
+                .ok_or_else(|| VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "tarfile.write_data: unknown handle {}",
+                        p3c_d_tar_wd_handle
+                    ),
+                })?;
+            let p3c_d_tar_wd_h = p3c_d_tar_wd_slot.as_mut().ok_or_else(|| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "tarfile.write_data: handle {} is closed",
+                        p3c_d_tar_wd_handle
+                    ),
+                }
+            })?;
+            let p3c_d_tar_wd_res = match p3c_d_tar_wd_h {
+                crate::TarWriteHandle::Plain(b) => b.append_data(
+                    &mut p3c_d_tar_wd_header,
+                    &p3c_d_tar_wd_arc,
+                    p3c_d_tar_wd_bytes.as_slice(),
+                ),
+                crate::TarWriteHandle::Gz(b) => b.append_data(
+                    &mut p3c_d_tar_wd_header,
+                    &p3c_d_tar_wd_arc,
+                    p3c_d_tar_wd_bytes.as_slice(),
+                ),
+                crate::TarWriteHandle::Bz2(b) => b.append_data(
+                    &mut p3c_d_tar_wd_header,
+                    &p3c_d_tar_wd_arc,
+                    p3c_d_tar_wd_bytes.as_slice(),
+                ),
+            };
+            p3c_d_tar_wd_res.map_err(|e| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!(
+                    "tarfile.write_data({:?}): {}",
+                    p3c_d_tar_wd_arc, e
+                ),
+            })?;
+            Ok(0)
+        }
+        NativeFn::TarfileClose => {
+            let p3c_d_tar_close_handle = arg_i64(args, 0);
+            if p3c_d_tar_close_handle <= 0 {
+                return Ok(0);
+            }
+            // Writers must be finished explicitly to flush; readers are
+            // memory-resident so dropping the slot is enough.
+            {
+                let mut p3c_d_tar_close_w_table = interp.shared.tar_writers.lock().unwrap();
+                if let Some(p3c_d_tar_close_w_slot) =
+                    p3c_d_tar_close_w_table.get_mut(p3c_d_tar_close_handle as usize)
+                {
+                    if let Some(p3c_d_tar_close_w) = p3c_d_tar_close_w_slot.take() {
+                        let p3c_d_tar_close_w_res = match p3c_d_tar_close_w {
+                            crate::TarWriteHandle::Plain(b) => b.into_inner().map(|_| ()),
+                            crate::TarWriteHandle::Gz(b) => {
+                                b.into_inner().and_then(|enc| enc.finish().map(|_| ()))
+                            }
+                            crate::TarWriteHandle::Bz2(b) => {
+                                b.into_inner().and_then(|enc| enc.finish().map(|_| ()))
+                            }
+                        };
+                        p3c_d_tar_close_w_res.map_err(|e| VmError::UncaughtException {
+                            type_name: "IOError".into(),
+                            message: format!(
+                                "tarfile.close({}): finish: {}",
+                                p3c_d_tar_close_handle, e
+                            ),
+                        })?;
+                        return Ok(0);
+                    }
+                }
+            }
+            let mut p3c_d_tar_close_r_table = interp.shared.tar_readers.lock().unwrap();
+            if let Some(p3c_d_tar_close_r_slot) =
+                p3c_d_tar_close_r_table.get_mut(p3c_d_tar_close_handle as usize)
+            {
+                *p3c_d_tar_close_r_slot = None;
+            }
+            Ok(0)
+        }
+        NativeFn::TarfileIsTarfile => {
+            use std::io::Read;
+            let p3c_d_tar_is_path = arg_str(args, 0);
+            // A tar file has the magic string "ustar" at offset 257 of
+            // its first 512-byte header block (POSIX / GNU formats).  We
+            // peek the first 512 bytes; anything shorter or without the
+            // marker is reported as not-a-tar.  This deliberately does
+            // NOT try gzipped or bz2'd tar files — those `is_tarfile`
+            // probes belong in Python at a higher layer; matching CPython
+            // here would mean opening the file with each of the three
+            // decoders, which is a lot more I/O.
+            let p3c_d_tar_is_ok = match std::fs::File::open(&p3c_d_tar_is_path) {
+                Ok(mut p3c_d_tar_is_file) => {
+                    let mut p3c_d_tar_is_buf = [0u8; 512];
+                    match p3c_d_tar_is_file.read(&mut p3c_d_tar_is_buf) {
+                        Ok(n) if n >= 265 => {
+                            &p3c_d_tar_is_buf[257..262] == b"ustar"
+                        }
+                        _ => false,
+                    }
+                }
+                Err(_) => false,
+            };
+            Ok(if p3c_d_tar_is_ok { 1 } else { 0 })
+        }
 
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),

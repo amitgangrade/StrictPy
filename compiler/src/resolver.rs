@@ -2596,6 +2596,174 @@ impl Resolver {
         };
         self.stdlib_modules.insert("sqlite3".into(), sqlite3_mod);
 
+        // ── M27 P3c-D: `zipfile` module ────────────────────────────────
+        // Wraps the `zip` crate.  Read-mode handles allow random-access
+        // entry reads; write-mode handles append in stored / deflated
+        // form.  All entry bytes round-trip as `str` (each codepoint
+        // 0..255 inclusive maps to a byte — the same str-as-byte-buffer
+        // convention `struct.pack` already uses in v0.2).  See spec
+        // §9.30.
+        const ZIPFILE_OPEN_READ: u32     = 520;
+        const ZIPFILE_OPEN_WRITE: u32    = 521;
+        const ZIPFILE_NAMES: u32         = 522;
+        const ZIPFILE_READ: u32          = 523;
+        const ZIPFILE_WRITE: u32         = 524;
+        const ZIPFILE_CLOSE: u32         = 525;
+        const ZIPFILE_IS_ZIPFILE: u32    = 526;
+        const ZIPFILE_INFO: u32          = 527;
+
+        let p3c_d_zip_info_tuple_ty =
+            Ty::Tuple(vec![i64_ty.clone(), i64_ty.clone(), i64_ty.clone()]);
+
+        let p3c_d_zipfile_mod = StdlibModule {
+            name: "zipfile".into(),
+            items: vec![
+                StdlibItem {
+                    name: "open_read".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], i64_ty.clone()),
+                    native_id: ZIPFILE_OPEN_READ,
+                },
+                StdlibItem {
+                    name: "open_write".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], i64_ty.clone()),
+                    native_id: ZIPFILE_OPEN_WRITE,
+                },
+                StdlibItem {
+                    name: "names".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], list_str_ty.clone()),
+                    native_id: ZIPFILE_NAMES,
+                },
+                StdlibItem {
+                    name: "read".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![i64_ty.clone(), str_ty.clone()],
+                        str_ty.clone(),
+                    ),
+                    native_id: ZIPFILE_READ,
+                },
+                StdlibItem {
+                    name: "write".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![i64_ty.clone(), str_ty.clone(), str_ty.clone()],
+                        unit_ty.clone(),
+                    ),
+                    native_id: ZIPFILE_WRITE,
+                },
+                StdlibItem {
+                    name: "close".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], unit_ty.clone()),
+                    native_id: ZIPFILE_CLOSE,
+                },
+                StdlibItem {
+                    name: "is_zipfile".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], bool_ty.clone()),
+                    native_id: ZIPFILE_IS_ZIPFILE,
+                },
+                StdlibItem {
+                    name: "info".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![i64_ty.clone(), str_ty.clone()],
+                        p3c_d_zip_info_tuple_ty.clone(),
+                    ),
+                    native_id: ZIPFILE_INFO,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("zipfile".into(), p3c_d_zipfile_mod);
+
+        // ── M27 P3c-D: `tarfile` module ────────────────────────────────
+        // Wraps the `tar` crate, with optional `flate2` (gz) and
+        // `bzip2` (bz2) transparent compression.  Mode strings ("r",
+        // "r:gz", "r:bz2", "w", "w:gz", "w:bz2") select the wrapper
+        // exactly like Python's `tarfile.open(name, mode)`.  See spec
+        // §9.31.
+        const TARFILE_OPEN_READ: u32     = 530;
+        const TARFILE_OPEN_WRITE: u32    = 531;
+        const TARFILE_NAMES: u32         = 532;
+        const TARFILE_READ: u32          = 533;
+        const TARFILE_WRITE_FILE: u32    = 534;
+        const TARFILE_WRITE_DATA: u32    = 535;
+        const TARFILE_CLOSE: u32         = 536;
+        const TARFILE_IS_TARFILE: u32    = 537;
+
+        let p3c_d_tarfile_mod = StdlibModule {
+            name: "tarfile".into(),
+            items: vec![
+                StdlibItem {
+                    name: "open_read".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), str_ty.clone()],
+                        i64_ty.clone(),
+                    ),
+                    native_id: TARFILE_OPEN_READ,
+                },
+                StdlibItem {
+                    name: "open_write".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), str_ty.clone()],
+                        i64_ty.clone(),
+                    ),
+                    native_id: TARFILE_OPEN_WRITE,
+                },
+                StdlibItem {
+                    name: "names".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], list_str_ty.clone()),
+                    native_id: TARFILE_NAMES,
+                },
+                StdlibItem {
+                    name: "read".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![i64_ty.clone(), str_ty.clone()],
+                        str_ty.clone(),
+                    ),
+                    native_id: TARFILE_READ,
+                },
+                StdlibItem {
+                    name: "write_file".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![i64_ty.clone(), str_ty.clone(), str_ty.clone()],
+                        unit_ty.clone(),
+                    ),
+                    native_id: TARFILE_WRITE_FILE,
+                },
+                StdlibItem {
+                    name: "write_data".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![i64_ty.clone(), str_ty.clone(), str_ty.clone()],
+                        unit_ty.clone(),
+                    ),
+                    native_id: TARFILE_WRITE_DATA,
+                },
+                StdlibItem {
+                    name: "close".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], unit_ty.clone()),
+                    native_id: TARFILE_CLOSE,
+                },
+                StdlibItem {
+                    name: "is_tarfile".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], bool_ty.clone()),
+                    native_id: TARFILE_IS_TARFILE,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("tarfile".into(), p3c_d_tarfile_mod);
+
         // ── M27 P3c-A: `shutil` module ─────────────────────────────────
         // High-level filesystem operations: file/dir copy, recursive
         // remove, PATH lookup for executables, and disk-usage stats.
