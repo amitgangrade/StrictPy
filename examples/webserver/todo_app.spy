@@ -1,39 +1,58 @@
-"""todo_app.spy — M29 web framework + TODO demo, all in one file.
+"""todo_app.spy — M29 / M29.5 web framework + TODO demo, all in one file.
 
 User-defined .spy modules are deferred to v0.3 (STRICTPY_SPEC.md §6.7),
 so the framework code and the demo app live in a single file.  Roughly
 half the file is reusable framework (HTTP/1.1 parser/writer, router,
 accept-loop) and half is the TODO app specifics (sqlite storage +
-handlers).  See `docs/thesis/agent_reports/m29_webserver.md` for the
-narrative companion.
+handlers + file uploads).  See `docs/thesis/agent_reports/m29_webserver.md`
++ `m29_5_webserver_roundout.md` for the narrative companions.
 
 Sub-systems, in declaration order:
   1.  Generic helpers      (substring, parse_i32, etc.)
-  2.  HTTP/1.1 protocol    (parse request, format response)
+  2.  HTTP/1.1 protocol    (parse request, format response, multipart)
   3.  Routing              (linear table of method-path-handler triples)
-  4.  Server               (accept loop, thread-per-connection)
-  5.  TODO storage + UI    (sqlite + JSON + minimal HTML)
-  6.  main()               (arg parsing, server start)
+  4.  Server               (accept loop, thread-per-connection, keep-alive)
+  5.  TODO storage + UI    (sqlite + JSON + minimal HTML + uploads)
+  6.  main()               (arg parsing, server start, shutdown timer)
 
 CLI:
     spy todo_app.spyc [--host HOST] [--port PORT] [--db PATH] [--tls CERT KEY]
+                      [--max-accepts N] [--shutdown-after-secs N]
 
 If `--tls cert.pem key.pem` is supplied the server uses HTTPS; otherwise
 plain HTTP/1.1.  Default host is 127.0.0.1, default port is 0 (the OS
 picks one, and the chosen port is printed to stdout as `PORT=NNNN` for
 the integration test to scrape).
 
-v0.2 limits we accept:
-  * No chunked transfer-encoding: requests are Content-Length-framed.
-  * No keep-alive: we always reply with `Connection: close`.
-  * No multipart bodies: form bodies are `application/x-www-form-urlencoded`.
+`--shutdown-after-secs N` is the v0.2 stand-in for SIGINT (StrictPy has
+no `signal` stdlib): N seconds after the listener binds, a background
+thread closes the listener — the accept loop sees the close, exits its
+loop, and the main thread waits up to 10s for in-flight requests before
+returning.  Production users would wire a real signal handler via FFI
+in v0.3.
+
+M29.5 additions (this file):
+  * HTTP keep-alive (Connection header + per-conn read loop, idle 5s).
+  * Chunked transfer-encoding (read on request, write on response via
+    `resp_set_chunked` + `Response.body_chunks`).
+  * `multipart/form-data` parsing (single nesting level — no nested
+    multipart inside parts; sufficient for file uploads).
+  * Graceful shutdown via `--shutdown-after-secs` (signal substitute).
+  * HTML error pages (400 / 404 / 405 / 500).
+
+v0.2 limits we still accept:
+  * No HTTP/2 / HTTP/3.
+  * No request pipelining (one request at a time per connection).
+  * No 100-Continue.
+  * No trailers in chunked encoding (we discard them on read; we
+    never emit them).
   * Header lookup is case-INSENSITIVE (we lowercase on parse).
   * Concurrency is thread-per-connection, bounded by a Semaphore.
 
 This program exercises:
-  * M11 classes (Request / Response / Route / RouteTable / Server)
+  * M11 classes (Request / Response / Router / MultipartPart)
   * M14 tuples (parser return shapes)
-  * M15 try/except (handler error capture, 500 fallback)
+  * M15 try/except (handler error capture, 500 fallback, idle-timeout)
   * M16 match (status-text family — see `status_phrase`)
   * Phase 3a/3b/3c stdlib: socket, ssl, sqlite3, threading, json,
     http_client (for urldecode), datetime, logging, time, sys, io, os.
@@ -77,7 +96,49 @@ fn max_concurrent_connections() -> i32:
 
 fn server_signature() -> str:
     """Value of the `Server:` response header."""
-    return "StrictPy-webserver/0.1"
+    return "StrictPy-webserver/0.3"
+
+
+fn keepalive_idle_secs() -> f64:
+    """Idle timeout (seconds) on a kept-alive connection.
+
+    After this many seconds without bytes from the peer, we tear the
+    connection down.  Browsers default to ~5s; we match."""
+    return 5.0
+
+
+fn keepalive_max_requests() -> i32:
+    """Hard cap on requests per kept-alive connection.
+
+    Bounds resource use (one rogue client can't permanently squat a
+    connection); the same value we advertise in the
+    `Keep-Alive: max=...` response header."""
+    return 100i32
+
+
+fn shutdown_grace_secs() -> f64:
+    """How long the main thread waits for in-flight requests to drain
+    after the listener has been closed."""
+    return 10.0
+
+
+fn max_chunk_size_bytes() -> i32:
+    """Hard cap on a single chunked-encoding chunk we'll accept.  Same
+    as max_request_bytes — a single chunk can't be larger than the
+    whole-body cap."""
+    return 65536i32
+
+
+fn max_multipart_parts() -> i32:
+    """Hard cap on the number of parts in a multipart body.  Defensive
+    bound against an attacker streaming a million empty parts."""
+    return 64i32
+
+
+fn uploads_dir() -> str:
+    """Filesystem directory where uploaded files land.  Relative to the
+    process CWD — matches the `--db` default convention."""
+    return "examples/webserver/uploads"
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -278,15 +339,248 @@ fn req_content_type(req: Request) -> str:
     return req_get_header(req, "content-type")
 
 
+fn req_transfer_encoding(req: Request) -> str:
+    """Lowercased Transfer-Encoding header value (empty if absent)."""
+    return ascii_lower(req_get_header(req, "transfer-encoding"))
+
+
+fn req_is_chunked(req: Request) -> bool:
+    """`true` iff the request body is framed with chunked transfer-
+    encoding (and we should not look at Content-Length)."""
+    te: str = req_transfer_encoding(req)
+    return te == "chunked" or contains(te, "chunked")
+
+
+fn req_connection_header(req: Request) -> str:
+    """Lowercased Connection header value (empty if absent)."""
+    return ascii_lower(req_get_header(req, "connection"))
+
+
+fn req_wants_close(req: Request) -> bool:
+    """Did the client ask to close the connection after this request?"""
+    return req_connection_header(req) == "close"
+
+
+fn req_wants_keepalive(req: Request, default_keepalive: bool) -> bool:
+    """Persistent-connection decision per RFC 7230 §6.3.
+
+    HTTP/1.1 defaults to keep-alive unless the client sends
+    `Connection: close`.  HTTP/1.0 is the reverse — close unless the
+    client sends `Connection: keep-alive`.  `default_keepalive` is the
+    version-derived default."""
+    cn: str = req_connection_header(req)
+    if cn == "close":
+        return false
+    if cn == "keep-alive":
+        return true
+    return default_keepalive
+
+
+# ── multipart/form-data parsing (M29.5) ───────────────────────────────
+#
+# Single-nesting-level support: we parse a top-level multipart body
+# into a flat list of parts.  Each part has its own headers (we
+# extract `name` + `filename` from Content-Disposition and the part's
+# Content-Type) and an opaque body (str-as-byte-buffer per the v0.2
+# binary convention).  We do NOT recurse into `multipart/mixed` /
+# `multipart/related` parts — those are v0.3.
+
+final class MultipartPart:
+    name: str             # the `name` attribute from Content-Disposition
+    filename: str         # the `filename` attribute, or ""
+    content_type: str     # the part's Content-Type, or ""
+    body: str             # the part's body bytes as a str
+
+    fn __init__(self) -> None:
+        self.name = ""
+        self.filename = ""
+        self.content_type = ""
+        self.body = ""
+
+
+fn extract_multipart_boundary(content_type: str) -> str:
+    """Pull the `boundary=...` parameter out of a multipart Content-Type.
+
+    Returns "" if the header isn't multipart/form-data or the boundary
+    parameter is missing.  Boundaries may optionally be quoted; we
+    strip a leading/trailing `"` if present."""
+    ct_lower: str = ascii_lower(content_type)
+    if not starts_with(ct_lower, "multipart/form-data"):
+        return ""
+    at: i32 = index_of(ct_lower, "boundary=", 0i32)
+    if at < 0i32:
+        return ""
+    # Use the original-case content_type for the value (boundary tokens
+    # are case-sensitive).
+    start: i32 = at + 9i32
+    n: i32 = i32(i64(len(content_type)))
+    end: i32 = start
+    # Boundary ends at `;` or end-of-string.
+    while end < n and byte_at(content_type, end) != 59i32:
+        end = end + 1i32
+    val: str = trim_ascii(substring(content_type, start, end))
+    # Strip surrounding double-quotes if present.
+    vn: i32 = i32(i64(len(val)))
+    if vn >= 2i32 and byte_at(val, 0i32) == 34i32 and byte_at(val, vn - 1i32) == 34i32:
+        val = substring(val, 1i32, vn - 1i32)
+    return val
+
+
+fn parse_disposition_param(line: str, param_name: str) -> str:
+    """Extract `param_name="value"` from a Content-Disposition value.
+
+    Returns the raw inner value, or "" if not present.  Only the
+    quoted form is supported (which is what every browser sends)."""
+    needle: str = param_name + "=\""
+    at: i32 = index_of(line, needle, 0i32)
+    if at < 0i32:
+        return ""
+    start: i32 = at + i32(i64(len(needle)))
+    end: i32 = index_of(line, "\"", start)
+    if end < 0i32:
+        return ""
+    return substring(line, start, end)
+
+
+fn parse_multipart_part_headers(header_block: str, part: MultipartPart) -> bool:
+    """Walk the part's header block (which ends in \r\n\r\n) and pull
+    out name + filename + content-type."""
+    lines: List[str] = header_block.split("\r\n")
+    n: i32 = i32(i64(len(lines)))
+    i: i32 = 0i32
+    while i < n:
+        line: str = lines[i]
+        if i64(len(line)) == 0i64:
+            i = i + 1i32
+            continue
+        colon: i32 = index_of(line, ":", 0i32)
+        if colon <= 0i32:
+            return false
+        name_l: str = ascii_lower(substring(line, 0i32, colon))
+        value: str = trim_ascii(substring(line, colon + 1i32, i32(i64(len(line)))))
+        if name_l == "content-disposition":
+            # Always `form-data; name="..."; filename="..."`.
+            part.name = parse_disposition_param(value, "name")
+            part.filename = parse_disposition_param(value, "filename")
+        elif name_l == "content-type":
+            part.content_type = value
+        i = i + 1i32
+    return true
+
+
+fn parse_multipart_body(body: str, boundary: str) -> Tuple[bool, List[MultipartPart]]:
+    """Parse `body` as a multipart/form-data body with the given
+    boundary.  Returns (ok, parts).
+
+    Algorithm: find each `--<boundary>` boundary line; the bytes after
+    each one (up to the next boundary or `--<boundary>--`) are the
+    next part.  Each part splits header/body on `\r\n\r\n`.
+
+    Caps at `max_multipart_parts()` parts; anything more fails."""
+    parts: List[MultipartPart] = []
+    if i64(len(boundary)) == 0i64:
+        return (false, parts)
+    delim: str = "--" + boundary
+    bn: i32 = i32(i64(len(body)))
+    dn: i32 = i32(i64(len(delim)))
+    # The first boundary must appear at the start (or after some
+    # optional preamble — we'll just `index_of` it).
+    first_at: i32 = index_of(body, delim, 0i32)
+    if first_at < 0i32:
+        return (false, parts)
+    # Walk boundary by boundary.
+    pos: i32 = first_at + dn
+    pcap: i32 = max_multipart_parts()
+    while pos < bn and i32(i64(len(parts))) < pcap:
+        # After the delimiter we expect either `--` (terminator) or
+        # `\r\n` (next part header block).
+        if pos + 2i32 <= bn and byte_at(body, pos) == 45i32 and byte_at(body, pos + 1i32) == 45i32:
+            # End-of-multipart marker.
+            return (true, parts)
+        # Skip the trailing whitespace + CRLF after the boundary
+        # token.  RFC 7578 §4.1 allows LWS before the CRLF.
+        while pos < bn and (byte_at(body, pos) == 32i32 or byte_at(body, pos) == 9i32):
+            pos = pos + 1i32
+        if pos + 2i32 > bn or byte_at(body, pos) != 13i32 or byte_at(body, pos + 1i32) != 10i32:
+            return (false, parts)
+        pos = pos + 2i32  # past the CRLF
+        # Find header/body split (\r\n\r\n).
+        hb_end: i32 = index_of(body, "\r\n\r\n", pos)
+        if hb_end < 0i32:
+            return (false, parts)
+        header_block: str = substring(body, pos, hb_end + 4i32)
+        # Find the next boundary.  Always preceded by `\r\n` (the part's
+        # body terminator).
+        next_b: i32 = index_of(body, "\r\n" + delim, hb_end + 4i32)
+        if next_b < 0i32:
+            return (false, parts)
+        part_body: str = substring(body, hb_end + 4i32, next_b)
+        part: MultipartPart = MultipartPart()
+        if not parse_multipart_part_headers(header_block, part):
+            return (false, parts)
+        part.body = part_body
+        parts.append(part)
+        pos = next_b + 2i32 + dn  # past `\r\n--<boundary>`
+    return (true, parts)
+
+
+fn req_multipart_parts(req: Request) -> Tuple[bool, List[MultipartPart]]:
+    """Convenience: parse the request's body as multipart/form-data and
+    return the list of parts.  ok==false if the Content-Type isn't
+    multipart or the body is malformed."""
+    ct: str = req_content_type(req)
+    boundary: str = extract_multipart_boundary(ct)
+    empty: List[MultipartPart] = []
+    if i64(len(boundary)) == 0i64:
+        return (false, empty)
+    return parse_multipart_body(req.body, boundary)
+
+
 final class Response:
     status: i32
     headers: Dict[str, str]   # keys as user supplies; Server/Date/Content-Length added on write
     body: str
+    # M29.5: chunked transfer-encoding support.  When `chunked` is true,
+    # `body_chunks` is emitted as a sequence of length-prefixed frames
+    # and `Content-Length` is omitted.  `body` is ignored in that mode
+    # (callers should use `resp_add_chunk` / `resp_set_chunked`).
+    chunked: bool
+    body_chunks: List[str]
+    # When true, handler asked us to close the connection after this
+    # response regardless of the client's Connection header.  Useful for
+    # 500s and other "we don't trust this connection" responses.
+    force_close: bool
 
     fn __init__(self) -> None:
         self.status = 200i32
         self.headers = {}
         self.body = ""
+        self.chunked = false
+        self.body_chunks = []
+        self.force_close = false
+
+
+fn resp_set_chunked(resp: Response) -> None:
+    """Flip the response into chunked-transfer-encoding mode.  The
+    handler should then call `resp_add_chunk` zero-or-more times to
+    populate the stream.  After this call, `resp.body` is ignored."""
+    resp.chunked = true
+    resp.body = ""
+    return
+
+
+fn resp_add_chunk(resp: Response, data: str) -> None:
+    """Append one body chunk to a chunked response.  A zero-length
+    chunk would terminate the stream early — we skip it silently."""
+    if i64(len(data)) == 0i64:
+        return
+    resp.body_chunks.append(data)
+    return
+
+
+fn resp_force_close(resp: Response) -> None:
+    resp.force_close = true
+    return
 
 
 fn resp_set_header(resp: Response, k: str, v: str) -> None:
@@ -512,6 +806,125 @@ fn read_header_block(handle: i64, is_tls: bool) -> Tuple[bool, str, str]:
     return (false, "", "")
 
 
+fn read_n_bytes(handle: i64, is_tls: bool, prefix: str, n: i32) -> Tuple[bool, str, str]:
+    """Read exactly `n` bytes, using `prefix` first then the wire.
+
+    Returns (ok, bytes_read, new_prefix) where `new_prefix` is any
+    unused-but-already-buffered bytes (a `recv` can overshoot).  ok ==
+    false on EOF / IO error before n bytes available.
+    """
+    if n <= 0i32:
+        return (true, "", prefix)
+    pn: i32 = i32(i64(len(prefix)))
+    if pn >= n:
+        # Whole request satisfied from the prefix.
+        return (true, substring(prefix, 0i32, n), substring(prefix, n, pn))
+    out: str = prefix
+    while i32(i64(len(out))) < n:
+        more: str = wire_recv(handle, n - i32(i64(len(out))), is_tls)
+        if i64(len(more)) == 0i64:
+            return (false, "", "")
+        out = out + more
+    return (true, substring(out, 0i32, n), substring(out, n, i32(i64(len(out)))))
+
+
+fn read_until_crlf(handle: i64, is_tls: bool, prefix: str) -> Tuple[bool, str, str]:
+    """Read up to and including the next `\r\n`.  Returns (ok, line, rest)
+    where `line` excludes the trailing `\r\n` and `rest` is any post-CRLF
+    bytes already buffered.
+
+    Used by the chunked-encoding decoder for chunk-size lines.  Bounded
+    at 1024 bytes per line — any longer is a protocol violation."""
+    buf: str = prefix
+    cap: i32 = 1024i32
+    while true:
+        at: i32 = index_of(buf, "\r\n", 0i32)
+        if at >= 0i32:
+            line: str = substring(buf, 0i32, at)
+            rest: str = substring(buf, at + 2i32, i32(i64(len(buf))))
+            return (true, line, rest)
+        if i32(i64(len(buf))) >= cap:
+            return (false, "", "")
+        more: str = wire_recv(handle, 512i32, is_tls)
+        if i64(len(more)) == 0i64:
+            return (false, "", "")
+        buf = buf + more
+    return (false, "", "")
+
+
+fn parse_chunked_body(handle: i64, is_tls: bool, body_prefix: str) -> Tuple[bool, str]:
+    """Decode a chunked Transfer-Encoding body off the wire.
+
+    Returns (ok, decoded_bytes).  ok == false on protocol violation
+    (bad hex, chunk too big, premature EOF) or trailers larger than
+    we'll tolerate.  Chunk extensions (`;name=value`) are silently
+    discarded; trailers are read-and-discarded after the terminator.
+    """
+    buf: str = body_prefix
+    out: str = ""
+    total: i32 = 0i32
+    while true:
+        size_line_tup: Tuple[bool, str, str] = read_until_crlf(handle, is_tls, buf)
+        if not size_line_tup.0:
+            return (false, "")
+        size_line: str = size_line_tup.1
+        buf = size_line_tup.2
+        # Strip chunk extensions (anything after the first `;`).
+        semi: i32 = index_of(size_line, ";", 0i32)
+        size_hex: str = size_line
+        if semi >= 0i32:
+            size_hex = substring(size_line, 0i32, semi)
+        size_hex = trim_ascii(size_hex)
+        sz_tup: Tuple[bool, i32] = parse_hex_i32(size_hex)
+        if not sz_tup.0:
+            return (false, "")
+        chunk_size: i32 = sz_tup.1
+        if chunk_size < 0i32 or chunk_size > max_chunk_size_bytes():
+            return (false, "")
+        if chunk_size == 0i32:
+            # Terminator.  Read-and-discard any trailers up to \r\n\r\n
+            # — but for simplicity we only accept the no-trailers case:
+            # the next two bytes (already in `buf` or on the wire) must
+            # be `\r\n`.  Anything else fails the request.
+            crlf_tup: Tuple[bool, str, str] = read_until_crlf(handle, is_tls, buf)
+            if not crlf_tup.0:
+                return (false, "")
+            # crlf_tup.1 is the trailer-line (or empty for the no-trailer
+            # case).  Discard any further trailer lines until we hit
+            # the empty line.  Bounded — bail if we see more than 16
+            # trailer lines.
+            tlimit: i32 = 16i32
+            current_trailer: str = crlf_tup.1
+            buf = crlf_tup.2
+            while i64(len(current_trailer)) != 0i64 and tlimit > 0i32:
+                nxt: Tuple[bool, str, str] = read_until_crlf(handle, is_tls, buf)
+                if not nxt.0:
+                    return (false, "")
+                current_trailer = nxt.1
+                buf = nxt.2
+                tlimit = tlimit - 1i32
+            if tlimit <= 0i32 and i64(len(current_trailer)) != 0i64:
+                return (false, "")
+            return (true, out)
+        # Read `chunk_size` body bytes + the trailing CRLF.
+        total = total + chunk_size
+        if total > max_request_bytes():
+            return (false, "")
+        body_tup: Tuple[bool, str, str] = read_n_bytes(handle, is_tls, buf, chunk_size)
+        if not body_tup.0:
+            return (false, "")
+        out = out + body_tup.1
+        buf = body_tup.2
+        # The next two bytes must be CRLF.
+        crlf_tup2: Tuple[bool, str, str] = read_n_bytes(handle, is_tls, buf, 2i32)
+        if not crlf_tup2.0:
+            return (false, "")
+        if byte_at(crlf_tup2.1, 0i32) != 13i32 or byte_at(crlf_tup2.1, 1i32) != 10i32:
+            return (false, "")
+        buf = crlf_tup2.2
+    return (false, "")
+
+
 fn parse_request_line(line: str, req: Request) -> bool:
     """Split "METHOD path HTTP/1.1" into the three fields.  Mutates req."""
     sp1: i32 = index_of(line, " ", 0i32)
@@ -559,19 +972,51 @@ fn parse_headers_into(header_block: str, req: Request) -> bool:
     return true
 
 
-fn parse_request(handle: i64, is_tls: bool) -> Tuple[bool, Request, i32]:
+fn read_header_block_with_prefix(handle: i64, is_tls: bool, initial_prefix: str) -> Tuple[bool, str, str]:
+    """Same shape as `read_header_block` but seeded with bytes already
+    buffered on the connection (the leftover from the previous request
+    on a kept-alive socket).  Returns (ok, header_block, body_prefix)."""
+    buf: str = initial_prefix
+    cap: i32 = header_buffer_bytes()
+    # If the initial prefix already contains the boundary, no recv needed.
+    boundary0: i32 = index_of(buf, "\r\n\r\n", 0i32)
+    if boundary0 >= 0i32:
+        header_block0: str = substring(buf, 0i32, boundary0 + 4i32)
+        body_prefix0: str = substring(buf, boundary0 + 4i32, i32(i64(len(buf))))
+        return (true, header_block0, body_prefix0)
+    while true:
+        chunk: str = wire_recv(handle, 1024i32, is_tls)
+        if i64(len(chunk)) == 0i64:
+            return (false, "", "")
+        buf = buf + chunk
+        boundary: i32 = index_of(buf, "\r\n\r\n", 0i32)
+        if boundary >= 0i32:
+            header_block: str = substring(buf, 0i32, boundary + 4i32)
+            body_prefix: str = substring(buf, boundary + 4i32, i32(i64(len(buf))))
+            return (true, header_block, body_prefix)
+        if i32(i64(len(buf))) >= cap:
+            return (false, "", "")
+    return (false, "", "")
+
+
+fn parse_request(handle: i64, is_tls: bool, initial_prefix: str) -> Tuple[bool, Request, i32, str]:
     """Read one HTTP/1.1 request off the wire.
 
-    Returns (ok, request, error_status).  On the failure path the
-    request is partially-populated and error_status carries the
-    intended HTTP status code (400 = malformed, 411 = missing
-    content-length on POST, 413 = body too big).
+    `initial_prefix` is any bytes already buffered from the previous
+    request on a kept-alive connection.  Pass `""` for a fresh socket.
+
+    Returns (ok, request, error_status, leftover_prefix).  On the
+    failure path the request is partially-populated and error_status
+    carries the intended HTTP status code (400 = malformed, 411 =
+    missing content-length on POST, 413 = body too big).
+    `leftover_prefix` is non-empty only when the previous request's
+    bytes spilled into the next on a kept-alive socket.
     """
     req: Request = Request()
 
-    block_tup: Tuple[bool, str, str] = read_header_block(handle, is_tls)
+    block_tup: Tuple[bool, str, str] = read_header_block_with_prefix(handle, is_tls, initial_prefix)
     if not block_tup.0:
-        return (false, req, 400i32)
+        return (false, req, 400i32, "")
     header_block: str = block_tup.1
     body_prefix: str = block_tup.2
 
@@ -579,58 +1024,113 @@ fn parse_request(handle: i64, is_tls: bool) -> Tuple[bool, Request, i32]:
     # the first \r\n).
     crlf: i32 = index_of(header_block, "\r\n", 0i32)
     if crlf < 0i32:
-        return (false, req, 400i32)
+        return (false, req, 400i32, "")
     request_line: str = substring(header_block, 0i32, crlf)
     if not parse_request_line(request_line, req):
-        return (false, req, 400i32)
+        return (false, req, 400i32, "")
 
     # Split the header block at the first CRLF and parse the rest.
     hdr_only: str = substring(header_block, crlf + 2i32, i32(i64(len(header_block))))
     # Wrap the request line back in so parse_headers_into's split-by-CRLF
     # logic counts correctly.
     if not parse_headers_into(request_line + "\r\n" + hdr_only, req):
-        return (false, req, 400i32)
+        return (false, req, 400i32, "")
 
-    # Body, if any.  We only support Content-Length framing.
+    # Body, if any.  Either Content-Length-framed or chunked-encoded.
+    # Per RFC 7230 §3.3.3, Transfer-Encoding takes priority when both
+    # are present, but the demo never sends both.
+    if req_is_chunked(req):
+        chunked_tup: Tuple[bool, str] = parse_chunked_body(handle, is_tls, body_prefix)
+        if not chunked_tup.0:
+            return (false, req, 400i32, "")
+        if i32(i64(len(chunked_tup.1))) > max_request_bytes():
+            return (false, req, 413i32, "")
+        req.body = chunked_tup.1
+        return (true, req, 200i32, "")
+
     content_len: i32 = req_content_length(req)
     if content_len > 0i32:
         if content_len > max_request_bytes():
-            return (false, req, 413i32)
-        body: str = body_prefix
-        remaining: i32 = content_len - i32(i64(len(body)))
-        if remaining > 0i32:
-            extra: str = wire_recv(handle, remaining, is_tls)
-            body = body + extra
-            # Loop once more if the TCP read was short.  Defensive — most
-            # recvs on loopback satisfy the whole request in one go.
-            while i32(i64(len(body))) < content_len:
-                more: str = wire_recv(handle, content_len - i32(i64(len(body))), is_tls)
-                if i64(len(more)) == 0i64:
-                    return (false, req, 400i32)
-                body = body + more
-        req.body = body
-    else:
-        req.body = body_prefix  # Probably empty.
-
-    return (true, req, 200i32)
+            return (false, req, 413i32, "")
+        body_tup: Tuple[bool, str, str] = read_n_bytes(handle, is_tls, body_prefix, content_len)
+        if not body_tup.0:
+            return (false, req, 400i32, "")
+        req.body = body_tup.1
+        return (true, req, 200i32, body_tup.2)
+    # No body indicated — body_prefix is leftover from the next request
+    # (pipelined client) or just spurious junk; thread it through.
+    req.body = ""
+    return (true, req, 200i32, body_prefix)
 
 
 # ── Response writing ──────────────────────────────────────────────────
 
 
-fn write_response(handle: i64, resp: Response, is_tls: bool) -> None:
-    """Serialize `resp` to the wire.  Always closes the connection
-    afterwards (no keep-alive in v0.2)."""
+fn send_all(handle: i64, data: str, is_tls: bool) -> bool:
+    """Send the whole buffer, looping if the underlying send is short.
+    Returns true on success, false if the peer hung up mid-write."""
+    total: i32 = i32(i64(len(data)))
+    sent_so_far: i32 = 0i32
+    while sent_so_far < total:
+        chunk: str = substring(data, sent_so_far, total)
+        n: i32 = wire_send(handle, chunk, is_tls)
+        if n <= 0i32:
+            return false
+        sent_so_far = sent_so_far + n
+    return true
+
+
+fn hex_string(n: i32) -> str:
+    """Lowercase hex string for `n` (n >= 0).  No leading "0x"; minimum
+    one digit (n == 0 → "0")."""
+    if n == 0i32:
+        return "0"
+    out: str = ""
+    v: i32 = n
+    while v > 0i32:
+        d: i32 = v % 16i32
+        out = hex_digit(d) + out
+        v = v / 16i32
+    return out
+
+
+fn write_response(handle: i64, resp: Response, is_tls: bool, keep_alive: bool,
+                  requests_served_after_this: i32) -> bool:
+    """Serialize `resp` to the wire.  Returns true if the connection
+    should stay open (caller wants keep-alive AND we wrote OK AND
+    response itself doesn't force close)."""
     # Status line.
     status_line: str = "HTTP/1.1 " + str(resp.status) + " " + status_phrase(resp.status) + "\r\n"
 
-    # Server / Date / Connection / Content-Length always set (overwriting
-    # any user attempt).  Content-Type only set by the user via
-    # resp_set_content_type if they wanted one; we don't default.
+    # Server / Date / Connection always set (overwriting any user
+    # attempt).  Content-Length OR Transfer-Encoding is set based on
+    # whether the handler asked for chunked output.  Content-Type only
+    # set by the user via resp_set_content_type if they wanted one; we
+    # don't default.
     resp.headers["Server"] = server_signature()
     resp.headers["Date"] = http_date_now()
-    resp.headers["Connection"] = "close"
-    resp.headers["Content-Length"] = str(i32(i64(len(resp.body))))
+
+    will_close: bool = (not keep_alive) or resp.force_close
+    if will_close:
+        resp.headers["Connection"] = "close"
+    else:
+        resp.headers["Connection"] = "keep-alive"
+        # Mirror the values from `handle_connection` — caller passes us
+        # how many more requests this connection will be allowed to
+        # serve.  RFC 7230 doesn't define Keep-Alive but it's the
+        # de-facto signal browsers + curl read.
+        resp.headers["Keep-Alive"] = "timeout=" + str(i32(keepalive_idle_secs())) + ", max=" + str(requests_served_after_this)
+
+    if resp.chunked:
+        resp.headers["Transfer-Encoding"] = "chunked"
+        # Defensive: if the user set Content-Length, strip it.  Both
+        # together violate RFC 7230 §3.3.3.
+        # BUG-039 workaround: `in` on Dict[str,str] is unreliable; use
+        # the lower-level approach of overwriting + relying on the
+        # serialiser to emit only one.
+        resp.headers["Content-Length"] = ""  # mark for removal below
+    else:
+        resp.headers["Content-Length"] = str(i32(i64(len(resp.body))))
 
     out: str = status_line
     keys: List[str] = resp.headers.keys()
@@ -639,21 +1139,37 @@ fn write_response(handle: i64, resp: Response, is_tls: bool) -> None:
     while i < kn:
         k: str = keys[i]
         v: str = resp.headers[k]
+        # Skip headers we explicitly cleared (chunked + Content-Length
+        # path).
+        if i64(len(v)) == 0i64 and ascii_lower(k) == "content-length":
+            i = i + 1i32
+            continue
         out = out + k + ": " + v + "\r\n"
         i = i + 1i32
     out = out + "\r\n"
-    out = out + resp.body
 
-    # Write the whole buffer, looping if the underlying send is short.
-    total: i32 = i32(i64(len(out)))
-    sent_so_far: i32 = 0i32
-    while sent_so_far < total:
-        chunk: str = substring(out, sent_so_far, total)
-        n: i32 = wire_send(handle, chunk, is_tls)
-        if n <= 0i32:
-            return  # Peer hung up mid-write; nothing else we can do.
-        sent_so_far = sent_so_far + n
-    return
+    if resp.chunked:
+        # Send the header block first, then frame each chunk, then
+        # terminator.
+        if not send_all(handle, out, is_tls):
+            return false
+        nc: i32 = i32(i64(len(resp.body_chunks)))
+        j: i32 = 0i32
+        while j < nc:
+            chunk: str = resp.body_chunks[j]
+            csz: i32 = i32(i64(len(chunk)))
+            frame: str = hex_string(csz) + "\r\n" + chunk + "\r\n"
+            if not send_all(handle, frame, is_tls):
+                return false
+            j = j + 1i32
+        if not send_all(handle, "0\r\n\r\n", is_tls):
+            return false
+    else:
+        out = out + resp.body
+        if not send_all(handle, out, is_tls):
+            return false
+
+    return not will_close
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -757,8 +1273,53 @@ fn router_dispatch(r: Router, req: Request) -> Response:
                 return safe_dispatch(hid, req)
         i = i + 1i32
     if path_found:
-        return resp_text(405i32, "405 Method Not Allowed\n")
-    return resp_text(404i32, "404 Not Found\n")
+        return error_html(405i32)
+    return error_html(404i32)
+
+
+fn error_html(status: i32) -> Response:
+    """Pretty HTML response for a stock error status (no extra detail).
+    M29.5: replaces the bare text/plain responses from M29.
+    Status-specific descriptions cover 400 / 404 / 405 / 500; other
+    codes fall back to a generic page."""
+    desc: str = ""
+    if status == 400i32:
+        desc = "The server could not understand the request due to invalid syntax."
+    elif status == 404i32:
+        desc = "The requested resource was not found on this server."
+    elif status == 405i32:
+        desc = "The HTTP method used is not allowed for this resource."
+    elif status == 411i32:
+        desc = "The request did not include the required Content-Length header."
+    elif status == 413i32:
+        desc = "The request body exceeded the server's size limit."
+    elif status == 415i32:
+        desc = "The request used an unsupported media type."
+    elif status == 500i32:
+        desc = "The server encountered an internal error and could not complete the request."
+    else:
+        desc = "An error occurred while processing the request."
+    phrase: str = status_phrase(status)
+    body: str = "<!doctype html>\n<html><head><title>" + str(status) + " " + html_escape(phrase) + "</title></head><body>\n"
+    body = body + "<h1>" + str(status) + " " + html_escape(phrase) + "</h1>\n"
+    body = body + "<p>" + html_escape(desc) + "</p>\n"
+    body = body + "<hr><p><em>" + html_escape(server_signature()) + "</em></p>\n"
+    body = body + "</body></html>\n"
+    return resp_html(status, body)
+
+
+fn error_html_with_detail(status: i32, detail: str) -> Response:
+    """Like `error_html` but appends a `<pre>`-escaped detail string —
+    used by `safe_dispatch` to surface exception messages on 500s.
+    `detail` is HTML-escaped via `html_escape`."""
+    phrase: str = status_phrase(status)
+    body: str = "<!doctype html>\n<html><head><title>" + str(status) + " " + html_escape(phrase) + "</title></head><body>\n"
+    body = body + "<h1>" + str(status) + " " + html_escape(phrase) + "</h1>\n"
+    body = body + "<p>The server encountered an error processing this request.</p>\n"
+    body = body + "<pre style=\"background:#f4f4f4;padding:8px;border:1px solid #ccc\">" + html_escape(detail) + "</pre>\n"
+    body = body + "<hr><p><em>" + html_escape(server_signature()) + "</em></p>\n"
+    body = body + "</body></html>\n"
+    return resp_html(status, body)
 
 
 fn safe_dispatch(handler_id: i32, req: Request) -> Response:
@@ -767,11 +1328,11 @@ fn safe_dispatch(handler_id: i32, req: Request) -> Response:
     try:
         return dispatch_handler(handler_id, req)
     except IOError as e:
-        return resp_text(500i32, "500 Internal Server Error (IO): " + e.message + "\n")
+        return error_html_with_detail(500i32, "IOError: " + e.message)
     except ValueError as e:
-        return resp_text(400i32, "400 Bad Request: " + e.message + "\n")
+        return error_html_with_detail(400i32, "ValueError: " + e.message)
     except Exception as e:
-        return resp_text(500i32, "500 Internal Server Error: " + e.type_name + ": " + e.message + "\n")
+        return error_html_with_detail(500i32, e.type_name + ": " + e.message)
 
 
 # `dispatch_handler` is defined later, after the TODO-app handlers, so
@@ -789,77 +1350,133 @@ fn safe_dispatch(handler_id: i32, req: Request) -> Response:
 # avoids the BUGS_KNOWN.md #1 sealed-class dispatch caveats and keeps
 # the thread-closure capture list explicit.
 
+fn log_access(access_lock: i64, method_logged: str, path_logged: str,
+              status_code: i32, elapsed_ms: i32, peer: str) -> None:
+    """Serialised access-log emit.  Acquires the access lock so concurrent
+    threads don't interleave bytes mid-line."""
+    threading.lock_acquire(access_lock)
+    logging.info(method_logged + " " + path_logged + " -> " + str(status_code) + " (" + str(elapsed_ms) + "ms) " + peer)
+    threading.lock_release(access_lock)
+    return
+
+
 fn handle_connection(handle: i64, peer: str, router: Router, sem: i64,
                      access_lock: i64, is_tls: bool, db_path: str) -> None:
     """Body of one connection-handling thread.
 
-    `sem` is the concurrency semaphore — released in *all* exit paths,
-    including the exception fallback, so a hung handler can't starve
-    the accept loop.
+    Implements HTTP/1.1 keep-alive: after writing a response, if the
+    client + server both agreed on persistence, we loop back to
+    parse_request on the same socket up to `keepalive_max_requests()`
+    times.  An idle period of >`keepalive_idle_secs()` (signalled by an
+    IOError from the timed-out recv) tears the connection down cleanly.
+
+    `sem` is the concurrency semaphore — released exactly once in *all*
+    exit paths, so a hung handler can't starve the accept loop.
 
     `db_path` and `access_lock` are passed through to handlers via the
     request-state dict (`x-state-*` headers), since we can't reach
     closures across the dispatch boundary.
     """
-    t0: f64 = time.monotonic()
-    status_code: i32 = 0i32
-    method_logged: str = "?"
-    path_logged: str = "?"
-    try:
-        wire_set_timeout(handle, 30.0, is_tls)
-        parsed: Tuple[bool, Request, i32] = parse_request(handle, is_tls)
-        ok: bool = parsed.0
-        req: Request = parsed.1
-        err_status: i32 = parsed.2
-        if not ok:
-            resp: Response = resp_text(err_status, str(err_status) + " " + status_phrase(err_status) + "\n")
-            write_response(handle, resp, is_tls)
-            status_code = err_status
-            method_logged = req.method
-            path_logged = req.path
-        else:
-            # Thread state into the request via the headers Dict (which is
-            # already the universal req side-channel).  Handlers read it
-            # back via req_get_state.
-            req.headers["x-state-db-path"] = db_path
-            req.headers["x-state-access-lock"] = str(access_lock)
-            req.headers["x-state-peer"] = peer
-            method_logged = req.method
-            path_logged = req.path
-            resp2: Response = router_dispatch(router, req)
-            write_response(handle, resp2, is_tls)
-            status_code = resp2.status
-    except IOError as e:
-        # Peer hung up mid-exchange; nothing actionable.
-        status_code = 0i32
-    except Exception as e:
-        status_code = 599i32  # custom "internal failure outside handler"
-    # Always close + release the permit.
+    request_count: i32 = 0i32
+    cap: i32 = keepalive_max_requests()
+    next_prefix: str = ""
+    keep_going: bool = true
+    while keep_going and request_count < cap:
+        t0: f64 = time.monotonic()
+        status_code: i32 = 0i32
+        method_logged: str = "?"
+        path_logged: str = "?"
+        # Whether the loop should continue after THIS request.
+        loop_again: bool = false
+        try:
+            # On a kept-alive socket the first byte may arrive arbitrarily
+            # late.  The first request gets a 30s budget (matches v0.2
+            # behaviour); subsequent requests get the keepalive idle
+            # timeout.
+            if request_count == 0i32:
+                wire_set_timeout(handle, 30.0, is_tls)
+            else:
+                wire_set_timeout(handle, keepalive_idle_secs(), is_tls)
+            parsed: Tuple[bool, Request, i32, str] = parse_request(handle, is_tls, next_prefix)
+            ok: bool = parsed.0
+            req: Request = parsed.1
+            err_status: i32 = parsed.2
+            new_prefix: str = parsed.3
+            if not ok:
+                # On a parse failure we always close — the framing is
+                # corrupt, persistence isn't safe.
+                err_resp: Response = error_html(err_status)
+                resp_force_close(err_resp)
+                # We can't honour keepalive on a malformed request; the
+                # `keep_alive=false` arg signals that.
+                wrote: bool = write_response(handle, err_resp, is_tls, false, 0i32)
+                status_code = err_status
+                method_logged = req.method
+                path_logged = req.path
+                loop_again = false
+            else:
+                # Thread state into the request via the headers Dict.
+                req.headers["x-state-db-path"] = db_path
+                req.headers["x-state-access-lock"] = str(access_lock)
+                req.headers["x-state-peer"] = peer
+                method_logged = req.method
+                path_logged = req.path
+                # Decide persistence BEFORE dispatch so handlers can
+                # observe via req.headers (rarely needed, but it's the
+                # right ordering).
+                default_keepalive: bool = (req.version == "HTTP/1.1")
+                client_wants_keepalive: bool = req_wants_keepalive(req, default_keepalive)
+                # Respect the per-connection cap: if this is our last
+                # allowed request we close after replying.
+                will_be_count: i32 = request_count + 1i32
+                server_can_keepalive: bool = will_be_count < cap
+                effective_keepalive: bool = client_wants_keepalive and server_can_keepalive
+                resp2: Response = router_dispatch(router, req)
+                remaining: i32 = cap - will_be_count
+                wrote2: bool = write_response(handle, resp2, is_tls, effective_keepalive, remaining)
+                status_code = resp2.status
+                loop_again = wrote2 and effective_keepalive and (not resp2.force_close)
+                next_prefix = new_prefix
+        except IOError as e:
+            # Recv timeout on a kept-alive socket, or peer hung up mid-
+            # request.  Either way, exit the loop cleanly.
+            status_code = 0i32
+            loop_again = false
+        except Exception as e:
+            status_code = 599i32  # custom "internal failure outside handler"
+            loop_again = false
+        request_count = request_count + 1i32
+        # Only emit an access log if we actually saw a request.  An
+        # idle-timeout-then-close (status_code == 0 and request_count
+        # > 1) is a normal end-of-life event, not worth logging.
+        if status_code != 0i32:
+            log_access(access_lock, method_logged, path_logged,
+                       status_code, duration_ms_since(t0), peer)
+        keep_going = loop_again
+    # Connection done — close + release the permit.
     try:
         wire_close(handle, is_tls)
     except IOError as e2:
         pass
     threading.semaphore_release(sem)
-
-    # Access log.  Use the lock so concurrent threads don't interleave
-    # log lines mid-byte.  logging itself isn't documented as
-    # thread-safe in M27 P3c-E so we serialise.
-    threading.lock_acquire(access_lock)
-    elapsed: i32 = duration_ms_since(t0)
-    logging.info(method_logged + " " + path_logged + " -> " + str(status_code) + " (" + str(elapsed) + "ms) " + peer)
-    threading.lock_release(access_lock)
     return
 
 
 fn accept_loop_plain(listener: i64, router: Router, sem: i64, access_lock: i64,
-                     db_path: str, max_accepts: i32) -> None:
+                     db_path: str, max_accepts: i32, shutdown_flag: i64) -> None:
     """Accept connections on `listener` and dispatch one thread each.
 
     `max_accepts == -1` means run forever.  Any positive value is the
     cap — useful in tests where we want the server to drain after N
-    requests."""
+    requests.
+
+    `shutdown_flag` is a Lock used as a "shutdown requested" signal:
+    the timer thread acquires it, the accept loop checks it before/after
+    each accept and exits cleanly when set."""
     served: i32 = 0i32
     while max_accepts < 0i32 or served < max_accepts:
+        if shutdown_requested(shutdown_flag):
+            return
         accepted: bool = false
         handle: i64 = 0i64
         peer: str = ""
@@ -872,7 +1489,22 @@ fn accept_loop_plain(listener: i64, router: Router, sem: i64, access_lock: i64,
             # Accept failed — likely the listener was closed (graceful
             # shutdown).  Break out cleanly.
             return
+        except ValueError as e:
+            # Listener handle has been close_listener'd from underneath
+            # us (graceful shutdown via that path).
+            return
         if not accepted:
+            return
+        # Check the shutdown flag *after* accept so we don't dispatch
+        # the timer's self-wakeup connection as a real request — we
+        # just close it and exit.
+        if shutdown_requested(shutdown_flag):
+            try:
+                socket.close(handle)
+            except IOError as e2:
+                pass
+            except ValueError as e2:
+                pass
             return
         threading.semaphore_acquire(sem)
         t: Thread = Thread(
@@ -884,11 +1516,14 @@ fn accept_loop_plain(listener: i64, router: Router, sem: i64, access_lock: i64,
 
 
 fn accept_loop_tls(listener: i64, server_cfg: i64, router: Router, sem: i64,
-                   access_lock: i64, db_path: str, max_accepts: i32) -> None:
+                   access_lock: i64, db_path: str, max_accepts: i32,
+                   shutdown_flag: i64) -> None:
     """Same shape as accept_loop_plain but uses `ssl.accept_tls` and
     flags the connection handler as TLS."""
     served: i32 = 0i32
     while max_accepts < 0i32 or served < max_accepts:
+        if shutdown_requested(shutdown_flag):
+            return
         accepted: bool = false
         handle: i64 = 0i64
         peer: str = ""
@@ -899,7 +1534,17 @@ fn accept_loop_tls(listener: i64, server_cfg: i64, router: Router, sem: i64,
             accepted = true
         except IOError as e:
             return
+        except ValueError as e:
+            return
         if not accepted:
+            return
+        if shutdown_requested(shutdown_flag):
+            try:
+                ssl.close(handle)
+            except IOError as e2:
+                pass
+            except ValueError as e2:
+                pass
             return
         threading.semaphore_acquire(sem)
         t: Thread = Thread(
@@ -1158,7 +1803,13 @@ fn handle_home(req: Request) -> Response:
         html = html + " <span class=\"date\">(" + html_escape(row[2i32]) + ")</span></li>\n"
         i = i + 1i32
     html = html + "</ul>\n"
-    html = html + "<p>API: GET /api/todos, POST /api/todos, DELETE /api/todos/&lt;id&gt;</p>\n"
+    html = html + "<h2>Upload a file</h2>\n"
+    html = html + "<form action=\"/api/upload\" method=\"POST\" enctype=\"multipart/form-data\">\n"
+    html = html + "<input type=\"file\" name=\"file\" required />\n"
+    html = html + "<button type=\"submit\">Upload</button>\n"
+    html = html + "</form>\n"
+    html = html + "<p>API: GET /api/todos, POST /api/todos, DELETE /api/todos/&lt;id&gt;, "
+    html = html + "POST /api/upload, GET /api/uploads/&lt;name&gt;, GET /api/stream</p>\n"
     html = html + "</body></html>\n"
     return resp_html(200i32, html)
 
@@ -1206,9 +1857,9 @@ fn handle_static(req: Request) -> Response:
     rest: str = req_route_param(req, "rest")
     # Strip leading slash to flatten + reject any path-traversal attempt.
     if contains(rest, ".."):
-        return resp_text(403i32, "403 Forbidden\n")
+        return error_html(403i32)
     if contains(rest, "\\"):
-        return resp_text(403i32, "403 Forbidden\n")
+        return error_html(403i32)
     target: str = "examples/webserver/static/" + rest
     # Existence check first (raises IOError otherwise — fine, we'd
     # rather a clean 404).
@@ -1221,7 +1872,7 @@ fn handle_static(req: Request) -> Response:
         resp_set_content_type(r, ct)
         return r
     except IOError as e:
-        return resp_text(404i32, "404 Not Found\n")
+        return error_html(404i32)
 
 
 fn guess_content_type(path: str) -> str:
@@ -1266,6 +1917,186 @@ fn handle_health(req: Request) -> Response:
     return resp_json(200i32, "{\"status\":\"ok\",\"server\":\"" + server_signature() + "\"}")
 
 
+# ── Upload helpers (M29.5) ────────────────────────────────────────────
+
+
+fn sanitise_upload_filename(raw: str) -> str:
+    """Strip leading dots, slashes, and `..` from an uploaded filename.
+
+    Returns "" if the cleaned name is empty / `.` / `..`.  Browsers
+    sometimes send a full client-side path on certain platforms — we
+    only keep the basename.  Output is restricted to ASCII alnum / `.`
+    / `-` / `_` to keep cross-platform path semantics simple."""
+    if i64(len(raw)) == 0i64:
+        return ""
+    # Take the basename: strip everything up to and including the last
+    # `/` or `\\`.
+    n: i32 = i32(i64(len(raw)))
+    last_sep: i32 = -1i32
+    i: i32 = 0i32
+    while i < n:
+        c: i32 = byte_at(raw, i)
+        if c == 47i32 or c == 92i32:
+            last_sep = i
+        i = i + 1i32
+    base: str = raw
+    if last_sep >= 0i32:
+        base = substring(raw, last_sep + 1i32, n)
+    # Strip leading dots (no hidden files).
+    bn: i32 = i32(i64(len(base)))
+    start: i32 = 0i32
+    while start < bn and byte_at(base, start) == 46i32:
+        start = start + 1i32
+    cleaned: str = substring(base, start, bn)
+    # Restrict character set.
+    out: str = ""
+    j: i32 = 0i32
+    cn: i32 = i32(i64(len(cleaned)))
+    while j < cn:
+        c2: i32 = byte_at(cleaned, j)
+        is_alnum: bool = (c2 >= 48i32 and c2 <= 57i32) or (c2 >= 65i32 and c2 <= 90i32) or (c2 >= 97i32 and c2 <= 122i32)
+        is_safe: bool = c2 == 46i32 or c2 == 45i32 or c2 == 95i32
+        if is_alnum or is_safe:
+            out = out + str(char(c2))
+        # silently drop other bytes
+        j = j + 1i32
+    # Reject reserved values.
+    if out == "" or out == "." or out == "..":
+        return ""
+    return out
+
+
+fn ensure_uploads_dir() -> None:
+    """Create the uploads dir if it doesn't already exist.
+
+    `os.mkdir` is non-recursive in v0.2; we only need a single-level
+    create here (`examples/webserver/uploads/`), and assume the parent
+    `examples/webserver/` exists (always true — that's where this
+    program lives)."""
+    d: str = uploads_dir()
+    if os.exists(d) and os.is_dir(d):
+        return
+    try:
+        os.mkdir(d)
+    except IOError as e:
+        pass
+    return
+
+
+# Handler 7 — POST /api/upload  (multipart file upload)
+fn handle_upload(req: Request) -> Response:
+    parts_tup: Tuple[bool, List[MultipartPart]] = req_multipart_parts(req)
+    if not parts_tup.0:
+        return resp_json(415i32, "{\"error\":\"expected multipart/form-data\"}")
+    parts: List[MultipartPart] = parts_tup.1
+    np: i32 = i32(i64(len(parts)))
+    if np == 0i32:
+        return resp_json(400i32, "{\"error\":\"multipart body had no parts\"}")
+    # Find the `file` part.
+    file_part: MultipartPart? = none
+    pi: i32 = 0i32
+    while pi < np:
+        p: MultipartPart = parts[pi]
+        if p.name == "file":
+            file_part = p
+            pi = np
+        else:
+            pi = pi + 1i32
+    if file_part is none:
+        return resp_json(400i32, "{\"error\":\"missing 'file' field in multipart body\"}")
+    fp: MultipartPart = file_part
+    if i64(len(fp.filename)) == 0i64:
+        return resp_json(400i32, "{\"error\":\"file part is missing filename\"}")
+    safe_name: str = sanitise_upload_filename(fp.filename)
+    if i64(len(safe_name)) == 0i64:
+        return resp_json(400i32, "{\"error\":\"filename rejected after sanitisation\"}")
+    ensure_uploads_dir()
+    target: str = uploads_dir() + "/" + safe_name
+    try:
+        pathlib.write_text(target, fp.body)
+    except IOError as e:
+        return resp_json(500i32, "{\"error\":\"failed to write upload: " + json_escape(e.message) + "\"}")
+    sz: i32 = i32(i64(len(fp.body)))
+    body_json: str = "{\"url\":\"/api/uploads/" + json_escape(safe_name) + "\",\"size\":" + str(sz) + "}"
+    return resp_json(201i32, body_json)
+
+
+# Handler 8 — GET /api/uploads/<*rest>  (serve previously uploaded files)
+fn handle_uploads_get(req: Request) -> Response:
+    rest: str = req_route_param(req, "rest")
+    if contains(rest, "..") or contains(rest, "\\") or contains(rest, "/"):
+        return error_html(403i32)
+    if i64(len(rest)) == 0i64:
+        return error_html(404i32)
+    target: str = uploads_dir() + "/" + rest
+    try:
+        data: str = pathlib.read_text(target)
+        ct: str = guess_upload_content_type(rest)
+        r: Response = Response()
+        r.status = 200i32
+        r.body = data
+        resp_set_content_type(r, ct)
+        return r
+    except IOError as e:
+        return error_html(404i32)
+
+
+fn guess_upload_content_type(path: str) -> str:
+    """Slightly broader ext-table than guess_content_type — covers
+    application/pdf + image/jpeg + the basic text types."""
+    if ends_with(path, ".txt"):
+        return "text/plain; charset=utf-8"
+    if ends_with(path, ".html") or ends_with(path, ".htm"):
+        return "text/html; charset=utf-8"
+    if ends_with(path, ".json"):
+        return "application/json"
+    if ends_with(path, ".css"):
+        return "text/css; charset=utf-8"
+    if ends_with(path, ".js"):
+        return "application/javascript"
+    if ends_with(path, ".png"):
+        return "image/png"
+    if ends_with(path, ".jpg") or ends_with(path, ".jpeg"):
+        return "image/jpeg"
+    if ends_with(path, ".pdf"):
+        return "application/pdf"
+    return "application/octet-stream"
+
+
+# Handler 9 — GET /api/stream  (chunked-output demo)
+fn handle_stream(req: Request) -> Response:
+    """Stream N lines back, one chunk per line, with a small sleep
+    between chunks so the client can observe streaming behavior.  N
+    defaults to 100 and can be lowered via the `?n=N` query parameter
+    (used by the integration test to keep wall-clock low)."""
+    n: i32 = 100i32
+    if i64(len(req.query)) > 0i64:
+        # query is `n=5` style — single param.
+        eq: i32 = index_of(req.query, "n=", 0i32)
+        if eq >= 0i32:
+            tail: str = substring(req.query, eq + 2i32, i32(i64(len(req.query))))
+            # Strip any trailing `&...`.
+            amp: i32 = index_of(tail, "&", 0i32)
+            if amp >= 0i32:
+                tail = substring(tail, 0i32, amp)
+            np: Tuple[bool, i32] = parse_i32_safe(tail)
+            if np.0 and np.1 > 0i32 and np.1 <= 1000i32:
+                n = np.1
+    r: Response = Response()
+    r.status = 200i32
+    resp_set_content_type(r, "text/plain; charset=utf-8")
+    resp_set_chunked(r)
+    i: i32 = 0i32
+    while i < n:
+        line: str = "chunk " + str(i) + "\n"
+        resp_add_chunk(r, line)
+        # Tiny pause so the test can observe the chunked framing on
+        # the wire.  50ms per chunk is plenty.
+        time.sleep_ms(50i64)
+        i = i + 1i32
+    return r
+
+
 # Handler IDs.  Keep these in lockstep with the dispatcher below.
 fn handler_id_home() -> i32:
     return 1i32
@@ -1291,6 +2122,18 @@ fn handler_id_health() -> i32:
     return 6i32
 
 
+fn handler_id_upload() -> i32:
+    return 7i32
+
+
+fn handler_id_uploads_get() -> i32:
+    return 8i32
+
+
+fn handler_id_stream() -> i32:
+    return 9i32
+
+
 fn dispatch_handler(id: i32, req: Request) -> Response:
     """Map a handler-id to the actual handler call.
 
@@ -1310,16 +2153,25 @@ fn dispatch_handler(id: i32, req: Request) -> Response:
         return handle_static(req)
     if id == 6i32:
         return handle_health(req)
-    return resp_text(501i32, "501 Not Implemented (handler " + str(id) + " unknown)\n")
+    if id == 7i32:
+        return handle_upload(req)
+    if id == 8i32:
+        return handle_uploads_get(req)
+    if id == 9i32:
+        return handle_stream(req)
+    return error_html(501i32)
 
 
 fn register_routes(r: Router) -> None:
-    router_add(r, "GET",    "/",                handler_id_home())
-    router_add(r, "GET",    "/api/todos",       handler_id_list_todos())
-    router_add(r, "POST",   "/api/todos",       handler_id_create_todo())
-    router_add(r, "DELETE", "/api/todos/<id>",  handler_id_delete_todo())
-    router_add(r, "GET",    "/static/<*rest>",  handler_id_static())
-    router_add(r, "GET",    "/health",          handler_id_health())
+    router_add(r, "GET",    "/",                       handler_id_home())
+    router_add(r, "GET",    "/api/todos",              handler_id_list_todos())
+    router_add(r, "POST",   "/api/todos",              handler_id_create_todo())
+    router_add(r, "DELETE", "/api/todos/<id>",         handler_id_delete_todo())
+    router_add(r, "GET",    "/static/<*rest>",         handler_id_static())
+    router_add(r, "GET",    "/health",                 handler_id_health())
+    router_add(r, "POST",   "/api/upload",             handler_id_upload())
+    router_add(r, "GET",    "/api/uploads/<*rest>",    handler_id_uploads_get())
+    router_add(r, "GET",    "/api/stream",             handler_id_stream())
     return
 
 
@@ -1329,7 +2181,8 @@ fn register_routes(r: Router) -> None:
 
 
 fn print_help() -> None:
-    println("usage: todo_app [--host HOST] [--port PORT] [--db PATH] [--tls CERT KEY] [--max-accepts N]")
+    println("usage: todo_app [--host HOST] [--port PORT] [--db PATH] [--tls CERT KEY]")
+    println("                [--max-accepts N] [--shutdown-after-secs N]")
     return
 
 
@@ -1344,6 +2197,7 @@ fn parse_args() -> Dict[str, str]:
     out["cert"] = ""
     out["key"] = ""
     out["max-accepts"] = "-1"
+    out["shutdown-after-secs"] = "-1"
 
     argv: List[str] = sys.argv
     n: i32 = i32(i64(len(argv)))
@@ -1361,6 +2215,9 @@ fn parse_args() -> Dict[str, str]:
             i = i + 2i32
         elif a == "--max-accepts" and i + 1i32 < n:
             out["max-accepts"] = argv[i + 1i32]
+            i = i + 2i32
+        elif a == "--shutdown-after-secs" and i + 1i32 < n:
+            out["shutdown-after-secs"] = argv[i + 1i32]
             i = i + 2i32
         elif a == "--tls" and i + 2i32 < n:
             out["tls"] = "true"
@@ -1398,6 +2255,110 @@ fn bind_listener(host: str, port: i32) -> Tuple[i64, i32]:
     return (0i64, 0i32)
 
 
+fn shutdown_timer_thread(listener: i64, host: str, port: i32, after_secs: i32,
+                         shutdown_flag: i64) -> None:
+    """Background thread that sleeps for `after_secs` then triggers a
+    graceful shutdown — our stand-in for SIGINT (StrictPy has no
+    `signal` module in v0.2; see report).
+
+    Mechanism: we self-connect to the listener address to wake the
+    blocked accept() (closing the listener handle does not unblock an
+    in-flight accept because the VM holds an Arc clone; this is an
+    M28 networking-surface gotcha — see m29_5 report §"surface
+    findings").  After the wake-up, the accept loop checks the
+    shutdown flag and exits.  We then close the listener for
+    completeness.
+
+    `shutdown_flag` is a Lock; held = "shutdown requested".  We grab
+    it BEFORE the wakeup connection so the accept loop sees a True
+    signal on its next iteration."""
+    if after_secs <= 0i32:
+        return
+    time.sleep_ms(i64(after_secs) * 1000i64)
+    logging.info("shutdown timer fired; initiating graceful shutdown")
+    # 1. Set the shutdown flag (acquire the lock and hold it).
+    threading.lock_acquire(shutdown_flag)
+    # 2. Wake the blocked accept() with a self-connection.
+    try:
+        wake: i64 = socket.connect_tcp(host, port)
+        socket.close(wake)
+    except IOError as e:
+        pass
+    except ValueError as e:
+        pass
+    # 3. Close the listener so any subsequent accepts also fail.
+    try:
+        socket.close_listener(listener)
+    except IOError as e:
+        pass
+    except ValueError as e:
+        pass
+    return
+
+
+fn shutdown_requested(shutdown_flag: i64) -> bool:
+    """Non-blocking check of the shutdown flag.  Returns true iff the
+    flag is currently held (by the shutdown timer)."""
+    if threading.lock_try_acquire(shutdown_flag):
+        # We grabbed it — that means it wasn't held.  Release and
+        # report not-shutting-down.
+        threading.lock_release(shutdown_flag)
+        return false
+    return true
+
+
+fn drain_in_flight(sem: i64, total_permits: i32, deadline_secs: f64) -> i32:
+    """After the listener has closed, the accept loop is done but per-
+    connection threads may still be running.  Each one acquires a
+    semaphore permit at start and releases it at end, so the count of
+    *available* permits equals `total_permits - in_flight`.
+
+    Loop until either all permits are back (in-flight == 0) or
+    `deadline_secs` elapses.  Returns the number of permits we could
+    NOT account for (0 == clean drain)."""
+    t0: f64 = time.monotonic()
+    while time.monotonic() - t0 < deadline_secs:
+        # Try to acquire ALL permits; if we get them, all in-flight
+        # handlers have finished.  We can then release them again.
+        acquired: i32 = 0i32
+        while acquired < total_permits:
+            if threading.semaphore_try_acquire(sem):
+                acquired = acquired + 1i32
+            else:
+                # Couldn't get them all; release what we have and
+                # sleep before trying again.
+                break
+        if acquired == total_permits:
+            # Release them all back (defensive — process exit would drop
+            # them but we play nicely).
+            j: i32 = 0i32
+            while j < total_permits:
+                threading.semaphore_release(sem)
+                j = j + 1i32
+            return 0i32
+        # Release the partial set we accumulated.
+        k: i32 = 0i32
+        while k < acquired:
+            threading.semaphore_release(sem)
+            k = k + 1i32
+        time.sleep_ms(50i64)
+    # Timed out — count how many we still can't acquire.
+    in_flight: i32 = 0i32
+    j2: i32 = 0i32
+    while j2 < total_permits:
+        if threading.semaphore_try_acquire(sem):
+            j2 = j2 + 1i32
+        else:
+            in_flight = total_permits - j2
+            j2 = total_permits  # break
+    # Release what we got back.
+    k2: i32 = 0i32
+    while k2 < (total_permits - in_flight):
+        threading.semaphore_release(sem)
+        k2 = k2 + 1i32
+    return in_flight
+
+
 fn main() -> i32:
     args: Dict[str, str] = parse_args()
     logging.basic_config("INFO")
@@ -1412,16 +2373,27 @@ fn main() -> i32:
         io.write_stderr("todo_app: bad --max-accepts\n")
         return 2
     max_accepts: i32 = max_acc_parsed.1
+    shutdown_parsed: Tuple[bool, i32] = parse_i32_safe(args["shutdown-after-secs"])
+    if not shutdown_parsed.0:
+        io.write_stderr("todo_app: bad --shutdown-after-secs\n")
+        return 2
+    shutdown_after: i32 = shutdown_parsed.1
     is_tls: bool = args["tls"] == "true"
 
     db_path: str = args["db"]
     db_init(db_path)
+    ensure_uploads_dir()
 
     router: Router = Router()
     register_routes(router)
 
-    sem: i64 = threading.semaphore_new(max_concurrent_connections())
+    permits: i32 = max_concurrent_connections()
+    sem: i64 = threading.semaphore_new(permits)
     access_lock: i64 = threading.lock_new()
+    # `shutdown_flag` semantics: an unheld Lock means "running"; a held
+    # Lock means "shutdown requested".  `lock_try_acquire` is the
+    # non-blocking probe.
+    shutdown_flag: i64 = threading.lock_new()
 
     binding: Tuple[i64, i32] = bind_listener(host, port_parsed.1)
     listener: i64 = binding.0
@@ -1434,13 +2406,38 @@ fn main() -> i32:
     println("TLS=" + str(is_tls))
     println("READY")
 
+    # Optional graceful-shutdown timer (signal substitute).
+    if shutdown_after > 0i32:
+        listener_for_timer: i64 = listener
+        timer_secs: i32 = shutdown_after
+        wake_host: str = host
+        wake_port: i32 = chosen_port
+        flag_for_timer: i64 = shutdown_flag
+        timer: Thread = Thread(
+            fn() -> None: shutdown_timer_thread(listener_for_timer, wake_host, wake_port, timer_secs, flag_for_timer)
+        )
+        timer.start()
+
     if is_tls:
         server_cfg: i64 = ssl.load_server_config(args["cert"], args["key"])
-        accept_loop_tls(listener, server_cfg, router, sem, access_lock, db_path, max_accepts)
+        accept_loop_tls(listener, server_cfg, router, sem, access_lock, db_path, max_accepts, shutdown_flag)
         ssl.free_server_config(server_cfg)
     else:
-        accept_loop_plain(listener, router, sem, access_lock, db_path, max_accepts)
+        accept_loop_plain(listener, router, sem, access_lock, db_path, max_accepts, shutdown_flag)
 
-    socket.close_listener(listener)
+    # Try to close the listener if we exited via --max-accepts (the
+    # timer path has already closed it).  Suppress errors for the
+    # double-close case.
+    try:
+        socket.close_listener(listener)
+    except IOError as e:
+        pass
+    except ValueError as e:
+        pass
+
+    # Wait for in-flight requests to drain.
+    leftover: i32 = drain_in_flight(sem, permits, shutdown_grace_secs())
+    if leftover > 0i32:
+        logging.warning(str(leftover) + " in-flight requests did not drain within " + str(i32(shutdown_grace_secs())) + "s")
     println("SHUTDOWN")
     return 0

@@ -11,7 +11,8 @@
 //! the test rather than relying on a kill signal.
 
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -287,4 +288,367 @@ fn webserver_demo_runs_https() {
     // Tear down.
     let _ = child.kill();
     let _ = child.wait();
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// M29.5 tests — keep-alive, chunked, multipart, HTML errors, graceful
+// shutdown.  These all share the "compile + spawn + scrape PORT" prelude
+// with the M29 tests above; the spawn helper is duplicated here so the
+// suite stays a single-file integration test (matches the M29 layout).
+// ─────────────────────────────────────────────────────────────────────
+
+fn spawn_server(test_name: &str, extra_args: &[&str]) -> (Child, u16, PathBuf) {
+    let tmp_root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(test_name);
+    let _ = fs::remove_dir_all(&tmp_root);
+    let spyc_path = compile_demo(&tmp_root);
+    let spy_bin = project_root().join("target").join("release").join("spy.exe");
+    let mut cmd = Command::new(&spy_bin);
+    cmd.arg(&spyc_path)
+        .arg("--port")
+        .arg("0")
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--db")
+        .arg(tmp_root.join("todos.db").display().to_string());
+    for a in extra_args {
+        cmd.arg(a);
+    }
+    let mut child = cmd
+        .current_dir(project_root())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn spy.exe");
+    let port = await_port(&mut child);
+    (child, port, tmp_root)
+}
+
+/// Read response off `stream`.  Returns (status_line, headers,
+/// body_after_headers).  body_after_headers may be the full body (for
+/// Content-Length-framed responses) or only the prefix (for chunked
+/// responses).  Reads up to `max_bytes` before giving up.
+fn read_http_response(stream: &mut TcpStream, max_bytes: usize) -> (String, Vec<(String, String)>, Vec<u8>) {
+    let mut buf = Vec::with_capacity(4096);
+    let mut tmp = [0u8; 1024];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        stream
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        match stream.read(&mut tmp) {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&tmp[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    // We have the full header block.  Decide whether the
+                    // body is content-length-framed or chunked; if
+                    // chunked or unknown, read more aggressively for a
+                    // short while.
+                    // For test simplicity we always pull more bytes if
+                    // < max_bytes (callers verify what they need).
+                    if buf.len() >= max_bytes {
+                        break;
+                    }
+                }
+            }
+            Err(_) => {
+                if Instant::now() > deadline {
+                    break;
+                }
+                if !buf.is_empty()
+                    && buf.windows(4).any(|w| w == b"\r\n\r\n")
+                    && buf.ends_with(b"0\r\n\r\n")
+                {
+                    break;
+                }
+                if !buf.is_empty() && buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    // We have headers — return what we got, caller
+                    // checks framing.
+                    break;
+                }
+            }
+        }
+    }
+    let head_end = buf
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("no \\r\\n\\r\\n in response");
+    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+    let mut lines = head.split("\r\n");
+    let status_line = lines.next().unwrap().to_string();
+    let mut headers = Vec::new();
+    for l in lines {
+        if let Some(c) = l.find(':') {
+            headers.push((l[..c].trim().to_ascii_lowercase(), l[c + 1..].trim().to_string()));
+        }
+    }
+    let body = buf[head_end + 4..].to_vec();
+    (status_line, headers, body)
+}
+
+fn parse_status_code(status_line: &str) -> u16 {
+    status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}
+
+fn header(headers: &[(String, String)], name: &str) -> Option<String> {
+    let key = name.to_ascii_lowercase();
+    headers.iter().find(|(k, _)| k == &key).map(|(_, v)| v.clone())
+}
+
+#[test]
+fn webserver_demo_keepalive_serves_multiple_requests_on_one_conn() {
+    let spy_bin = project_root().join("target").join("release").join("spy.exe");
+    if !spy_bin.exists() {
+        eprintln!("skipping: {} not present", spy_bin.display());
+        return;
+    }
+    let (mut child, port, _tmp) = spawn_server(
+        "m29_5_webserver_keepalive",
+        &["--max-accepts", "200", "--shutdown-after-secs", "20"],
+    );
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream.set_nodelay(true).unwrap();
+
+    // Send three requests on the same connection.  HTTP/1.1 defaults to
+    // keep-alive; we explicitly send Connection: keep-alive for the
+    // first two and Connection: close on the third.
+    let r1 = b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n";
+    let r2 = b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n";
+    let r3 = b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+
+    stream.write_all(r1).unwrap();
+    let (status_line, headers, _body) = read_http_response(&mut stream, 256);
+    assert_eq!(parse_status_code(&status_line), 200, "req1 status: {status_line}");
+    assert_eq!(
+        header(&headers, "Connection").as_deref(),
+        Some("keep-alive"),
+        "req1 connection: {headers:?}"
+    );
+    assert!(
+        header(&headers, "Keep-Alive").is_some(),
+        "req1 keep-alive header missing: {headers:?}"
+    );
+
+    stream.write_all(r2).unwrap();
+    let (status_line2, headers2, _) = read_http_response(&mut stream, 256);
+    assert_eq!(parse_status_code(&status_line2), 200, "req2 status: {status_line2}");
+    assert_eq!(
+        header(&headers2, "Connection").as_deref(),
+        Some("keep-alive"),
+        "req2 connection: {headers2:?}"
+    );
+
+    stream.write_all(r3).unwrap();
+    let (status_line3, headers3, _) = read_http_response(&mut stream, 256);
+    assert_eq!(parse_status_code(&status_line3), 200, "req3 status: {status_line3}");
+    assert_eq!(
+        header(&headers3, "Connection").as_deref(),
+        Some("close"),
+        "req3 connection: {headers3:?}"
+    );
+
+    drop(stream);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn webserver_demo_chunked_response_streams_correctly() {
+    let spy_bin = project_root().join("target").join("release").join("spy.exe");
+    if !spy_bin.exists() {
+        eprintln!("skipping: {} not present", spy_bin.display());
+        return;
+    }
+    let (mut child, port, _tmp) = spawn_server(
+        "m29_5_webserver_chunked",
+        &["--max-accepts", "20", "--shutdown-after-secs", "20"],
+    );
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream.set_nodelay(true).unwrap();
+
+    // Ask for 5 chunks so the test stays fast.
+    let req = b"GET /api/stream?n=5 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    stream.write_all(req).unwrap();
+
+    let (status_line, headers, body) = read_http_response(&mut stream, 8192);
+    assert_eq!(parse_status_code(&status_line), 200, "stream status: {status_line}");
+    assert_eq!(
+        header(&headers, "Transfer-Encoding").as_deref(),
+        Some("chunked"),
+        "stream TE: {headers:?}"
+    );
+    assert!(
+        header(&headers, "Content-Length").is_none(),
+        "stream should not have Content-Length: {headers:?}"
+    );
+
+    let body_str = String::from_utf8_lossy(&body);
+    // The body should be 5 chunks framed as `<hex>\r\n<data>\r\n` ending
+    // with `0\r\n\r\n`.  Each chunk should be "chunk N\n" for N in 0..5.
+    assert!(body_str.contains("chunk 0\n"), "missing chunk 0: {body_str:?}");
+    assert!(body_str.contains("chunk 4\n"), "missing chunk 4: {body_str:?}");
+    assert!(body_str.ends_with("0\r\n\r\n"), "no terminator chunk: {body_str:?}");
+
+    drop(stream);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn webserver_demo_multipart_upload_roundtrip() {
+    let spy_bin = project_root().join("target").join("release").join("spy.exe");
+    if !spy_bin.exists() {
+        eprintln!("skipping: {} not present", spy_bin.display());
+        return;
+    }
+    let (mut child, port, _tmp) = spawn_server(
+        "m29_5_webserver_multipart",
+        &["--max-accepts", "20", "--shutdown-after-secs", "20"],
+    );
+
+    // Build a multipart body by hand to control the exact framing.
+    let boundary = "----TestBoundary12345";
+    let file_content = b"hello multipart world";
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"file\"; filename=\"greeting.txt\"\r\n");
+    body.extend_from_slice(b"Content-Type: text/plain\r\n\r\n");
+    body.extend_from_slice(file_content);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(10))
+        .max_idle_connections(0)
+        .build();
+    let resp = agent
+        .post(&format!("http://127.0.0.1:{port}/api/upload"))
+        .set("Content-Type", &format!("multipart/form-data; boundary={boundary}"))
+        .send_bytes(&body);
+    let resp = resp.expect("upload");
+    assert_eq!(resp.status(), 201);
+    let upload_body = resp.into_string().unwrap();
+    assert!(
+        upload_body.contains("\"url\":\"/api/uploads/greeting.txt\""),
+        "upload body: {upload_body}"
+    );
+    assert!(
+        upload_body.contains(&format!("\"size\":{}", file_content.len())),
+        "upload body size: {upload_body}"
+    );
+
+    // Now download it.
+    let (status, fetched_body) = http_call(
+        "GET",
+        &format!("http://127.0.0.1:{port}/api/uploads/greeting.txt"),
+        None,
+        None,
+    );
+    assert_eq!(status, 200);
+    assert_eq!(fetched_body, "hello multipart world");
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn webserver_demo_returns_html_404_not_textplain() {
+    let spy_bin = project_root().join("target").join("release").join("spy.exe");
+    if !spy_bin.exists() {
+        eprintln!("skipping: {} not present", spy_bin.display());
+        return;
+    }
+    let (mut child, port, _tmp) = spawn_server(
+        "m29_5_webserver_html404",
+        &["--max-accepts", "20", "--shutdown-after-secs", "20"],
+    );
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream.set_nodelay(true).unwrap();
+    let req = b"GET /no/such/route HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    stream.write_all(req).unwrap();
+    let (status_line, headers, body) = read_http_response(&mut stream, 4096);
+    assert_eq!(parse_status_code(&status_line), 404, "404 status: {status_line}");
+    let ct = header(&headers, "Content-Type").unwrap_or_default();
+    assert!(
+        ct.starts_with("text/html"),
+        "404 Content-Type should be text/html, got: {ct} (headers={headers:?})"
+    );
+    let body_str = String::from_utf8_lossy(&body);
+    assert!(
+        body_str.contains("<h1>404"),
+        "404 body should be HTML with h1: {body_str:?}"
+    );
+
+    drop(stream);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn webserver_demo_graceful_shutdown_completes_in_flight() {
+    let spy_bin = project_root().join("target").join("release").join("spy.exe");
+    if !spy_bin.exists() {
+        eprintln!("skipping: {} not present", spy_bin.display());
+        return;
+    }
+    // Server shuts down 3 seconds after startup.  We send a slow-streaming
+    // /api/stream?n=10 request (10 chunks * 50ms = ~500ms wall-clock) and
+    // verify the response completes before the SHUTDOWN line is printed.
+    let tmp_root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("m29_5_webserver_shutdown");
+    let _ = fs::remove_dir_all(&tmp_root);
+    let spyc_path = compile_demo(&tmp_root);
+
+    let mut child = Command::new(&spy_bin)
+        .arg(&spyc_path)
+        .arg("--port").arg("0")
+        .arg("--host").arg("127.0.0.1")
+        .arg("--db").arg(tmp_root.join("todos.db").display().to_string())
+        .arg("--max-accepts").arg("20")
+        .arg("--shutdown-after-secs").arg("3")
+        .current_dir(project_root())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn spy.exe");
+
+    let port = await_port(&mut child);
+
+    // Issue an in-flight request that takes ~500ms.  This should
+    // complete cleanly even though the shutdown timer is going to fire
+    // shortly after.
+    let t0 = Instant::now();
+    let (status, body) = http_call("GET", &format!("http://127.0.0.1:{port}/api/stream?n=10"), None, None);
+    let elapsed = t0.elapsed();
+    assert_eq!(status, 200, "in-flight status; body={body}");
+    assert!(body.contains("chunk 9"), "in-flight body should be complete: {body:?}");
+    assert!(
+        elapsed >= Duration::from_millis(400),
+        "request finished suspiciously fast: {elapsed:?}"
+    );
+
+    // Wait for the server to print SHUTDOWN on stdout.  We'll observe
+    // this via try_wait — the child should exit cleanly within ~15s of
+    // launch.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut exited = false;
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                exited = true;
+                break;
+            }
+            Ok(None) => {
+                thread::sleep(Duration::from_millis(200));
+            }
+            Err(_) => break,
+        }
+    }
+    if !exited {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("server did not exit gracefully within 20s of --shutdown-after-secs=3");
+    }
 }

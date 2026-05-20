@@ -24,3 +24,9 @@ __pycache__/
 /compiler/safe_open_a.txt
 /compiler/safe_open_c.txt
 
+# Uploaded files from examples/webserver/todo_app.spy /api/upload route.
+# The .gitkeep file keeps the directory present in source control; any
+# actual uploads are test artifacts.
+/examples/webserver/uploads/*
+!/examples/webserver/uploads/.gitkeep
+

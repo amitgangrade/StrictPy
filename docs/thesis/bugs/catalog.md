@@ -18,7 +18,8 @@ discovered, milestone fixed (or "deferred" with pointer to
 | Parser / lexer | 1 | 0 | 1 |
 | Formatting / spec consistency | 1 | 1 | 0 |
 | Spec/runtime drift | 1 | 1 | 0 |
-| **Total** | **34** | **33** | **1** |
+| Stdlib semantics (network/concurrency) | 1 | 0 | 1 |
+| **Total** | **35** | **33** | **2** |
 
 Post-M12 state (2026-05-18):
 
@@ -477,7 +478,17 @@ Post-M24 state (2026-05-19 even-even later):
 - **Status**: fixed in M24. Tests: `vm/tests/m24_in_operator.rs` (5 tests — present-key, missing-key, variable key, Dict[str, *] across value types, churn).
 - **Severity**: medium-high. Every program using `in` on a Dict silently went the wrong way. Same shape as BUG-008 / BUG-034 / BUG-037 — placeholder IR lowering for a binary operator. **This is the FOURTH instance of the pattern.** The thesis methodology section should call out an audit candidate: every binary-op match arm in `emit_binop` should be verified to dispatch on operand types where the operator's semantics depend on type (every comparison, every container membership, every short-circuit), not just emit a hardcoded IROp.
 
-## Lessons from the catalog
+### M29.5-only finds
+
+#### BUG-040 — `socket.close_listener` does not unblock an in-flight `socket.accept` ⚠️ DEFERRED
+- **Found**: M29.5 (webserver framework round-out — graceful-shutdown implementation)
+- **Symptom**: Calling `socket.close_listener(lh)` from one thread while another thread is blocked in `socket.accept(lh)` does NOT cause the blocked accept to return. The accept call continues to block until a new connection arrives — at which point it returns the connection (not an error), which the main thread isn't expecting after the listener was "closed."
+- **Root cause**: `vm/src/builtins.rs::NativeFn::SocketAccept` (lines 5402-5446) takes an `Arc::clone` of the listener from the slot table, drops the table mutex, then calls `TcpListener::accept()` on the Arc'd handle. When `close_listener` removes the slot, the Arc'd clone held by the accept thread keeps the underlying `TcpListener` alive — closing the socket-level FD is what would unblock accept, but the Arc-clone preserves it. Same Arc-vs-Mutex pattern the P3b-A agent introduced for TCP send/recv (where it was the right call: send/recv are short, and not holding the mutex avoids deadlocks). For listener-close-during-accept it's wrong — there's no way to signal-wake the blocked syscall from another thread.
+- **Workaround used in M29.5**: graceful-shutdown timer thread self-connects to the listener via `socket.connect_tcp("127.0.0.1", port)` immediately before closing, which gives the blocked accept a connection to return; the main thread then sees the listener is closed-flag-set and exits the accept loop. ~15 LOC of user code in `examples/webserver/todo_app.spy::drain_in_flight`.
+- **Status**: deferred to v0.3. Fix is stdlib-side: either (a) put `TcpListener` behind a `Mutex<Option<TcpListener>>` slot (close drops the inner Option, taking the FD with it before the Arc'd accept-thread can see the new connection), or (b) add a `socket.shutdown_listener` function that does the platform-specific socket-shutdown syscall on the listener FD even while another thread holds an Arc'd accept reference.
+- **Severity**: medium. Worked around cleanly in user code via self-connect; no program is silently wrong; the workaround is documented and reproducible. Stress-test ROI: M29.5 is the first program to need cooperative listener shutdown, and it found this on the first attempt.
+
+
 
 1. **The biggest clusters of bugs were each found by ONE real-world
    program and audited up.** Without CSV aggregator, BUG-001 through
