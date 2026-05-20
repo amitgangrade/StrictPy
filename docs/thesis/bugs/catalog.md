@@ -15,11 +15,11 @@ discovered, milestone fixed (or "deferred" with pointer to
 | Frontend operator semantics | 2 | 2 | 0 |
 | Runtime memory / GC | 2 | 2 | 0 |
 | Stdlib missing | 5 | 5 | 0 |
-| Parser / lexer | 1 | 0 | 1 |
+| Parser / lexer | 1 | 1 | 0 |
 | Formatting / spec consistency | 1 | 1 | 0 |
 | Spec/runtime drift | 1 | 1 | 0 |
 | Stdlib semantics (network/concurrency) | 1 | 1 | 0 |
-| **Total** | **35** | **34** | **1** |
+| **Total** | **35** | **35** | **0** |
 
 Post-M12 state (2026-05-18):
 
@@ -200,6 +200,30 @@ Post-M24 state (2026-05-19 even-even later):
 - Bug totals: 34 found, 33 fixed, 1 deferred (still only BUG-028).
 - Tests: 553 → 578 (+25 from M24's new examples + regression). 24
   stdlib modules unchanged (M24 added no new modules).
+
+Post-M30 state (2026-05-21):
+
+- **BUG-028 closed.** M30 landed the last legacy frontend bug: the
+  lexer now suppresses `Newline` at top level when the last emitted
+  significant token is a binary operator that requires a right-hand
+  operand. This means `return "a " + \n    "b"` (with no parens, no
+  `\`) now compiles cleanly; same for boolean `and`/`or`, comparisons,
+  bare and compound assignment, bitwise ops, and `in`/`is`/`as`/`??`.
+  Implementation: `compiler/src/lexer.rs` — new
+  `last_significant_kind: Option<TokenKind>` field updated in
+  `next_token` (skips `Indent`/`Dedent`/`Newline`/`Eof`); new
+  `last_token_continues_line()` predicate; the newline emit-path now
+  recurses into `next_token_inner()` when the predicate fires, mirroring
+  the existing `paren_depth > 0` whitespace path. Continuation lines'
+  leading indentation is naturally ignored because `at_line_start`
+  stays false. Spec §3.2 amended.
+- Tests: `vm/tests/m30_line_continuation.rs` (11 tests — canonical
+  BUG-028 plus and/or/eq/lt/=/+= continuations, paren regression,
+  no-false-positive on string literals containing `+`, no-trigger on
+  non-operator trailing tokens, chained continuations).
+- **Bug totals: 35 found, 34 fixed, 1 deferred** (only the truly-deferred
+  stdlib network/concurrency item remains; BUG-028 was the last legacy
+  frontend bug). The `Parser / lexer` category is now 1/1/0.
 
 ## Full catalog
 
@@ -389,10 +413,35 @@ Post-M24 state (2026-05-19 even-even later):
 
 ### Frontend semantics
 
-#### BUG-028 — No implicit line continuation across trailing `+` ⚠️ DEFERRED
+#### BUG-028 — No implicit line continuation across trailing `+` — fixed in M30
 - **Found**: M10 (C2 Markov)
 - **Symptom**: `return "a " +\n    "b"` errors with E0001. Forces accumulator-style string building.
-- **Status**: deferred. See `BUGS_KNOWN.md §6`. Lexer enhancement, mechanically simple but separate.
+- **Root cause**: `compiler/src/lexer.rs` only suppressed `Newline`
+  inside open bracket pairs (`paren_depth > 0`). A trailing binary
+  operator at end-of-line did NOT trigger continuation, so the lexer
+  ended the logical line and the parser saw the next token (the start
+  of the continuation expression) as a statement-level token at the
+  wrong indent → E0001.
+- **Fix**: track `last_significant_kind: Option<TokenKind>` (updated in
+  `next_token`, skipping `Indent`/`Dedent`/`Newline`/`Eof`). In the
+  newline-emit path, if the last significant token is a binary operator
+  requiring a RHS (the set in `last_token_continues_line()` — arithmetic
+  / assignment / comparison / boolean / bitwise / `in`/`is`/`as`/`??`),
+  recurse into `next_token_inner()` instead of emitting `Newline`,
+  mirroring the existing `paren_depth > 0` whitespace path. The
+  continuation line's leading indentation is treated as inline whitespace
+  because `at_line_start` stays false. ~95 lines (predicate + comments +
+  field).
+- **Spec**: STRICTPY_SPEC.md §3.2 amended to document the new rule and
+  enumerate the trigger token set.
+- **Tests**: `vm/tests/m30_line_continuation.rs` — 11 cases including
+  the canonical BUG-028 repro, boolean `and`/`or`, comparison `==`/`<`,
+  assignment `=`/`+=`, paren-regression, no-false-positive on `+` inside
+  a string literal, and chained continuations.
+- **Status**: fixed in M30. This was the last legacy frontend bug. The
+  fix is the smallest of the M10-era backlog (one predicate + one early
+  return) but unblocks the most ergonomic Python idiom that StrictPy
+  was missing.
 
 ### M11-only finds
 

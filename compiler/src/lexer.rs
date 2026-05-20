@@ -135,6 +135,15 @@ pub struct Lexer<'src> {
     /// If so, a subsequent `.<digit>` MUST lex as `Dot IntLit` (a tuple field
     /// access like `t.0`), not as a `.5`-style float literal.
     prev_was_postfix_terminator: bool,
+
+    /// M30 (BUG-028): track the last emitted "significant" token kind
+    /// (anything that isn't Indent/Dedent/Newline). If the last emitted
+    /// token is a binary operator/keyword that requires a right-hand
+    /// operand, a physical newline at the top level is suppressed and
+    /// lexing continues on the next physical line as if it were the same
+    /// logical line. See spec §3.2 (implicit line continuation across
+    /// trailing infix operators).
+    last_significant_kind: Option<TokenKind>,
 }
 
 impl<'src> Lexer<'src> {
@@ -156,6 +165,7 @@ impl<'src> Lexer<'src> {
             fstring_stack: Vec::new(),
             queued: std::collections::VecDeque::new(),
             prev_was_postfix_terminator: false,
+            last_significant_kind: None,
         }
     }
 
@@ -176,7 +186,69 @@ impl<'src> Lexer<'src> {
                 | TokenKind::RBracket
                 | TokenKind::IntLit { .. }
         );
+        // M30 (BUG-028): remember the last "significant" token kind for
+        // implicit-line-continuation across trailing binary operators.
+        // Indent/Dedent/Newline/Eof are not significant — they don't
+        // affect whether the next physical newline should be suppressed.
+        if !matches!(
+            tok.kind,
+            TokenKind::Indent | TokenKind::Dedent | TokenKind::Newline | TokenKind::Eof
+        ) {
+            self.last_significant_kind = Some(tok.kind.clone());
+        }
         Ok(tok)
+    }
+
+    /// M30 (BUG-028): returns true if the previously emitted significant
+    /// token is a binary operator (or operator-like keyword) that requires
+    /// a right-hand operand on the next logical line. Used to suppress the
+    /// `Newline` token at top level so continuation lines work without
+    /// requiring an explicit `\` or wrapping parentheses.
+    ///
+    /// Conservative set — only operators whose semantics make a trailing
+    /// position unambiguously incomplete:
+    /// * arithmetic: `+ - * / // % **`
+    /// * assignment: `= += -= *= /= //= %= **= &= |= ^= <<= >>=`
+    /// * comparison: `== != < > <= >=`
+    /// * boolean keywords: `and or`
+    /// * bitwise: `& | ^ << >>`
+    /// * membership / type / cast keywords: `in is as`
+    /// * null-coalesce: `??`
+    ///
+    /// Notably NOT included: `Colon` (block headers like `if x:` MUST end
+    /// the logical line), `Dot` (`obj.method` rarely spans lines and
+    /// already lexes naturally), `Comma` (already handled by paren-depth
+    /// counting where it appears), `Arrow`, `At`, `Not` (unary), `Tilde`
+    /// (unary). Open-bracket kinds `( [ {` increment paren_depth which
+    /// already suppresses newlines.
+    fn last_token_continues_line(&self) -> bool {
+        let Some(ref k) = self.last_significant_kind else {
+            return false;
+        };
+        matches!(
+            k,
+            // Arithmetic
+            TokenKind::Plus | TokenKind::Minus | TokenKind::Star
+            | TokenKind::Slash | TokenKind::DoubleSlash | TokenKind::Percent
+            | TokenKind::DoubleStar
+            // Assignment
+            | TokenKind::Assign | TokenKind::PlusEq | TokenKind::MinusEq
+            | TokenKind::StarEq | TokenKind::SlashEq | TokenKind::DoubleSlashEq
+            | TokenKind::PercentEq | TokenKind::DoubleStarEq
+            | TokenKind::AmpEq | TokenKind::PipeEq | TokenKind::CaretEq
+            | TokenKind::ShlEq | TokenKind::ShrEq
+            // Comparison
+            | TokenKind::EqEq | TokenKind::NotEq | TokenKind::Lt
+            | TokenKind::Gt | TokenKind::LtEq | TokenKind::GtEq
+            // Bitwise
+            | TokenKind::Amp | TokenKind::Pipe | TokenKind::Caret
+            | TokenKind::Shl | TokenKind::Shr
+            // Boolean / membership / type keywords
+            | TokenKind::KwAnd | TokenKind::KwOr
+            | TokenKind::KwIn | TokenKind::KwIs | TokenKind::KwAs
+            // Null-coalesce
+            | TokenKind::QuestionQuestion
+        )
     }
 
     fn next_token_inner(&mut self) -> Result<Token, CompileError> {
@@ -260,6 +332,16 @@ impl<'src> Lexer<'src> {
                 // expression here — fall through and re-enter the loop)
             }
             if self.paren_depth == 0 {
+                // M30 (BUG-028): if the last significant token is a binary
+                // operator that requires a RHS, suppress the Newline and
+                // continue lexing as if the next physical line were part
+                // of the same logical line. The continuation line's
+                // leading indentation is ignored (no INDENT/DEDENT emitted)
+                // because `at_line_start` stays false. Mirrors the
+                // paren-depth >0 path semantically.
+                if self.last_token_continues_line() {
+                    return self.next_token_inner();
+                }
                 self.at_line_start = true;
                 let sp = Span { start: start as u32, end: self.pos as u32, line, col };
                 return Ok(Token { kind: TokenKind::Newline, span: sp });

@@ -95,6 +95,15 @@ Source files are **UTF-8**. The byte order mark (BOM) is permitted at file start
 - Logical lines are terminated by `\n` (LF) or `\r\n` (CRLF, normalized to LF).
 - Physical line continuation: backslash before newline (`\\\n`).
 - Implicit continuation inside `()`, `[]`, `{}`.
+- Implicit continuation after a trailing binary operator: a physical
+  newline is also suppressed when the last significant token on the line
+  is a binary operator/keyword requiring a right-hand operand —
+  arithmetic (`+ - * / // % **`), assignment (`= += -= *= /= //= %= **= &= |= ^= <<= >>=`),
+  comparison (`== != < > <= >=`), boolean (`and`, `or`), bitwise
+  (`& | ^ << >>`), membership/cast keywords (`in`, `is`, `as`), or
+  null-coalesce (`??`). The continuation line's leading indentation is
+  ignored (no `INDENT`/`DEDENT` emitted). `:`, `.`, `,`, `->`, `@`,
+  unary `not`/`~` do NOT trigger this rule.
 
 ### 3.3 Indentation
 
