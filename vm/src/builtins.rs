@@ -5456,18 +5456,41 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
                     ),
                 });
             }
-            let mut p3b_a_sock_clu_table =
-                interp.shared.tcp_listeners.lock().unwrap();
-            let p3b_a_sock_clu_slot = p3b_a_sock_clu_table
-                .get_mut(p3b_a_sock_clu_handle as usize)
-                .ok_or_else(|| VmError::UncaughtException {
-                    type_name: "ValueError".into(),
-                    message: format!(
-                        "socket.close_listener: unknown handle {}",
-                        p3b_a_sock_clu_handle
-                    ),
-                })?;
-            let _ = p3b_a_sock_clu_slot.take();
+            // M30 BUG-040: fix `close_listener` not unblocking an in-flight
+            // `accept`.  The `Arc::clone` in `SocketAccept` above keeps the
+            // underlying `TcpListener` alive even after we `take()` the
+            // slot, so the OS-level FD stays open and the blocking accept
+            // never returns.  Solution: shutdown(FD, SHUT_RDWR) the
+            // listener's socket BEFORE dropping our Option — that wakes any
+            // accept-thread with an `Err` immediately; the dangling Arc
+            // then drops naturally when the accept-thread's stack unwinds.
+            //
+            // Scoped so the table-mutex is released before the helper
+            // runs (the helper does a syscall, no need to hold the lock).
+            let p3b_a_sock_clu_listener: Option<Arc<std::net::TcpListener>> = {
+                let mut p3b_a_sock_clu_table =
+                    interp.shared.tcp_listeners.lock().unwrap();
+                let p3b_a_sock_clu_slot = p3b_a_sock_clu_table
+                    .get_mut(p3b_a_sock_clu_handle as usize)
+                    .ok_or_else(|| VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "socket.close_listener: unknown handle {}",
+                            p3b_a_sock_clu_handle
+                        ),
+                    })?;
+                p3b_a_sock_clu_slot.take()
+            };
+            if let Some(p3b_a_sock_clu_arc) = p3b_a_sock_clu_listener {
+                shutdown_listener_fd(&p3b_a_sock_clu_arc);
+                // Drop our own clone — if no other thread holds one (the
+                // common case where close_listener is called from the
+                // same thread that owned the listener), the FD is closed
+                // here.  If another thread is mid-accept, that thread's
+                // Arc clone drops as soon as the now-shutdown accept()
+                // returns Err.
+                drop(p3b_a_sock_clu_arc);
+            }
             Ok(0)
         }
         NativeFn::SocketUdpSocket => {
@@ -6614,6 +6637,103 @@ fn arc_tcp_stream(
         message: format!("{}: handle {} is closed", who, handle),
     })?;
     Ok(stream.clone())
+}
+
+/// M30 BUG-040: wake any thread currently blocked inside
+/// `TcpListener::accept()` on this listener so it returns with an error
+/// (or returns the wake-up connection, which user code will discard
+/// because the listener slot is already gone by then).
+///
+/// Background: `socket.close_listener` removes the slot from the
+/// listener table, but if another thread grabbed an `Arc` clone for an
+/// in-flight `accept`, the FD stays open and the accept stays blocked —
+/// see BUG-040 in `docs/thesis/bugs/catalog.md`.  Two complementary
+/// mechanisms are used here:
+///
+/// 1. Unix / Linux / macOS: `shutdown(fd, SHUT_RDWR)` on the listening
+///    socket atomically transitions it to "no more connections" — any
+///    pending `accept()` returns `Err(EINVAL)` (Linux) or
+///    `Err(ECONNABORTED)` (macOS).  This is the textbook POSIX recipe
+///    and what e.g. mio, tokio, libuv, and Python's `socketserver` rely
+///    on.  Performed via `libc::shutdown`.
+///
+/// 2. Windows: Winsock's `shutdown` does **not** wake a blocked
+///    `accept`, by design (see Microsoft KB-179942 — "you must call
+///    `closesocket` to interrupt a blocking accept").  Closing the
+///    underlying SOCKET while another thread holds an `Arc<TcpListener>`
+///    would race the stdlib `Drop` impl into a double-close on a
+///    possibly-recycled FD.  The reliable, race-free wake-up is the
+///    self-connect trick: dial the listener's own bound address and let
+///    the pending `accept()` return with that throwaway connection.
+///    The accept-thread's caller already sees the slot is closed and
+///    discards the result (the M29.5 workaround used exactly this
+///    technique in user code; we now move it stdlib-side so user code
+///    doesn't have to).
+///
+/// We do **both** on Windows — the shutdown is a no-op-but-harmless on
+/// Windows, and on Unix the self-connect after shutdown is also a no-op
+/// (the shutdown already woke the accept; the connect just races a
+/// half-open dial that's promptly refused or never sees a peer).  This
+/// belt-and-braces approach keeps the same code path on both platforms
+/// while letting whichever mechanism is canonical for each OS do the
+/// actual wake.
+fn shutdown_listener_fd(listener: &std::net::TcpListener) {
+    // (1) Platform-specific socket shutdown.  Best-effort — any error
+    // (e.g. "fd already shut down") is exactly what we want and is
+    // intentionally ignored.
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: `fd` came from a live `TcpListener` we are holding a
+        // reference to; the kernel-side socket is alive for the call.
+        unsafe {
+            libc::shutdown(listener.as_raw_fd(), libc::SHUT_RDWR);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawSocket;
+        // Declared inline — adding `windows-sys` just for one symbol
+        // would bloat the dep graph.  `SOCKET` on Windows is
+        // `uintptr_t` (usize).  `SD_BOTH` = 2 per winsock2.h.
+        extern "system" {
+            fn shutdown(s: usize, how: i32) -> i32;
+        }
+        // SAFETY: `sock` came from a live `TcpListener` we are holding
+        // a reference to.
+        unsafe {
+            let _ = shutdown(listener.as_raw_socket() as usize, 2);
+        }
+    }
+
+    // (2) Self-connect to wake any pending `accept()`.  This is the
+    // canonical Windows wake mechanism (KB-179942) and is harmless on
+    // Unix where the shutdown above already did the job.  Best-effort:
+    // a failed connect just means there was no pending accept to wake
+    // (the program had already discovered the close), which is fine.
+    //
+    // When the listener was bound to `0.0.0.0` (`INADDR_ANY`) or `[::]`
+    // (`IN6ADDR_ANY`), we need to dial loopback rather than the wildcard
+    // address — you can listen on a wildcard but you can't connect to
+    // one.  `IpAddr::is_unspecified()` covers both v4 and v6.
+    if let Ok(mut addr) = listener.local_addr() {
+        if addr.ip().is_unspecified() {
+            use std::net::IpAddr;
+            let lo: IpAddr = match addr {
+                std::net::SocketAddr::V4(_) => "127.0.0.1".parse().unwrap(),
+                std::net::SocketAddr::V6(_) => "::1".parse().unwrap(),
+            };
+            addr.set_ip(lo);
+        }
+        // Tiny timeout — we don't want close_listener itself to block
+        // even when the wake-up isn't necessary (e.g. shutdown already
+        // woke things up on Unix).  50ms is plenty for a loopback
+        // SYN/SYN-ACK round-trip (typically <1ms).
+        let _ = std::net::TcpStream::connect_timeout(
+            &addr,
+            std::time::Duration::from_millis(50),
+        );
+    }
 }
 
 /// Same as `arc_tcp_stream` but for `SharedVm.udp_sockets`.  See the

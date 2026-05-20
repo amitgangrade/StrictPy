@@ -3115,6 +3115,32 @@ Semantics:
   need one should set `O_NONBLOCK` via a v0.3 `set_nonblocking` API
   (deferred).  The returned stream inherits the listener's
   blocking / timeout state.
+* `close_listener(handle)` releases the listener slot **and**
+  interrupts any thread currently blocked inside `accept(handle)` on
+  the same listener (M30 BUG-040 fix; matches Python's `socket.close`
+  behaviour, where closing a socket from one thread wakes a `recv` /
+  `accept` on another).  The shape of the wake-up is platform-
+  dependent:
+  - **Unix (Linux, macOS):** the blocked `accept` returns with
+    `IOError` (the underlying `shutdown(SHUT_RDWR)` causes the kernel
+    to return `EINVAL` / `ECONNABORTED`, which the VM maps to
+    `IOError`).  User code should put the call in a `try / except
+    IOError` block when shutdown-from-another-thread is part of its
+    lifecycle.
+  - **Windows:** the blocked `accept` returns *successfully* with a
+    throwaway connection — Winsock does not wake `accept` from
+    `shutdown`, so the stdlib delivers a wake-up via a self-connect
+    to the listener's bound address (see KB-179942 for the rationale
+    against `closesocket` as the alternative).  User code that
+    inspects a flag-or-shared-state to detect "shutdown was
+    requested" will see the close, drop the throwaway connection,
+    and exit its accept loop cleanly.
+  Programs that want a single error-shape across platforms can also
+  follow the M29.5 webserver pattern: set a `shutdown_requested`
+  flag before calling `close_listener`, then check the flag in the
+  accept loop after every successful accept.  The flag check is
+  cheap and handles both wake-up shapes uniformly.  Closing slot 0 /
+  an already-closed listener raises `ValueError`.
 * `udp_socket()` binds to `0.0.0.0:0` (OS-assigned ephemeral v4
   port); `udp_bind(host, port)` binds to a fixed endpoint.
 * `udp_send_to(handle, data, host, port)` sends one datagram; returns

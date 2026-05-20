@@ -18,8 +18,8 @@ discovered, milestone fixed (or "deferred" with pointer to
 | Parser / lexer | 1 | 0 | 1 |
 | Formatting / spec consistency | 1 | 1 | 0 |
 | Spec/runtime drift | 1 | 1 | 0 |
-| Stdlib semantics (network/concurrency) | 1 | 0 | 1 |
-| **Total** | **35** | **33** | **2** |
+| Stdlib semantics (network/concurrency) | 1 | 1 | 0 |
+| **Total** | **35** | **34** | **1** |
 
 Post-M12 state (2026-05-18):
 
@@ -480,13 +480,18 @@ Post-M24 state (2026-05-19 even-even later):
 
 ### M29.5-only finds
 
-#### BUG-040 — `socket.close_listener` does not unblock an in-flight `socket.accept` ⚠️ DEFERRED
+#### BUG-040 — `socket.close_listener` does not unblock an in-flight `socket.accept` ✅ FIXED (M30)
 - **Found**: M29.5 (webserver framework round-out — graceful-shutdown implementation)
 - **Symptom**: Calling `socket.close_listener(lh)` from one thread while another thread is blocked in `socket.accept(lh)` does NOT cause the blocked accept to return. The accept call continues to block until a new connection arrives — at which point it returns the connection (not an error), which the main thread isn't expecting after the listener was "closed."
 - **Root cause**: `vm/src/builtins.rs::NativeFn::SocketAccept` (lines 5402-5446) takes an `Arc::clone` of the listener from the slot table, drops the table mutex, then calls `TcpListener::accept()` on the Arc'd handle. When `close_listener` removes the slot, the Arc'd clone held by the accept thread keeps the underlying `TcpListener` alive — closing the socket-level FD is what would unblock accept, but the Arc-clone preserves it. Same Arc-vs-Mutex pattern the P3b-A agent introduced for TCP send/recv (where it was the right call: send/recv are short, and not holding the mutex avoids deadlocks). For listener-close-during-accept it's wrong — there's no way to signal-wake the blocked syscall from another thread.
-- **Workaround used in M29.5**: graceful-shutdown timer thread self-connects to the listener via `socket.connect_tcp("127.0.0.1", port)` immediately before closing, which gives the blocked accept a connection to return; the main thread then sees the listener is closed-flag-set and exits the accept loop. ~15 LOC of user code in `examples/webserver/todo_app.spy::drain_in_flight`.
-- **Status**: deferred to v0.3. Fix is stdlib-side: either (a) put `TcpListener` behind a `Mutex<Option<TcpListener>>` slot (close drops the inner Option, taking the FD with it before the Arc'd accept-thread can see the new connection), or (b) add a `socket.shutdown_listener` function that does the platform-specific socket-shutdown syscall on the listener FD even while another thread holds an Arc'd accept reference.
-- **Severity**: medium. Worked around cleanly in user code via self-connect; no program is silently wrong; the workaround is documented and reproducible. Stress-test ROI: M29.5 is the first program to need cooperative listener shutdown, and it found this on the first attempt.
+- **Workaround used in M29.5**: graceful-shutdown timer thread self-connects to the listener via `socket.connect_tcp("127.0.0.1", port)` immediately before closing, which gives the blocked accept a connection to return; the main thread then sees the listener is closed-flag-set and exits the accept loop. ~15 LOC of user code in `examples/webserver/todo_app.spy::drain_in_flight`. *(Kept in the demo post-M30 for archaeological value — see M30 agent report — but no longer required.)*
+- **Fix (M30)**: Option C from the catalogue's proposed fixes — `socket.close_listener` itself now actively wakes any blocked accept rather than just dropping the slot. Two complementary mechanisms applied unconditionally:
+  - `shutdown(fd, SHUT_RDWR)` on the listener's underlying socket (POSIX wake — Linux/macOS); accept returns `Err(EINVAL)` / `Err(ECONNABORTED)`, surfaced as `IOError`.
+  - Self-connect to `listener.local_addr()` with a 50ms `connect_timeout` (Windows wake — Winsock does not wake `accept` from `shutdown`; see Microsoft KB-179942); accept returns successfully with the throwaway connection, which the user-code drops.
+  Wildcard-bind (`0.0.0.0` / `[::]`) is detected via `IpAddr::is_unspecified()` and rewritten to `127.0.0.1` / `::1` for the self-connect dial (you can listen on a wildcard but not connect to one).
+- **Test**: `vm/tests/m30_close_listener_wakes_accept.rs` runs the canonical repro with a 5s wall-clock watchdog (pre-fix the test would hang `cargo test` rather than fail; post-fix it completes in ~50ms).
+- **Spec amendment**: §9.40 now documents `close_listener`'s new wake-up behaviour (and the platform-dependent shape) — matches Python's `socket.close()` semantics.
+- **Severity**: medium. Worked around cleanly in user code via self-connect; no program was silently wrong; the workaround was documented and reproducible. Stress-test ROI: M29.5 was the first program to need cooperative listener shutdown, and it found this on the first attempt.
 
 
 
