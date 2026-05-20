@@ -2596,6 +2596,127 @@ impl Resolver {
         };
         self.stdlib_modules.insert("sqlite3".into(), sqlite3_mod);
 
+        // ── M27 P3c-A: `shutil` module ─────────────────────────────────
+        // High-level filesystem operations: file/dir copy, recursive
+        // remove, PATH lookup for executables, and disk-usage stats.
+        // Pure `std::fs` / `std::path` under the hood; no new crate dep.
+        // Closes the v0.2 gap M24-D documented (no recursive rmdir).
+        //
+        // `shutil.which` returns `str?` (nullable) — Python returns None
+        // when the command isn't on PATH.  `disk_usage` returns a
+        // 3-tuple of i64s (total, used, free) in bytes, big enough for
+        // filesystems up to ~9.2 EB.
+        const SHUTIL_COPY: u32       = 450;
+        const SHUTIL_COPYTREE: u32   = 451;
+        const SHUTIL_MOVE: u32       = 452;
+        const SHUTIL_RMTREE: u32     = 453;
+        const SHUTIL_WHICH: u32      = 454;
+        const SHUTIL_DISK_USAGE: u32 = 455;
+
+        let tuple_i64_i64_i64_shutil = Ty::Tuple(vec![
+            i64_ty.clone(),
+            i64_ty.clone(),
+            i64_ty.clone(),
+        ]);
+
+        let shutil_mod = StdlibModule {
+            name: "shutil".into(),
+            items: vec![
+                StdlibItem {
+                    name: "copy".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), str_ty.clone()],
+                        unit_ty.clone(),
+                    ),
+                    native_id: SHUTIL_COPY,
+                },
+                StdlibItem {
+                    name: "copytree".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), str_ty.clone()],
+                        unit_ty.clone(),
+                    ),
+                    native_id: SHUTIL_COPYTREE,
+                },
+                StdlibItem {
+                    name: "move".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), str_ty.clone()],
+                        unit_ty.clone(),
+                    ),
+                    native_id: SHUTIL_MOVE,
+                },
+                StdlibItem {
+                    name: "rmtree".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], unit_ty.clone()),
+                    native_id: SHUTIL_RMTREE,
+                },
+                StdlibItem {
+                    name: "which".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], nullable_str_ty.clone()),
+                    native_id: SHUTIL_WHICH,
+                },
+                StdlibItem {
+                    name: "disk_usage".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone()],
+                        tuple_i64_i64_i64_shutil.clone(),
+                    ),
+                    native_id: SHUTIL_DISK_USAGE,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("shutil".into(), shutil_mod);
+
+        // ── M27 P3c-A: `tempfile` module ───────────────────────────────
+        // Temp file/dir creation backed by the `tempfile` crate (the
+        // canonical Rust binding — picks the right per-OS atomic-creation
+        // syscall, sets restrictive permissions, handles the prefix
+        // dance).  v0.2 ships only the path-returning helpers; the
+        // context-manager wrappers (NamedTemporaryFile,
+        // TemporaryDirectory) wait for stdlib classes in v0.3.
+        //
+        // No default-argument support yet in the StdlibItem surface, so
+        // users always pass the prefix explicitly (matches the M22
+        // `argparse` shape — call sites are slightly more verbose than
+        // Python but the surface is exactly representable).
+        const TEMPFILE_MKDTEMP: u32     = 470;
+        const TEMPFILE_MKSTEMP: u32     = 471;
+        const TEMPFILE_GETTEMPDIR: u32  = 472;
+
+        let tempfile_mod = StdlibModule {
+            name: "tempfile".into(),
+            items: vec![
+                StdlibItem {
+                    name: "mkdtemp".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: TEMPFILE_MKDTEMP,
+                },
+                StdlibItem {
+                    name: "mkstemp".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), str_ty.clone()],
+                        str_ty.clone(),
+                    ),
+                    native_id: TEMPFILE_MKSTEMP,
+                },
+                StdlibItem {
+                    name: "gettempdir".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], str_ty.clone()),
+                    native_id: TEMPFILE_GETTEMPDIR,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("tempfile".into(), tempfile_mod);
         // ── M27 P3c-E: `logging` module ────────────────────────────────
         // Application logging — flat global-logger surface.  v0.2 keeps
         // the API single-logger because Python's named-logger /

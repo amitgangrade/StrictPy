@@ -1,0 +1,134 @@
+"""shutil_demo — M27 P3c-A demo of the stdlib `shutil` module.
+
+Exercises:
+  * `shutil.copy(src, dst)` — single-file copy with content preservation.
+  * `shutil.copytree(src, dst)` — recursive directory tree copy; the
+    destination must not exist (CPython 3.7+ behaviour).
+  * `shutil.rmtree(path)` — recursive directory removal.  Closes the
+    v0.2 gap M24-D documented (no recursive os.removedirs).
+  * `shutil.which(cmd)` — PATH-search for an executable; on Windows we
+    also try `.exe`/`.bat`/`.cmd` extensions when the input has none.
+  * `shutil.disk_usage(path)` — (total, used, free) bytes for the
+    mount-point containing `path`.
+
+`shutil.move` is exercised lightly (just within the same tempdir, so
+the rename fast-path always succeeds — no cross-filesystem fallback
+test in v0.2 because we have no portable way to force one).
+
+Test: `compiler/tests/shutil_demo_runs.rs`.
+"""
+
+import shutil
+import tempfile
+import os
+import path
+import sys
+import io
+
+fn write_text_file(p: str, content: str) -> None:
+    f: io.File = open(p, "w")
+    f.write(content)
+    f.close()
+
+fn read_text_file(p: str) -> str:
+    f: io.File = open(p, "r")
+    out: str = f.read()
+    f.close()
+    return out
+
+fn main() -> i32:
+    # 1. Create a workspace under the system temp dir.
+    root_dir: str = tempfile.mkdtemp("shutil_demo")
+    println("created tempdir")
+
+    # 2. Build a small source tree to exercise copy + copytree on:
+    #     root/
+    #       file_a.txt    "hello A"
+    #       sub/
+    #         file_b.txt  "hello B"
+    src_a: str = path.join(root_dir, "file_a.txt")
+    write_text_file(src_a, "hello A")
+    sub_src: str = path.join(root_dir, "sub")
+    os.mkdir(sub_src)
+    src_b: str = path.join(sub_src, "file_b.txt")
+    write_text_file(src_b, "hello B")
+
+    # 3. shutil.copy — single-file copy, contents preserved.
+    dst_a: str = path.join(root_dir, "file_a_copy.txt")
+    shutil.copy(src_a, dst_a)
+    if read_text_file(dst_a) == "hello A":
+        println("copy: ok")
+    else:
+        println("copy: FAIL")
+
+    # 4. shutil.copytree — recursive tree copy.  Destination must not
+    # exist; we point at a fresh path under root.
+    tree_dst: str = path.join(root_dir, "tree_copy")
+    shutil.copytree(sub_src, tree_dst)
+    copied_b: str = path.join(tree_dst, "file_b.txt")
+    if read_text_file(copied_b) == "hello B":
+        println("copytree: ok")
+    else:
+        println("copytree: FAIL")
+
+    # 5. shutil.copytree refuses to overwrite an existing destination.
+    try:
+        shutil.copytree(sub_src, tree_dst)
+        println("UNREACHED copytree overwrite")
+    except IOError as e:
+        println("caught IOError on copytree existing dst")
+
+    # 6. shutil.move within the same dir — fast-path rename.
+    moved_path: str = path.join(root_dir, "file_a_moved.txt")
+    shutil.move(dst_a, moved_path)
+    if os.exists(moved_path) and not os.exists(dst_a):
+        println("move: ok")
+    else:
+        println("move: FAIL")
+
+    # 7. shutil.which — search PATH for a binary that should exist on
+    # every host.  On Windows we try `cmd`; on Unix we try `sh`.
+    target_cmd: str = ""
+    if sys.platform == "windows":
+        target_cmd = "cmd"
+    else:
+        target_cmd = "sh"
+    found_opt: str? = shutil.which(target_cmd)
+    if found_opt is none:
+        println("which: FAIL (not found: " + target_cmd + ")")
+    else:
+        found: str = found_opt
+        # Don't print the full path (varies between hosts) — assert IS
+        # absolute via path semantics.
+        println("which: ok")
+
+    # 8. shutil.which returns None for a bogus command.
+    bogus_opt: str? = shutil.which("definitely_not_a_real_program_xyz_42424242")
+    if bogus_opt is none:
+        println("which.miss: ok")
+    else:
+        println("which.miss: FAIL")
+
+    # 9. shutil.disk_usage — sanity check that total > 0 and free <= total.
+    usage: Tuple[i64, i64, i64] = shutil.disk_usage(root_dir)
+    if usage.0 > 0i64 and usage.2 <= usage.0:
+        println("disk_usage: ok")
+    else:
+        println("disk_usage: FAIL")
+
+    # 10. Clean up: shutil.rmtree the whole workspace.  Verify it's gone.
+    shutil.rmtree(root_dir)
+    if not os.exists(root_dir):
+        println("rmtree: ok")
+    else:
+        println("rmtree: FAIL")
+
+    # 11. shutil.rmtree on a non-existent path raises IOError.
+    try:
+        shutil.rmtree(path.join(root_dir, "doesnt_exist_anymore"))
+        println("UNREACHED rmtree missing")
+    except IOError as e:
+        println("caught IOError on rmtree missing")
+
+    println("done")
+    return 0

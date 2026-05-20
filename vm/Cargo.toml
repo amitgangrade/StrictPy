@@ -55,11 +55,22 @@ hmac = "0.12"
 # build hermetic on Windows/Linux/macOS at the cost of ~30s extra C
 # compile on first build, cached thereafter).
 rusqlite = { version = "0.32", features = ["bundled"] }
+# M27 P3c-A: `tempfile` stdlib module.  The `tempfile` crate handles the
+# per-OS atomic-creation syscall (mkdtemp on Unix, NTFS-aware on Windows)
+# and sets restrictive permissions (0o700 dirs, 0o600 files on Unix; ACL'd
+# to the current user on Windows) so user code doesn't need to.
+tempfile = "3"
 cranelift = { version = "0.115", optional = true }
 cranelift-jit = { version = "0.115", optional = true }
 cranelift-codegen = { version = "0.115", optional = true }
 cranelift-frontend = { version = "0.115", optional = true }
 cranelift-module = { version = "0.115", optional = true }
+
+# M27 P3c-A: `libc` for `shutil.disk_usage` on Unix (statvfs syscall).
+# Windows uses GetDiskFreeSpaceExW from kernel32 declared inline — no
+# crate needed.  libc is unix-only here to keep Windows build minimal.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # M25: strictpy-compiler is now in [dependencies], so no
 # dev-dependency entry is needed.  Test code that calls

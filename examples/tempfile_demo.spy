@@ -1,0 +1,92 @@
+"""tempfile_demo — M27 P3c-A demo of the stdlib `tempfile` module.
+
+Exercises:
+  * `tempfile.gettempdir()` — system temp directory path.
+  * `tempfile.mkdtemp(prefix)` — create a temp directory; we then
+    verify it exists, write a file into it, and clean up.
+  * `tempfile.mkstemp(prefix, suffix)` — create a closed temp file
+    ready for `open(...)`; we then write/read it back.
+
+Demonstrates the v0.2 callsite shape: prefix/suffix are positional
+because we don't yet have default-argument support on stdlib items.
+
+Test: `compiler/tests/tempfile_demo_runs.rs`.
+"""
+
+import tempfile
+import shutil
+import os
+import path
+import io
+
+fn write_text_file(p: str, content: str) -> None:
+    f: io.File = open(p, "w")
+    f.write(content)
+    f.close()
+
+fn read_text_file(p: str) -> str:
+    f: io.File = open(p, "r")
+    out: str = f.read()
+    f.close()
+    return out
+
+fn main() -> i32:
+    # 1. gettempdir — system temp directory.  Don't print the value
+    # (host-specific) — just assert it exists and is a directory.
+    sys_tmp: str = tempfile.gettempdir()
+    if os.is_dir(sys_tmp):
+        println("gettempdir: ok")
+    else:
+        println("gettempdir: FAIL")
+
+    # 2. mkdtemp — create a temp directory with our prefix.
+    d: str = tempfile.mkdtemp("tempfile_demo")
+    if os.is_dir(d):
+        println("mkdtemp: ok")
+    else:
+        println("mkdtemp: FAIL")
+
+    # 3. The created directory lives under gettempdir() (most platforms).
+    # We just assert the path is non-empty and the directory is writable
+    # by round-tripping a file.
+    file_in_dir: str = path.join(d, "scratch.txt")
+    write_text_file(file_in_dir, "scratch content")
+    if read_text_file(file_in_dir) == "scratch content":
+        println("mkdtemp.write: ok")
+    else:
+        println("mkdtemp.write: FAIL")
+
+    # 4. mkstemp — create a temp file that's already closed.  Suffix
+    # lets us produce e.g. ".log" / ".csv" files for downstream tools.
+    tmp_file: str = tempfile.mkstemp("tfprefix", ".log")
+    if os.is_file(tmp_file):
+        println("mkstemp: ok")
+    else:
+        println("mkstemp: FAIL")
+
+    # 5. The mkstemp file is ready for re-open (it was created + closed).
+    write_text_file(tmp_file, "log line 1\nlog line 2\n")
+    contents: str = read_text_file(tmp_file)
+    if len(contents) == 22:
+        println("mkstemp.write: ok")
+    else:
+        println("mkstemp.write: FAIL (len=" + str(len(contents)) + ")")
+
+    # 6. The suffix should be preserved on the returned path (so callers
+    # can route by extension).
+    suf: str = path.splitext(tmp_file).1
+    if suf == ".log":
+        println("mkstemp.suffix: ok")
+    else:
+        println("mkstemp.suffix: FAIL (" + suf + ")")
+
+    # 7. Clean up: shutil.rmtree the temp dir; os.remove the temp file.
+    shutil.rmtree(d)
+    os.remove(tmp_file)
+    if not os.exists(d) and not os.exists(tmp_file):
+        println("cleanup: ok")
+    else:
+        println("cleanup: FAIL")
+
+    println("done")
+    return 0

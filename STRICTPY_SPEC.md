@@ -2459,6 +2459,127 @@ gated on stdlib classes.
 
 ---
 
+### 9.30 Module `shutil` (v0.2 — M27 P3c-A)
+
+High-level filesystem operations layered on top of M20a's `os` /
+`path` modules.  Closes the long-standing v0.2 gap M24-D documented:
+there was no recursive directory removal in the stdlib.
+
+```
+fn copy(src: str, dst: str) -> None
+fn copytree(src: str, dst: str) -> None
+fn move(src: str, dst: str) -> None
+fn rmtree(path: str) -> None
+fn which(cmd: str) -> str?
+fn disk_usage(path: str) -> Tuple[i64, i64, i64]
+```
+
+Semantics:
+
+* `copy(src, dst)` copies a single file's bytes from `src` to `dst`.
+  Matches `shutil.copyfile` rather than full `shutil.copy` — the
+  permission bits are NOT preserved (Python's `copy` preserves
+  permissions via `copymode`, which is itself a v0.3 gap because
+  StrictPy doesn't yet have a `chmod` surface).  Raises `IOError`
+  on filesystem failure.
+* `copytree(src, dst)` recursively copies the directory rooted at
+  `src` to `dst`.  Matches CPython 3.7+: `dst` must NOT already
+  exist; the call raises `IOError` if it does.  Symlinks are
+  followed (CPython default `symlinks=False`).
+* `move(src, dst)` renames in place when possible (fast path on the
+  same filesystem).  On cross-filesystem moves where `rename`
+  returns `ENXDEV` / `ERROR_NOT_SAME_DEVICE`, falls back to
+  copy-then-remove (file or directory tree as appropriate).  This
+  is the same fallback Python's `shutil.move` uses.
+* `rmtree(path)` removes a directory and all its contents
+  recursively.  Raises `IOError` if `path` doesn't exist OR if
+  `path` is not a directory (use `os.remove` for files).  Maps to
+  `std::fs::remove_dir_all` under the hood.
+* `which(cmd)` searches `$PATH` (`%PATH%` on Windows) for an
+  executable named `cmd`.  Returns the absolute path to the first
+  hit, or `none` if not found.  On Windows, when `cmd` has no
+  extension, also tries `.exe` / `.bat` / `.cmd` / `.com` in CPython's
+  preferred order — matches CPython 3.x `shutil.which` behaviour.
+  Absolute / relative-with-separator inputs are checked directly
+  without consulting `$PATH`.
+* `disk_usage(path)` returns `(total, used, free)` bytes for the
+  filesystem mount-point containing `path`.  `used` is always
+  `total - free` (CPython derives it the same way — no separate
+  syscall).  Uses `statvfs` on Unix and `GetDiskFreeSpaceExW` on
+  Windows.
+
+Errors:
+
+* All filesystem-level failures (permission denied, path not found,
+  cross-volume rename failure that the copy fallback also rejected,
+  etc.) surface as `IOError` with the underlying OS message in the
+  body.
+* `copytree(src, existing_dst)` raises `IOError` with a "destination
+  already exists" message — DOES NOT overwrite silently.
+
+What v0.2 does **not** ship: `copy2` (which preserves metadata —
+needs `chmod` + stat-time preservation); `copytree(..., ignore=...)`
+filter callbacks (need closures-across-NativeFn-boundary, deferred);
+`make_archive` / `unpack_archive` (need full `tar` / `zip` parsers
+— deferred to v0.3 alongside the `bytes` runtime type); `chown`
+(needs Unix-specific uid/gid surface); `get_terminal_size` (TTY
+introspection); `rmtree(..., onerror=...)` recovery hooks.
+
+### 9.31 Module `tempfile` (v0.2 — M27 P3c-A)
+
+Temporary file and directory creation, backed by the `tempfile`
+Rust crate.  The crate handles the per-OS atomic-creation syscall
+(`mkdtemp` on Unix, NTFS-aware on Windows) and applies restrictive
+permissions (`0o700` directories, `0o600` files on Unix; ACL'd to
+the current user on Windows).
+
+```
+fn mkdtemp(prefix: str = "tmp") -> str
+fn mkstemp(prefix: str = "tmp", suffix: str = "") -> str
+fn gettempdir() -> str
+```
+
+(StrictPy v0.2 doesn't yet have default-argument support on stdlib
+items; callers pass `prefix` and `suffix` explicitly.  Pass `""`
+for the suffix when you don't want one.)
+
+Semantics:
+
+* `mkdtemp(prefix)` creates a fresh directory under the system
+  temp root (per `tempfile.gettempdir()`) with a randomised name
+  starting with `prefix`.  Returns the absolute path.  The
+  directory is NOT auto-cleaned on program exit — the caller is
+  responsible (typically via `shutil.rmtree`).  Matches Python's
+  `tempfile.mkdtemp` guarantee.
+* `mkstemp(prefix, suffix)` creates a fresh file under the system
+  temp root, with a randomised name like `<prefix><random><suffix>`,
+  and returns its absolute path.  The file is created (zero bytes)
+  and immediately closed; the caller re-opens via `open(...)` for
+  use.  Unlike Python's `mkstemp` (which returns `(fd, path)`),
+  StrictPy returns the path only because the runtime doesn't expose
+  raw file descriptors.
+* `gettempdir()` returns the system temp directory path, honouring
+  `$TMPDIR` / `$TEMP` / `$TMP` environment variables (per
+  `std::env::temp_dir`).  Typically `/tmp` on Unix, `%LOCALAPPDATA%\
+  Temp` (or `C:\Windows\Temp`) on Windows.
+
+Errors:
+
+* `mkdtemp` / `mkstemp` raise `IOError` if the OS rejects the
+  creation (e.g. permission denied on the temp root, disk full,
+  filename collision after the configured number of retries — the
+  `tempfile` crate retries internally before surfacing the failure).
+
+What v0.2 does **not** ship: `NamedTemporaryFile`,
+`SpooledTemporaryFile`, `TemporaryDirectory` — all three are
+class-shaped context managers, blocked on stdlib-class registration
+(the same v0.3 work that unblocks typed `JsonValue`, `ArgParser`,
+and pathlib's `Path`).  Programs that want auto-cleanup-on-scope-exit
+should pair `mkdtemp` / `mkstemp` with `try` / `except` and an
+explicit `shutil.rmtree` / `os.remove` in the cleanup arm.
+
+---
+
 ## 10. Compiler Architecture
 
 ### 10.1 Pipeline

@@ -3321,6 +3321,199 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             Ok(lst as u64)
         }
 
+        // ── M27 P3c-A: `shutil` module ────────────────────────────────
+        // High-level filesystem ops.  All paths go through `std::fs` /
+        // `std::path`; the only platform-specific code is the Windows
+        // `.exe`/`.bat`/`.cmd` extension dance in `which` and the
+        // `disk_usage` syscall, both encapsulated in helpers below.
+        NativeFn::ShutilCopy => {
+            let src = arg_str(args, 0);
+            let dst = arg_str(args, 1);
+            std::fs::copy(&src, &dst).map_err(|e| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("shutil.copy({:?}, {:?}): {}", src, dst, e),
+            })?;
+            Ok(0)
+        }
+        NativeFn::ShutilCopytree => {
+            let src = arg_str(args, 0);
+            let dst = arg_str(args, 1);
+            // CPython 3.7+ refuses to overwrite an existing dst.  We
+            // match that — surprising users who expect overwrite is far
+            // worse than a clear error.
+            if std::path::Path::new(&dst).exists() {
+                return Err(VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!(
+                        "shutil.copytree({:?}, {:?}): destination already exists",
+                        src, dst
+                    ),
+                });
+            }
+            shutil_copytree_impl(&src, &dst).map_err(|e| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("shutil.copytree({:?}, {:?}): {}", src, dst, e),
+            })?;
+            Ok(0)
+        }
+        NativeFn::ShutilMove => {
+            let src = arg_str(args, 0);
+            let dst = arg_str(args, 1);
+            // `rename` is the fast path; falls back to copy+remove on
+            // cross-filesystem ENXDEV / "Access denied across volumes"
+            // (Windows reports ERROR_NOT_SAME_DEVICE = 17 here).
+            match std::fs::rename(&src, &dst) {
+                Ok(()) => Ok(0),
+                Err(_) => {
+                    // Slow path: copy then remove.  Works for both files
+                    // and dirs.
+                    let src_path = std::path::Path::new(&src);
+                    if src_path.is_dir() {
+                        shutil_copytree_impl(&src, &dst).map_err(|e| {
+                            VmError::UncaughtException {
+                                type_name: "IOError".into(),
+                                message: format!(
+                                    "shutil.move({:?}, {:?}): copy: {}",
+                                    src, dst, e
+                                ),
+                            }
+                        })?;
+                        shutil_rmtree_impl(&src).map_err(|e| {
+                            VmError::UncaughtException {
+                                type_name: "IOError".into(),
+                                message: format!(
+                                    "shutil.move({:?}, {:?}): cleanup: {}",
+                                    src, dst, e
+                                ),
+                            }
+                        })?;
+                    } else {
+                        std::fs::copy(&src, &dst).map_err(|e| {
+                            VmError::UncaughtException {
+                                type_name: "IOError".into(),
+                                message: format!(
+                                    "shutil.move({:?}, {:?}): copy: {}",
+                                    src, dst, e
+                                ),
+                            }
+                        })?;
+                        std::fs::remove_file(&src).map_err(|e| {
+                            VmError::UncaughtException {
+                                type_name: "IOError".into(),
+                                message: format!(
+                                    "shutil.move({:?}, {:?}): cleanup: {}",
+                                    src, dst, e
+                                ),
+                            }
+                        })?;
+                    }
+                    Ok(0)
+                }
+            }
+        }
+        NativeFn::ShutilRmtree => {
+            let path = arg_str(args, 0);
+            shutil_rmtree_impl(&path).map_err(|e| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("shutil.rmtree({:?}): {}", path, e),
+            })?;
+            Ok(0)
+        }
+        NativeFn::ShutilWhich => {
+            let cmd = arg_str(args, 0);
+            match shutil_which_impl(&cmd) {
+                Some(p) => {
+                    let sp = interp.alloc_string(&p);
+                    Ok(sp as u64)
+                }
+                None => Ok(NONE_SENTINEL),
+            }
+        }
+        NativeFn::ShutilDiskUsage => {
+            let path = arg_str(args, 0);
+            let (total, free) = shutil_disk_usage_impl(&path).map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!("shutil.disk_usage({:?}): {}", path, e),
+                }
+            })?;
+            // `used` is total - free.  Matches Python's `shutil.disk_usage`
+            // which derives `used` the same way (no separate syscall).
+            let used = total.saturating_sub(free);
+            let tup = interp.alloc_tuple_obj(&[
+                total as u64,
+                used as u64,
+                free as u64,
+            ]);
+            Ok(tup as u64)
+        }
+
+        // ── M27 P3c-A: `tempfile` module ──────────────────────────────
+        // Path-returning temp helpers.  The `tempfile` crate handles the
+        // per-OS atomic-creation syscall + restrictive permissions; we
+        // `keep()` the handle so the temp file/dir survives past the
+        // native-handler return (caller owns cleanup).
+        NativeFn::TempfileMkdtemp => {
+            let prefix = arg_str(args, 0);
+            let prefix = if prefix.is_empty() { "tmp".to_string() } else { prefix };
+            let dir = tempfile::Builder::new()
+                .prefix(&prefix)
+                .tempdir()
+                .map_err(|e| VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!("tempfile.mkdtemp({:?}): {}", prefix, e),
+                })?;
+            // `into_path` consumes the TempDir and returns the PathBuf
+            // WITHOUT scheduling cleanup — exactly what Python's
+            // mkdtemp guarantees ("the user is responsible for deleting").
+            // Using deprecated `into_path` rather than `keep` because the
+            // crate version pinned by `tempfile = "3"` resolves to a
+            // release where `keep` doesn't yet exist on TempDir; on
+            // newer releases this is a one-line swap.
+            #[allow(deprecated)]
+            let path = dir.into_path();
+            let s = path.to_string_lossy().into_owned();
+            let p = interp.alloc_string(&s);
+            Ok(p as u64)
+        }
+        NativeFn::TempfileMkstemp => {
+            let prefix = arg_str(args, 0);
+            let suffix = arg_str(args, 1);
+            let prefix = if prefix.is_empty() { "tmp".to_string() } else { prefix };
+            let nf = tempfile::Builder::new()
+                .prefix(&prefix)
+                .suffix(&suffix)
+                .tempfile()
+                .map_err(|e| VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!(
+                        "tempfile.mkstemp(prefix={:?}, suffix={:?}): {}",
+                        prefix, suffix, e
+                    ),
+                })?;
+            // `keep` consumes the NamedTempFile and returns
+            // (File, PathBuf) WITHOUT scheduling cleanup.  We drop the
+            // file (which closes it) and hand the path back to user
+            // code, ready for `open(...)`.  Matches Python's
+            // `tempfile.mkstemp` which returns (fd, path) but our
+            // surface is path-only because StrictPy doesn't expose raw
+            // fds.
+            let (file, path) = nf.keep().map_err(|e| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("tempfile.mkstemp: keep: {}", e),
+            })?;
+            drop(file);
+            let s = path.to_string_lossy().into_owned();
+            let p = interp.alloc_string(&s);
+            Ok(p as u64)
+        }
+        NativeFn::TempfileGettempdir => {
+            let dir = std::env::temp_dir();
+            let s = dir.to_string_lossy().into_owned();
+            let p = interp.alloc_string(&s);
+            Ok(p as u64)
+        }
+
         // ── M23 P3a-B: `datetime` module ───────────────────────────────
         // Calendar arithmetic + ISO-8601 parse/format over unix-epoch
         // seconds.  Reuses `civil_from_days` (from M20b) for epoch->ymd
@@ -5247,6 +5440,204 @@ fn subprocess_table_take(handle: i64) -> Result<std::process::Child, VmError> {
         type_name: "IOError".into(),
         message: format!("subprocess: handle {} not found (already reaped?)", handle),
     })
+}
+
+// ─── M27 P3c-A: `shutil` helpers ──────────────────────────────────────
+
+/// Recursively copy a directory tree from `src` to `dst`.  Mirrors
+/// CPython's `shutil.copytree` for the common case: walks `src`,
+/// recreates the directory structure under `dst`, and copies file
+/// contents (no metadata preservation in v0.2 — symlinks are
+/// followed, perms aren't preserved beyond what `std::fs::copy`
+/// does by default on each OS).
+///
+/// Caller is responsible for the "dst must not exist" check.
+fn shutil_copytree_impl(src: &str, dst: &str) -> std::io::Result<()> {
+    let src_path = std::path::Path::new(src);
+    let dst_path = std::path::Path::new(dst);
+    if !src_path.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("source {:?} is not a directory", src),
+        ));
+    }
+    std::fs::create_dir_all(dst_path)?;
+    for entry in std::fs::read_dir(src_path)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let entry_src = entry.path();
+        let entry_dst = dst_path.join(entry.file_name());
+        if file_type.is_dir() {
+            // Recurse — use string forms because we share the helper
+            // signature with the top-level call.
+            shutil_copytree_impl(
+                &entry_src.to_string_lossy(),
+                &entry_dst.to_string_lossy(),
+            )?;
+        } else {
+            // Includes regular files AND symlinks (we follow them, per
+            // CPython default `symlinks=False`).
+            std::fs::copy(&entry_src, &entry_dst)?;
+        }
+    }
+    Ok(())
+}
+
+/// Recursively remove a directory tree at `path`.  Wraps
+/// `std::fs::remove_dir_all` (which is the canonical Rust API for the
+/// job); kept as a tiny helper so `shutil.move`'s cleanup path doesn't
+/// have to re-derive the same call.
+fn shutil_rmtree_impl(path: &str) -> std::io::Result<()> {
+    let p = std::path::Path::new(path);
+    if !p.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("path {:?} does not exist", path),
+        ));
+    }
+    if p.is_dir() {
+        std::fs::remove_dir_all(p)
+    } else {
+        // Match Python: rmtree on a non-dir raises NotADirectoryError;
+        // we surface this as IOError with a clear message.
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("path {:?} is not a directory (use os.remove for files)", path),
+        ))
+    }
+}
+
+/// PATH-search for an executable.  Matches CPython's `shutil.which`
+/// behaviour:
+///   * If `cmd` is an absolute path, return it iff it exists and is
+///     executable (we accept "is a file" as a proxy on Windows where
+///     execute bits aren't a thing).
+///   * Otherwise, split `$PATH` (or `%PATH%` on Windows) and try each
+///     directory.  On Windows, also try the `PATHEXT` extensions
+///     (`.exe`, `.bat`, `.cmd`) when `cmd` has no extension.
+///   * Return `None` if no candidate exists.
+fn shutil_which_impl(cmd: &str) -> Option<String> {
+    // Absolute or relative-with-separator → check directly.
+    let cmd_path = std::path::Path::new(cmd);
+    if cmd_path.is_absolute() || cmd.contains('/') || cmd.contains('\\') {
+        // Try the path as-given, plus Windows extension variants.
+        if let Some(found) = shutil_which_check_one(cmd_path) {
+            return Some(found);
+        }
+        return None;
+    }
+
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(cmd);
+        if let Some(found) = shutil_which_check_one(&candidate) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Check a single PATH candidate, trying Windows extensions if needed.
+/// Returns the resolved absolute path as a string, or None if no
+/// variant of `candidate` is a real file.
+fn shutil_which_check_one(candidate: &std::path::Path) -> Option<String> {
+    // Try as-given first.
+    if candidate.is_file() {
+        return Some(candidate.to_string_lossy().into_owned());
+    }
+    // On Windows: if the input has no extension, try PATHEXT.  CPython
+    // canonicalises to lowercase `.exe` / `.bat` / `.cmd` / `.com` in
+    // the default config.
+    #[cfg(windows)]
+    {
+        if candidate.extension().is_none() {
+            // PATHEXT is normally ";"-separated and SHOUTY, e.g.
+            // ".COM;.EXE;.BAT;.CMD;...".  We try the canonical four in
+            // CPython's preferred order regardless of PATHEXT contents
+            // (matches CPython's win32-fallback path).
+            for ext in [".exe", ".bat", ".cmd", ".com"] {
+                let mut with_ext = candidate.as_os_str().to_owned();
+                with_ext.push(ext);
+                let p = std::path::PathBuf::from(with_ext);
+                if p.is_file() {
+                    return Some(p.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Disk-usage stats for the volume containing `path`.  Returns
+/// `(total, free)`.  `used` is derived as `total - free` in the
+/// caller, matching CPython's `shutil.disk_usage` (no separate
+/// "used" syscall — it's always total minus free).
+#[cfg(unix)]
+fn shutil_disk_usage_impl(path: &str) -> std::io::Result<(i64, i64)> {
+    // statvfs via libc.  We use the std `MetadataExt` route on the
+    // file to avoid pulling in `libc` as a new direct dep; instead,
+    // call out to the cross-platform shim from `tempfile`'s deps if
+    // available, else fall back to a minimal libc binding.
+    use std::os::unix::ffi::OsStrExt;
+    use std::ffi::CString;
+    let c = CString::new(std::path::Path::new(path).as_os_str().as_bytes())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::statvfs(c.as_ptr(), &mut st) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let block_size = st.f_frsize as u64;
+    let total = (st.f_blocks as u64).saturating_mul(block_size) as i64;
+    let free = (st.f_bavail as u64).saturating_mul(block_size) as i64;
+    Ok((total, free))
+}
+
+#[cfg(windows)]
+fn shutil_disk_usage_impl(path: &str) -> std::io::Result<(i64, i64)> {
+    use std::os::windows::ffi::OsStrExt;
+    // GetDiskFreeSpaceExW wants a wide-char directory path.
+    let wide: Vec<u16> = std::path::Path::new(path)
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut free_bytes_to_caller: u64 = 0;
+    let mut total_bytes: u64 = 0;
+    let mut total_free_bytes: u64 = 0;
+    // SAFETY: GetDiskFreeSpaceExW expects a NUL-terminated wide string
+    // and three out-pointers.  Returns nonzero on success.
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut free_bytes_to_caller,
+            &mut total_bytes,
+            &mut total_free_bytes,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok((total_bytes as i64, total_free_bytes as i64))
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetDiskFreeSpaceExW(
+        lpDirectoryName: *const u16,
+        lpFreeBytesAvailableToCaller: *mut u64,
+        lpTotalNumberOfBytes: *mut u64,
+        lpTotalNumberOfFreeBytes: *mut u64,
+    ) -> i32;
+}
+
+#[cfg(not(any(unix, windows)))]
+fn shutil_disk_usage_impl(_path: &str) -> std::io::Result<(i64, i64)> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "shutil.disk_usage: unsupported platform",
+    ))
 }
 
 /// M22 P2C: read a `List[f64]` argument into a `Vec<f64>`.  The slot

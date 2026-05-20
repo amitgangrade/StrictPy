@@ -906,6 +906,67 @@ pub enum NativeFn {
     /// the statement and return its column-name vector (no rows fetched).
     Sqlite3ColumnNames      = 448,
 
+    // ── 450-479: `shutil` + `tempfile` modules (M27 P3c-A) ──────────────
+    // High-level filesystem operations (`shutil`) and temp file/dir
+    // creation (`tempfile`).  Both are pure `std::fs` / `std::path`
+    // surface (no new FFI) — `tempfile` adds the `tempfile` crate as the
+    // single new dependency for atomic temp-dir / temp-file creation
+    // with the platform-correct permissions (700 on Unix; ACL'd to the
+    // current user on Windows).  See spec §9.30 (shutil) and §9.31
+    // (tempfile).
+    //
+    // `shutil` ID layout (450-459 used, 460-469 reserved):
+    //   450 copy           — single-file copy
+    //   451 copytree       — recursive directory copy
+    //   452 move           — rename with cross-filesystem fallback
+    //   453 rmtree         — recursive directory removal (closes M24-D)
+    //   454 which          — PATH lookup with Windows .exe extension dance
+    //   455 disk_usage     — (total, used, free) bytes for a mount-point
+    // `tempfile` ID layout (470-472 used, 473-479 reserved):
+    //   470 mkdtemp        — create temp directory, return absolute path
+    //   471 mkstemp        — create temp file, return absolute path
+    //   472 gettempdir     — system temp directory (env-var aware)
+    /// `shutil.copy(src: str, dst: str) -> None` — file-content copy.
+    /// Preserves bytes but not permission bits (matches `shutil.copyfile`,
+    /// which is what 99% of Python `shutil.copy` callers actually want).
+    /// Raises `IOError` on filesystem failure.
+    ShutilCopy              = 450,
+    /// `shutil.copytree(src: str, dst: str) -> None` — recursive directory
+    /// copy.  `dst` must NOT already exist (matches CPython 3.7+).
+    ShutilCopytree          = 451,
+    /// `shutil.move(src: str, dst: str) -> None` — rename, with copy+delete
+    /// fallback across filesystems (matches Python `shutil.move`).
+    ShutilMove              = 452,
+    /// `shutil.rmtree(path: str) -> None` — recursive directory removal.
+    /// Closes the v0.2 gap M24-D documented (no recursive `os.removedirs`).
+    ShutilRmtree            = 453,
+    /// `shutil.which(cmd: str) -> str?` — PATH lookup; returns None if the
+    /// command isn't found.  On Windows, also tries `.exe`/`.bat`/`.cmd`
+    /// extensions when the input has none (matches CPython 3.x).
+    ShutilWhich             = 454,
+    /// `shutil.disk_usage(path: str) -> Tuple[i64, i64, i64]` — disk
+    /// space stats for the volume containing `path`.  Tuple slots:
+    /// (total, used, free) in bytes.
+    ShutilDiskUsage         = 455,
+    // 456-469 reserved (chmod, chown, copytree-ignore, copy2 with metadata,
+    // make_archive, unpack_archive, get_terminal_size in v0.3).
+
+    /// `tempfile.mkdtemp(prefix: str = "tmp") -> str` — create a temp
+    /// directory under the system temp root and return its absolute
+    /// path.  The directory is NOT auto-cleaned (caller's responsibility,
+    /// usually via `shutil.rmtree`).
+    TempfileMkdtemp         = 470,
+    /// `tempfile.mkstemp(prefix: str = "tmp", suffix: str = "") -> str`
+    /// — create a temp file and return its absolute path.  The file is
+    /// created (zero bytes) and closed; caller re-opens via `open(...)`.
+    TempfileMkstemp         = 471,
+    /// `tempfile.gettempdir() -> str` — system temp directory path
+    /// (`$TMPDIR` / `$TEMP` / `/tmp` etc., per `std::env::temp_dir`).
+    TempfileGettempdir      = 472,
+    // 473-479 reserved (NamedTemporaryFile, SpooledTemporaryFile,
+    // TemporaryDirectory context-manager wrapper — all need v0.3
+    // stdlib classes).
+
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
     /// encounters. The VM treats this as a runtime error.
@@ -1224,6 +1285,16 @@ impl NativeFn {
             446 => Some(Self::Sqlite3LastInsertRowid),
             447 => Some(Self::Sqlite3Changes),
             448 => Some(Self::Sqlite3ColumnNames),
+            // M27 P3c-A: shutil + tempfile (450-472, 9 ids; 456-469 + 473-479 reserved).
+            450 => Some(Self::ShutilCopy),
+            451 => Some(Self::ShutilCopytree),
+            452 => Some(Self::ShutilMove),
+            453 => Some(Self::ShutilRmtree),
+            454 => Some(Self::ShutilWhich),
+            455 => Some(Self::ShutilDiskUsage),
+            470 => Some(Self::TempfileMkdtemp),
+            471 => Some(Self::TempfileMkstemp),
+            472 => Some(Self::TempfileGettempdir),
             // M27 P3c-E: logging module (550-560, 11 ids; 561-569 reserved).
             550 => Some(Self::LoggingBasicConfig),
             551 => Some(Self::LoggingBasicConfigToFile),
