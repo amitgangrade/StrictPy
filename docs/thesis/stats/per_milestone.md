@@ -70,6 +70,8 @@ See `bench/history/` for the underlying JSON.
 | M28 (Phase 3b stdlib: 3 parallel agents, 3 networking modules) | 16 | 0 | 0 | 13.1 ms | (no codegen-affecting change; 36 stdlib modules total — closes the networking gap) | — |
 | M28.5 (server-side TLS extension) | 16 | 0 | 0 | 13.1 ms | (single agent, 3 new NativeFns; closes the HTTPS-server gap) | — |
 | M29 (webserver framework stress test) | 16 | 0 | 0 | 13.1 ms | (1,446-LOC user-code framework; **zero new bugs** in M28/M28.5 — first stress round in project history with zero finds) | — |
+| M29.5 (framework Tier 1 round-out) | 16 | 0 | 0 | 13.1 ms | (+keep-alive, chunked TE, multipart, graceful shutdown, HTML errors; **found BUG-040** `socket.close_listener` doesn't unblock accept) | — |
+| M30 (last two open bugs closed) | 16 | 0 | 0 | 13.1 ms | (BUG-028 lexer line continuation + BUG-040 socket.close_listener; **35 found / 35 fixed / 0 deferred** — v0.2-frozen-clean state) | — |
 
 \* M7-unfair: Python timing included parse+compile time. Methodology bug
 caught and fixed at M10-prep; the M7-fair snapshot is the honest baseline.

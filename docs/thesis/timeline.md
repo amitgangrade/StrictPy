@@ -1117,6 +1117,72 @@ No language/compiler changes; new pure-bench infrastructure only.
 
 ---
 
+## M30 — Last two open bugs closed (2026-05-21)
+
+Two focused parallel agents closed the last two open bugs in the
+project. **35 found / 35 fixed / 0 deferred** — the cleanest "v0.2
+frozen" state possible. First time at zero open bugs since M10.
+
+### Agents
+
+- **M30 BUG-028** — lexer line continuation across infix `+`/`and`/
+  `or`/`==`/`=`/`+=`/etc. Frontend-only fix in `compiler/src/lexer.rs`
+  (~95 LOC). Track last significant token; suppress NEWLINE if it's
+  a binary operator needing a right-hand operand. Trigger set
+  documented in spec §3.2; deliberately excludes `:` / `,` / `.` /
+  `->` / `@` / unary `not`/`~`. 11 new regression tests.
+- **M30 BUG-040** — `socket.close_listener` now wakes blocked
+  `accept()`. Option C from the catalog (cleanest API): extended
+  `close_listener` semantics, no new NativeFns. Implementation uses
+  TWO mechanisms unconditionally — `shutdown(fd, SHUT_RDWR)` +
+  self-connect to listener address (with wildcard-bind rewrite to
+  loopback). Agent empirically found that Windows winsock does NOT
+  wake `accept` from `shutdown` alone (KB-179942) — self-connect is
+  essential on Windows. 1 new regression test with 5s watchdog
+  (pre-fix would hang `cargo test`).
+
+### Two findings worth recording
+
+**The cross-platform shutdown finding** (BUG-040 agent): Linux
+`shutdown(fd, SHUT_RDWR)` wakes a blocked `accept()` immediately.
+Windows winsock does not — `accept()` keeps blocking. The canonical
+Windows fix is to self-connect to the listener's address with a
+short timeout; the throwaway connection gets accepted and the
+accept returns. The agent ran the test, hit the 5s watchdog on
+Windows, and added the self-connect as a belt-and-braces fix that
+works uniformly across platforms. This is reproducible from the
+Microsoft KB-179942 article but is the kind of platform-specific
+landmine that doesn't show up in cross-platform Rust abstractions
+(`std::net::TcpListener` doesn't expose any shutdown surface; you
+have to drop down to raw FD/socket handles).
+
+**The Lesson 1 streak holds at 10**: both M30 agents committed
+cleanly on their worktree branches with no orchestrator
+commit-on-behalf needed. The strengthened brief language (first
+commit before 60% of budget) is now battle-tested across **10
+consecutive clean agents** spanning M28 + M28.5 + M29 + M29.5 + M30.
+The intervention is reproducible.
+
+### Tests + size
+
+- Tests: 639 → 651 (+12).
+- Examples: unchanged at 96+.
+- Stdlib modules: unchanged at 36.
+- Bug catalogue: **35 found, 35 fixed, 0 deferred** (post-M30).
+
+### The "v0.2 frozen" interpretation
+
+After M30, the language has no known correctness bugs. The
+remaining items on the "what v0.2 can't do" list are unimplemented
+v0.3 features (generic classes, async event loop, precise GC stack
+maps, stdlib classes, HTTP/2, WebSockets, server-side TLS mutual
+auth, NumPy integration). None of those are bugs — they are
+documented gaps with explicit rationale.
+
+The minimum claim for a clean v0.2 release is now achievable.
+
+---
+
 ## M29 — Webserver framework stress test (2026-05-20)
 
 The largest single-program stress test of the project to date. A
