@@ -2360,6 +2360,103 @@ same conn) is a runtime error ("connection in use") rather than a
 deadlock — but v0.2 has no callback / hook surface so user code can't
 hit this path organically.
 
+### 9.39 Module `logging` (v0.2 — M27 P3c-E)
+
+Application logging.  v0.2 ships a **single global logger** — threshold,
+optional file sink, and a fixed record format.  Python's class-heavy
+`Logger` / `Handler` / `Formatter` hierarchy (and named loggers
+addressable by dotted module path) depend on stdlib-class registration
+and are v0.3 work.
+
+```
+fn basic_config(level: str) -> None
+fn basic_config_to_file(level: str, filename: str) -> None
+fn set_level(level: str) -> None
+fn get_level() -> str
+
+fn debug(msg: str) -> None
+fn info(msg: str) -> None
+fn warning(msg: str) -> None
+fn error(msg: str) -> None
+fn critical(msg: str) -> None
+fn log(level: str, msg: str) -> None
+
+fn is_enabled_for(level: str) -> bool
+```
+
+Level names: `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"`.
+The aliases `"WARN"` (== WARNING) and `"FATAL"` (== CRITICAL) are also
+accepted for CPython compatibility.  Comparison is case-insensitive
+(`"info"` and `"INFO"` both resolve to level 20).  Unknown level names
+raise `ValueError`.
+
+The numeric levels match CPython exactly so the surface is
+interchangeable: `DEBUG = 10`, `INFO = 20`, `WARNING = 30`, `ERROR = 40`,
+`CRITICAL = 50`.
+
+**Format** — fixed, matching CPython's default
+`%(asctime)s %(levelname)s %(message)s`:
+
+```
+2026-05-20T13:42:55Z INFO Some message here
+```
+
+Timestamps are UTC, integer-seconds (no fractional component), formatted
+with the same Howard Hinnant `civil_from_days` algorithm used by
+`time.format_iso` and `datetime.to_iso`.  Each log record ends with a
+single trailing `\n`.
+
+Semantics:
+
+* `basic_config(level)` initialises the global logger to write to
+  process stderr.  Idempotent — calling it again resets the threshold
+  and drops any prior file sink.
+* `basic_config_to_file(level, filename)` opens `filename` in
+  create-or-append mode and directs all subsequent emits there.
+  Raises `IOError` on open failure.  Idempotent — calling either
+  `basic_config` variant again replaces the sink.
+* `set_level(level)` adjusts the threshold without touching the sink.
+* `get_level()` returns the current level's canonical upper-case name.
+  After process start (before any `basic_config`), the default is
+  `"WARNING"` — matches CPython's `logging.WARNING` pre-`basicConfig`
+  default.
+* `debug` / `info` / `warning` / `error` / `critical` emit at the
+  corresponding level.  Each is a one-line shortcut for
+  `log("LEVEL", msg)`.  Messages below the current threshold are
+  silently dropped — no formatting cost beyond the level comparison.
+* `log(level, msg)` is the generic emit; useful when the level is
+  dynamic (computed from a config string).
+* `is_enabled_for(level)` returns `true` iff emitting at `level` would
+  produce output.  Use it to gate expensive message-building:
+
+    ```python
+    if logging.is_enabled_for("DEBUG"):
+        logging.debug(f"big: {expensive_thing()}")
+    ```
+
+  Without the gate the `f"..."` interpolation (and `expensive_thing()`)
+  runs even when the message is dropped — exactly the same pattern as
+  Python's `logger.isEnabledFor(logging.DEBUG)`.
+
+Thread safety: emits on the file path acquire the per-instance
+`Mutex<Option<File>>` only for the single `write_all` of the formatted
+record, so concurrent log lines never interleave bytes within a record.
+Stderr emits skip the mutex — the OS-level stderr is line-atomic for
+the short writes we produce — but two concurrent stderr emits can
+appear in either order in the output.
+
+Implementation: state lives on `SharedVm` (`log_level: AtomicI32`,
+`log_file: Mutex<Option<File>>`) so all interpreter instances spawned
+on top of the same VM (the M6 threading runtime) share one logger,
+matching Python's single-process-global-logger model.
+
+What v0.2 does **not** ship: named loggers (`logging.getLogger("app.db")`);
+custom formatters (the format string is fixed); rotating file handlers;
+multiple handlers per logger; structured / JSON output; log records with
+exception tracebacks (`logger.exception(...)`); a `disable` /
+`shutdown` API; the `LogRecord` object.  All of those are v0.3 work,
+gated on stdlib classes.
+
 ---
 
 ## 10. Compiler Architecture

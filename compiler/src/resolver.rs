@@ -2595,6 +2595,110 @@ impl Resolver {
             ],
         };
         self.stdlib_modules.insert("sqlite3".into(), sqlite3_mod);
+
+        // ── M27 P3c-E: `logging` module ────────────────────────────────
+        // Application logging — flat global-logger surface.  v0.2 keeps
+        // the API single-logger because Python's named-logger /
+        // Logger/Handler/Formatter class hierarchy depends on stdlib
+        // classes (still v0.3 work).  Level threshold + optional file
+        // sink live on `SharedVm` as per-instance state.  Format is
+        // fixed `"YYYY-MM-DDTHH:MM:SSZ LEVEL message\n"`, matching
+        // CPython's default formatter.  See spec §9.39.
+        //
+        // Two entry points instead of CPython's single `basicConfig`
+        // with an optional `filename=`: v0.2 stdlib doesn't ship default
+        // arguments, so we split into `basic_config(level)` (stderr) and
+        // `basic_config_to_file(level, filename)` (file).
+        const LOG_BASIC_CONFIG: u32          = 550;
+        const LOG_BASIC_CONFIG_TO_FILE: u32  = 551;
+        const LOG_SET_LEVEL: u32             = 552;
+        const LOG_GET_LEVEL: u32             = 553;
+        const LOG_DEBUG: u32                 = 554;
+        const LOG_INFO: u32                  = 555;
+        const LOG_WARNING: u32               = 556;
+        const LOG_ERROR: u32                 = 557;
+        const LOG_CRITICAL: u32              = 558;
+        const LOG_LOG: u32                   = 559;
+        const LOG_IS_ENABLED_FOR: u32        = 560;
+
+        let logging_mod = StdlibModule {
+            name: "logging".into(),
+            items: vec![
+                StdlibItem {
+                    name: "basic_config".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], unit_ty.clone()),
+                    native_id: LOG_BASIC_CONFIG,
+                },
+                StdlibItem {
+                    name: "basic_config_to_file".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), str_ty.clone()],
+                        unit_ty.clone(),
+                    ),
+                    native_id: LOG_BASIC_CONFIG_TO_FILE,
+                },
+                StdlibItem {
+                    name: "set_level".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], unit_ty.clone()),
+                    native_id: LOG_SET_LEVEL,
+                },
+                StdlibItem {
+                    name: "get_level".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], str_ty.clone()),
+                    native_id: LOG_GET_LEVEL,
+                },
+                StdlibItem {
+                    name: "debug".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], unit_ty.clone()),
+                    native_id: LOG_DEBUG,
+                },
+                StdlibItem {
+                    name: "info".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], unit_ty.clone()),
+                    native_id: LOG_INFO,
+                },
+                StdlibItem {
+                    name: "warning".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], unit_ty.clone()),
+                    native_id: LOG_WARNING,
+                },
+                StdlibItem {
+                    name: "error".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], unit_ty.clone()),
+                    native_id: LOG_ERROR,
+                },
+                StdlibItem {
+                    name: "critical".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], unit_ty.clone()),
+                    native_id: LOG_CRITICAL,
+                },
+                StdlibItem {
+                    name: "log".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), str_ty.clone()],
+                        unit_ty.clone(),
+                    ),
+                    native_id: LOG_LOG,
+                },
+                StdlibItem {
+                    name: "is_enabled_for".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], bool_ty.clone()),
+                    native_id: LOG_IS_ENABLED_FOR,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("logging".into(), logging_mod);
     }
 
     // ─────────────────────────────────────────────────────────────────────

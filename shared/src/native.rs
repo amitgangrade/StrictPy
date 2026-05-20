@@ -823,6 +823,46 @@ pub enum NativeFn {
     QueuePqIsEmpty      = 437,
     // 438-439 reserved for v0.3 (e.g. pq_clear, pq_drain).
 
+    // ── 550-569: `logging` module (M27 P3c-E) ───────────────────────────
+    // Application logging — flat global-logger surface for v0.2 (Python's
+    // class-heavy Logger/Handler/Formatter hierarchy is v0.3 work, blocked
+    // on stdlib-class registration).  Threshold + optional file sink live
+    // as per-instance state on `SharedVm` (`log_level` AtomicI32 +
+    // `log_file` Mutex<Option<File>>).  Format is fixed
+    // `"YYYY-MM-DDTHH:MM:SSZ LEVEL message\n"` — matches CPython's default
+    // `%(asctime)s %(levelname)s %(message)s`.  Level constants
+    // (10/20/30/40/50) match CPython exactly so the API is interchangeable.
+    /// `logging.basic_config(level: str) -> None` — initialise global logger
+    /// to write to stderr.  Idempotent; calling again resets the level and
+    /// drops any prior file sink.  `level` is one of "DEBUG", "INFO",
+    /// "WARNING", "ERROR", "CRITICAL".  Raises `ValueError` on unknown level.
+    LoggingBasicConfig          = 550,
+    /// `logging.basic_config_to_file(level: str, filename: str) -> None` —
+    /// initialise to write to `filename` instead of stderr.  Opens the file
+    /// in append mode; raises `IOError` on open failure.
+    LoggingBasicConfigToFile    = 551,
+    /// `logging.set_level(level: str) -> None` — change current threshold.
+    LoggingSetLevel             = 552,
+    /// `logging.get_level() -> str` — current level name.
+    LoggingGetLevel             = 553,
+    /// `logging.debug(msg: str) -> None`.
+    LoggingDebug                = 554,
+    /// `logging.info(msg: str) -> None`.
+    LoggingInfo                 = 555,
+    /// `logging.warning(msg: str) -> None`.
+    LoggingWarning              = 556,
+    /// `logging.error(msg: str) -> None`.
+    LoggingError                = 557,
+    /// `logging.critical(msg: str) -> None`.
+    LoggingCritical             = 558,
+    /// `logging.log(level: str, msg: str) -> None` — generic emit.
+    LoggingLog                  = 559,
+    /// `logging.is_enabled_for(level: str) -> bool` — gate expensive
+    /// message-building code.
+    LoggingIsEnabledFor         = 560,
+    // 561-569 reserved for v0.3 (named loggers, structured records,
+    // custom formatters, rotating-file handlers, etc.).
+
     // ── 440-469: `sqlite3` module (M23 P3a-D) ───────────────────────────
     // Backed by the `rusqlite` crate (with the `bundled` feature so
     // libsqlite3.c is statically linked into the VM binary — no system
@@ -1184,6 +1224,18 @@ impl NativeFn {
             446 => Some(Self::Sqlite3LastInsertRowid),
             447 => Some(Self::Sqlite3Changes),
             448 => Some(Self::Sqlite3ColumnNames),
+            // M27 P3c-E: logging module (550-560, 11 ids; 561-569 reserved).
+            550 => Some(Self::LoggingBasicConfig),
+            551 => Some(Self::LoggingBasicConfigToFile),
+            552 => Some(Self::LoggingSetLevel),
+            553 => Some(Self::LoggingGetLevel),
+            554 => Some(Self::LoggingDebug),
+            555 => Some(Self::LoggingInfo),
+            556 => Some(Self::LoggingWarning),
+            557 => Some(Self::LoggingError),
+            558 => Some(Self::LoggingCritical),
+            559 => Some(Self::LoggingLog),
+            560 => Some(Self::LoggingIsEnabledFor),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

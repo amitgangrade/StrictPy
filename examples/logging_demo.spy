@@ -1,0 +1,212 @@
+"""logging_demo.spy — application logging (M27 P3c-E).
+
+Exercises:
+  * `import logging` — M27 P3c-E stdlib module.
+  * `logging.basic_config(level)` — initialise logger to write to stderr.
+  * `logging.basic_config_to_file(level, filename)` — redirect to a file.
+  * `logging.set_level(level)` / `logging.get_level()` — runtime threshold.
+  * `logging.debug` / `info` / `warning` / `error` / `critical` — per-level
+    emit shortcuts.
+  * `logging.log(level, msg)` — generic emit.
+  * `logging.is_enabled_for(level)` — gate for expensive message building.
+  * Format: `"YYYY-MM-DDTHH:MM:SSZ LEVEL message\\n"`, matching CPython's
+    default `%(asctime)s %(levelname)s %(message)s`.
+
+Known-answer asserts:
+  * Default level (before basic_config) is "WARNING".
+  * After `set_level("DEBUG")`, `is_enabled_for("DEBUG")` is true.
+  * After `set_level("ERROR")`, `is_enabled_for("INFO")` is false.
+  * Unknown level name raises ValueError.
+  * File output: a 5-line program writing at INFO threshold produces 4
+    records (DEBUG filtered out, INFO/WARNING/ERROR/CRITICAL pass), each
+    with the correct level token in column 2.
+
+Tests:
+  * `compiler/tests/logging_demo_runs.rs` — subprocess assertion. Verifies
+    the OK banner on stdout AND the file contents (level filtering +
+    record format).
+"""
+
+import logging
+import os
+import io
+
+
+fn count_lines(s: str) -> i32:
+    """Count `\\n`-terminated lines in `s`."""
+    n: i32 = i32(i64(len(s)))
+    i: i32 = 0i32
+    count: i32 = 0i32
+    while i < n:
+        if i32(i64(s[i])) == 10i32:
+            count = count + 1i32
+        i = i + 1i32
+    return count
+
+
+fn contains_substr(haystack: str, needle: str) -> bool:
+    """True if `needle` is a contiguous substring of `haystack`.
+
+    Hand-rolled because v0.2 doesn't ship `str.contains` and pulling in
+    `re` for an exact-string match feels heavy.
+    """
+    hn: i32 = i32(i64(len(haystack)))
+    nn: i32 = i32(i64(len(needle)))
+    if nn == 0i32:
+        return true
+    if nn > hn:
+        return false
+    i: i32 = 0i32
+    while i <= hn - nn:
+        j: i32 = 0i32
+        ok: bool = true
+        while j < nn:
+            if i32(i64(haystack[i + j])) != i32(i64(needle[j])):
+                ok = false
+                j = nn
+            else:
+                j = j + 1i32
+        if ok:
+            return true
+        i = i + 1i32
+    return false
+
+
+fn main() -> i32:
+    # ── Defaults pin: get_level() is "WARNING" pre-basic_config. ─────────
+    default_level: str = logging.get_level()
+    assert default_level == "WARNING", "default level should be WARNING"
+
+    # ── basic_config (stderr sink) at WARNING. ───────────────────────────
+    # First few records go to stderr — the integration test asserts on
+    # stdout, so we don't print these to expected output. We're verifying
+    # the path doesn't trap and the threshold takes effect.
+    logging.basic_config("WARNING")
+    assert logging.get_level() == "WARNING", "basic_config should set level"
+
+    # Below-threshold calls return silently — no trap, no formatting cost.
+    logging.debug("debug message — should be filtered out")
+    logging.info("info message — should be filtered out")
+    # Above-threshold calls write to stderr.  We can't easily capture
+    # stderr from inside the program, so trust the file-sink test below
+    # for the format/content verification.
+    logging.warning("warning to stderr — visible")
+    logging.error("error to stderr — visible")
+
+    # ── set_level + is_enabled_for. ──────────────────────────────────────
+    logging.set_level("DEBUG")
+    assert logging.get_level() == "DEBUG", "set_level should take effect"
+    assert logging.is_enabled_for("DEBUG"), "DEBUG enabled when threshold DEBUG"
+    assert logging.is_enabled_for("INFO"), "INFO enabled when threshold DEBUG"
+    assert logging.is_enabled_for("CRITICAL"), "CRITICAL always enabled"
+
+    logging.set_level("ERROR")
+    assert not logging.is_enabled_for("DEBUG"), "DEBUG disabled when threshold ERROR"
+    assert not logging.is_enabled_for("INFO"), "INFO disabled when threshold ERROR"
+    assert not logging.is_enabled_for("WARNING"), "WARNING disabled when threshold ERROR"
+    assert logging.is_enabled_for("ERROR"), "ERROR enabled at threshold ERROR"
+    assert logging.is_enabled_for("CRITICAL"), "CRITICAL always enabled"
+
+    # ── Case-insensitive level names. ────────────────────────────────────
+    logging.set_level("info")
+    assert logging.get_level() == "INFO", "lowercase 'info' should resolve"
+    logging.set_level("Warning")
+    assert logging.get_level() == "WARNING", "mixed-case 'Warning' should resolve"
+
+    # ── CPython aliases. ─────────────────────────────────────────────────
+    logging.set_level("WARN")
+    assert logging.get_level() == "WARNING", "WARN alias should map to WARNING"
+    logging.set_level("FATAL")
+    assert logging.get_level() == "CRITICAL", "FATAL alias should map to CRITICAL"
+
+    # ── Unknown level name raises ValueError. ────────────────────────────
+    raised: bool = false
+    try:
+        logging.set_level("NOTSET")
+        # NOTSET is a CPython level (== 0) but we don't ship it in v0.2.
+    except ValueError as e:
+        raised = true
+    assert raised, "unknown level should raise ValueError"
+
+    raised = false
+    try:
+        logging.log("CHATTER", "garbage level")
+    except ValueError as e:
+        raised = true
+    assert raised, "log() with unknown level should raise ValueError"
+
+    # ── File output. ─────────────────────────────────────────────────────
+    # Write to a deterministic path; clean up any prior copy.  We pick
+    # `logging_demo.log` in the current directory so the integration test
+    # can read it back via the same path.
+    log_path: str = "logging_demo.log"
+    if os.exists(log_path):
+        try:
+            os.remove(log_path)
+        except IOError as ioe:
+            pass
+
+    logging.basic_config_to_file("INFO", log_path)
+    assert logging.get_level() == "INFO", "basic_config_to_file sets level"
+
+    # Emit one of each level.  At INFO threshold the DEBUG record is
+    # filtered out; the other four land in the file.
+    logging.debug("DEBUG should be filtered")
+    logging.info("info-line-one")
+    logging.warning("warning-line-two")
+    logging.error("error-line-three")
+    logging.critical("critical-line-four")
+
+    # Verify the file by reading it back through os.read_file.  We can't
+    # do this in the same process if the file is still open, but the OS
+    # buffers the write_all calls into the page cache — read_file sees
+    # them.  (On Windows the file is opened with FILE_SHARE_READ by
+    # default so the read syscall succeeds.)
+    contents: str = os.read_file(log_path)
+    line_count: i32 = count_lines(contents)
+    assert line_count == 4i32, "file should have exactly 4 records (DEBUG filtered)"
+
+    # Format pin: each record should contain its level token.
+    assert contains_substr(contents, " INFO "), "INFO record present"
+    assert contains_substr(contents, " WARNING "), "WARNING record present"
+    assert contains_substr(contents, " ERROR "), "ERROR record present"
+    assert contains_substr(contents, " CRITICAL "), "CRITICAL record present"
+    # And the body of each message.
+    assert contains_substr(contents, "info-line-one"), "INFO body present"
+    assert contains_substr(contents, "warning-line-two"), "WARNING body present"
+    assert contains_substr(contents, "error-line-three"), "ERROR body present"
+    assert contains_substr(contents, "critical-line-four"), "CRITICAL body present"
+    # And NOT the DEBUG body.
+    assert not contains_substr(contents, "DEBUG should be filtered"), \
+        "DEBUG record should be absent (below threshold)"
+
+    # Timestamp shape: every record begins with "YYYY-MM-DDTHH:MM:SSZ ".
+    # Pin the year prefix — every record from this process runs in 2026+,
+    # so a leading "20" through the next 80-odd years is a safe check.
+    # (A stricter regex check is in vm/tests; the demo just shows the
+    # field is present.)
+    assert i32(i64(contents[0])) == 50i32, "first char should be '2' (year)"
+    assert i32(i64(contents[1])) == 48i32, "second char should be '0'"
+    # Column 11 is the 'T' separator: "YYYY-MM-DDTHH..." -> index 10.
+    assert i32(i64(contents[10])) == 84i32, "char 10 should be 'T' separator"
+    # Column 19 is the 'Z' UTC marker.
+    assert i32(i64(contents[19])) == 90i32, "char 19 should be 'Z' UTC marker"
+
+    # ── `logging.log` — generic emit, same path as the level shortcuts. ─
+    # Reset to a stderr sink so the file doesn't accumulate extra records
+    # we'd then have to filter out of the line-count assert above.
+    # (We've already verified file output; what we test next is just the
+    # threshold + dispatch behaviour, which doesn't need the file sink.)
+    logging.basic_config("INFO")
+    logging.log("ERROR", "via-generic-log")
+
+    # ── Clean up the log file. ───────────────────────────────────────────
+    try:
+        os.remove(log_path)
+    except IOError as ioe:
+        pass
+
+    println("default-level=" + default_level)
+    println("file-lines=" + str(line_count))
+    println("OK")
+    return 0

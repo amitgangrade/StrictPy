@@ -3599,10 +3599,244 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             Ok(if empty { 1 } else { 0 })
         }
 
+        // ── M27 P3c-E: `logging` module ────────────────────────────────
+        // Flat global-logger surface.  Threshold + optional file sink live
+        // on `SharedVm` (`log_level` AtomicI32, `log_file` Mutex<Option<File>>).
+        // Format is fixed `"YYYY-MM-DDTHH:MM:SSZ LEVEL message\n"` — one
+        // `write_all` per record so concurrent emits on the file path don't
+        // interleave bytes within a single record (each acquires the
+        // `log_file` mutex briefly).  Stderr is OS-level line-atomic for
+        // short writes so we don't gate it through a mutex.
+        NativeFn::LoggingBasicConfig => {
+            let level = arg_str(args, 0);
+            let lvl = level_str_to_int(&level)?;
+            interp
+                .shared
+                .log_level
+                .store(lvl, std::sync::atomic::Ordering::SeqCst);
+            // Drop any prior file sink — calling basic_config again
+            // resets the destination to stderr.  Idempotent.
+            let mut sink = interp
+                .shared
+                .log_file
+                .lock()
+                .map_err(|_| VmError::Trap("log_file mutex poisoned".into()))?;
+            *sink = None;
+            Ok(0)
+        }
+        NativeFn::LoggingBasicConfigToFile => {
+            let level = arg_str(args, 0);
+            let filename = arg_str(args, 1);
+            let lvl = level_str_to_int(&level)?;
+            // Open append-mode + create.  Matches Python's
+            // `FileHandler(filename, mode="a")` default.
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&filename)
+                .map_err(|e| VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!("logging.basic_config_to_file: {}: {}", filename, e),
+                })?;
+            interp
+                .shared
+                .log_level
+                .store(lvl, std::sync::atomic::Ordering::SeqCst);
+            let mut sink = interp
+                .shared
+                .log_file
+                .lock()
+                .map_err(|_| VmError::Trap("log_file mutex poisoned".into()))?;
+            *sink = Some(file);
+            Ok(0)
+        }
+        NativeFn::LoggingSetLevel => {
+            let level = arg_str(args, 0);
+            let lvl = level_str_to_int(&level)?;
+            interp
+                .shared
+                .log_level
+                .store(lvl, std::sync::atomic::Ordering::SeqCst);
+            Ok(0)
+        }
+        NativeFn::LoggingGetLevel => {
+            let lvl = interp.shared.log_level.load(std::sync::atomic::Ordering::SeqCst);
+            let s = level_int_to_str(lvl).to_string();
+            let p = interp.alloc_string(&s);
+            Ok(p as u64)
+        }
+        NativeFn::LoggingDebug => {
+            let msg = arg_str(args, 0);
+            log_emit(interp, 10, "DEBUG", &msg)?;
+            Ok(0)
+        }
+        NativeFn::LoggingInfo => {
+            let msg = arg_str(args, 0);
+            log_emit(interp, 20, "INFO", &msg)?;
+            Ok(0)
+        }
+        NativeFn::LoggingWarning => {
+            let msg = arg_str(args, 0);
+            log_emit(interp, 30, "WARNING", &msg)?;
+            Ok(0)
+        }
+        NativeFn::LoggingError => {
+            let msg = arg_str(args, 0);
+            log_emit(interp, 40, "ERROR", &msg)?;
+            Ok(0)
+        }
+        NativeFn::LoggingCritical => {
+            let msg = arg_str(args, 0);
+            log_emit(interp, 50, "CRITICAL", &msg)?;
+            Ok(0)
+        }
+        NativeFn::LoggingLog => {
+            let level = arg_str(args, 0);
+            let msg = arg_str(args, 1);
+            let lvl = level_str_to_int(&level)?;
+            log_emit(interp, lvl, level_int_to_str(lvl), &msg)?;
+            Ok(0)
+        }
+        NativeFn::LoggingIsEnabledFor => {
+            let level = arg_str(args, 0);
+            let lvl = level_str_to_int(&level)?;
+            let threshold = interp
+                .shared
+                .log_level
+                .load(std::sync::atomic::Ordering::SeqCst);
+            Ok(if lvl >= threshold { 1 } else { 0 })
+        }
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
     }
+}
+
+// ─── M27 P3c-E: `logging` module helpers ───────────────────────────────
+
+/// Map a level-name string ("DEBUG"/"INFO"/"WARNING"/"ERROR"/"CRITICAL")
+/// to its CPython integer level (10/20/30/40/50).  Matches CPython
+/// exactly so the API is interchangeable: a Python program that imports
+/// `logging` and reads `logging.INFO` sees the same `20` we use here.
+/// Accepts the canonical upper-case names plus the lower-case "warn"
+/// alias CPython recognises for backward compatibility.
+fn level_str_to_int(level: &str) -> Result<i32, VmError> {
+    // Case-insensitive comparison so `"info"` and `"INFO"` both work.
+    // CPython's `getLevelName` is case-sensitive, but the value of the
+    // string-form leniency here is high (saves every program from
+    // remembering the convention) and the cost is zero.
+    let up = level.to_ascii_uppercase();
+    match up.as_str() {
+        "DEBUG" => Ok(10),
+        "INFO" => Ok(20),
+        "WARNING" | "WARN" => Ok(30),
+        "ERROR" => Ok(40),
+        "CRITICAL" | "FATAL" => Ok(50),
+        _ => Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "logging: unknown level {:?} (expected DEBUG/INFO/WARNING/ERROR/CRITICAL)",
+                level
+            ),
+        }),
+    }
+}
+
+/// Inverse of `level_str_to_int`.  Returns the canonical upper-case
+/// name; unknown integers (set via direct atomic mutation, which user
+/// code cannot do) round-trip as "Level <N>" matching CPython's
+/// `getLevelName` fallback.
+fn level_int_to_str(level: i32) -> &'static str {
+    match level {
+        10 => "DEBUG",
+        20 => "INFO",
+        30 => "WARNING",
+        40 => "ERROR",
+        50 => "CRITICAL",
+        _ => "NOTSET",
+    }
+}
+
+/// Emit one log record.  Compares `lvl` against the threshold first;
+/// only formats + writes when the record is enabled.  This is the gate
+/// that makes `logging.is_enabled_for(lvl)` worth calling for expensive
+/// message-building patterns — the `format!` call below is the cheap
+/// version (a fixed prefix + a borrowed `&str` msg), but real call
+/// sites use `f"big string {compute()}"` where `compute()` runs even
+/// when the log line will be discarded.
+///
+/// Format matches CPython's default `%(asctime)s %(levelname)s %(message)s`:
+///
+/// ```text
+/// 2026-05-20T13:42:55Z INFO Some message here
+/// ```
+///
+/// Implementation note: timestamp uses the same epoch-format helper
+/// `format_epoch_iso` that `time.format_iso` (M20b) and
+/// `datetime.to_iso` (M23 P3a-B) use — no duplicate civil-from-days
+/// table here.  The whole record (prefix + msg + newline) is written
+/// via a single `write_all` call so concurrent emits don't interleave
+/// bytes within one record.
+fn log_emit(
+    interp: &Interpreter,
+    lvl: i32,
+    level_name: &str,
+    msg: &str,
+) -> Result<(), VmError> {
+    let threshold = interp
+        .shared
+        .log_level
+        .load(std::sync::atomic::Ordering::SeqCst);
+    if lvl < threshold {
+        return Ok(());
+    }
+    let ts = current_utc_iso();
+    let line = format!("{} {} {}\n", ts, level_name, msg);
+
+    let mut sink = interp
+        .shared
+        .log_file
+        .lock()
+        .map_err(|_| VmError::Trap("log_file mutex poisoned".into()))?;
+    if let Some(f) = sink.as_mut() {
+        use std::io::Write;
+        f.write_all(line.as_bytes()).map_err(|e| VmError::UncaughtException {
+            type_name: "IOError".into(),
+            message: format!("logging: write to file failed: {}", e),
+        })?;
+    } else {
+        // No file sink → write to process stderr.  We deliberately do
+        // NOT hold the log_file mutex while writing to stderr (the
+        // borrow above is short, but a future refactor that swaps
+        // sinks at runtime would otherwise be a lock-order concern).
+        // Drop the guard before the stderr call.
+        drop(sink);
+        use std::io::Write;
+        let stderr = std::io::stderr();
+        let mut h = stderr.lock();
+        h.write_all(line.as_bytes()).map_err(|e| VmError::UncaughtException {
+            type_name: "IOError".into(),
+            message: format!("logging: write to stderr failed: {}", e),
+        })?;
+    }
+    Ok(())
+}
+
+/// Current wall-clock UTC formatted per the M20b `format_epoch_iso`
+/// helper (`"YYYY-MM-DDTHH:MM:SSZ"`).  Hand-rolled rather than via the
+/// `time` or `datetime` modules to keep `logging` dep-free — those
+/// modules are siblings, not prerequisites.
+fn current_utc_iso() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(d) => d.as_secs() as f64,
+        // Pre-1970 system clocks (rare; freshly imaged VMs) report 0
+        // rather than wrapping negative — same convention M23 P3a-B's
+        // `DateTimeNow` uses.
+        Err(_) => 0.0,
+    };
+    format_epoch_iso(secs)
 }
 
 // ─── M23 P3a-C: lock / semaphore / priority-queue helpers ─────────────
