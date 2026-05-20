@@ -1,7 +1,10 @@
 # StrictPy Language & Virtual Machine Specification
 
-**Version:** 0.1 (Draft)
-**Status:** Implementation reference
+**Version:** 0.2 (M0–M30 implementation reference)
+**Status:** Frozen at v0.2 release (2026-05-21). Spec was originally
+frozen at v0.1 on day one (M0); subsequent milestones extended it in
+place (M16 match patterns, M19 imports, M25 CLI, M27–M29 stdlib
+sections, M30 lexer line-continuation rule). v0.3 work begins at M31.
 **Audience:** Compiler & VM implementers
 
 ---
