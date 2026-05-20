@@ -1091,6 +1091,83 @@ debugging (Rust raw string vs line-continuation indentation).
 
 ---
 
+## M26 — Extended benchmark suite (2026-05-19 latest)
+
+10 additional benchmark tests (5 pure-compute + 5 stdlib) added on top
+of the canonical 4-program / 16-cell suite. Generators in
+`bench/harness.py`; rendered to `bench/EXTENDED_REPORT.md`; raw timings
+in `bench/history/m26_extended.json`.
+
+**Headline (30 cells)**: 28W / 2T / 0L vs CPython 3.12.10. Median pure-
+compute ratio 0.15×, median stdlib ratio 0.25×. Two interesting
+empirical findings, both honest data:
+
+1. The btree row narrows monotonically as allocation pressure grows
+   (0.23× → 0.71× → 1.13× at n=10k). At ~10k recursive insertions,
+   StrictPy's `rt_alloc` + conservative GC overhead overtakes the JIT
+   win. Cell precise stack maps + a moving GC would fix.
+2. The stdlib comparison was expected to land near 1× since both sides
+   do the work in C/Rust. Instead all 15 stdlib cells go to StrictPy
+   with the narrowing-at-scale pattern visible on every test (CSV
+   0.20× → 0.91×, SQLite 0.19× → 0.75×). Python's ~50–70 ms startup
+   overhead amortises out as the work grows; what remains is the true
+   relative cost of the bindings.
+
+No language/compiler changes; new pure-bench infrastructure only.
+
+---
+
+## M27 — Phase 3c stdlib (2026-05-20)
+
+Filesystem ergonomics + compression + archives + logging — 9 stdlib
+modules shipped concurrently by 5 worktree-isolated agents (the
+largest concurrent stdlib round to date). NativeFn IDs 450-569; spec
+§9.30-§9.39.
+
+### Agents + outcomes
+
+| Agent | Modules | NativeFns | New crate deps |
+|---|---|---:|---|
+| P3c-A | shutil + tempfile | 9 | tempfile, libc (unix) |
+| P3c-B | glob + fnmatch | 7 | glob |
+| P3c-C | gzip + zlib + bz2 | 11 | flate2, bzip2 |
+| P3c-D | zipfile + tarfile | 16 | zip, tar |
+| P3c-E | logging | 11 | (none — std::io + std::fs only) |
+
+### Three patterns recorded by this round
+
+1. **"Commit EARLY" still doesn't get followed.** Brief language is
+   necessary but not sufficient — 2 of 5 M27 agents still ran out of
+   compute mid-test-build before committing (same failure mode as
+   M23 P3a-D + all four M24 agents despite the brief's explicit warning).
+   Orchestrator committed both worktrees on the agents' behalf. The
+   pattern recommendation now: auto-snapshot worktree state at
+   intervals from the orchestrator side, independent of agent's
+   explicit commits.
+
+2. **Keep-both auto-resolution has a one-line failure mode.** The
+   M27 orchestrator switched from manual cherry-pick resolution to
+   `git apply --3way` + Python script that takes both sides of every
+   conflict marker. This worked cleanly for purely additive at-end
+   blocks (spec sections, Cargo.toml entries, from_u32 match arms),
+   but failed in two places per integration: resolver.rs interleaved
+   module-block conflicts, and vm/src/builtins.rs match-arm-boundary
+   missing-`}` errors. Each required one manual fix per integration.
+
+3. **Spec section collisions are now standard.** P3c-A and P3c-D
+   both independently picked §9.30 + §9.31. M22 had all 4 agents
+   pick §9.15+. Orchestrator renumber step is now expected, not
+   exceptional.
+
+### Tests + size
+
+- **Tests**: 586 → ~640+ (M27 added ~50 new tests across 5 agents).
+- **Examples**: 70 → 79 (+9 new demo programs across 9 modules).
+- **Stdlib modules**: 24 → 33.
+- **vm/Cargo.toml deps**: 11 → 17 (+ unix-only libc).
+
+---
+
 ## What this trajectory shows
 
 - **Bugs found scales with running real programs, not with writing tests.**

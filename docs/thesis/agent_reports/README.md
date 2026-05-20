@@ -70,3 +70,12 @@ the time it lands.
 
 (M25 was a single-conversation orchestrator refactor — no sub-agents,
 no agent report. See `docs/thesis/milestones/m25_unified_cli.md`.)
+
+(M26 was a single-session extended-benchmark addition — no sub-agents.
+See `bench/EXTENDED_REPORT.md`.)
+
+| `m27_p3c_a.md` | M27 P3c-A | shutil + tempfile (NativeFns 450-472, §9.30/9.31). Closes the v0.2 gap M24-D documented (no recursive rmdir). `shutil.which` does Windows .exe lookup. |
+| `m27_p3c_b.md` | M27 P3c-B | glob + fnmatch (NativeFns 480-486, §9.32/9.33). Uses Rust `glob` crate; `fnmatch.translate` hand-rolled (~50 LOC). |
+| `m27_p3c_c.md` | M27 P3c-C | gzip + zlib + bz2 (NativeFns 500-510, §9.34/9.35/9.36). Round-trip + level + checksum (crc32/adler32). **Found and worked around a bzip2 write-side decoder hang** on malformed input; switched to read-side. |
+| `m27_p3c_d.md` | M27 P3c-D | zipfile + tarfile (NativeFns 520-535, §9.37/9.38). Uses `zip` + `tar` Rust crates. Two slot tables per format (read/write). Tar writer is enum-typed for plain/gz/bz2 modes. |
+| `m27_p3c_e.md` | M27 P3c-E | logging (NativeFns 550-560, §9.39). Flat global-logger surface (v0.3 will add class-shaped Logger/Handler/Formatter on top of stdlib classes). Hand-rolled timestamp formatting via M20b's civil_from_days. |

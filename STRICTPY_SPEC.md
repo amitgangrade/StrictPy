@@ -2832,7 +2832,7 @@ What v0.2 does **not** ship:
 
 ---
 
-### 9.30 Module `zipfile` (v0.2 — M27 P3c-D)
+### 9.37 Module `zipfile` (v0.2 — M27 P3c-D)
 
 A read+write surface for `.zip` archives, wrapping the pure-Rust `zip`
 crate.  Archives are referenced by opaque `i64` handles into a
@@ -2905,7 +2905,7 @@ serialise on the inner archive borrow.
 
 ---
 
-### 9.31 Module `tarfile` (v0.2 — M27 P3c-D)
+### 9.38 Module `tarfile` (v0.2 — M27 P3c-D)
 
 A read+write surface for POSIX `.tar` archives, with optional gzip /
 bz2 transparent compression.  Wraps the pure-Rust `tar` crate plus
