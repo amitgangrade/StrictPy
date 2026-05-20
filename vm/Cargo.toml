@@ -67,6 +67,13 @@ tempfile = "3"
 # `fnmatch.translate` is implemented by hand (~30 LOC) — converting a
 # shell-glob to a regex is too small to justify another crate.
 glob = "0.3"
+# M27 P3c-C: gzip + zlib + bz2 compression stdlib modules.  `flate2`
+# covers DEFLATE-based formats (zlib RFC 1950 + gzip RFC 1952) and
+# also ships a CRC-32 implementation we reuse for `zlib.crc32`.
+# `bzip2` wraps the libbzip2 algorithm; we depend on the rust-only
+# fallback so no system libbz2 is required on Windows/Linux/macOS.
+flate2 = "1"
+bzip2 = "0.4"
 cranelift = { version = "0.115", optional = true }
 cranelift-jit = { version = "0.115", optional = true }
 cranelift-codegen = { version = "0.115", optional = true }

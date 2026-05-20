@@ -1002,6 +1002,38 @@ pub enum NativeFn {
     FnmatchTranslate      = 486,
     // 487-499 reserved for v0.3 (e.g. recursive variants of fnmatch,
     // `glob.iglob` lazy iterator, `glob.has_magic`).
+    // ── 500–519: compression modules (M27 P3c-C) ────────────────────────
+    // Three stdlib modules wrap the `flate2` and `bzip2` crates.  All
+    // entry points use the str-as-byte-buffer convention (M22 P2D
+    // struct): each codepoint 0..=255 is one byte, so a binary blob
+    // round-trips losslessly through the str type without needing v0.3
+    // `bytes`.  Compression failures and malformed inputs surface as
+    // `ValueError`.
+    /// `gzip.compress(data: str) -> str` — RFC 1952 gzip, default level 6.
+    GzipCompress         = 500,
+    /// `gzip.compress_level(data: str, level: i32) -> str` — level 0..9.
+    GzipCompressLevel    = 501,
+    /// `gzip.decompress(data: str) -> str` — gzip-decompress; ValueError on bad data.
+    GzipDecompress       = 502,
+    /// `zlib.compress(data: str) -> str` — RFC 1950 zlib, default level 6.
+    ZlibCompress         = 503,
+    /// `zlib.compress_level(data: str, level: i32) -> str` — level 0..9.
+    ZlibCompressLevel    = 504,
+    /// `zlib.decompress(data: str) -> str` — zlib-decompress; ValueError on bad data.
+    ZlibDecompress       = 505,
+    /// `zlib.crc32(data: str) -> i64` — CRC-32 checksum (returned as i64 to
+    /// avoid u32/i32 sign ambiguity; always in 0..=0xFFFF_FFFF).
+    ZlibCrc32            = 506,
+    /// `zlib.adler32(data: str) -> i64` — Adler-32 checksum.
+    ZlibAdler32          = 507,
+    /// `bz2.compress(data: str) -> str` — bzip2 format, default level 6.
+    Bz2Compress          = 508,
+    /// `bz2.compress_level(data: str, level: i32) -> str` — level 1..9.
+    Bz2CompressLevel     = 509,
+    /// `bz2.decompress(data: str) -> str` — bzip2-decompress; ValueError on bad data.
+    Bz2Decompress        = 510,
+    // 511-519 reserved for v0.3 streaming hashers (gzip.open / etc.)
+    // and lzma/xz support if a real-world program needs them.
 
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
@@ -1351,6 +1383,18 @@ impl NativeFn {
             484 => Some(Self::FnmatchFnmatchcase),
             485 => Some(Self::FnmatchFilter),
             486 => Some(Self::FnmatchTranslate),
+            // M27 P3c-C: gzip + zlib + bz2 (500-510, 11 ids; 511-519 reserved).
+            500 => Some(Self::GzipCompress),
+            501 => Some(Self::GzipCompressLevel),
+            502 => Some(Self::GzipDecompress),
+            503 => Some(Self::ZlibCompress),
+            504 => Some(Self::ZlibCompressLevel),
+            505 => Some(Self::ZlibDecompress),
+            506 => Some(Self::ZlibCrc32),
+            507 => Some(Self::ZlibAdler32),
+            508 => Some(Self::Bz2Compress),
+            509 => Some(Self::Bz2CompressLevel),
+            510 => Some(Self::Bz2Decompress),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

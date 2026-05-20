@@ -1,0 +1,76 @@
+"""gzip_demo — M27 P3c-C demo of the stdlib `gzip` module.
+
+Round-trips text and a longer repetitive payload through the gzip
+encoder (RFC 1952 `.gz` framing).  Demonstrates the default level
+plus explicit `compress_level`, and verifies that `decompress` raises
+`ValueError` on malformed input.
+
+The str-as-byte-buffer convention (see STRICTPY_SPEC.md §9.34) treats
+each `str` codepoint 0..=255 as one byte.  ASCII text feeds straight
+through; programs handling binary payloads should construct their
+inputs codepoint-by-codepoint so every char fits in 0..=255.
+"""
+
+import gzip
+
+fn check(label: str, ok: bool) -> None:
+    if ok:
+        println(label + ": ok")
+    else:
+        println(label + ": FAIL")
+
+fn main() -> i32:
+    # 1. Default-level round-trip on a short ASCII string.
+    plain: str = "Hello, StrictPy compression!"
+    compressed: str = gzip.compress(plain)
+    println("plain len: " + str(len(plain)))
+    println("compressed len: " + str(len(compressed)))
+    decompressed: str = gzip.decompress(compressed)
+    check("default round-trip", decompressed == plain)
+
+    # 2. Highly compressible payload — a 200-char repeat of "ab".
+    repeat: str = ""
+    i: i32 = 0
+    while i < 100:
+        repeat = repeat + "ab"
+        i = i + 1
+    println("repeat len: " + str(len(repeat)))
+    repeat_z: str = gzip.compress(repeat)
+    println("repeat compressed len: " + str(len(repeat_z)))
+    check("repeat compresses smaller", len(repeat_z) < len(repeat))
+    check("repeat round-trip", gzip.decompress(repeat_z) == repeat)
+
+    # 3. Explicit compression level 0 (store, no compression) and 9 (max).
+    level0: str = gzip.compress_level(repeat, 0)
+    level9: str = gzip.compress_level(repeat, 9)
+    println("level0 len: " + str(len(level0)))
+    println("level9 len: " + str(len(level9)))
+    check("level 0 round-trip", gzip.decompress(level0) == repeat)
+    check("level 9 round-trip", gzip.decompress(level9) == repeat)
+    # Level 9 should produce a smaller output than level 0 for any
+    # input with structure.
+    check("level 9 < level 0", len(level9) < len(level0))
+
+    # 4. Empty-input round-trip.  Per RFC 1952 the gzip header is
+    #    always emitted, so the output is non-empty but `decompress`
+    #    must recover the empty string.
+    empty_z: str = gzip.compress("")
+    check("empty compresses to non-empty", len(empty_z) > 0)
+    check("empty round-trip", gzip.decompress(empty_z) == "")
+
+    # 5. Malformed input raises ValueError.
+    try:
+        bad: str = gzip.decompress("not a gzip stream")
+        println("UNREACHED: " + bad)
+    except ValueError as e:
+        println("caught bad gzip")
+
+    # 6. Bad level (out-of-range) raises ValueError.
+    try:
+        also_bad: str = gzip.compress_level("x", 99)
+        println("UNREACHED level: " + also_bad)
+    except ValueError as e:
+        println("caught bad level")
+
+    println("done")
+    return 0

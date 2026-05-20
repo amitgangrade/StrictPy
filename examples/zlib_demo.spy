@@ -1,0 +1,75 @@
+"""zlib_demo — M27 P3c-C demo of the stdlib `zlib` module.
+
+Round-trips through the raw zlib format (RFC 1950 — DEFLATE wrapped in
+a 2-byte header + 4-byte Adler-32 trailer, NO gzip framing) and
+demonstrates the `crc32` / `adler32` checksums.
+
+The str-as-byte-buffer convention (STRICTPY_SPEC.md §9.35) treats
+each `str` codepoint 0..=255 as one byte.
+"""
+
+import zlib
+
+fn check(label: str, ok: bool) -> None:
+    if ok:
+        println(label + ": ok")
+    else:
+        println(label + ": FAIL")
+
+fn main() -> i32:
+    # 1. Default-level round-trip.
+    plain: str = "The zlib format is just DEFLATE plus a small header."
+    compressed: str = zlib.compress(plain)
+    println("plain len: " + str(len(plain)))
+    println("compressed len: " + str(len(compressed)))
+    check("default round-trip", zlib.decompress(compressed) == plain)
+
+    # 2. zlib output should be smaller than gzip output for the same
+    #    input on highly redundant payloads (no gzip header).
+    repeat: str = ""
+    i: i32 = 0
+    while i < 256:
+        repeat = repeat + "spy"
+        i = i + 1
+    repeat_z: str = zlib.compress(repeat)
+    check("repeat round-trip", zlib.decompress(repeat_z) == repeat)
+    println("repeat len: " + str(len(repeat)))
+    println("repeat zlib len: " + str(len(repeat_z)))
+
+    # 3. Explicit level 0 and 9.
+    level0: str = zlib.compress_level(repeat, 0)
+    level9: str = zlib.compress_level(repeat, 9)
+    check("level 0 round-trip", zlib.decompress(level0) == repeat)
+    check("level 9 round-trip", zlib.decompress(level9) == repeat)
+    check("level 9 < level 0", len(level9) < len(level0))
+
+    # 4. Empty round-trip.
+    empty_z: str = zlib.compress("")
+    check("empty compresses to non-empty", len(empty_z) > 0)
+    check("empty round-trip", zlib.decompress(empty_z) == "")
+
+    # 5. crc32 known vector — IEEE polynomial.
+    #    crc32(b"") == 0
+    #    crc32(b"123456789") == 0xCBF43926 == 3421780262
+    check("crc32(\"\") == 0", zlib.crc32("") == 0)
+    crc_check: i64 = zlib.crc32("123456789")
+    println("crc32(123456789): " + str(crc_check))
+    check("crc32(123456789) == 0xCBF43926", crc_check == 3421780262)
+
+    # 6. adler32 known vector — RFC 1950 §9.
+    #    adler32(b"") == 1 (initial state)
+    #    adler32(b"Wikipedia") == 0x11E60398 == 300286872
+    check("adler32(\"\") == 1", zlib.adler32("") == 1)
+    adler_check: i64 = zlib.adler32("Wikipedia")
+    println("adler32(Wikipedia): " + str(adler_check))
+    check("adler32(Wikipedia) == 0x11E60398", adler_check == 300286872)
+
+    # 7. Malformed decompress raises ValueError.
+    try:
+        bad: str = zlib.decompress("not zlib data")
+        println("UNREACHED: " + bad)
+    except ValueError as e:
+        println("caught bad zlib")
+
+    println("done")
+    return 0

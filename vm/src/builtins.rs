@@ -4039,6 +4039,310 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             let p = interp.alloc_string(&regex);
             Ok(p as u64)
         }
+        // ── M27 P3c-C: `gzip` / `zlib` / `bz2` compression modules ─────
+        // All entry points use the str-as-byte-buffer convention from
+        // M22 P2D `struct`: each `str` codepoint 0..=255 is one byte.
+        // Reading: `packed_str_to_bytes(&s, 0, s.chars().count(), …)`
+        // accepts any codepoint in 0..=255, which exactly matches the
+        // output shape of every native that ever returns a packed buffer
+        // (`bytes_to_packed_str`).  ASCII strings (codepoint < 128) are
+        // a special case that always works — `"hello"` packs as 5
+        // bytes.  Multi-byte UTF-8 characters in the input WILL raise
+        // ValueError ("not a packed byte"); programs feeding text
+        // through compression should encode their text up-front (the
+        // str-as-byte-buffer view is a binary surface).
+        //
+        // Writing: `bytes_to_packed_str(&out)` re-encodes each output
+        // byte as one codepoint 0..=255, so the round trip
+        // decompress(compress(x)) == x for any packed-byte input.
+        NativeFn::GzipCompress => {
+            use flate2::write::GzEncoder;
+            use flate2::Compression;
+            use std::io::Write;
+            let s = arg_str(args, 0);
+            let p3c_c_in_bytes = packed_str_to_bytes(
+                &s, 0, s.chars().count(), "gzip.compress",
+            )?;
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::new(6));
+            encoder.write_all(&p3c_c_in_bytes).map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("gzip.compress: {}", e),
+                }
+            })?;
+            let p3c_c_byte_out = encoder.finish().map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("gzip.compress: finish: {}", e),
+                }
+            })?;
+            let p = interp.alloc_string(&bytes_to_packed_str(&p3c_c_byte_out));
+            Ok(p as u64)
+        }
+        NativeFn::GzipCompressLevel => {
+            use flate2::write::GzEncoder;
+            use flate2::Compression;
+            use std::io::Write;
+            let s = arg_str(args, 0);
+            let level = arg_i64(args, 1);
+            if !(0..=9).contains(&level) {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "gzip.compress_level: level must be 0..=9, got {}",
+                        level
+                    ),
+                });
+            }
+            let p3c_c_in_bytes = packed_str_to_bytes(
+                &s, 0, s.chars().count(), "gzip.compress_level",
+            )?;
+            let mut encoder =
+                GzEncoder::new(Vec::new(), Compression::new(level as u32));
+            encoder.write_all(&p3c_c_in_bytes).map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("gzip.compress_level: {}", e),
+                }
+            })?;
+            let p3c_c_byte_out = encoder.finish().map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("gzip.compress_level: finish: {}", e),
+                }
+            })?;
+            let p = interp.alloc_string(&bytes_to_packed_str(&p3c_c_byte_out));
+            Ok(p as u64)
+        }
+        NativeFn::GzipDecompress => {
+            use flate2::write::GzDecoder;
+            use std::io::Write;
+            let s = arg_str(args, 0);
+            let p3c_c_in_bytes = packed_str_to_bytes(
+                &s, 0, s.chars().count(), "gzip.decompress",
+            )?;
+            let mut decoder = GzDecoder::new(Vec::new());
+            decoder.write_all(&p3c_c_in_bytes).map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("gzip.decompress: {}", e),
+                }
+            })?;
+            let p3c_c_byte_out = decoder.finish().map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("gzip.decompress: bad data: {}", e),
+                }
+            })?;
+            let p = interp.alloc_string(&bytes_to_packed_str(&p3c_c_byte_out));
+            Ok(p as u64)
+        }
+
+        NativeFn::ZlibCompress => {
+            use flate2::write::ZlibEncoder;
+            use flate2::Compression;
+            use std::io::Write;
+            let s = arg_str(args, 0);
+            let p3c_c_in_bytes = packed_str_to_bytes(
+                &s, 0, s.chars().count(), "zlib.compress",
+            )?;
+            let mut encoder =
+                ZlibEncoder::new(Vec::new(), Compression::new(6));
+            encoder.write_all(&p3c_c_in_bytes).map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("zlib.compress: {}", e),
+                }
+            })?;
+            let p3c_c_byte_out = encoder.finish().map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("zlib.compress: finish: {}", e),
+                }
+            })?;
+            let p = interp.alloc_string(&bytes_to_packed_str(&p3c_c_byte_out));
+            Ok(p as u64)
+        }
+        NativeFn::ZlibCompressLevel => {
+            use flate2::write::ZlibEncoder;
+            use flate2::Compression;
+            use std::io::Write;
+            let s = arg_str(args, 0);
+            let level = arg_i64(args, 1);
+            if !(0..=9).contains(&level) {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "zlib.compress_level: level must be 0..=9, got {}",
+                        level
+                    ),
+                });
+            }
+            let p3c_c_in_bytes = packed_str_to_bytes(
+                &s, 0, s.chars().count(), "zlib.compress_level",
+            )?;
+            let mut encoder =
+                ZlibEncoder::new(Vec::new(), Compression::new(level as u32));
+            encoder.write_all(&p3c_c_in_bytes).map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("zlib.compress_level: {}", e),
+                }
+            })?;
+            let p3c_c_byte_out = encoder.finish().map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("zlib.compress_level: finish: {}", e),
+                }
+            })?;
+            let p = interp.alloc_string(&bytes_to_packed_str(&p3c_c_byte_out));
+            Ok(p as u64)
+        }
+        NativeFn::ZlibDecompress => {
+            use flate2::write::ZlibDecoder;
+            use std::io::Write;
+            let s = arg_str(args, 0);
+            let p3c_c_in_bytes = packed_str_to_bytes(
+                &s, 0, s.chars().count(), "zlib.decompress",
+            )?;
+            let mut decoder = ZlibDecoder::new(Vec::new());
+            decoder.write_all(&p3c_c_in_bytes).map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("zlib.decompress: {}", e),
+                }
+            })?;
+            let p3c_c_byte_out = decoder.finish().map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("zlib.decompress: bad data: {}", e),
+                }
+            })?;
+            let p = interp.alloc_string(&bytes_to_packed_str(&p3c_c_byte_out));
+            Ok(p as u64)
+        }
+        NativeFn::ZlibCrc32 => {
+            // flate2 ships `flate2::Crc` (an IEEE CRC-32 implementation
+            // matching the RFC 1952 / zlib / gzip polynomial).  Output
+            // is a `u32`; we widen to `i64` so callers don't have to
+            // worry about negative values from a sign-bit reinterp.
+            use flate2::Crc;
+            let s = arg_str(args, 0);
+            let p3c_c_in_bytes = packed_str_to_bytes(
+                &s, 0, s.chars().count(), "zlib.crc32",
+            )?;
+            let mut crc = Crc::new();
+            crc.update(&p3c_c_in_bytes);
+            Ok(crc.sum() as i64 as u64)
+        }
+        NativeFn::ZlibAdler32 => {
+            // Hand-rolled Adler-32 (RFC 1950 §9).  About 12 lines and
+            // avoids pulling another crate; runs at native speed for
+            // multi-megabyte buffers.  Identical to Python's
+            // `zlib.adler32(data)` modulo signed/unsigned reinterp.
+            let s = arg_str(args, 0);
+            let p3c_c_in_bytes = packed_str_to_bytes(
+                &s, 0, s.chars().count(), "zlib.adler32",
+            )?;
+            const MOD_ADLER: u32 = 65521;
+            let mut a: u32 = 1;
+            let mut b: u32 = 0;
+            for &byte in &p3c_c_in_bytes {
+                a = (a + byte as u32) % MOD_ADLER;
+                b = (b + a) % MOD_ADLER;
+            }
+            let out: u64 = ((b as u64) << 16) | (a as u64);
+            Ok(out)
+        }
+
+        NativeFn::Bz2Compress => {
+            use bzip2::write::BzEncoder;
+            use bzip2::Compression;
+            use std::io::Write;
+            let s = arg_str(args, 0);
+            let p3c_c_in_bytes = packed_str_to_bytes(
+                &s, 0, s.chars().count(), "bz2.compress",
+            )?;
+            let mut encoder =
+                BzEncoder::new(Vec::new(), Compression::new(6));
+            encoder.write_all(&p3c_c_in_bytes).map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("bz2.compress: {}", e),
+                }
+            })?;
+            let p3c_c_byte_out = encoder.finish().map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("bz2.compress: finish: {}", e),
+                }
+            })?;
+            let p = interp.alloc_string(&bytes_to_packed_str(&p3c_c_byte_out));
+            Ok(p as u64)
+        }
+        NativeFn::Bz2CompressLevel => {
+            use bzip2::write::BzEncoder;
+            use bzip2::Compression;
+            use std::io::Write;
+            let s = arg_str(args, 0);
+            let level = arg_i64(args, 1);
+            if !(1..=9).contains(&level) {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "bz2.compress_level: level must be 1..=9, got {}",
+                        level
+                    ),
+                });
+            }
+            let p3c_c_in_bytes = packed_str_to_bytes(
+                &s, 0, s.chars().count(), "bz2.compress_level",
+            )?;
+            let mut encoder =
+                BzEncoder::new(Vec::new(), Compression::new(level as u32));
+            encoder.write_all(&p3c_c_in_bytes).map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("bz2.compress_level: {}", e),
+                }
+            })?;
+            let p3c_c_byte_out = encoder.finish().map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("bz2.compress_level: finish: {}", e),
+                }
+            })?;
+            let p = interp.alloc_string(&bytes_to_packed_str(&p3c_c_byte_out));
+            Ok(p as u64)
+        }
+        NativeFn::Bz2Decompress => {
+            // Use the *read*-side BzDecoder over an in-memory Cursor.
+            // The write-side BzDecoder buffers bytes that don't yet form
+            // a complete frame and only errors at finish(); on garbage
+            // input it can block indefinitely waiting for the next byte
+            // (the bzip2 C library treats short reads as "more input
+            // needed" rather than as a hard error).  The read-side
+            // wrapper drives the decoder synchronously: `read_to_end`
+            // returns Err the first time the underlying source returns
+            // EOF while the decoder is mid-frame, so malformed inputs
+            // surface as a fast ValueError.
+            use bzip2::read::BzDecoder;
+            use std::io::Read;
+            let s = arg_str(args, 0);
+            let p3c_c_in_bytes = packed_str_to_bytes(
+                &s, 0, s.chars().count(), "bz2.decompress",
+            )?;
+            let mut decoder = BzDecoder::new(std::io::Cursor::new(p3c_c_in_bytes));
+            let mut p3c_c_byte_out = Vec::new();
+            decoder.read_to_end(&mut p3c_c_byte_out).map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("bz2.decompress: bad data: {}", e),
+                }
+            })?;
+            let p = interp.alloc_string(&bytes_to_packed_str(&p3c_c_byte_out));
+            Ok(p as u64)
+        }
 
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),

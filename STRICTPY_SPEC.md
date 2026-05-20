@@ -2691,6 +2691,144 @@ Not in v0.2:
   `re.compile`).
 * No `fnmatch.translate` round-trip back into a glob pattern.
   Translate is one-way.
+### 9.34 Module `gzip` (v0.2 — M27 P3c-C)
+
+gzip-format (RFC 1952) compressor / decompressor over `str`.  Backed
+by the `flate2` crate's `GzEncoder` / `GzDecoder`.
+
+```
+fn compress(data: str)                       -> str
+fn compress_level(data: str, level: i32)     -> str   # level 0..=9
+fn decompress(data: str)                     -> str
+```
+
+**The str-as-byte-buffer convention (binary surface).** All three
+modules in this trio (`gzip`, `zlib`, `bz2`) interpret `str` as a
+buffer of bytes 0..=255 where each byte is one Unicode codepoint
+(C0 + Latin-1).  This is the same convention M22 P2D `struct` adopted:
+`len(buf)` equals the byte count, indexing returns one-byte
+codepoints, and concatenation works at the byte level.  Programs feed
+text in through plain ASCII (each codepoint < 128 is exactly its
+byte value); binary blobs are built codepoint-by-codepoint with
+`chr(b)` where `0 ≤ b ≤ 255`.  Compressed output bytes outside the
+ASCII range are emitted as the corresponding U+0080..U+00FF
+codepoints, so the resulting `str`'s `byte_len` is ≥ the underlying
+byte count — but `len(buf)` is still the byte count.  A real `bytes`
+runtime type is v0.3 work; until then this convention round-trips
+losslessly.
+
+Semantics:
+
+* `compress(data)` runs DEFLATE at level 6 (Python's default), wraps
+  the result in the gzip header / footer (RFC 1952), and emits the
+  bytes as a packed-byte `str`.  Empty input still produces a
+  non-empty result (the gzip header is always written).
+* `compress_level(data, level)` accepts level 0..=9.  0 means
+  "store" (no compression — just gzip framing around the raw
+  bytes); 9 is maximum compression.  Out-of-range levels raise
+  `ValueError`.
+* `decompress(data)` parses the gzip framing and runs DEFLATE
+  inflate.  Malformed input (bad magic, truncated stream, bad CRC,
+  ...) raises `ValueError` with the underlying flate2 error in the
+  message.
+
+What v0.2 does **not** ship:
+
+* Streaming `GzipFile` handle for incremental compression.  Pulls in
+  stdlib-class registration (M20c's deferred work).  v0.3.
+* `mtime` / `filename` header field control.  The encoder emits
+  default values (no filename, mtime = 0); v0.3 may add a tuple-
+  returning helper if a real-world program needs to inspect them.
+* Multi-member gzip streams.  flate2 reads only the first member;
+  `gunzip -c | cat` semantics await v0.3.
+
+### 9.35 Module `zlib` (v0.2 — M27 P3c-C)
+
+Raw zlib-format (RFC 1950) DEFLATE codec — the same algorithm as
+`gzip` minus the gzip header / footer, plus a 2-byte zlib header
+and a 4-byte Adler-32 trailer.  Also exposes the CRC-32 and
+Adler-32 checksum primitives directly.  Backed by `flate2`
+(`ZlibEncoder` / `ZlibDecoder` / `flate2::Crc`).
+
+```
+fn compress(data: str)                       -> str
+fn compress_level(data: str, level: i32)     -> str   # level 0..=9
+fn decompress(data: str)                     -> str
+fn crc32(data: str)                          -> i64
+fn adler32(data: str)                        -> i64
+```
+
+The str-as-byte-buffer convention (see §9.34) applies to the three
+data-shaped entry points and to the two checksum inputs.
+
+Semantics:
+
+* `compress` / `compress_level` / `decompress` mirror the `gzip`
+  variants except the wire format is RFC 1950 (zlib) — about 18
+  fewer bytes of framing than gzip, but the body is identical
+  DEFLATE.  Use `zlib.compress` for embedded protocol data (HTTP
+  `Content-Encoding: deflate`, PNG `IDAT`, git objects); use
+  `gzip.compress` for `.gz` files on disk.
+* `crc32(data)` runs the IEEE CRC-32 polynomial (the same checksum
+  the gzip trailer carries).  Returns a non-negative i64 in
+  0..=0xFFFF_FFFF.  Output matches Python's `zlib.crc32(data)`
+  exactly.  Empty input returns 0.
+* `adler32(data)` runs RFC 1950 §9's Adler-32 over the bytes (the
+  same checksum the zlib trailer carries).  Returns a non-negative
+  i64 in 0..=0xFFFF_FFFF.  Output matches Python's
+  `zlib.adler32(data)`.  Empty input returns 1 (the standard
+  initial state).
+* Returning the checksums as `i64` avoids the
+  signed-vs-unsigned ambiguity that would arise from packing a `u32`
+  into `i32` (the high bit would surface as a negative number on
+  most inputs).  Callers can compare against literal hex constants
+  directly: `if z == 0xCBF43926: ...`.
+
+What v0.2 does **not** ship:
+
+* Streaming `Compress` / `Decompress` handles for incremental work.
+  Same v0.3 stdlib-class blocker as `gzip`.
+* Dictionary-primed compression (RFC 1950 FDICT bit).
+* `decompressobj.flush(Z_SYNC_FLUSH)` for partial flushes — the
+  current API is one-shot only.
+
+### 9.36 Module `bz2` (v0.2 — M27 P3c-C)
+
+bzip2-format (BWT + MTF + RLE + Huffman) compressor / decompressor.
+Backed by the `bzip2` crate.
+
+```
+fn compress(data: str)                       -> str
+fn compress_level(data: str, level: i32)     -> str   # level 1..=9
+fn decompress(data: str)                     -> str
+```
+
+The str-as-byte-buffer convention (see §9.34) applies to all three.
+
+Semantics:
+
+* `compress(data)` runs bzip2 at level 6.  Output is a packed-byte
+  `str` carrying the standard `BZh6` bzip2 header.  Empty input
+  produces a 14-byte "empty bzip2 stream" output.
+* `compress_level(data, level)` accepts level 1..=9.  Note bzip2's
+  level scale differs from gzip / zlib (which use 0..=9): there is
+  no "store" mode.  Out-of-range levels raise `ValueError`.
+* `decompress(data)` runs bzip2 inflate.  Malformed input raises
+  `ValueError`.
+* bzip2 typically yields tighter output than gzip / zlib on text-
+  heavy inputs (English prose, source code, JSON) at the cost of
+  ~5-10x slower compression and ~3-5x slower decompression.  Pick
+  bz2 for archival storage where size dominates time; pick zlib for
+  network protocols where latency dominates.
+
+What v0.2 does **not** ship:
+
+* Streaming `BZ2File` handle.  Same blocker as gzip / zlib.
+* Multi-stream bzip2 input.  The decoder reads the first stream
+  only.
+* Parallel block-level decoding (`lbzip2` / `pbzip2` style).
+  bzip2's block structure makes this tractable in principle; v0.3
+  may add it if a real-world program needs it.
 
 ---
 

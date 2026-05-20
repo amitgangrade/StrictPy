@@ -2899,6 +2899,124 @@ impl Resolver {
             ],
         };
         self.stdlib_modules.insert("fnmatch".into(), fnmatch_mod);
+        // ── M27 P3c-C: `gzip` + `zlib` + `bz2` compression modules ──────
+        // All three follow the str-as-byte-buffer convention (M22 P2D
+        // struct): each `str` codepoint 0..=255 is one byte.  Inputs
+        // are decoded via that convention; outputs (compressed bytes,
+        // decompressed bytes) are re-encoded the same way so a binary
+        // blob can round-trip losslessly without v0.3 `bytes`.
+        //
+        // `gzip` uses RFC 1952 framing; `zlib` uses RFC 1950 (no gzip
+        // header / footer); `bz2` uses the libbzip2 format.  All three
+        // raise `ValueError` on malformed input.
+        const GZIP_COMPRESS: u32         = 500;
+        const GZIP_COMPRESS_LEVEL: u32   = 501;
+        const GZIP_DECOMPRESS: u32       = 502;
+        const ZLIB_COMPRESS: u32         = 503;
+        const ZLIB_COMPRESS_LEVEL: u32   = 504;
+        const ZLIB_DECOMPRESS: u32       = 505;
+        const ZLIB_CRC32: u32            = 506;
+        const ZLIB_ADLER32: u32          = 507;
+        const BZ2_COMPRESS: u32          = 508;
+        const BZ2_COMPRESS_LEVEL: u32    = 509;
+        const BZ2_DECOMPRESS: u32        = 510;
+
+        // i32_ty / i64_ty are in scope from the M20b `time` block above.
+        let gzip_mod = StdlibModule {
+            name: "gzip".into(),
+            items: vec![
+                StdlibItem {
+                    name: "compress".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: GZIP_COMPRESS,
+                },
+                StdlibItem {
+                    name: "compress_level".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), i32_ty.clone()],
+                        str_ty.clone(),
+                    ),
+                    native_id: GZIP_COMPRESS_LEVEL,
+                },
+                StdlibItem {
+                    name: "decompress".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: GZIP_DECOMPRESS,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("gzip".into(), gzip_mod);
+
+        let zlib_mod = StdlibModule {
+            name: "zlib".into(),
+            items: vec![
+                StdlibItem {
+                    name: "compress".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: ZLIB_COMPRESS,
+                },
+                StdlibItem {
+                    name: "compress_level".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), i32_ty.clone()],
+                        str_ty.clone(),
+                    ),
+                    native_id: ZLIB_COMPRESS_LEVEL,
+                },
+                StdlibItem {
+                    name: "decompress".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: ZLIB_DECOMPRESS,
+                },
+                StdlibItem {
+                    name: "crc32".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], i64_ty.clone()),
+                    native_id: ZLIB_CRC32,
+                },
+                StdlibItem {
+                    name: "adler32".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], i64_ty.clone()),
+                    native_id: ZLIB_ADLER32,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("zlib".into(), zlib_mod);
+
+        let bz2_mod = StdlibModule {
+            name: "bz2".into(),
+            items: vec![
+                StdlibItem {
+                    name: "compress".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: BZ2_COMPRESS,
+                },
+                StdlibItem {
+                    name: "compress_level".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), i32_ty.clone()],
+                        str_ty.clone(),
+                    ),
+                    native_id: BZ2_COMPRESS_LEVEL,
+                },
+                StdlibItem {
+                    name: "decompress".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: BZ2_DECOMPRESS,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("bz2".into(), bz2_mod);
     }
 
     // ─────────────────────────────────────────────────────────────────────

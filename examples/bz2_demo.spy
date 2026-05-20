@@ -1,0 +1,68 @@
+"""bz2_demo — M27 P3c-C demo of the stdlib `bz2` module.
+
+Round-trips text through the bzip2 (BWT + RLE + Huffman) compressor.
+bz2 is markedly slower than gzip / zlib but produces tighter output on
+many real-world inputs.
+
+The str-as-byte-buffer convention (STRICTPY_SPEC.md §9.36) treats
+each `str` codepoint 0..=255 as one byte.
+"""
+
+import bz2
+
+fn check(label: str, ok: bool) -> None:
+    if ok:
+        println(label + ": ok")
+    else:
+        println(label + ": FAIL")
+
+fn main() -> i32:
+    # 1. Default-level round-trip.
+    plain: str = "bzip2 uses BWT + RLE + Huffman; it's slower than DEFLATE."
+    compressed: str = bz2.compress(plain)
+    println("plain len: " + str(len(plain)))
+    println("compressed len: " + str(len(compressed)))
+    check("default round-trip", bz2.decompress(compressed) == plain)
+
+    # 2. A highly compressible payload — repeated 'a'.  Kept modest
+    #    (200 bytes) so the test completes inside the default test
+    #    timeout — bzip2 has a constant ~10-30ms per-call setup cost
+    #    on top of the actual work.
+    repeat: str = ""
+    i: i32 = 0
+    while i < 200:
+        repeat = repeat + "a"
+        i = i + 1
+    repeat_z: str = bz2.compress(repeat)
+    check("repeat round-trip", bz2.decompress(repeat_z) == repeat)
+    println("repeat len: " + str(len(repeat)))
+    println("repeat compressed len: " + str(len(repeat_z)))
+    check("repeat compresses smaller", len(repeat_z) < len(repeat))
+
+    # 3. Explicit level 1 and 9 round-trip.  bz2 levels run 1..9.
+    level1: str = bz2.compress_level(repeat, 1)
+    level9: str = bz2.compress_level(repeat, 9)
+    check("level 1 round-trip", bz2.decompress(level1) == repeat)
+    check("level 9 round-trip", bz2.decompress(level9) == repeat)
+
+    # 4. Empty input round-trip.  bzip2 always emits a header.
+    empty_z: str = bz2.compress("")
+    check("empty compresses to non-empty", len(empty_z) > 0)
+    check("empty round-trip", bz2.decompress(empty_z) == "")
+
+    # 5. Malformed input raises ValueError.
+    try:
+        bad: str = bz2.decompress("not bz2 data!!")
+        println("UNREACHED: " + bad)
+    except ValueError as e:
+        println("caught bad bz2")
+
+    # 6. Out-of-range level raises ValueError.
+    try:
+        also_bad: str = bz2.compress_level("x", 0)
+        println("UNREACHED level: " + also_bad)
+    except ValueError as e:
+        println("caught bad level")
+
+    println("done")
+    return 0
