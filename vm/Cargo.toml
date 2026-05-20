@@ -60,6 +60,13 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # and sets restrictive permissions (0o700 dirs, 0o600 files on Unix; ACL'd
 # to the current user on Windows) so user code doesn't need to.
 tempfile = "3"
+# M27 P3c-B: glob + fnmatch stdlib modules.  The `glob` crate ships both
+# pattern matching (`glob::Pattern`) and a directory walker (`glob::glob`
+# / `glob::glob_with`) under a permissive licence; we use the walker for
+# `glob.glob` / `glob.recursive` and the pattern matcher for fnmatch.
+# `fnmatch.translate` is implemented by hand (~30 LOC) — converting a
+# shell-glob to a regex is too small to justify another crate.
+glob = "0.3"
 cranelift = { version = "0.115", optional = true }
 cranelift-jit = { version = "0.115", optional = true }
 cranelift-codegen = { version = "0.115", optional = true }

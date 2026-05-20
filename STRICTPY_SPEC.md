@@ -2472,6 +2472,18 @@ fn move(src: str, dst: str) -> None
 fn rmtree(path: str) -> None
 fn which(cmd: str) -> str?
 fn disk_usage(path: str) -> Tuple[i64, i64, i64]
+### 9.32 Module `glob` (v0.2 — M27 P3c-B)
+
+Unix-shell-style pathname wildcard expansion.  Backed by the `glob`
+crate, which ships both pattern matching (`glob::Pattern`) and a
+directory walker (`glob::glob` / `glob::glob_with`).  Each native
+handler is a thin wrapper — no hand-rolled FSM or directory walker
+lives in the VM.
+
+```
+fn glob(pattern: str) -> List[str]
+fn recursive(pattern: str) -> List[str]
+fn escape(s: str) -> str
 ```
 
 Semantics:
@@ -2577,6 +2589,108 @@ class-shaped context managers, blocked on stdlib-class registration
 and pathlib's `Path`).  Programs that want auto-cleanup-on-scope-exit
 should pair `mkdtemp` / `mkstemp` with `try` / `except` and an
 explicit `shutil.rmtree` / `os.remove` in the cleanup arm.
+* `glob(pattern)` matches paths under the current working directory
+  against `pattern` using shell-style wildcards: `*` matches any
+  run of characters within a single path component, `?` matches a
+  single character, and `[abc]` / `[a-z]` are character classes.
+  Returns a `List[str]` of matching paths, **sorted ascending**.
+  Does NOT recurse into subdirectories — `*` stops at the first
+  path separator.  Returns the empty list (not an error) when no
+  paths match.  Case sensitivity follows the platform's filesystem:
+  Windows is case-insensitive, Unix is case-sensitive.
+* `recursive(pattern)` is `glob(pattern)` with `**` enabled — a
+  `**` segment matches arbitrarily-deep subdirectories.  Equivalent
+  to Python's `glob.glob(pattern, recursive=True)`.  Same sort and
+  case-sensitivity rules.
+* `escape(s)` quotes the glob metacharacters `*`, `?`, and `[` in
+  `s` by wrapping each in a single-character class (so `a*b`
+  becomes `a[*]b`).  Other characters pass through unchanged.  Use
+  this when a literal filename contains a metacharacter and you
+  want to match it exactly.  Matches CPython's `glob.escape`.
+
+Errors:
+
+* `glob` / `recursive` raise `ValueError` on a malformed pattern
+  (unterminated `[`, etc.) — message is `"glob: invalid pattern
+  ...: <crate error>"`.
+* Individual `read_dir` failures for one subdirectory during a walk
+  are silently skipped (matches CPython's behaviour — `glob.glob`
+  doesn't abort on a single permission-denied subtree).
+
+Not in v0.2:
+
+* `glob.iglob` — lazy iterator.  v0.3 work; v0.2 always materialises
+  the full list (programs that need streaming can still cap memory
+  by globbing one subdirectory at a time).
+* `glob.has_magic(s) -> bool` — `True` iff `s` contains glob
+  metacharacters.  Trivial to add; deferred to v0.3 alongside
+  `iglob` so the surface ships in one batch.
+* Tilde / shell-variable expansion (`~`, `$HOME`).  CPython's `glob`
+  doesn't do these either — callers compose with `os.env(...)` and
+  `pathlib.join(...)` instead.
+
+### 9.33 Module `fnmatch` (v0.2 — M27 P3c-B)
+
+Single-string shell-glob matching (no I/O).  Backed by the same
+`glob::Pattern` matcher used by `glob.glob`, so the pattern syntax
+is identical: `*` matches any run of characters, `?` matches one,
+`[abc]` / `[a-z]` are character classes, and `[!abc]` is CPython's
+negated class.
+
+```
+fn fnmatch(name: str, pattern: str) -> bool
+fn fnmatchcase(name: str, pattern: str) -> bool
+fn filter(names: List[str], pattern: str) -> List[str]
+fn translate(pattern: str) -> str
+```
+
+Semantics:
+
+* `fnmatch(name, pattern)` returns `true` iff `name` matches
+  `pattern`.  **Case sensitivity is platform-dependent**, matching
+  CPython: Windows is case-INsensitive, Unix is case-sensitive.
+  Programs that care about portable behaviour should use
+  `fnmatchcase` instead.
+* `fnmatchcase(name, pattern)` is `fnmatch` with case sensitivity
+  forced ON regardless of platform.  This is the recommended form
+  for cross-platform code.
+* `filter(names, pattern)` returns a new `List[str]` containing
+  every element of `names` that matches `pattern`, **in input
+  order**.  Case sensitivity follows `fnmatch` (i.e.
+  platform-dependent).  Empty input list yields an empty result
+  with no allocation overhead.
+* `translate(pattern)` converts a shell-glob pattern into an
+  anchored regex string callers can feed into `re.fullmatch` (or
+  `re.search` since the regex is end-anchored with `\z`).  The
+  output shape is `"(?s:<body>)\z"` where `<body>` has each glob
+  construct rewritten as the regex equivalent:
+    * `*` → `.*`
+    * `?` → `.`
+    * `[abc]` / `[a-z]` → passed through unchanged
+    * `[!abc]` → `[^abc]` (CPython's negation translates to regex)
+    * Regex metacharacters in literal positions (`.`, `^`, `$`, `+`,
+      `(`, `)`, `|`, `{`, `}`, `\`) are backslash-escaped.
+  The `(?s:...)` group enables dot-matches-newline so `*` truly is
+  "any character".  The `\z` end anchor is the Rust `regex` crate's
+  end-of-input assertion (CPython uses `\Z`; the semantic is the
+  same for `re.fullmatch`).
+
+Errors:
+
+* `fnmatch` / `fnmatchcase` / `filter` / `translate` raise
+  `ValueError` on a malformed pattern (unterminated `[`, etc.)
+  — message `"fnmatch: invalid pattern ...: <crate error>"`.
+  CPython raises `re.error` from `translate`; we keep `ValueError`
+  for surface consistency with the rest of the v0.2 stdlib.
+
+Not in v0.2:
+
+* No precompiled-pattern handle.  Every call re-parses the pattern.
+  For tight loops over a fixed pattern, the `glob::Pattern`-cache
+  optimisation is v0.3 work (same shape as the deferred
+  `re.compile`).
+* No `fnmatch.translate` round-trip back into a glob pattern.
+  Translate is one-way.
 
 ---
 

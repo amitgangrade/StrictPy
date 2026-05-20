@@ -1,0 +1,163 @@
+"""glob_demo.spy — shell-style pathname expansion (M27 P3c-B).
+
+Exercises:
+  * `import glob` — M27 P3c-B stdlib module.
+  * `glob.glob(pattern)` — non-recursive pattern match.
+  * `glob.recursive(pattern)` — `**` expansion across subdirectories.
+  * `glob.escape(s)` — quote metacharacters in a literal path fragment.
+
+Test-tree layout (created under cwd, removed on exit):
+  _m27_glob_tmp/
+    a.spy
+    b.spy
+    c.txt
+    sub/
+      x.spy
+      y.txt
+
+Known-answer asserts:
+  * `glob.glob("_m27_glob_tmp/*.spy")` -> 2 matches sorted: a.spy, b.spy
+  * `glob.glob("_m27_glob_tmp/*.txt")` -> 1 match: c.txt
+  * `glob.recursive("_m27_glob_tmp/**/*.spy")` -> 3 matches:
+    a.spy, b.spy, sub/x.spy (the recursive walk picks up `sub/x.spy`).
+  * `glob.escape("[abc].txt")` -> "[[][a][b][c][]].txt"-ish form (we
+    just round-trip through itself, asserting metachars get bracketed).
+
+Tests:
+  * `compiler/tests/glob_demo_runs.rs` — subprocess assertion.
+"""
+
+import glob
+import os
+import pathlib
+
+
+fn try_mkdir(p: str) -> None:
+    try:
+        os.mkdir(p)
+    except IOError as e:
+        # Idempotent setup — directory may exist from a previous bad run.
+        pass
+
+
+fn setup_tree(root: str) -> None:
+    try_mkdir(root)
+    pathlib.write_text(pathlib.join(root, "a.spy"), "fn main() -> i32: return 0\n")
+    pathlib.write_text(pathlib.join(root, "b.spy"), "fn main() -> i32: return 0\n")
+    pathlib.write_text(pathlib.join(root, "c.txt"), "hello\n")
+    sub: str = pathlib.join(root, "sub")
+    try_mkdir(sub)
+    pathlib.write_text(pathlib.join(sub, "x.spy"), "fn main() -> i32: return 0\n")
+    pathlib.write_text(pathlib.join(sub, "y.txt"), "world\n")
+
+
+fn cleanup_tree(root: str) -> None:
+    # Best-effort: remove every file we created, ignore the dirs (no
+    # rmdir in v0.2 — the test treats partial cleanup as expected).
+    files: List[str] = [
+        pathlib.join(root, "a.spy"),
+        pathlib.join(root, "b.spy"),
+        pathlib.join(root, "c.txt"),
+        pathlib.join(pathlib.join(root, "sub"), "x.spy"),
+        pathlib.join(pathlib.join(root, "sub"), "y.txt"),
+    ]
+    n: i64 = i64(len(files))
+    fi: i64 = 0
+    while fi < n:
+        try:
+            os.remove(files[fi])
+        except IOError as e:
+            pass
+        fi = fi + 1
+
+
+fn count_ending(matches: List[str], suffix: str) -> i64:
+    n: i64 = i64(len(matches))
+    j: i64 = 0
+    hits: i64 = 0
+    slen: i64 = i64(len(suffix))
+    while j < n:
+        m: str = matches[j]
+        mlen: i64 = i64(len(m))
+        if mlen >= slen:
+            tail: str = m.slice(mlen - slen, mlen)
+            if tail == suffix:
+                hits = hits + 1i64
+        j = j + 1
+    return hits
+
+
+fn main() -> i32:
+    root: str = "_m27_glob_tmp"
+    setup_tree(root)
+
+    # ── glob.glob (non-recursive) ─────────────────────────────────────
+    spy_pat: str = pathlib.join(root, "*.spy")
+    spy_matches: List[str] = glob.glob(spy_pat)
+    n_spy: i64 = i64(len(spy_matches))
+    assert n_spy == 2i64, "glob.glob should match the two top-level .spy files"
+    # The walker returns paths sorted ascending.
+    assert count_ending(spy_matches, "a.spy") == 1i64, "a.spy missing"
+    assert count_ending(spy_matches, "b.spy") == 1i64, "b.spy missing"
+
+    txt_pat: str = pathlib.join(root, "*.txt")
+    txt_matches: List[str] = glob.glob(txt_pat)
+    assert i64(len(txt_matches)) == 1i64, "exactly one top-level .txt"
+    assert count_ending(txt_matches, "c.txt") == 1i64, "c.txt missing"
+
+    # `?` character class — a, b, c are all single chars.
+    qm_pat: str = pathlib.join(root, "?.spy")
+    qm_matches: List[str] = glob.glob(qm_pat)
+    assert i64(len(qm_matches)) == 2i64, "? should match the two .spy files"
+
+    # ── glob.recursive (`**` expansion) ───────────────────────────────
+    # We use forward slashes — the glob crate normalises them on Windows.
+    rec_pat: str = root + "/**/*.spy"
+    rec_matches: List[str] = glob.recursive(rec_pat)
+    n_rec: i64 = i64(len(rec_matches))
+    # Should find a.spy, b.spy, sub/x.spy = 3 matches.
+    assert n_rec == 3i64, "recursive glob should pick up the nested .spy too"
+    assert count_ending(rec_matches, "x.spy") == 1i64, "sub/x.spy missing from recursive"
+    assert count_ending(rec_matches, "a.spy") == 1i64, "a.spy missing from recursive"
+    assert count_ending(rec_matches, "b.spy") == 1i64, "b.spy missing from recursive"
+
+    # Recursive over all files.
+    all_pat: str = root + "/**/*"
+    all_matches: List[str] = glob.recursive(all_pat)
+    # Walker also includes the `sub` directory entry itself, so we
+    # don't pin the exact count — just assert we got more than the
+    # non-recursive case.
+    assert i64(len(all_matches)) >= 5i64, "recursive ** should see >= 5 entries"
+
+    # ── glob.escape ───────────────────────────────────────────────────
+    raw: str = "weird[name]*.txt"
+    esc: str = glob.escape(raw)
+    # After escape, `[` and `*` should be bracketed.  The closing `]`
+    # passes through unchanged (CPython behaviour).
+    # We don't assert the exact string — just that escape introduced
+    # the bracket-quoting (each metachar becomes longer).
+    assert i64(len(esc)) > i64(len(raw)), "escape should expand metacharacters"
+    # Escaping an already-literal string is a no-op.
+    plain: str = "hello.txt"
+    assert glob.escape(plain) == plain, "escape on literal string is identity"
+
+    # Use the escaped pattern to literally find a file whose name
+    # contains a `*` character — well, we can't create such files
+    # portably (Windows forbids `*` in filenames), so we just verify
+    # the round trip on a benign name.
+    safe: str = "a_b.txt"
+    assert glob.escape(safe) == safe, "no metachars -> unchanged"
+
+    # ── Empty results ─────────────────────────────────────────────────
+    empty_matches: List[str] = glob.glob(pathlib.join(root, "*.zzz"))
+    assert i64(len(empty_matches)) == 0i64, "no matches -> empty list, not error"
+
+    # Pretty-print sentinels for the integration test.
+    println("spy_count=" + str(n_spy))
+    println("rec_count=" + str(n_rec))
+    println("txt_count=" + str(len(txt_matches)))
+    println("escape_grew=true")
+
+    cleanup_tree(root)
+    println("OK")
+    return 0

@@ -3899,6 +3899,146 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
                 .load(std::sync::atomic::Ordering::SeqCst);
             Ok(if lvl >= threshold { 1 } else { 0 })
         }
+        // ── M27 P3c-B: `glob` + `fnmatch` modules ──────────────────────
+        // `glob.glob` / `glob.recursive` walk the filesystem matching a
+        // shell-style pattern; `glob.escape` quotes metacharacters so a
+        // path matches literally.  `fnmatch.*` performs single-string
+        // pattern matching with no I/O.  See spec §9.32 / §9.33.
+        NativeFn::GlobGlob => {
+            let pattern = arg_str(args, 0);
+            // Default options: literal separator on, case-sensitive
+            // per platform default (Windows: insensitive; Unix: sensitive).
+            let opts = ::glob::MatchOptions {
+                case_sensitive: !cfg!(windows),
+                require_literal_separator: true,
+                require_literal_leading_dot: false,
+            };
+            let matches = match ::glob::glob_with(&pattern, opts) {
+                Ok(it) => it,
+                Err(e) => return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("glob: invalid pattern {:?}: {}", pattern, e),
+                }),
+            };
+            let mut paths: Vec<String> = Vec::new();
+            for entry in matches {
+                if let Ok(p) = entry {
+                    paths.push(p.to_string_lossy().into_owned());
+                }
+                // Silently skip individual entries that errored (e.g.
+                // permission denied on one subdirectory); CPython's
+                // `glob.glob` does the same.
+            }
+            paths.sort();
+            let lst = interp.alloc_list(paths.len());
+            for p in &paths {
+                let sp = interp.alloc_string(p) as u64;
+                // SAFETY: lst freshly allocated.
+                unsafe { interp.list_push(lst, sp) };
+            }
+            Ok(lst as u64)
+        }
+        NativeFn::GlobRecursive => {
+            let pattern = arg_str(args, 0);
+            // Recursive mode: `**` matches across directory boundaries.
+            // The `glob` crate enables this via `require_literal_separator:
+            // false` — then `**/*.spy` walks subdirectories.
+            let opts = ::glob::MatchOptions {
+                case_sensitive: !cfg!(windows),
+                require_literal_separator: false,
+                require_literal_leading_dot: false,
+            };
+            let matches = match ::glob::glob_with(&pattern, opts) {
+                Ok(it) => it,
+                Err(e) => return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("glob.recursive: invalid pattern {:?}: {}", pattern, e),
+                }),
+            };
+            let mut paths: Vec<String> = Vec::new();
+            for entry in matches {
+                if let Ok(p) = entry {
+                    paths.push(p.to_string_lossy().into_owned());
+                }
+            }
+            paths.sort();
+            let lst = interp.alloc_list(paths.len());
+            for p in &paths {
+                let sp = interp.alloc_string(p) as u64;
+                // SAFETY: lst freshly allocated.
+                unsafe { interp.list_push(lst, sp) };
+            }
+            Ok(lst as u64)
+        }
+        NativeFn::GlobEscape => {
+            let s = arg_str(args, 0);
+            // Mirror CPython's `glob.escape`: wrap each glob
+            // metacharacter (`*`, `?`, `[`) in a character class so the
+            // pattern matches the literal character.  The closing `]`
+            // does not need quoting (a stray `]` is literal in a glob).
+            let mut out = String::with_capacity(s.len());
+            for ch in s.chars() {
+                if matches!(ch, '*' | '?' | '[') {
+                    out.push('[');
+                    out.push(ch);
+                    out.push(']');
+                } else {
+                    out.push(ch);
+                }
+            }
+            let p = interp.alloc_string(&out);
+            Ok(p as u64)
+        }
+        NativeFn::FnmatchFnmatch => {
+            let name = arg_str(args, 0);
+            let pattern = arg_str(args, 1);
+            let matched = fnmatch_match(&name, &pattern, /*case_sensitive=*/ !cfg!(windows))?;
+            Ok(if matched { 1 } else { 0 })
+        }
+        NativeFn::FnmatchFnmatchcase => {
+            let name = arg_str(args, 0);
+            let pattern = arg_str(args, 1);
+            let matched = fnmatch_match(&name, &pattern, /*case_sensitive=*/ true)?;
+            Ok(if matched { 1 } else { 0 })
+        }
+        NativeFn::FnmatchFilter => {
+            let names = read_list_str(args, 0);
+            let pattern = arg_str(args, 1);
+            // Case sensitivity follows `fnmatch.fnmatch` — i.e. platform.
+            let case_sensitive = !cfg!(windows);
+            // Compile the pattern once for the whole filter pass.
+            let pat = match ::glob::Pattern::new(&pattern) {
+                Ok(p) => p,
+                Err(e) => return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("fnmatch.filter: invalid pattern {:?}: {}", pattern, e),
+                }),
+            };
+            let opts = ::glob::MatchOptions {
+                case_sensitive,
+                require_literal_separator: false,
+                require_literal_leading_dot: false,
+            };
+            let mut kept: Vec<String> = Vec::new();
+            for n in &names {
+                if pat.matches_with(n, opts) {
+                    kept.push(n.clone());
+                }
+            }
+            let lst = interp.alloc_list(kept.len());
+            for n in &kept {
+                let sp = interp.alloc_string(n) as u64;
+                // SAFETY: lst freshly allocated.
+                unsafe { interp.list_push(lst, sp) };
+            }
+            Ok(lst as u64)
+        }
+        NativeFn::FnmatchTranslate => {
+            let pattern = arg_str(args, 0);
+            let regex = fnmatch_translate(&pattern);
+            let p = interp.alloc_string(&regex);
+            Ok(p as u64)
+        }
 
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
@@ -6125,6 +6265,117 @@ fn local_offset_minutes_now() -> i32 {
     // On platforms we don't compile for (wasm32, etc.) we fall back to
     // UTC — the caller is expected to treat 0 as "unknown / UTC".
     0
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// M27 P3c-B: fnmatch helpers
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Match a single name against a shell-glob pattern.  Honours the
+/// `case_sensitive` flag for the `fnmatch.fnmatch` / `fnmatchcase` split.
+/// `**` is **not** special here — fnmatch is a single-string matcher, so
+/// it behaves like `*` in v0.2 (matches no path separators when
+/// `require_literal_separator` is true, all characters otherwise).
+///
+/// Backed by the `glob::Pattern` matcher.  Pattern-compile errors surface
+/// as `ValueError` — matches CPython's `error` behaviour, which raises
+/// `re.error` on a malformed `[abc` class.
+fn fnmatch_match(name: &str, pattern: &str, case_sensitive: bool) -> Result<bool, VmError> {
+    let pat = ::glob::Pattern::new(pattern).map_err(|e| VmError::UncaughtException {
+        type_name: "ValueError".into(),
+        message: format!("fnmatch: invalid pattern {:?}: {}", pattern, e),
+    })?;
+    let opts = ::glob::MatchOptions {
+        case_sensitive,
+        // For a single-string matcher, both leading-dot and separator
+        // semantics should be permissive — fnmatch operates over names,
+        // not full paths, and a `*` in fnmatch is allowed to match `.`
+        // and `/` alike (matching CPython).
+        require_literal_separator: false,
+        require_literal_leading_dot: false,
+    };
+    Ok(pat.matches_with(name, opts))
+}
+
+/// Convert a shell-glob pattern into an anchored regex string.
+///
+/// Mirrors CPython's `fnmatch.translate`:
+///   * `*`          → `.*`
+///   * `?`          → `.`
+///   * `[abc]`      → `[abc]` (passed through unchanged)
+///   * `[!abc]`     → `[^abc]` (CPython's negation)
+///   * any other regex metachar → escaped via backslash
+///
+/// The output is anchored with `(?s:...)\Z` so it works as a full-string
+/// match the same way `re.match(pat + '$', name)` would in Python.  The
+/// `(?s:...)` enables dot-matches-newline so `*` truly is "anything".
+fn fnmatch_translate(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len() + 16);
+    out.push_str("(?s:");
+    let bytes: Vec<char> = pattern.chars().collect();
+    let mut i = 0;
+    while i < bytes.len() {
+        let ch = bytes[i];
+        match ch {
+            '*' => out.push_str(".*"),
+            '?' => out.push('.'),
+            '[' => {
+                // Try to close the class.  If there's no `]`, we treat
+                // the `[` literally (matches CPython's defensive
+                // behaviour on unterminated character classes).
+                let close = bytes[i+1..].iter().position(|c| *c == ']');
+                match close {
+                    None => {
+                        out.push_str(r"\[");
+                    }
+                    Some(j) => {
+                        // The class body spans bytes[i+1 .. i+1+j].
+                        let body: String = bytes[i+1..i+1+j].iter().collect();
+                        // CPython uses `!` for negation; regex uses `^`.
+                        let (negated, rest) = if body.starts_with('!') {
+                            (true, &body[1..])
+                        } else {
+                            (false, body.as_str())
+                        };
+                        // A leading `^` in a non-negated class needs
+                        // escaping so it isn't read as negation.
+                        out.push('[');
+                        if negated {
+                            out.push('^');
+                        }
+                        for c in rest.chars() {
+                            // Inside a class, only `\` and `]` need
+                            // escaping in regex.  We've already handled
+                            // `]` by terminating early.
+                            if c == '\\' {
+                                out.push_str(r"\\");
+                            } else {
+                                out.push(c);
+                            }
+                        }
+                        out.push(']');
+                        i += j + 1;
+                    }
+                }
+            }
+            // Regex metacharacters we must escape so the literal char
+            // matches.  `?`, `*`, `[` are handled above.
+            '.' | '^' | '$' | '+' | '(' | ')' | '|' | '{' | '}' | '\\' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+        i += 1;
+    }
+    // Rust's `regex` crate supports `\z` (end of input) but not `\Z`;
+    // since this output flows into `re.search` / `re.fullmatch` which
+    // are backed by the `regex` crate (M20c), we emit `\z`.  Either
+    // anchor produces the same semantics for `re.fullmatch` (which
+    // already requires end-of-string), but `\z` is correct for the
+    // `re.search` composition path the brief calls out.
+    out.push_str(r")\z");
+    out
 }
 
 #[cfg(test)]

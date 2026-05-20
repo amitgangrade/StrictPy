@@ -966,6 +966,42 @@ pub enum NativeFn {
     // 473-479 reserved (NamedTemporaryFile, SpooledTemporaryFile,
     // TemporaryDirectory context-manager wrapper — all need v0.3
     // stdlib classes).
+    // ── 480-499: `glob` + `fnmatch` modules (M27 P3c-B) ─────────────────
+    // Unix-shell-style wildcard expansion (`glob`) and single-string
+    // wildcard matching (`fnmatch`).  Backed by the `glob` crate (which
+    // provides both pattern matching and directory walking) so the v0.2
+    // surface is "ship a thin native handler per spec function" — no
+    // hand-rolled FSM.  `fnmatch.translate` converts a shell-glob to a
+    // regex string so callers can compose with `re` (M20c).
+    //
+    // Case-sensitivity follows CPython: `fnmatch.fnmatch` is
+    // case-INsensitive on Windows / sensitive on Unix; `fnmatchcase` is
+    // always sensitive.  `glob.glob` mirrors the platform's filesystem
+    // case-sensitivity (Windows: case-insensitive, Unix: sensitive).
+    /// `glob.glob(pattern: str) -> List[str]` — non-recursive paths
+    /// matching a `*`/`?`/`[abc]` pattern, sorted ascending.
+    GlobGlob              = 480,
+    /// `glob.recursive(pattern: str) -> List[str]` — like `glob.glob`
+    /// but `**` matches arbitrarily-deep subdirectories.
+    GlobRecursive         = 481,
+    /// `glob.escape(s: str) -> str` — escape glob metacharacters in `s`
+    /// so it matches literally (`[` becomes `[[]`, `*` → `[*]`, etc.).
+    GlobEscape            = 482,
+    /// `fnmatch.fnmatch(name: str, pattern: str) -> bool` — shell-glob
+    /// match.  Case-INsensitive on Windows; case-sensitive on Unix.
+    FnmatchFnmatch        = 483,
+    /// `fnmatch.fnmatchcase(name: str, pattern: str) -> bool` — always
+    /// case-sensitive, regardless of platform.
+    FnmatchFnmatchcase    = 484,
+    /// `fnmatch.filter(names: List[str], pattern: str) -> List[str]` —
+    /// keep only names matching `pattern`, preserving input order.
+    /// Case sensitivity follows `fnmatch.fnmatch` (i.e. platform-dependent).
+    FnmatchFilter         = 485,
+    /// `fnmatch.translate(pattern: str) -> str` — convert a shell-glob
+    /// pattern into an anchored regex string suitable for `re.match`.
+    FnmatchTranslate      = 486,
+    // 487-499 reserved for v0.3 (e.g. recursive variants of fnmatch,
+    // `glob.iglob` lazy iterator, `glob.has_magic`).
 
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
@@ -1307,6 +1343,14 @@ impl NativeFn {
             558 => Some(Self::LoggingCritical),
             559 => Some(Self::LoggingLog),
             560 => Some(Self::LoggingIsEnabledFor),
+            // M27 P3c-B: glob + fnmatch modules (480-486).
+            480 => Some(Self::GlobGlob),
+            481 => Some(Self::GlobRecursive),
+            482 => Some(Self::GlobEscape),
+            483 => Some(Self::FnmatchFnmatch),
+            484 => Some(Self::FnmatchFnmatchcase),
+            485 => Some(Self::FnmatchFilter),
+            486 => Some(Self::FnmatchTranslate),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

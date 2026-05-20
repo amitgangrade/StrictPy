@@ -2820,6 +2820,85 @@ impl Resolver {
             ],
         };
         self.stdlib_modules.insert("logging".into(), logging_mod);
+        // ── M27 P3c-B: `glob` module ───────────────────────────────────
+        // Unix-shell-style pathname wildcard expansion.  Backed by the
+        // `glob` crate so we ship a thin native handler per spec function
+        // — no hand-rolled directory walker.  All three functions take
+        // primitive `str` / return `str` or `List[str]`, matching the
+        // CPython `glob` surface.  See spec §9.32.
+        const GLOB_GLOB: u32      = 480;
+        const GLOB_RECURSIVE: u32 = 481;
+        const GLOB_ESCAPE: u32    = 482;
+
+        let glob_mod = StdlibModule {
+            name: "glob".into(),
+            items: vec![
+                StdlibItem {
+                    name: "glob".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], list_str_ty.clone()),
+                    native_id: GLOB_GLOB,
+                },
+                StdlibItem {
+                    name: "recursive".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], list_str_ty.clone()),
+                    native_id: GLOB_RECURSIVE,
+                },
+                StdlibItem {
+                    name: "escape".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: GLOB_ESCAPE,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("glob".into(), glob_mod);
+
+        // ── M27 P3c-B: `fnmatch` module ────────────────────────────────
+        // Single-string wildcard match (`*`, `?`, `[abc]`).
+        // `fnmatch.fnmatch` is case-INsensitive on Windows / sensitive on
+        // Unix to match CPython; `fnmatchcase` is always case-sensitive.
+        // `translate` converts a shell-glob into a regex string callers
+        // can feed into `re` (M20c) for composition.  See spec §9.33.
+        const FNMATCH_FNMATCH: u32     = 483;
+        const FNMATCH_FNMATCHCASE: u32 = 484;
+        const FNMATCH_FILTER: u32      = 485;
+        const FNMATCH_TRANSLATE: u32   = 486;
+
+        let fnmatch_mod = StdlibModule {
+            name: "fnmatch".into(),
+            items: vec![
+                StdlibItem {
+                    name: "fnmatch".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone(), str_ty.clone()], bool_ty.clone()),
+                    native_id: FNMATCH_FNMATCH,
+                },
+                StdlibItem {
+                    name: "fnmatchcase".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone(), str_ty.clone()], bool_ty.clone()),
+                    native_id: FNMATCH_FNMATCHCASE,
+                },
+                StdlibItem {
+                    name: "filter".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![list_str_ty.clone(), str_ty.clone()],
+                        list_str_ty.clone(),
+                    ),
+                    native_id: FNMATCH_FILTER,
+                },
+                StdlibItem {
+                    name: "translate".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: FNMATCH_TRANSLATE,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("fnmatch".into(), fnmatch_mod);
     }
 
     // ─────────────────────────────────────────────────────────────────────

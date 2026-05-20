@@ -1,0 +1,88 @@
+"""fnmatch_demo.spy — single-string shell-glob matching (M27 P3c-B).
+
+Exercises:
+  * `import fnmatch` — M27 P3c-B stdlib module.
+  * `fnmatch.fnmatch(name, pattern)` — platform-dependent case sensitivity.
+  * `fnmatch.fnmatchcase(name, pattern)` — always case-sensitive.
+  * `fnmatch.filter(names, pattern)` — order-preserving list filter.
+  * `fnmatch.translate(pattern)` — convert to regex string.
+
+Known-answer asserts cover:
+  * basic `*` / `?` / `[abc]` patterns
+  * fnmatchcase guarantees case sensitivity
+  * filter preserves input order
+  * translate produces a regex that round-trips through re.match
+"""
+
+import fnmatch
+import re
+
+
+fn main() -> i32:
+    # ── Basic matches ────────────────────────────────────────────────
+    assert fnmatch.fnmatchcase("hello.txt", "*.txt"), "*.txt matches hello.txt"
+    assert not fnmatch.fnmatchcase("hello.bin", "*.txt"), "*.txt rejects .bin"
+    assert fnmatch.fnmatchcase("a", "?"), "? matches single char"
+    assert not fnmatch.fnmatchcase("ab", "?"), "? does not match two chars"
+    assert fnmatch.fnmatchcase("file1", "file[0-9]"), "char class matches digit"
+    assert not fnmatch.fnmatchcase("filea", "file[0-9]"), "char class rejects letter"
+
+    # ── Case sensitivity contract ────────────────────────────────────
+    # fnmatchcase is ALWAYS case-sensitive.
+    assert fnmatch.fnmatchcase("Hello", "Hello"), "exact match case-sensitive"
+    assert not fnmatch.fnmatchcase("hello", "Hello"), "case-sensitive rejects"
+    assert not fnmatch.fnmatchcase("HELLO.TXT", "*.txt"), "upper.TXT does not match *.txt under fnmatchcase"
+    # fnmatch is platform-dependent — we don't assert direction (the
+    # test would have to know the host OS), but we assert the contract
+    # that it always returns the same answer on the same input.
+    a1: bool = fnmatch.fnmatch("HELLO.TXT", "*.txt")
+    a2: bool = fnmatch.fnmatch("HELLO.TXT", "*.txt")
+    assert a1 == a2, "fnmatch is deterministic"
+
+    # ── filter preserves input order ─────────────────────────────────
+    names: List[str] = ["zeta.spy", "alpha.txt", "beta.spy", "gamma.txt", "delta.spy"]
+    spy_only: List[str] = fnmatch.filter(names, "*.spy")
+    assert i64(len(spy_only)) == 3i64, "three .spy files in input"
+    assert spy_only[0] == "zeta.spy", "filter preserves zeta first"
+    assert spy_only[1] == "beta.spy", "filter preserves beta second"
+    assert spy_only[2] == "delta.spy", "filter preserves delta third"
+
+    # filter with no matches returns empty list.
+    nope: List[str] = fnmatch.filter(names, "*.xyz")
+    assert i64(len(nope)) == 0i64, "no matches -> empty filter result"
+
+    # filter with empty input list returns empty.
+    empty_in: List[str] = []
+    empty_out: List[str] = fnmatch.filter(empty_in, "*")
+    assert i64(len(empty_out)) == 0i64, "empty input -> empty output"
+
+    # ── translate produces a usable regex ────────────────────────────
+    # `*.txt` -> regex that matches anything ending in .txt.
+    pat_re: str = fnmatch.translate("*.txt")
+    # The exact form is implementation-defined (CPython prefixes with
+    # `(?s:` and suffixes with `)\Z`); we just verify the *result*
+    # matches under `re.match`.
+    assert re.fullmatch(pat_re, "hello.txt"), "translated pattern matches hello.txt"
+    assert re.fullmatch(pat_re, "x.txt"), "translated pattern matches x.txt"
+    assert not re.fullmatch(pat_re, "x.bin"), "translated pattern rejects x.bin"
+
+    # `?` translates to a single-char match.
+    qm_re: str = fnmatch.translate("file?")
+    assert re.fullmatch(qm_re, "file1"), "translated ? matches single digit"
+    assert re.fullmatch(qm_re, "filea"), "translated ? matches single letter"
+    assert not re.fullmatch(qm_re, "file"), "translated ? requires a char"
+    assert not re.fullmatch(qm_re, "file12"), "translated ? requires exactly one char"
+
+    # `[abc]` character class round-trip.
+    cc_re: str = fnmatch.translate("file[ab]")
+    assert re.fullmatch(cc_re, "filea"), "translated [ab] matches a"
+    assert re.fullmatch(cc_re, "fileb"), "translated [ab] matches b"
+    assert not re.fullmatch(cc_re, "filec"), "translated [ab] rejects c"
+
+    # Dot in the pattern is a *literal* dot, not regex-any.
+    dot_re: str = fnmatch.translate("x.txt")
+    assert re.fullmatch(dot_re, "x.txt"), "literal dot matches"
+    assert not re.fullmatch(dot_re, "xytxt"), "literal dot does not match arbitrary char"
+
+    println("OK")
+    return 0
