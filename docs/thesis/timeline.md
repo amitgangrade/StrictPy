@@ -1117,6 +1117,111 @@ No language/compiler changes; new pure-bench infrastructure only.
 
 ---
 
+## M32 + M33 — async I/O + precise GC stack maps (2026-05-21)
+
+The second and third v0.3 features per THESIS.md §8.4 priority list,
+shipped in parallel as two independent worktree agents on disjoint
+VM subsystems. **First parallel-v0.3-agent round; zero cherry-pick
+conflicts at integration.**
+
+### M32 — async I/O (Shape A: thread-backed Future façade)
+
+Adds a complete async API surface with thread-backed implementation.
+v0.4 will swap the internals for a real mio/polling event loop
+without changing the public surface.
+
+- New `asyncio` stdlib module (NativeFn IDs 700-714): `run_i32` /
+  `run_unit` / `spawn_{i32,i64,str,bool,unit}` / `sleep` /
+  `gather_{2,3,4}_{i32,str}`
+- New `Future[T]` as a `TypeCtor` (joining `Channel`/`Atomic`/`Dict`/
+  `List`) with special-cased `.await()` / `.is_ready()` dispatch.
+  Agent's design call: did NOT use M31's user-defined-generic-class
+  machinery — ~25 LOC of TypeCtor wiring vs the full M31
+  monomorphisation worklist. Same shape as existing stdlib generic
+  types.
+- New async-variant socket functions (IDs 720-722): `async_accept`,
+  `async_recv`, `async_send` returning `Future[...]`
+- Demo: `examples/async_echo_server.spy` (~115 LOC) composes 5+ async
+  primitives. Integration test verifies 3 concurrent clients.
+- Internal: `SharedVm.futures` slot table with
+  `Mutex<FutureState>` + `Condvar` per slot; spawned OS thread fills
+  the slot on completion; `Future.await()` blocks on the Condvar.
+- 9 new tests (7 VM + 2 compiler integration), all green.
+
+### M33 — precise GC stack maps (shadow-stack fallback)
+
+Replaces the M9 `in_jit: AtomicUsize` "freeze GC during JIT'd
+execution" pause with a per-thread shadow-stack approach that lets
+the collector see register-resident pointers in JIT'd frames.
+
+- Shape: shadow-stack fallback, not full Cranelift `enable_safepoints`
+  (the brief's STOP CRITERIA explicitly authorized this scope-down
+  — Cranelift's safepoint API requires walking JIT'd Rust frames
+  and correlating PC offsets against MachBufferFinalized ranges that
+  `cranelift-jit 0.115` doesn't expose stably).
+- New `vm/src/stackmap_registry.rs`: thread-local `Vec<(buf, len)>`
+  with `rt_shadow_push` / `rt_shadow_pop` extern "C" helpers callable
+  from JIT'd code.
+- `vm/src/jit.rs`: each JIT'd function allocates a per-function
+  Cranelift stack slot sized to its register file. Before every
+  heap-allocating runtime helper (`rt_alloc`, `rt_list_*`,
+  `rt_array_new`, `rt_virtual_call`, `CallDirect`, etc.) the JIT
+  spills every register variable into the slot and pushes the window;
+  pops after the helper returns.
+- `Heap::collect` consults the shadow stack windows for precise root
+  enumeration in JIT'd frames.
+- The `in_jit: AtomicUsize` field, its bracket calls in
+  `op_call_direct`, and the early-return in `maybe_collect` are all
+  removed.
+- 4 new tests (vm/tests/m33_precise_gc.rs) — including the M26
+  `btree` shape (recursive 5,000-allocation workload).
+
+### Why M32 + M33 in parallel worked
+
+Both agents launched from the same pre-M32 base (893326a) and were
+explicitly briefed to avoid each other's territory:
+
+- M32 owned `asyncio`/`socket` natives, `Future` TypeCtor, parser
+  tweak for `.await()` as method name, `SharedVm.futures` slot table
+- M33 owned `vm/src/{gc,jit,stackmap_registry}.rs`, removed
+  `SharedVm.in_jit` field
+
+The shared files (`vm/src/interp.rs`, `vm/src/lib.rs`) had
+orthogonal additions vs. removals — M32 added `SharedVm.futures`,
+M33 removed `SharedVm.in_jit`. Git's three-way merge resolved them
+automatically; **zero manual edits** at cherry-pick time, the
+cleanest parallel-agent integration in project history.
+
+### Lesson 1 streak now at 13 consecutive clean agents
+
+(M28 + M28.5 + M29 + M29.5 + M30×2 + M31 + M32 + M33). The
+strengthened brief language has now produced 13 clean commits
+across 4 calendar days with zero orchestrator-commit-on-behalf
+interventions needed.
+
+### Tests + size
+
+- Tests: 664 → 677 (+13: 9 from M32 + 4 from M33).
+- Examples: +1 (`async_echo_server.spy`).
+- Stdlib modules: 36 → 37 (asyncio).
+- Bug catalogue: unchanged at 35/35/0 — no new bugs found in either
+  round.
+
+### What this means for the v0.3 trajectory
+
+After M31 + M32 + M33, the top three items of the v0.3 priority list
+are complete. The v0.4 menu now reads:
+- Real Cranelift safepoint stack maps (replaces M33's shadow stack)
+- Real mio-based event loop (replaces M32's thread façade)
+- Bounded generics, variance, HKT, explicit type-arg syntax (extends
+  M31's generic classes)
+- Stdlib classes built on M31 generic classes — typed JsonValue,
+  Request/Response, etc.
+- Phase 3d stdlib (traceback, enum, functools, uuid, secrets)
+- HTTP/2, WebSockets, async ssl/sqlite/http_client variants
+
+---
+
 ## M31 — Generic classes (first v0.3 feature) (2026-05-21)
 
 The first item on the THESIS.md §8.4 v0.3 priority list shipped: generic

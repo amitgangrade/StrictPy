@@ -74,6 +74,8 @@ See `bench/history/` for the underlying JSON.
 | M30 (last two open bugs closed) | 16 | 0 | 0 | 13.1 ms | (BUG-028 lexer line continuation + BUG-040 socket.close_listener; **35 found / 35 fixed / 0 deferred** — v0.2-frozen-clean state) | — |
 | **v0.2.0 tag** (2026-05-21) | 16 | 0 | 0 | 13.1 ms | First frozen release. 656 tests, 35 bugs all fixed, 36 stdlib modules, web framework working. Cargo workspace 0.1.0 → 0.2.0; spec banner updated; RELEASE_NOTES_v0.2.md shipped. | — |
 | M31 (generic classes — first v0.3 feature) | 16 | 0 | 0 | 13.1 ms | `class Box[T]:` / `Pair[K,V]:` / `Stack[T]:` via extension of M17 worklist. Per-instantiation type_id + method bodies. +8 tests. Unblocks v0.3 stdlib classes. | — |
+| M32 (async I/O — Shape A thread-backed Future façade) | 16 | 0 | 0 | 13.1 ms | New `asyncio` stdlib module (IDs 700-714) + async-socket variants (720-722). Future[T] as TypeCtor (not M31 generic class — agent's call). +9 tests. v0.4 will swap internals for real mio event loop. | — |
+| M33 (precise GC stack maps — shadow-stack fallback) | 16 | 0 | 0 | 13.1 ms | Replaces M9 `in_jit` pause with shadow-stack root enumeration. JIT spills registers + pushes window before each heap-allocating helper. **Zero cherry-pick conflicts** with M32 despite both touching interp.rs + lib.rs — first parallel-v0.3-agent round, cleanest parallel integration in project history. +4 tests. v0.4 swaps to full Cranelift safepoints. | — |
 
 \* M7-unfair: Python timing included parse+compile time. Methodology bug
 caught and fixed at M10-prep; the M7-fair snapshot is the honest baseline.
