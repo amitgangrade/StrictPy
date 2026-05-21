@@ -2,8 +2,13 @@
 
 A statically typed dialect of Python, with a dedicated compiler and bytecode VM.
 
-The full language and VM specification lives in **[STRICTPY_SPEC.md](STRICTPY_SPEC.md)**.
-Read it first — every design decision below traces back to a section of the spec.
+## Documents to read first
+
+- **Writing StrictPy code?** Read **[LANGUAGE_GUIDE.md](LANGUAGE_GUIDE.md)** — the AI-friendly language reference. Every syntax form, every stdlib function, every gotcha, with examples. Designed so AI coding tools can generate idiomatic StrictPy without reading the compiler source.
+- **Working on the compiler / VM internals?** Read **[STRICTPY_SPEC.md](STRICTPY_SPEC.md)** — the canonical 1800+ line implementation reference. Every design decision in the compiler/VM source traces back to a section of the spec.
+- **Understanding the project's history / methodology?** Read **[THESIS.md](THESIS.md)** (mid-form technical thesis) and **[BLOG_POST.md](BLOG_POST.md)** (narrative version). The full per-milestone archive lives at `docs/thesis/`.
+- **Resuming a session?** Read **[HANDOFF.md](HANDOFF.md)** — current state, in-flight work, integration recipes.
+- **Latest frozen release?** **[RELEASE_NOTES_v0.2.md](RELEASE_NOTES_v0.2.md)** (tag `v0.2.0`).
 
 ## Workspace layout
 

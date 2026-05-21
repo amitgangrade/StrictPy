@@ -173,6 +173,30 @@ items + general v0.4 backlog):
   thing is mildly ugly; could unify via a constructor-flavour flag
   on `StdlibItemKind::Function`)
 
+## CRITICAL: keep `LANGUAGE_GUIDE.md` up to date
+
+`LANGUAGE_GUIDE.md` (project root, ~2,300 lines as of M34) is the
+**single source of truth** for AI coding tools writing StrictPy
+programs. Every agent brief that touches **language syntax**,
+**type system**, or **stdlib** MUST include:
+
+> Update `LANGUAGE_GUIDE.md` to document the new feature in the
+> appropriate section. The doc is the single source of truth for
+> AI coding tools; if it's out of date, AI tools generate wrong
+> code. See §13 "Maintaining this file" at the bottom of the
+> guide for the per-feature update pattern.
+
+When integrating an agent's worktree, verify the guide was updated;
+if not, write the update yourself before pushing. The doc is what
+makes StrictPy usable by other AI tools — losing freshness here
+costs more than the integration time saves.
+
+After M35 (and any v0.4 language/stdlib work), update:
+- Version banner at the top ("Last refresh: post-M..")
+- The relevant §3 / §4 / §5 / §10 sub-section
+- A §11 entry if there's a gotcha worth flagging
+- §12 examples if the new feature deserves a worked demo
+
 ## Methodology lessons that have held
 
 Document these in any new agent brief:
