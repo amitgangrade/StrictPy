@@ -544,3 +544,146 @@ fn main() -> i32:
     assert!(out.contains("min=1000"), "got: {out:?}");
     assert!(out.contains("max=5000"), "got: {out:?}");
 }
+
+// ── Phase D: group_by + GroupedDataFrame ─────────────────────────────
+
+/// Helper: source frame with category/qty columns used by several
+/// group-by tests.
+const GBY_SRC_HEADER: &str = "\
+from tabular import DataFrame, Column, ColumnI64, ColumnStr, GroupedDataFrame
+import tabular
+fn make_frame() -> DataFrame:
+    cats_v: List[str] = []
+    cats_v.append(\"a\")
+    cats_v.append(\"b\")
+    cats_v.append(\"a\")
+    cats_v.append(\"b\")
+    cats_v.append(\"a\")
+    cats: ColumnStr = tabular.col_str_simple(cats_v)
+    qty_v: List[i64] = []
+    qty_v.append(10i64)
+    qty_v.append(5i64)
+    qty_v.append(20i64)
+    qty_v.append(15i64)
+    qty_v.append(30i64)
+    qty: ColumnI64 = tabular.col_i64_simple(qty_v)
+    names: List[str] = []
+    names.append(\"cat\")
+    names.append(\"qty\")
+    cols: List[Column] = []
+    cols.append(cats)
+    cols.append(qty)
+    return tabular.from_columns(names, cols)
+";
+
+#[test]
+fn group_by_single_column_size() {
+    let src = format!(
+        "{GBY_SRC_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"cat\")\n    gdf: GroupedDataFrame = df.group_by(keys)\n    sz: DataFrame = gdf.size()\n    println(\"size_rows=\" + str(sz.length()))\n    println(\"size_cols=\" + str(sz.ncols()))\n    return 0\n"
+    );
+    let out = run("gby_size", &src);
+    // 2 groups (a, b)
+    assert!(out.contains("size_rows=2"), "got: {out:?}");
+    // cat + size = 2 cols
+    assert!(out.contains("size_cols=2"), "got: {out:?}");
+}
+
+#[test]
+fn group_by_keys_returns_unique_groups() {
+    let src = format!(
+        "{GBY_SRC_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"cat\")\n    gdf: GroupedDataFrame = df.group_by(keys)\n    k: DataFrame = gdf.keys()\n    println(\"k_rows=\" + str(k.length()))\n    println(\"k_cols=\" + str(k.ncols()))\n    return 0\n"
+    );
+    let out = run("gby_keys", &src);
+    assert!(out.contains("k_rows=2"), "got: {out:?}");
+    assert!(out.contains("k_cols=1"), "got: {out:?}");
+}
+
+#[test]
+fn group_by_sum_shortcut() {
+    let src = format!(
+        "{GBY_SRC_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"cat\")\n    gdf: GroupedDataFrame = df.group_by(keys)\n    s: DataFrame = gdf.sum()\n    println(\"s_rows=\" + str(s.length()))\n    println(\"s_cols=\" + str(s.ncols()))\n    sorted_s: DataFrame = s.sort_by(\"cat\", true)\n    qty_col: ColumnI64? = sorted_s.get_column_i64(\"qty\")\n    if qty_col is not none:\n        a: i64? = qty_col.get(0i64)\n        b: i64? = qty_col.get(1i64)\n        if a is not none:\n            println(\"a_sum=\" + str(a))\n        if b is not none:\n            println(\"b_sum=\" + str(b))\n    return 0\n"
+    );
+    let out = run("gby_sum", &src);
+    // a: 10+20+30 = 60; b: 5+15 = 20
+    assert!(out.contains("a_sum=60"), "got: {out:?}");
+    assert!(out.contains("b_sum=20"), "got: {out:?}");
+}
+
+#[test]
+fn group_by_mean_shortcut() {
+    let src = format!(
+        "{GBY_SRC_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"cat\")\n    gdf: GroupedDataFrame = df.group_by(keys)\n    m: DataFrame = gdf.mean()\n    sorted_m: DataFrame = m.sort_by(\"cat\", true)\n    qty_col: ColumnF64? = sorted_m.get_column_f64(\"qty\")\n    if qty_col is not none:\n        a: f64? = qty_col.get(0i64)\n        if a is not none:\n            println(\"a_mean=\" + str(a))\n    return 0\n"
+    );
+    let out = run("gby_mean", &src);
+    // a mean: (10+20+30)/3 = 20
+    assert!(out.contains("a_mean=20"), "got: {out:?}");
+}
+
+#[test]
+fn group_by_count_shortcut() {
+    let src = format!(
+        "{GBY_SRC_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"cat\")\n    gdf: GroupedDataFrame = df.group_by(keys)\n    c: DataFrame = gdf.count()\n    sorted_c: DataFrame = c.sort_by(\"cat\", true)\n    qty_col: ColumnI64? = sorted_c.get_column_i64(\"qty\")\n    if qty_col is not none:\n        a: i64? = qty_col.get(0i64)\n        b: i64? = qty_col.get(1i64)\n        if a is not none:\n            println(\"a_count=\" + str(a))\n        if b is not none:\n            println(\"b_count=\" + str(b))\n    return 0\n"
+    );
+    let out = run("gby_count", &src);
+    assert!(out.contains("a_count=3"), "got: {out:?}");
+    assert!(out.contains("b_count=2"), "got: {out:?}");
+}
+
+#[test]
+fn group_by_agg_specs() {
+    let src = format!(
+        "{GBY_SRC_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"cat\")\n    gdf: GroupedDataFrame = df.group_by(keys)\n    specs: List[Tuple[str, str]] = []\n    specs.append((\"qty\", \"sum\"))\n    specs.append((\"qty\", \"max\"))\n    a: DataFrame = gdf.agg(specs)\n    println(\"a_rows=\" + str(a.length()))\n    println(\"a_cols=\" + str(a.ncols()))\n    out_names: List[str] = a.columns()\n    println(\"col1=\" + out_names[1i32])\n    println(\"col2=\" + out_names[2i32])\n    return 0\n"
+    );
+    let out = run("gby_agg_specs", &src);
+    assert!(out.contains("a_rows=2"), "got: {out:?}");
+    // cat + qty_sum + qty_max = 3
+    assert!(out.contains("a_cols=3"), "got: {out:?}");
+    assert!(out.contains("col1=qty_sum"), "got: {out:?}");
+    assert!(out.contains("col2=qty_max"), "got: {out:?}");
+}
+
+#[test]
+fn group_by_multi_column() {
+    let src = "\
+from tabular import DataFrame, Column, ColumnI64, ColumnStr, GroupedDataFrame
+import tabular
+fn main() -> i32:
+    cats_v: List[str] = []
+    cats_v.append(\"a\")
+    cats_v.append(\"a\")
+    cats_v.append(\"b\")
+    cats_v.append(\"b\")
+    cats: ColumnStr = tabular.col_str_simple(cats_v)
+    sub_v: List[str] = []
+    sub_v.append(\"x\")
+    sub_v.append(\"y\")
+    sub_v.append(\"x\")
+    sub_v.append(\"x\")
+    sub: ColumnStr = tabular.col_str_simple(sub_v)
+    qty_v: List[i64] = []
+    qty_v.append(1i64)
+    qty_v.append(2i64)
+    qty_v.append(3i64)
+    qty_v.append(4i64)
+    qty: ColumnI64 = tabular.col_i64_simple(qty_v)
+    names: List[str] = []
+    names.append(\"cat\")
+    names.append(\"sub\")
+    names.append(\"qty\")
+    cols: List[Column] = []
+    cols.append(cats)
+    cols.append(sub)
+    cols.append(qty)
+    df: DataFrame = tabular.from_columns(names, cols)
+    keys: List[str] = []
+    keys.append(\"cat\")
+    keys.append(\"sub\")
+    gdf: GroupedDataFrame = df.group_by(keys)
+    sz: DataFrame = gdf.size()
+    println(\"groups=\" + str(sz.length()))
+    return 0
+";
+    let out = run("gby_multi", src);
+    // (a, x), (a, y), (b, x) → 3 groups
+    assert!(out.contains("groups=3"), "got: {out:?}");
+}
