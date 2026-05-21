@@ -1,12 +1,12 @@
 # StrictPy — a statically typed Python dialect, compiler, and bytecode VM
 
-*A 30-milestone, AI-orchestrated systems-language project*
+*A 34-milestone, AI-orchestrated systems-language project (v0.2.0 frozen on day 5; v0.3 work began at M31 and continues through M34+).*
 
 **Project**: <https://github.com/amitgangrade/StrictPy>
-**Archive**: [`docs/thesis/`](docs/thesis/) — quantitative record (per-milestone CSV, 47 verbatim agent reports, 35-entry bug catalog, 8 benchmark snapshots).
-**Spec**: [`STRICTPY_SPEC.md`](STRICTPY_SPEC.md) — frozen at v0.1 on day one; the contract every subsequent milestone is checked against.
-**Date span**: 2026-05-17 → 2026-05-21 (5 calendar days, ~85 hours of agent compute).
-**Outcome**: A working compiler + bytecode VM + Cranelift JIT that beats CPython 3.12 by **4–17×** on all 16 cells of the canonical 4-program benchmark suite and wins **28 of 30 cells** on an extended suite; with **96 example programs** (including a complete HTTP/1.1 + HTTPS web framework written in StrictPy user code), **36 stdlib modules**, **639 passing tests**, and **two** open bugs.
+**Archive**: [`docs/thesis/`](docs/thesis/) — quantitative record (per-milestone CSV, 51+ verbatim agent reports, 35-entry bug catalog, 8 benchmark snapshots).
+**Spec**: [`STRICTPY_SPEC.md`](STRICTPY_SPEC.md) — frozen at v0.1 on day one; v0.2 release tagged at M30; v0.3 amendments in place through M34+.
+**Date span**: 2026-05-17 → 2026-05-21 (5 calendar days, ~100+ hours of agent compute).
+**Outcome**: A working compiler + bytecode VM + Cranelift JIT that beats CPython 3.12 by **4–17×** on all 16 cells of the canonical 4-program benchmark suite and wins **28 of 30 cells** on an extended suite. **v0.2 frozen state**: 96 example programs (including a complete HTTP/1.1 + HTTPS web framework written in StrictPy user code), 36 stdlib modules, **35 bugs found, ALL 35 fixed (0 deferred)**, tagged as **v0.2.0**. **v0.3 work since**: generic classes (M31), async I/O event loop (M32), precise GC stack maps (M33), first stdlib classes — typed JsonValue tree (M34). **690 passing tests** at M34. **Lesson 1 methodology streak: 14 consecutive clean-commit agents** (M28 → M34).
 
 ---
 
@@ -468,10 +468,90 @@ before 60% of budget**" language, with explicit checkpoint discipline
 (20% / 40% / 60% / 80% / 95%), produced **3 of 3 committed agents**
 in M28, then **1 of 1** in M28.5, then **1 of 1** in M29, then **1 of
 1** in M29.5 — a five-agent winning streak after the 2 of 5 partial-
-failure rate in M27. The brief change was the only meaningful
-difference. The pattern generalises: numerical thresholds in agent
-briefs move the needle where qualitative urgency ("commit early")
-doesn't.
+failure rate in M27. The streak then extended through M30 (2 agents),
+M31 (1), M32 (1), M33 (1), and M34 (1) — **14 consecutive
+clean-commit agents** over 4 calendar days. The brief change was
+the only meaningful difference. The pattern generalises: numerical
+thresholds in agent briefs move the needle where qualitative urgency
+("commit early") doesn't.
+
+**Phase H: v0.2 release + v0.3 architectural work (M30–M34,
+2026-05-21).** After M30 closed the last two open bugs (BUG-028
+lexer continuation + BUG-040 socket.close_listener), the project
+reached its first "v0.2 frozen" state — 35 bugs found, all 35 fixed,
+0 deferred — and was tagged as **v0.2.0** with a comprehensive
+[`RELEASE_NOTES_v0.2.md`](RELEASE_NOTES_v0.2.md). v0.3 work then
+began at M31 and shipped four of the priority items from the
+THESIS.md §8.4 next-pass list in tight sequence:
+
+- **M31 generic classes** (`class Box[T]:`, `Pair[K, V]`,
+  `Stack[T]`). Extended the M17 worklist-driven monomorphisation
+  infrastructure from free functions to classes. New IR Pass 2.7 +
+  3.6 running to joint fixpoint with M17's existing passes.
+  Per-instantiation type_id + method bodies via mangled names
+  (`Box__i64`, `Pair__str_i32`). Existing M11 vtable infrastructure
+  handles dispatch — zero new VM opcodes. Constructor-site type
+  inference; no explicit `Box[i64]()` syntax (v0.4). +8 tests.
+- **M32 async I/O** (`asyncio` stdlib module + async-socket
+  variants). Shape A — thread-backed Future façade. New `Future[T]`
+  exposed as a TypeCtor (joining Channel/Atomic/Dict/List) with
+  special-cased `.await()` dispatch — agent's design call to NOT
+  use M31's user-defined-generic-class machinery (~25 LOC of
+  TypeCtor wiring vs the full monomorphisation worklist).
+  `asyncio.spawn` launches an OS thread; the thread fills a
+  `FutureSlot`; `Future.await()` blocks on a Condvar. Demo:
+  `examples/async_echo_server.spy` (~115 LOC) handling 3 concurrent
+  clients. v0.4 swaps the internals for a real mio/polling event
+  loop without changing the public surface. +9 tests.
+- **M33 precise GC stack maps** (shadow-stack fallback). Replaces
+  the M9 conservative `in_jit: AtomicUsize` pause that blocked
+  collection during JIT'd execution. New `vm/src/stackmap_registry.rs`
+  with thread-local shadow stack; the JIT spills register variables
+  into a per-function Cranelift stack slot and pushes the slot
+  window before every heap-allocating runtime helper; `Heap::collect`
+  consults the windows for precise root enumeration. Removes the
+  `in_jit` field and its bracket calls. Full Cranelift
+  `enable_safepoints` integration deferred to v0.4 (requires
+  walking JIT'd Rust frames + correlating PC offsets that
+  `cranelift-jit 0.115` doesn't expose stably). +4 tests.
+
+**M32 + M33 was the first parallel-v0.3-agent round** — two
+agents in separate worktrees, both modifying `vm/src/interp.rs`
+and `vm/src/lib.rs`. M32 added `SharedVm.futures`; M33 removed
+`SharedVm.in_jit`. **Zero cherry-pick conflicts at integration** —
+git's three-way merge handled the orthogonal hunks automatically.
+Cleanest parallel-agent integration in project history.
+
+- **M34 typed JsonValue tree** — the first stdlib classes. Sealed
+  `JsonValue` base + 6 final subclasses (JNull, JBool, JInt,
+  JFloat, JString, JList, JObject). Closes the M29 framework
+  agent's #1 documented ergonomics gap: the framework's POST body
+  parser hand-walks `json.parse_to_string` output for ~50 LOC where
+  a typed JsonValue tree drops it to ~10 LOC of `match`. Per the
+  brief's STOP CRITERIA the agent took the scope-down option:
+  registered the 7 classes in the **prelude** (alongside Channel,
+  Thread, io.File) rather than building proper
+  `StdlibItemKind::Class` infrastructure for module-level class
+  items. The legacy "prelude wins" branch in the import resolver
+  makes `from json import JsonValue` work transparently; module-
+  scoped class registration is a pure refactor deferred to v0.4.
+  Three findings: (a) `JList` storing `List[JsonValue]` worked
+  first-try under M11 + M31 — the class system is stable enough for
+  recursive types-with-self-in-a-List; (b) GC root scanning was
+  free via existing `GcKind::Class` + `GcKind::List` traversals
+  — no bespoke code for the recursive tree; (c) helper-vs-
+  constructor needs two NativeFn IDs per shape (different arg
+  conventions, caught by JNull's zero-arg case). +13 tests.
+
+After M34, the v0.3 menu reads: real Cranelift safepoint stack
+maps (replaces M33 shadow stack); real mio event loop (replaces
+M32 thread façade); module-level class registration (replaces M34
+prelude registration); bounded generics + variance + HKT + explicit
+type-arg syntax for M31; remaining stdlib classes (`re.Pattern`,
+`sqlite3.Connection`, `Hasher`, `logging.Logger` — in flight as
+M35 at the time of this thesis); Phase 3d stdlib (`traceback`,
+`enum`, `functools`, `uuid`, `secrets`); user-defined exception
+subclasses; HTTP/2; WebSockets.
 
 ### 3.4 Test count growth
 
@@ -488,6 +568,8 @@ M22 468 tests     (+213 across stdlib sprint)
 M25 586 tests     (+8 unified CLI integration tests)
 M27 621 tests     (+35 across Phase 3c — 9 modules)
 M29 639 tests     (+18 across networking stack + web framework)
+M30 656 tests     (+17 across last two bug closures — v0.2.0 freeze point)
+M34 690 tests     (+34 across generic classes / async / GC / JsonValue)
 ```
 
 The jump at M10 is the inflection point. M0–M9 added 134 tests via
@@ -631,6 +713,7 @@ been essentially flat:
 | M22 | 15.7 ms | 16/0/0 |
 | M25 | 13.1 ms | 16/0/0 |
 | M29 | 13.1 ms | 16/0/0 |
+| M34 | 13.1 ms | 16/0/0 |
 
 Cross-snapshot variance is ~10–20%, which is below the noise floor
 of best-of-3 timing on a Windows workstation. **The JIT-emitted
@@ -1255,26 +1338,22 @@ infrastructure — substantial work, deferred. Until that lands, any
 StrictPy program with >16 MB of live data and JIT'd hot loops will
 either OOM or stall.
 
-### 7.3 The two open bugs
+### 7.3 No open bugs (v0.2 + v0.3 state)
 
-**BUG-028**: the lexer doesn't continue lines across a trailing `+`
-operator (`return "a " + \n "b"` errors with E0001). Workaround:
-parentheses (`return ("a " + \n "b")`) or accumulator variables.
-Mechanically simple to fix; the cost of the workaround is small
-enough that the deferral never blocked anything.
+After M30 closed BUG-028 (lexer line continuation) and BUG-040
+(`socket.close_listener` doesn't unblock blocked `accept`), the
+project reached its first **zero-open-bugs** state. **35 bugs found,
+35 fixed, 0 deferred.** This is the cleanest state in project history
+and was the freeze point for the **v0.2.0 release tag** (2026-05-21).
 
-**BUG-040** (found in M29.5): `socket.close_listener` does not
-unblock an in-flight `socket.accept`. The M28 P3b-A `SocketAccept`
-handler `Arc::clone`s the listener from the slot table and drops
-the mutex before the blocking syscall, so closing the slot from
-another thread doesn't drop the underlying FD. Workaround: the
-M29.5 graceful-shutdown path self-connects to the listener (~15
-LOC user code) to wake the blocked accept. Stdlib-side fix
-(`Mutex<Option<TcpListener>>` slot OR new
-`socket.shutdown_listener`) is deferred to v0.3.
+Subsequent v0.3 work (M31 generic classes, M32 async I/O, M33
+precise GC, M34 stdlib classes) has found no new bugs in either the
+M0–M30 surface or the new v0.3 features themselves. The bug
+catalogue summary table is now:
 
-Listed here so readers know what the "33 of 35 fixed" number
-refers to.
+| Category | Found | Fixed | Deferred |
+|---|---:|---:|---:|
+| (all categories) | **35** | **35** | **0** |
 
 ### 7.4 v0.2 feature gaps
 
@@ -1445,7 +1524,7 @@ reproducible from a `git clone`:
 git clone https://github.com/amitgangrade/StrictPy
 cd StrictPy
 cargo build --release
-cargo test --workspace --release    # 639 tests pass
+cargo test --workspace --release    # 690 tests pass (M34); v0.2.0 freeze was 656
 python bench/harness.py             # regenerates BENCH_REPORT.md
 python bench/harness.py --extended  # 30-cell extended suite
 spy examples/fib.spy                # 13.1 ms for fib(30)

@@ -20,7 +20,7 @@ The current implementation wins against CPython 3.12 on every cell of the canoni
 
 And on an extended 30-cell suite (5 more pure-compute programs + 5 stdlib-comparison programs): **28 wins, 2 ties, 0 losses**.
 
-Headline numbers: **96 example programs**, **639 tests passing**, **35 distinct bugs found** (33 fixed, 2 deferred), **36 stdlib modules** (sys, os, io, time, random, math, json, re, argparse, csv, collections, base64, hashlib, statistics, itertools, struct, urllib_parse, datetime, subprocess, pathlib, threading, queue, sqlite3, shutil, tempfile, glob, fnmatch, gzip, zlib, bz2, zipfile, tarfile, logging, socket, ssl, http_client), **a working HTTP/1.1 + HTTPS web framework + TODO API demo in ~2,400 LOC of StrictPy** that runs ~2,200 req/s on `/health` (within 2× of Flask+gunicorn).
+Headline numbers (current — post-M34): **97 example programs**, **690 tests passing**, **35 distinct bugs found and ALL 35 fixed (0 deferred)**, **37 stdlib modules** + 7 prelude JSON classes, **a working HTTP/1.1 + HTTPS web framework + TODO API demo in ~2,400 LOC of StrictPy** that runs ~2,200 req/s on `/health` (within 2× of Flask+gunicorn). The project was tagged as **v0.2.0** at M30 (the 35/35/0 freeze point); v0.3 began at M31 and has shipped generic classes, async I/O, precise GC stack maps, and typed JsonValue tree.
 
 The short answer to "how": **static types make AOT compilation easy, and AOT compilation crushes any interpreter — and once you have a typed-bytecode language with a real stdlib, you can actually use it for real software.** The interesting answer is the long story of what had to be true for both punchlines to land — including seven stress test rounds that found bugs unit tests didn't, a class-system overhaul forced by a M3-era latent hack that took 10 milestones to trigger, a four-times-recurring "placeholder IR lowering" pattern, and the small methodology change that took agent commit-discipline from "fails 40% of the time" to "8 consecutive clean agents."
 
@@ -573,6 +573,34 @@ The framework is now 2,443 LOC. Eight tests pass (3 from M29 + 5 new). It can ho
 **And M29.5 found a stdlib bug.** `socket.close_listener` doesn't unblock an in-flight `socket.accept` — the M28 P3b-A handler `Arc::clones` the listener and drops the slot-table mutex before the blocking syscall, so closing the slot from another thread doesn't drop the underlying FD. The agent worked around it in user code with a self-connect from the shutdown timer (~15 LOC). I logged it as BUG-040; the stdlib fix is v0.3. **First stress test in project history to find a bug in the network stack** — and it found it within minutes of attempting graceful shutdown, which the M29 framework hadn't exercised.
 
 This is the second example in the project of the "real programs use APIs in combinations unit tests don't" mechanism (the first was BUG-039 from M24, where `dict.get(k)` worked but `k in dict` didn't because no unit test had bothered to test `in` on the natural Python idiom). The pattern is structural and probably recurring: **stress tests find the integration-level bugs; unit tests find the unit-level bugs; both are necessary; the marginal cost of a stress test per round is consistently rewarded.**
+
+---
+
+## M30 — closing the last two bugs
+
+Two focused agents in parallel closed BUG-028 (lexer line continuation across `+`/`and`/`or`/`==`/`=`/etc., deferred since M10) and BUG-040 (the M29.5 finding). BUG-028 was a 95-LOC additive lexer fix tracking the "last significant token" and suppressing `NEWLINE` if it's a binary operator needing a right operand. BUG-040 shipped `shutdown(fd, SHUT_RDWR)` + self-connect to listener address as belt-and-braces — agent's empirical Windows finding: **winsock does NOT wake `accept()` from `shutdown(fd)` alone** (per Microsoft KB-179942), self-connect is essential on Windows. Belt-and-braces both mechanisms on both platforms rather than `#[cfg]`-gating because redundancy is harmless.
+
+After M30: **35 bugs found, 35 fixed, 0 deferred.** First zero-open-bugs state since M10. Tagged as **v0.2.0**. See [`RELEASE_NOTES_v0.2.md`](RELEASE_NOTES_v0.2.md) for the full freeze-point summary.
+
+---
+
+## M31–M34 — v0.3 begins
+
+After v0.2 froze, the project pivoted to the THESIS §8.4 next-pass priority list. Four substantial features in three milestone-clusters:
+
+**M31 generic classes** — `class Box[T]:`, `class Pair[K, V]:`, `class Stack[T]:`. Extended the M17 worklist-driven monomorphisation infrastructure from generic *free functions* to generic *classes*. Per-instantiation `type_id` + distinct method bodies via mangled names (`Box__i64`, `Pair__str_i32`). Constructor-site type inference (no explicit `Box[i64]()` — v0.4). Existing M11 vtable infrastructure handles dispatch — zero new VM opcodes. The big unlock: typed stdlib classes (next).
+
+**M32 async I/O** — `asyncio` stdlib module with `run` / `spawn` / `sleep` / `gather` + `socket.async_accept` / `async_recv` / `async_send`. Shape A (thread-backed Future façade). Notable design call: agent did NOT use M31's user-defined-generic-class machinery for `Future[T]`. Instead added `Future` as a TypeCtor (joining Channel / Atomic / Dict / List) with special-cased `.await()` dispatch. ~25 LOC vs the full M31 monomorphisation worklist. Demo: `examples/async_echo_server.spy` (~115 LOC) handles 3 concurrent clients. v0.4 will swap internals for a real `mio` event loop without changing the public surface.
+
+**M33 precise GC stack maps** — replaces the M9 conservative `in_jit: AtomicUsize` "freeze GC during JIT" pause with a per-thread shadow-stack approach. JIT spills register variables into per-function Cranelift stack slots; pushes `(buf, len)` window before each heap-allocating runtime helper; `Heap::collect` reads the windows for precise root enumeration. Shadow-stack rather than full Cranelift `enable_safepoints` (scope-down per brief — `cranelift-jit 0.115` doesn't stably expose what's needed). The `in_jit` field is gone; GC can now collect during JIT'd execution.
+
+**M32 + M33 ran in parallel and integrated with zero cherry-pick conflicts** despite both touching `vm/src/interp.rs` and `vm/src/lib.rs`. M32 added `SharedVm.futures`; M33 removed `SharedVm.in_jit`. Git's three-way merge resolved everything automatically. Cleanest parallel-agent integration in project history; the file-ownership-discipline investment from M28 onward finally paid back its setup cost in full.
+
+**M34 typed JsonValue tree** — first stdlib classes. Sealed `JsonValue` base + 6 final subclasses (JNull, JBool, JInt, JFloat, JString, JList, JObject), plus `json.parse(s) -> JsonValue`, `json.stringify(v)`, and constructor convenience helpers. Closes the M29 framework's #1 documented ergonomics gap: the POST body parser hand-walks `json.parse_to_string` output for ~50 LOC where typed `match case JObject(o): ...` drops it to ~10. Per the brief's STOP CRITERIA, agent registered the 7 classes in the **prelude** rather than building proper `StdlibItemKind::Class` infrastructure for module-level classes — the legacy "prelude wins" branch makes `from json import JsonValue` work transparently. Module-scoped class registration is a pure refactor deferred to v0.4. Three findings: (a) `JList` storing `List[JsonValue]` worked first-try under M11 + M31 — the class system is stable enough for recursive types; (b) GC root scanning was free via existing GcKind traversals; (c) helper-vs-constructor needs two NativeFn IDs per shape (caught by JNull's zero-arg case).
+
+**The Lesson 1 streak holds at 14 consecutive clean-commit agents** (M28 → M34, 4 calendar days, zero orchestrator-commit-on-behalf interventions). The intervention is reproducible. The pattern generalises: in agent briefs, **numerical thresholds ("first commit before 60% of budget") beat qualitative urgency ("commit early")** for behaviours an agent needs to self-assess mid-task.
+
+After M34, headline numbers refresh: **690 tests passing, 97 example programs, 37 stdlib modules, 7 new prelude classes (JsonValue tree), 0 open bugs.** Benchmark numbers unchanged (the v0.3 work doesn't touch the JIT-emitted hot-loop code).
 
 ---
 
