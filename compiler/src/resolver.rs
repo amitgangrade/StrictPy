@@ -180,18 +180,25 @@ pub struct ResolvedModule {
 // v0.3; resolution falls through to an `E4001` error.
 
 /// One item inside a built-in stdlib module — either a value-typed
-/// constant (`sys.argv`) or a function (`sys.exit`). Both kinds dispatch
-/// through a single `NativeFn` slot; the distinction matters only for
-/// the typechecker (a constant has a concrete `Ty`, a function has
-/// `Ty::Function`).
+/// constant (`sys.argv`), a function (`sys.exit`), or (M36) a class
+/// such as `json.JsonValue` / `re.Pattern`.  Const + Function dispatch
+/// through a single `NativeFn` slot; Class items carry a `ClassId`
+/// on the kind variant (the class is registered into
+/// `class_name_to_id` / `class_layouts` at seed time, and the
+/// StdlibItem only records the id so the import resolver can re-bind
+/// it under a local name).
 #[derive(Debug, Clone)]
 pub struct StdlibItem {
     pub name: String,
     pub kind: StdlibItemKind,
-    /// Static type of the item. For `Function`, this is `Ty::Function`.
+    /// Static type of the item. For `Function`, this is `Ty::Function`;
+    /// for `Class`, `Ty::Class(class_id)`.
     pub ty: Ty,
     /// `NativeFn` discriminant (as u32). The IR lowerer emits a
-    /// `CallNative { native_id }` carrying this id.
+    /// `CallNative { native_id }` carrying this id.  Unused (kept at
+    /// 0) for `StdlibItemKind::Class` items, whose method dispatch
+    /// goes through the IR's class-name lookup in `lower_method_call`
+    /// rather than this field.
     pub native_id: u32,
 }
 
@@ -203,6 +210,15 @@ pub enum StdlibItemKind {
     /// A callable like `sys.exit(code)`. Calling emits an N-arg
     /// `CallNative` whose operands are the user-supplied args.
     Function,
+    /// M36: a class such as `json.JsonValue` / `re.Pattern` /
+    /// `sqlite3.Connection` / `hashlib.Hasher`.  Importing the item
+    /// binds a local symbol to the resolver-allocated `ClassId`
+    /// carried in the variant payload (the class itself is registered
+    /// into `class_name_to_id` + `class_layouts` at seed time, so
+    /// method dispatch via `lower_method_call` works regardless of
+    /// whether the user wrote `from json import JsonValue` or relied
+    /// on the legacy prelude binding).
+    Class { class_id: ClassId },
 }
 
 /// One built-in module exposed to user code.
@@ -1132,6 +1148,28 @@ impl Resolver {
                 },
             ],
         };
+        // M36: publish the 8 JsonValue-tree classes as
+        // `StdlibItemKind::Class` items on the `json` module.  The
+        // classes themselves are still registered in `seed_prelude`
+        // (their bindings reach the prelude_scope for back-compat);
+        // these items make them additionally discoverable via the
+        // module table so v0.4 callers can route through
+        // `from json import JsonValue` cleanly.
+        let m36_json_classes = [
+            "JsonValue", "JNull", "JBool", "JInt", "JFloat",
+            "JString", "JList", "JObject",
+        ];
+        let mut json_mod = json_mod;
+        for m36_name in m36_json_classes {
+            if let Some(&m36_cid) = self.class_name_to_id.get(m36_name) {
+                json_mod.items.push(StdlibItem {
+                    name: m36_name.into(),
+                    kind: StdlibItemKind::Class { class_id: m36_cid },
+                    ty: Ty::Class(m36_cid),
+                    native_id: 0,
+                });
+            }
+        }
         self.stdlib_modules.insert("json".into(), json_mod);
 
         // ── M20c: `re` module ──────────────────────────────────────────
@@ -1235,6 +1273,19 @@ impl Resolver {
                 },
             ],
         };
+        // M36: publish the `Pattern` class on the `re` module so
+        // `from re import Pattern` / `re.compile(...)` route through
+        // the proper module table.  See the matching `json` block
+        // above for the broader pattern.
+        let mut re_mod = re_mod;
+        if let Some(&m36_pat_cid) = self.class_name_to_id.get("Pattern") {
+            re_mod.items.push(StdlibItem {
+                name: "Pattern".into(),
+                kind: StdlibItemKind::Class { class_id: m36_pat_cid },
+                ty: Ty::Class(m36_pat_cid),
+                native_id: 0,
+            });
+        }
         self.stdlib_modules.insert("re".into(), re_mod);
 
         // ── M22 P2C: `itertools` module ────────────────────────────────
@@ -1751,6 +1802,17 @@ impl Resolver {
                 },
             ],
         };
+        // M36: publish the `Hasher` class on the `hashlib` module.
+        // Mirror of the json + re + sqlite3 registrations above.
+        let mut hashlib_mod = hashlib_mod;
+        if let Some(&m36_hasher_cid) = self.class_name_to_id.get("Hasher") {
+            hashlib_mod.items.push(StdlibItem {
+                name: "Hasher".into(),
+                kind: StdlibItemKind::Class { class_id: m36_hasher_cid },
+                ty: Ty::Class(m36_hasher_cid),
+                native_id: 0,
+            });
+        }
         self.stdlib_modules.insert("hashlib".into(), hashlib_mod);
 
         // ── M22 (P2A): `argparse` module ───────────────────────────────
@@ -2788,6 +2850,20 @@ impl Resolver {
                 },
             ],
         };
+        // M36: publish the `Connection` + `Cursor` classes on the
+        // `sqlite3` module.  Mirror of the json + re registrations
+        // above.
+        let mut sqlite3_mod = sqlite3_mod;
+        for m36_name in ["Connection", "Cursor"] {
+            if let Some(&m36_cid) = self.class_name_to_id.get(m36_name) {
+                sqlite3_mod.items.push(StdlibItem {
+                    name: m36_name.into(),
+                    kind: StdlibItemKind::Class { class_id: m36_cid },
+                    ty: Ty::Class(m36_cid),
+                    native_id: 0,
+                });
+            }
+        }
         self.stdlib_modules.insert("sqlite3".into(), sqlite3_mod);
 
         // ── M27 P3c-D: `zipfile` module ────────────────────────────────
@@ -4328,14 +4404,21 @@ impl Resolver {
 
         // ── M34: typed `json.JsonValue` tree ──────────────────────────
         //
+        // M36 NOTE: these 11 classes (JsonValue + 6 subclasses, Pattern,
+        // Connection + Cursor, Hasher) are still registered into the
+        // prelude scope here for back-compat — every M34/M35 test
+        // reaches them by bare name after just `import json` /
+        // `import re` / `import sqlite3` / `import hashlib`, and a
+        // hard removal would regress that surface.  What M36 changes
+        // is that `seed_stdlib_modules` (which runs immediately after
+        // `seed_prelude` returns) also publishes each ClassId as a
+        // `StdlibItemKind::Class` entry on the matching stdlib module
+        // — so the metadata now lives where v0.4 stdlib growth can
+        // grow it, even though the prelude-scope bindings stay.
+        //
         // Seven prelude classes — sealed base + 6 final subclasses —
         // backing the `json.parse` / `json.stringify` typed surface.
-        // Registered in the prelude rather than under the `json` module
-        // because v0.3 does not yet have module-scoped class
-        // registration; the legacy "prelude wins" branch in the import
-        // resolution code means `from json import JsonValue` still
-        // works correctly (it's a no-op since the name is already in
-        // scope).  M11 + M16 + M31 do all the heavy lifting — these are
+        // M11 + M16 + M31 do all the heavy lifting — these are
         // ordinary `is_native: false` classes that participate in the
         // standard vtable / isinstance / match infrastructure.
         //
@@ -4789,7 +4872,7 @@ impl Resolver {
         //
         //   (a) `import sys`                  — bind `sys` as BuiltinModule.
         //   (b) `import sys as s`             — bind `s` as alias of `sys`.
-        //   (c) `from sys import argv, exit`  — bind each item as Const/Function.
+        //   (c) `from sys import argv, exit`  — bind each item as Const/Function/Class.
         //
         // The pre-M19 fast-path (no-op when the name already exists in
         // prelude) is preserved for legacy stdlibs that flatten into the
@@ -4797,6 +4880,21 @@ impl Resolver {
         // from `seed_prelude` and the import is purely cosmetic. New
         // stdlib modules registered via `seed_stdlib_modules` take
         // precedence — they go through the proper module table.
+        //
+        // M36 Phase D — legacy "prelude wins" coverage note: the
+        // `lookup(scope, local_name).is_some() => continue` branch
+        // below is still load-bearing for the 11 M34/M35 stdlib
+        // classes (JsonValue + JNull + JBool + JInt + JFloat + JString
+        // + JList + JObject; Pattern; Connection + Cursor; Hasher).
+        // M36 registers them as `StdlibItemKind::Class` items on their
+        // home modules so future v0.4 routes find them in the module
+        // table, but `seed_prelude` still binds the symbols into
+        // `prelude_scope` for back-compat — every M34/M35 test
+        // reaches the names by bare lookup after just `import json`
+        // (etc.), without an explicit `from json import JsonValue`.
+        // A future agent that flips those tests to explicit imports
+        // can then delete the `lookup => continue` branch and rely
+        // entirely on the M36 Class-item path above.
         for imp in &module.imports {
             // Single-segment module path required in v0.2. Submodules
             // (`os.path`) are parser-supported but resolve here as a
@@ -4840,7 +4938,51 @@ impl Resolver {
                             }
                             let item = item.unwrap();
                             if self.table.lookup(scope, local_name).is_some() {
-                                // Pre-existing prelude binding wins (legacy stdlib).
+                                // Pre-existing prelude binding wins (legacy
+                                // stdlib).  M36 NOTE: for the 11 relocated
+                                // stdlib classes (JsonValue + 6 subclasses,
+                                // Pattern, Connection + Cursor, Hasher),
+                                // this branch still fires for non-aliased
+                                // `from json import JsonValue` because the
+                                // class symbols continue to live in
+                                // `prelude_scope` for back-compat — see
+                                // `seed_prelude`.  The class is reachable
+                                // by the local name already, so the import
+                                // is correctly a no-op.  The
+                                // `StdlibItemKind::Class` entry on the
+                                // module is what the *aliased* path below
+                                // consumes (`from json import JsonValue
+                                // as JV`).
+                                continue;
+                            }
+                            // M36: when the item is a `Class`, bind the
+                            // local alias as a fresh class symbol so
+                            // `isinstance(x, JV)` and downstream class-
+                            // shaped uses (`JV()` constructor, `JV.method`)
+                            // work via the existing class-by-name lookup
+                            // paths in typecheck.rs / ir.rs.  The class
+                            // itself was allocated in `seed_prelude` and
+                            // already lives in `class_name_to_id` /
+                            // `class_layouts`; we only register an
+                            // additional Symbol pointing at the same
+                            // ClassId, so dispatch finds it under either
+                            // the original or the aliased name.
+                            if let StdlibItemKind::Class { class_id } = item.kind {
+                                let sid = self.make_symbol(
+                                    scope,
+                                    local_name,
+                                    SymbolKind::Class,
+                                    imp.span,
+                                    Some(Ty::Class(class_id)),
+                                );
+                                self.table.get_mut(sid).class_id = Some(class_id);
+                                self.class_of_symbol.insert(sid, class_id);
+                                // NOTE: we deliberately do NOT overwrite
+                                // `symbol_of_class[class_id]` — the
+                                // canonical reverse mapping stays pointed
+                                // at the original (prelude) symbol so
+                                // diagnostics resolve to the upstream
+                                // declaration site, not the import site.
                                 continue;
                             }
                             let sid = self.make_symbol(
