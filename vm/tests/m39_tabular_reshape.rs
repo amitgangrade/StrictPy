@@ -608,3 +608,230 @@ fn main() -> i32:
     let out = run("concat_cols_mismatch", src);
     assert!(out.contains("raised"), "got: {out:?}");
 }
+
+// ── Phase C: pivot + melt ────────────────────────────────────────────
+
+#[test]
+fn pivot_happy_path() {
+    // Long: (region, month, sales)
+    // R = us, jan, 10 / us, feb, 20 / uk, jan, 30 / uk, feb, 40
+    // pivot index=region columns=month values=sales => 2 rows × 3 cols
+    // (region, jan, feb) with us:10/20, uk:30/40.
+    let src = "\
+from tabular import ColumnI64, ColumnStr, DataFrame, Column
+import tabular
+fn main() -> i32:
+    regions: List[str] = []
+    regions.append(\"us\")
+    regions.append(\"us\")
+    regions.append(\"uk\")
+    regions.append(\"uk\")
+    months: List[str] = []
+    months.append(\"jan\")
+    months.append(\"feb\")
+    months.append(\"jan\")
+    months.append(\"feb\")
+    sales: List[i64] = []
+    sales.append(10i64)
+    sales.append(20i64)
+    sales.append(30i64)
+    sales.append(40i64)
+    cr: ColumnStr = tabular.col_str_simple(regions)
+    cm: ColumnStr = tabular.col_str_simple(months)
+    cs: ColumnI64 = tabular.col_i64_simple(sales)
+    cn: List[str] = []
+    cn.append(\"region\")
+    cn.append(\"month\")
+    cn.append(\"sales\")
+    cols: List[Column] = []
+    cols.append(cr)
+    cols.append(cm)
+    cols.append(cs)
+    df: DataFrame = tabular.from_columns(cn, cols)
+    p: DataFrame = df.pivot(\"region\", \"month\", \"sales\")
+    println(\"nrows=\" + str(p.length()))
+    println(\"ncols=\" + str(p.ncols()))
+    r0: List[str] = p.row(0i64)
+    r1: List[str] = p.row(1i64)
+    println(\"r0=\" + r0[0i32] + \"|\" + r0[1i32] + \"|\" + r0[2i32])
+    println(\"r1=\" + r1[0i32] + \"|\" + r1[1i32] + \"|\" + r1[2i32])
+    return 0
+";
+    let out = run("pivot_happy", src);
+    assert!(out.contains("nrows=2"), "got: {out:?}");
+    assert!(out.contains("ncols=3"), "got: {out:?}");
+    assert!(out.contains("r0=us|10|20"), "got: {out:?}");
+    assert!(out.contains("r1=uk|30|40"), "got: {out:?}");
+}
+
+#[test]
+fn pivot_missing_cell_is_null() {
+    // (us,jan,10), (uk,feb,20) — missing (us,feb) + (uk,jan); each null.
+    let src = "\
+from tabular import ColumnI64, ColumnStr, DataFrame, Column
+import tabular
+fn main() -> i32:
+    regions: List[str] = []
+    regions.append(\"us\")
+    regions.append(\"uk\")
+    months: List[str] = []
+    months.append(\"jan\")
+    months.append(\"feb\")
+    sales: List[i64] = []
+    sales.append(10i64)
+    sales.append(20i64)
+    cr: ColumnStr = tabular.col_str_simple(regions)
+    cm: ColumnStr = tabular.col_str_simple(months)
+    cs: ColumnI64 = tabular.col_i64_simple(sales)
+    cn: List[str] = []
+    cn.append(\"region\")
+    cn.append(\"month\")
+    cn.append(\"sales\")
+    cols: List[Column] = []
+    cols.append(cr)
+    cols.append(cm)
+    cols.append(cs)
+    df: DataFrame = tabular.from_columns(cn, cols)
+    p: DataFrame = df.pivot(\"region\", \"month\", \"sales\")
+    println(\"nrows=\" + str(p.length()))
+    r0: List[str] = p.row(0i64)
+    r1: List[str] = p.row(1i64)
+    println(\"r0=\" + r0[0i32] + \"|\" + r0[1i32] + \"|\" + r0[2i32])
+    println(\"r1=\" + r1[0i32] + \"|\" + r1[1i32] + \"|\" + r1[2i32])
+    return 0
+";
+    let out = run("pivot_null", src);
+    assert!(out.contains("nrows=2"), "got: {out:?}");
+    // us has jan=10, feb=null; uk has jan=null, feb=20.
+    assert!(out.contains("r0=us|10|null"), "got: {out:?}");
+    assert!(out.contains("r1=uk|null|20"), "got: {out:?}");
+}
+
+#[test]
+fn pivot_duplicate_pair_raises() {
+    let src = "\
+from tabular import ColumnI64, ColumnStr, DataFrame, Column
+import tabular
+fn main() -> i32:
+    regions: List[str] = []
+    regions.append(\"us\")
+    regions.append(\"us\")
+    months: List[str] = []
+    months.append(\"jan\")
+    months.append(\"jan\")
+    sales: List[i64] = []
+    sales.append(10i64)
+    sales.append(99i64)
+    cr: ColumnStr = tabular.col_str_simple(regions)
+    cm: ColumnStr = tabular.col_str_simple(months)
+    cs: ColumnI64 = tabular.col_i64_simple(sales)
+    cn: List[str] = []
+    cn.append(\"region\")
+    cn.append(\"month\")
+    cn.append(\"sales\")
+    cols: List[Column] = []
+    cols.append(cr)
+    cols.append(cm)
+    cols.append(cs)
+    df: DataFrame = tabular.from_columns(cn, cols)
+    try:
+        p: DataFrame = df.pivot(\"region\", \"month\", \"sales\")
+        println(\"unexpected ok\")
+    except ValueError as e:
+        println(\"raised\")
+    return 0
+";
+    let out = run("pivot_dup", src);
+    assert!(out.contains("raised"), "got: {out:?}");
+}
+
+#[test]
+fn melt_basic() {
+    // Wide: id=1,a=10,b=20 / id=2,a=30,b=40
+    // Melt id_vars=[id], value_vars=[a,b] => 4 rows.
+    let src = "\
+from tabular import ColumnI64, DataFrame, Column
+import tabular
+fn main() -> i32:
+    ids: List[i64] = []
+    ids.append(1i64)
+    ids.append(2i64)
+    avs: List[i64] = []
+    avs.append(10i64)
+    avs.append(30i64)
+    bvs: List[i64] = []
+    bvs.append(20i64)
+    bvs.append(40i64)
+    ci: ColumnI64 = tabular.col_i64_simple(ids)
+    ca: ColumnI64 = tabular.col_i64_simple(avs)
+    cb: ColumnI64 = tabular.col_i64_simple(bvs)
+    cn: List[str] = []
+    cn.append(\"id\")
+    cn.append(\"a\")
+    cn.append(\"b\")
+    cols: List[Column] = []
+    cols.append(ci)
+    cols.append(ca)
+    cols.append(cb)
+    df: DataFrame = tabular.from_columns(cn, cols)
+    id_vars: List[str] = []
+    id_vars.append(\"id\")
+    value_vars: List[str] = []
+    value_vars.append(\"a\")
+    value_vars.append(\"b\")
+    m: DataFrame = df.melt(id_vars, value_vars)
+    println(\"nrows=\" + str(m.length()))
+    println(\"ncols=\" + str(m.ncols()))
+    r0: List[str] = m.row(0i64)
+    r1: List[str] = m.row(1i64)
+    r2: List[str] = m.row(2i64)
+    r3: List[str] = m.row(3i64)
+    println(\"r0=\" + r0[0i32] + \"|\" + r0[1i32] + \"|\" + r0[2i32])
+    println(\"r1=\" + r1[0i32] + \"|\" + r1[1i32] + \"|\" + r1[2i32])
+    println(\"r2=\" + r2[0i32] + \"|\" + r2[1i32] + \"|\" + r2[2i32])
+    println(\"r3=\" + r3[0i32] + \"|\" + r3[1i32] + \"|\" + r3[2i32])
+    return 0
+";
+    let out = run("melt_basic", src);
+    assert!(out.contains("nrows=4"), "got: {out:?}");
+    assert!(out.contains("ncols=3"), "got: {out:?}");
+    // Row order: source-row 0 × [a,b], then source-row 1 × [a,b].
+    assert!(out.contains("r0=1|a|10"), "got: {out:?}");
+    assert!(out.contains("r1=1|b|20"), "got: {out:?}");
+    assert!(out.contains("r2=2|a|30"), "got: {out:?}");
+    assert!(out.contains("r3=2|b|40"), "got: {out:?}");
+}
+
+#[test]
+fn melt_dtype_mismatch_raises() {
+    let src = "\
+from tabular import ColumnI64, ColumnStr, DataFrame, Column
+import tabular
+fn main() -> i32:
+    avs: List[i64] = []
+    avs.append(10i64)
+    bvs: List[str] = []
+    bvs.append(\"hi\")
+    ca: ColumnI64 = tabular.col_i64_simple(avs)
+    cb: ColumnStr = tabular.col_str_simple(bvs)
+    cn: List[str] = []
+    cn.append(\"a\")
+    cn.append(\"b\")
+    cols: List[Column] = []
+    cols.append(ca)
+    cols.append(cb)
+    df: DataFrame = tabular.from_columns(cn, cols)
+    id_vars: List[str] = []
+    value_vars: List[str] = []
+    value_vars.append(\"a\")
+    value_vars.append(\"b\")
+    try:
+        m: DataFrame = df.melt(id_vars, value_vars)
+        println(\"unexpected ok\")
+    except ValueError as e:
+        println(\"raised\")
+    return 0
+";
+    let out = run("melt_mismatch", src);
+    assert!(out.contains("raised"), "got: {out:?}");
+}
