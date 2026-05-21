@@ -6988,6 +6988,21 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         NativeFn::M38TabGdfCount      => m38_gdf_agg_shortcut(interp, args, "count"),
         NativeFn::M38TabGdfAgg        => m38_gdf_agg(interp, args),
 
+        // ── M39 Phase A: unique / value_counts / concat ──
+        NativeFn::M39TabDfUniqueI64      => m39_df_unique_typed(interp, args, "i64"),
+        NativeFn::M39TabDfUniqueF64      => m39_df_unique_typed(interp, args, "f64"),
+        NativeFn::M39TabDfUniqueStr      => m39_df_unique_typed(interp, args, "str"),
+        NativeFn::M39TabDfUniqueBool     => m39_df_unique_typed(interp, args, "bool"),
+        NativeFn::M39TabDfUniqueDateTime => m39_df_unique_typed(interp, args, "datetime"),
+        NativeFn::M39TabDfValueCounts    => m39_df_value_counts(interp, args),
+        NativeFn::M39TabConcatRows       => m39_concat_rows(interp, args),
+        NativeFn::M39TabConcatCols       => m39_concat_cols(interp, args),
+        // ── M39 Phase B: merge ──
+        NativeFn::M39TabDfMerge          => m39_df_merge(interp, args),
+        // ── M39 Phase C: pivot + melt ──
+        NativeFn::M39TabDfPivot          => m39_df_pivot(interp, args),
+        NativeFn::M39TabDfMelt           => m39_df_melt(interp, args),
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
@@ -14141,6 +14156,1092 @@ fn m38_gdf_agg(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
         out_cols.push(m37_alloc_column(interp, cls_name, v_lst, n_lst, n) as u64);
     }
     Ok(m37_build_df(interp, &out_names, &out_cols, groups.len() as i64))
+}
+
+// ═════════════════════════════════════════════════════════════════════
+//  M39 Phase 4 — tabular reshape (unique / value_counts / concat /
+//  merge / pivot / melt)
+//
+//  Every helper here uses the `m39_` prefix per the brief.  All
+//  reshape ops build on the M37 column/dataframe layout and the M38
+//  row-key serialization (`\x01`-joined per-cell encoding).
+// ═════════════════════════════════════════════════════════════════════
+
+/// Same row-key encoding as M38's group-by — reused by `merge` for
+/// hash-join keys.  Multi-column composition is `\x01`-separated;
+/// null cells encode as `\x02null` (unreachable by user strings).
+/// Returns `None` when any cell in the composite key is null, since
+/// pandas/SQL semantics require null != null in join keys.
+fn m39_join_key(
+    col_ptrs: &[u64],
+    col_class: &[String],
+    row: usize,
+) -> Option<String> {
+    let mut out = String::new();
+    for (i, cp) in col_ptrs.iter().enumerate() {
+        if i > 0 {
+            out.push('\x01');
+        }
+        let (vals, nulls, _length) = m37_col_fields(*cp);
+        let ns = m37_read_list_bool(nulls);
+        if ns.get(row).copied().unwrap_or(false) {
+            return None;
+        }
+        match col_class[i].as_str() {
+            "ColumnI64" | "ColumnDateTime" => {
+                let v = m37_read_list_i64(vals).get(row).copied().unwrap_or(0);
+                out.push_str(&v.to_string());
+            }
+            "ColumnF64" => {
+                let v = m37_read_list_f64(vals).get(row).copied().unwrap_or(0.0);
+                out.push_str(&v.to_bits().to_string());
+            }
+            "ColumnStr" => {
+                let v = m37_read_list_str_lst(vals).get(row).cloned().unwrap_or_default();
+                out.push_str(&v);
+            }
+            "ColumnBool" => {
+                let v = m37_read_list_bool(vals).get(row).copied().unwrap_or(false);
+                out.push_str(if v { "1" } else { "0" });
+            }
+            _ => out.push('?'),
+        }
+    }
+    Some(out)
+}
+
+// ── M39 Phase A: unique ─────────────────────────────────────────────
+
+/// Map a dtype string to the matching Column class name for allocation.
+fn m39_class_name_for_dtype(dtype: &str) -> &'static str {
+    match dtype {
+        "i64" => "ColumnI64",
+        "f64" => "ColumnF64",
+        "str" => "ColumnStr",
+        "bool" => "ColumnBool",
+        "datetime" => "ColumnDateTime",
+        _ => "ColumnI64",
+    }
+}
+
+/// `DataFrame.unique_<dtype>(self, col: str) -> Column<dtype>?`.
+/// Returns `none` when the column is missing or has the wrong dtype.
+/// Excludes null cells from the result; preserves first-occurrence
+/// order (matches pandas `pd.unique`).
+fn m39_df_unique_typed(
+    interp: &mut Interpreter,
+    args: &[u64],
+    want_dtype: &str,
+) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let name = arg_str(args, 1);
+    let (names_lst, _, _) = m37_df_fields(recv);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_ptrs = m37_df_col_ptrs(recv);
+    let idx = match names.iter().position(|n| n == &name) {
+        None => return Ok(NONE_SENTINEL),
+        Some(i) => i,
+    };
+    let col = col_ptrs.get(idx).copied().unwrap_or(0);
+    if col == 0 {
+        return Ok(NONE_SENTINEL);
+    }
+    let actual_dtype = match m38_col_class_name(col).as_str() {
+        "ColumnI64" => "i64",
+        "ColumnF64" => "f64",
+        "ColumnStr" => "str",
+        "ColumnBool" => "bool",
+        "ColumnDateTime" => "datetime",
+        _ => return Ok(NONE_SENTINEL),
+    };
+    if actual_dtype != want_dtype {
+        return Ok(NONE_SENTINEL);
+    }
+    let (vals, nulls, length) = m37_col_fields(col);
+    let ns = m37_read_list_bool(nulls);
+    let class_name = m39_class_name_for_dtype(want_dtype);
+    let out_col = match want_dtype {
+        "i64" | "datetime" => {
+            let vs = m37_read_list_i64(vals);
+            let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+            let mut out_vs: Vec<i64> = Vec::new();
+            for i in 0..length as usize {
+                if ns.get(i).copied().unwrap_or(false) {
+                    continue;
+                }
+                let v = vs.get(i).copied().unwrap_or(0);
+                if seen.insert(v) {
+                    out_vs.push(v);
+                }
+            }
+            let n = out_vs.len() as i64;
+            let v_lst = m37_alloc_list_i64(interp, &out_vs);
+            let n_lst = m37_alloc_list_bool(interp, &vec![false; out_vs.len()]);
+            m37_alloc_column(interp, class_name, v_lst, n_lst, n) as u64
+        }
+        "f64" => {
+            let vs = m37_read_list_f64(vals);
+            // f64 uniqueness keys on bit pattern (NaN-aware: every NaN
+            // counts as identical when its bits match; differing NaN
+            // payloads are distinct).
+            let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+            let mut out_vs: Vec<f64> = Vec::new();
+            for i in 0..length as usize {
+                if ns.get(i).copied().unwrap_or(false) {
+                    continue;
+                }
+                let v = vs.get(i).copied().unwrap_or(0.0);
+                if seen.insert(v.to_bits()) {
+                    out_vs.push(v);
+                }
+            }
+            let n = out_vs.len() as i64;
+            let v_lst = m37_alloc_list_f64(interp, &out_vs);
+            let n_lst = m37_alloc_list_bool(interp, &vec![false; out_vs.len()]);
+            m37_alloc_column(interp, class_name, v_lst, n_lst, n) as u64
+        }
+        "str" => {
+            let vs = m37_read_list_str_lst(vals);
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut out_vs: Vec<String> = Vec::new();
+            for i in 0..length as usize {
+                if ns.get(i).copied().unwrap_or(false) {
+                    continue;
+                }
+                let v = vs.get(i).cloned().unwrap_or_default();
+                if seen.insert(v.clone()) {
+                    out_vs.push(v);
+                }
+            }
+            let n = out_vs.len() as i64;
+            let v_lst = m37_alloc_list_str(interp, &out_vs);
+            let n_lst = m37_alloc_list_bool(interp, &vec![false; out_vs.len()]);
+            m37_alloc_column(interp, class_name, v_lst, n_lst, n) as u64
+        }
+        "bool" => {
+            let vs = m37_read_list_bool(vals);
+            let mut seen_true = false;
+            let mut seen_false = false;
+            let mut out_vs: Vec<bool> = Vec::new();
+            for i in 0..length as usize {
+                if ns.get(i).copied().unwrap_or(false) {
+                    continue;
+                }
+                let v = vs.get(i).copied().unwrap_or(false);
+                if v && !seen_true {
+                    seen_true = true;
+                    out_vs.push(true);
+                } else if !v && !seen_false {
+                    seen_false = true;
+                    out_vs.push(false);
+                }
+            }
+            let n = out_vs.len() as i64;
+            let v_lst = m37_alloc_list_bool(interp, &out_vs);
+            let n_lst = m37_alloc_list_bool(interp, &vec![false; out_vs.len()]);
+            m37_alloc_column(interp, class_name, v_lst, n_lst, n) as u64
+        }
+        _ => return Ok(NONE_SENTINEL),
+    };
+    Ok(out_col)
+}
+
+// ── M39 Phase A: value_counts ───────────────────────────────────────
+
+/// `DataFrame.value_counts(self, col: str) -> DataFrame`.  Returns a
+/// 2-column frame: the source column's values + a `count: i64`
+/// column.  Sorted by count descending; ties broken by first-
+/// occurrence order (stable).  Null cells are excluded.
+fn m39_df_value_counts(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let name = arg_str(args, 1);
+    let (names_lst, _, _) = m37_df_fields(recv);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_ptrs = m37_df_col_ptrs(recv);
+    let idx = match names.iter().position(|n| n == &name) {
+        None => return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("DataFrame.value_counts: column {:?} not found", name),
+        }),
+        Some(i) => i,
+    };
+    let col = col_ptrs[idx];
+    let (vals, nulls, length) = m37_col_fields(col);
+    let ns = m37_read_list_bool(nulls);
+    let cls = m38_col_class_name(col);
+    // Walk the column, accumulating a (key_repr, count, first_row) tuple
+    // per distinct value.  We dedupe via a HashMap<key_repr, slot_index>
+    // so we keep first-occurrence order in `slots`.
+    #[derive(Clone)]
+    struct Slot {
+        key_repr: String,
+        count: i64,
+        first_row: usize,
+    }
+    let mut slots: Vec<Slot> = Vec::new();
+    let mut lookup: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let key_for_row = |row: usize| -> Option<String> {
+        if ns.get(row).copied().unwrap_or(false) {
+            return None;
+        }
+        Some(match cls.as_str() {
+            "ColumnI64" | "ColumnDateTime" => {
+                m37_read_list_i64(vals).get(row).copied().unwrap_or(0).to_string()
+            }
+            "ColumnF64" => {
+                m37_read_list_f64(vals).get(row).copied().unwrap_or(0.0).to_bits().to_string()
+            }
+            "ColumnStr" => {
+                m37_read_list_str_lst(vals).get(row).cloned().unwrap_or_default()
+            }
+            "ColumnBool" => {
+                if m37_read_list_bool(vals).get(row).copied().unwrap_or(false) {
+                    "1".into()
+                } else {
+                    "0".into()
+                }
+            }
+            _ => "?".into(),
+        })
+    };
+    for r in 0..length as usize {
+        let k = match key_for_row(r) {
+            None => continue,
+            Some(k) => k,
+        };
+        match lookup.get(&k).copied() {
+            Some(slot_idx) => slots[slot_idx].count += 1,
+            None => {
+                lookup.insert(k.clone(), slots.len());
+                slots.push(Slot { key_repr: k, count: 1, first_row: r });
+            }
+        }
+    }
+    // Sort: count desc, then first_row asc (stable tie-break).
+    slots.sort_by(|a, b| b.count.cmp(&a.count).then(a.first_row.cmp(&b.first_row)));
+    // Build the source-dtype column from the first_row of each slot.
+    let pick_rows: Vec<usize> = slots.iter().map(|s| s.first_row).collect();
+    let val_col = m37_column_take(interp, col, &pick_rows);
+    // Build the count column.
+    let count_vs: Vec<i64> = slots.iter().map(|s| s.count).collect();
+    let count_v_lst = m37_alloc_list_i64(interp, &count_vs);
+    let count_n_lst = m37_alloc_list_bool(interp, &vec![false; count_vs.len()]);
+    let count_col = m37_alloc_column(
+        interp, "ColumnI64", count_v_lst, count_n_lst, count_vs.len() as i64,
+    ) as u64;
+    let _ = slots; // keep alive for the lifetime of pick_rows usage
+    let out_names = vec![name.clone(), "count".to_string()];
+    let out_cols = vec![val_col, count_col];
+    Ok(m37_build_df(interp, &out_names, &out_cols, pick_rows.len() as i64))
+}
+
+// ── M39 Phase A: concat_rows / concat_cols ──────────────────────────
+
+/// Decode a `List[DataFrame]` argument into a `Vec<u64>` of frame
+/// pointers.  Mirrors the M37 `m37_alloc_dataframe` decode of
+/// `List[Column]`.
+fn m39_read_list_df(args: &[u64], i: usize) -> Vec<u64> {
+    let lst = arg_u64(args, i) as *const crate::object::ListRepr;
+    if lst.is_null() {
+        return Vec::new();
+    }
+    unsafe {
+        let n = (*lst).length;
+        let data = (*lst).data as *const u64;
+        (0..n).map(|j| std::ptr::read_unaligned(data.add(j))).collect()
+    }
+}
+
+/// `tabular.concat_rows(dfs: List[DataFrame]) -> DataFrame`.
+/// Vertical concatenation; all input dfs must share names + dtypes.
+fn m39_concat_rows(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let dfs = m39_read_list_df(args, 0);
+    if dfs.is_empty() {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "tabular.concat_rows: at least one DataFrame required".into(),
+        });
+    }
+    // Capture the reference schema from the first frame.
+    let (ref_names_lst, _, _) = m37_df_fields(dfs[0]);
+    let ref_names = m37_read_list_str_lst(ref_names_lst);
+    let ref_col_ptrs = m37_df_col_ptrs(dfs[0]);
+    let ref_classes: Vec<String> = ref_col_ptrs.iter().map(|cp| m38_col_class_name(*cp)).collect();
+    // Validate every other frame.
+    for (i, df) in dfs.iter().enumerate().skip(1) {
+        let (nl, _, _) = m37_df_fields(*df);
+        let ns = m37_read_list_str_lst(nl);
+        let cps = m37_df_col_ptrs(*df);
+        if ns.len() != ref_names.len() {
+            return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!(
+                    "tabular.concat_rows: frame {} has {} columns; expected {}",
+                    i, ns.len(), ref_names.len()
+                ),
+            });
+        }
+        for j in 0..ns.len() {
+            if ns[j] != ref_names[j] {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "tabular.concat_rows: frame {} column {} named {:?}; expected {:?}",
+                        i, j, ns[j], ref_names[j]
+                    ),
+                });
+            }
+            let cls = m38_col_class_name(cps[j]);
+            if cls != ref_classes[j] {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "tabular.concat_rows: frame {} column {:?} dtype mismatch ({} vs {})",
+                        i, ref_names[j], cls, ref_classes[j]
+                    ),
+                });
+            }
+        }
+    }
+    // Concatenate per-column.
+    let ncols = ref_names.len();
+    let mut out_cols: Vec<u64> = Vec::with_capacity(ncols);
+    let mut total_nrows: i64 = 0;
+    for c in 0..ncols {
+        let cls = ref_classes[c].clone();
+        let mut all_nulls: Vec<bool> = Vec::new();
+        // Per-dtype value buffers.
+        let mut buf_i64: Vec<i64> = Vec::new();
+        let mut buf_f64: Vec<f64> = Vec::new();
+        let mut buf_str: Vec<String> = Vec::new();
+        let mut buf_bool: Vec<bool> = Vec::new();
+        for df in &dfs {
+            let cps = m37_df_col_ptrs(*df);
+            let col = cps[c];
+            let (vals, nulls, length) = m37_col_fields(col);
+            let ns = m37_read_list_bool(nulls);
+            for i in 0..length as usize {
+                all_nulls.push(ns.get(i).copied().unwrap_or(false));
+            }
+            match cls.as_str() {
+                "ColumnI64" | "ColumnDateTime" => {
+                    let vs = m37_read_list_i64(vals);
+                    buf_i64.extend(vs.into_iter().chain(std::iter::repeat(0)).take(length as usize));
+                }
+                "ColumnF64" => {
+                    let vs = m37_read_list_f64(vals);
+                    buf_f64.extend(vs.into_iter().chain(std::iter::repeat(0.0)).take(length as usize));
+                }
+                "ColumnStr" => {
+                    let vs = m37_read_list_str_lst(vals);
+                    buf_str.extend(vs.into_iter().chain(std::iter::repeat(String::new())).take(length as usize));
+                }
+                "ColumnBool" => {
+                    let vs = m37_read_list_bool(vals);
+                    buf_bool.extend(vs.into_iter().chain(std::iter::repeat(false)).take(length as usize));
+                }
+                _ => {}
+            }
+        }
+        let n = all_nulls.len() as i64;
+        if c == 0 { total_nrows = n; }
+        let n_lst = m37_alloc_list_bool(interp, &all_nulls);
+        let v_lst = match cls.as_str() {
+            "ColumnI64" | "ColumnDateTime" => m37_alloc_list_i64(interp, &buf_i64),
+            "ColumnF64" => m37_alloc_list_f64(interp, &buf_f64),
+            "ColumnStr" => m37_alloc_list_str(interp, &buf_str),
+            "ColumnBool" => m37_alloc_list_bool(interp, &buf_bool),
+            _ => m37_alloc_list_i64(interp, &buf_i64),
+        };
+        out_cols.push(m37_alloc_column(interp, &cls, v_lst, n_lst, n) as u64);
+    }
+    Ok(m37_build_df(interp, &ref_names, &out_cols, total_nrows))
+}
+
+/// `tabular.concat_cols(dfs: List[DataFrame]) -> DataFrame`.
+/// Horizontal concatenation; all input dfs must share row count.
+/// Column names must be globally unique.
+fn m39_concat_cols(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let dfs = m39_read_list_df(args, 0);
+    if dfs.is_empty() {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "tabular.concat_cols: at least one DataFrame required".into(),
+        });
+    }
+    let (_, _, ref_nrows) = m37_df_fields(dfs[0]);
+    let mut out_names: Vec<String> = Vec::new();
+    let mut out_cols: Vec<u64> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (i, df) in dfs.iter().enumerate() {
+        let (nl, _, nrows) = m37_df_fields(*df);
+        if nrows != ref_nrows {
+            return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!(
+                    "tabular.concat_cols: frame {} has {} rows; expected {}",
+                    i, nrows, ref_nrows
+                ),
+            });
+        }
+        let names = m37_read_list_str_lst(nl);
+        let cps = m37_df_col_ptrs(*df);
+        for (j, n) in names.iter().enumerate() {
+            if !seen.insert(n.clone()) {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("tabular.concat_cols: duplicate column name {:?}", n),
+                });
+            }
+            out_names.push(n.clone());
+            out_cols.push(cps[j]);
+        }
+    }
+    Ok(m37_build_df(interp, &out_names, &out_cols, ref_nrows))
+}
+
+// ── M39 Phase B: merge (hash-join inner/left/right/outer) ───────────
+
+/// Build a `HashMap<key, Vec<row_indices>>` over the named columns of
+/// a DataFrame.  Used as the build side of `df.merge`.
+fn m39_build_hash_map(
+    df: u64,
+    key_col_indices: &[usize],
+) -> std::collections::HashMap<String, Vec<usize>> {
+    let (_, _, nrows) = m37_df_fields(df);
+    let col_ptrs = m37_df_col_ptrs(df);
+    let key_cps: Vec<u64> = key_col_indices.iter().map(|i| col_ptrs[*i]).collect();
+    let key_cls: Vec<String> = key_cps.iter().map(|cp| m38_col_class_name(*cp)).collect();
+    let mut out: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+    for r in 0..nrows as usize {
+        if let Some(k) = m39_join_key(&key_cps, &key_cls, r) {
+            out.entry(k).or_insert_with(Vec::new).push(r);
+        }
+    }
+    out
+}
+
+/// `DataFrame.merge(self, other, on, how) -> DataFrame`.  Hash-join
+/// implementation; `on` is a list of column names that must exist in
+/// both frames with matching dtypes.
+fn m39_df_merge(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let lhs = arg_u64(args, 0);
+    let rhs = arg_u64(args, 1);
+    let on = read_list_str(args, 2);
+    let how = arg_str(args, 3);
+    if !matches!(how.as_str(), "inner" | "left" | "right" | "outer") {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "DataFrame.merge: how must be 'inner'/'left'/'right'/'outer'; got {:?}",
+                how
+            ),
+        });
+    }
+    if on.is_empty() {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "DataFrame.merge: `on` must list at least one column".into(),
+        });
+    }
+    let (lhs_nl, _, lhs_nrows) = m37_df_fields(lhs);
+    let (rhs_nl, _, rhs_nrows) = m37_df_fields(rhs);
+    let lhs_names = m37_read_list_str_lst(lhs_nl);
+    let rhs_names = m37_read_list_str_lst(rhs_nl);
+    let lhs_col_ptrs = m37_df_col_ptrs(lhs);
+    let rhs_col_ptrs = m37_df_col_ptrs(rhs);
+    // Resolve `on` columns in both frames; validate matching dtypes.
+    let mut lhs_key_idx: Vec<usize> = Vec::with_capacity(on.len());
+    let mut rhs_key_idx: Vec<usize> = Vec::with_capacity(on.len());
+    for k in &on {
+        let l = match lhs_names.iter().position(|n| n == k) {
+            None => return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!("DataFrame.merge: left has no column {:?}", k),
+            }),
+            Some(i) => i,
+        };
+        let r = match rhs_names.iter().position(|n| n == k) {
+            None => return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!("DataFrame.merge: right has no column {:?}", k),
+            }),
+            Some(i) => i,
+        };
+        let lcls = m38_col_class_name(lhs_col_ptrs[l]);
+        let rcls = m38_col_class_name(rhs_col_ptrs[r]);
+        if lcls != rcls {
+            return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!(
+                    "DataFrame.merge: column {:?} dtype mismatch ({} vs {})",
+                    k, lcls, rcls
+                ),
+            });
+        }
+        lhs_key_idx.push(l);
+        rhs_key_idx.push(r);
+    }
+    // Determine output schema: all of lhs's columns + rhs's columns
+    // minus the `on` columns (no duplicates).  Output column order:
+    // lhs columns in lhs order, then rhs non-on columns in rhs order.
+    let on_set: std::collections::HashSet<String> = on.iter().cloned().collect();
+    let rhs_extra_idx: Vec<usize> = (0..rhs_names.len())
+        .filter(|i| !on_set.contains(&rhs_names[*i]))
+        .collect();
+    let mut out_names: Vec<String> = lhs_names.clone();
+    for ri in &rhs_extra_idx {
+        out_names.push(rhs_names[*ri].clone());
+    }
+    let out_ncols = out_names.len();
+    // Build the rhs hash map.
+    let rhs_map = m39_build_hash_map(rhs, &rhs_key_idx);
+    // Compute lhs key column ptrs/classes (for probe).
+    let lhs_key_cps: Vec<u64> = lhs_key_idx.iter().map(|i| lhs_col_ptrs[*i]).collect();
+    let lhs_key_cls: Vec<String> = lhs_key_cps.iter().map(|cp| m38_col_class_name(*cp)).collect();
+    // Probe phase: emit (left_row_opt, right_row_opt) pairs.  None on a
+    // side means "synthesize null cells from that side's columns".
+    let mut emit: Vec<(Option<usize>, Option<usize>)> = Vec::new();
+    let mut rhs_matched: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for lr in 0..lhs_nrows as usize {
+        let key = m39_join_key(&lhs_key_cps, &lhs_key_cls, lr);
+        let mut matched = false;
+        if let Some(k) = key {
+            if let Some(rs) = rhs_map.get(&k) {
+                for rr in rs {
+                    emit.push((Some(lr), Some(*rr)));
+                    rhs_matched.insert(*rr);
+                    matched = true;
+                }
+            }
+        }
+        if !matched && (how == "left" || how == "outer") {
+            emit.push((Some(lr), None));
+        }
+    }
+    if how == "right" || how == "outer" {
+        // For "right" we ALSO need to drop unmatched left rows already
+        // emitted as (Some, None) — but since how != "left" gate above
+        // already excludes them.  For "right", iterate every rhs row;
+        // if not matched, emit (None, Some(rr)).  For "outer", emit
+        // unmatched right rows on top of the left-side scan.
+        for rr in 0..rhs_nrows as usize {
+            // A right-row matches if rhs_matched.contains(rr).  Also
+            // skip rows whose key is null (won't match anyway).
+            let rhs_col_cps: Vec<u64> = rhs_key_idx.iter().map(|i| rhs_col_ptrs[*i]).collect();
+            let rhs_col_cls: Vec<String> = rhs_col_cps.iter().map(|cp| m38_col_class_name(*cp)).collect();
+            let _ = (rhs_col_cps, rhs_col_cls); // recomputed each iter — fine for v1
+            if !rhs_matched.contains(&rr) {
+                // For right join: also include left-unmatched in the
+                // output.  For inner alone we wouldn't reach here.
+                emit.push((None, Some(rr)));
+            }
+        }
+        if how == "right" {
+            // For right join semantics, we should ALSO drop the
+            // (Some(lr), None) left-only rows added in the lhs scan.
+            // But the earlier loop only adds those for "left"/"outer".
+            // So nothing to filter here.
+        }
+    }
+    // Compose output columns.  For each out column, decide which
+    // source it pulls from and walk `emit`, materializing per-row
+    // values + null mask.
+    let mut out_cols: Vec<u64> = Vec::with_capacity(out_ncols);
+    // First, lhs columns (every column in lhs).
+    for li in 0..lhs_names.len() {
+        let src = lhs_col_ptrs[li];
+        let cls = m38_col_class_name(src);
+        let cell_pairs: Vec<(Option<usize>, Option<usize>)> = emit.clone();
+        // `on` columns: if a row has Some(lr) use lhs cell; else if
+        // Some(rr), pull from rhs's matching column (so the merged key
+        // column carries the right-side value for right-only rows).
+        // Non-`on` lhs columns: if Some(lr), use lhs cell; else null.
+        let is_on_col = on.iter().any(|n| n == &lhs_names[li]);
+        let rhs_match_idx: Option<usize> = if is_on_col {
+            // Find this name in rhs (must exist — we validated above).
+            rhs_names.iter().position(|n| n == &lhs_names[li])
+        } else {
+            None
+        };
+        let col_u64 = m39_pluck_column(
+            interp, src, cls.as_str(),
+            &cell_pairs, true, rhs_match_idx, &rhs_col_ptrs,
+        );
+        out_cols.push(col_u64);
+    }
+    // Then, rhs non-`on` columns.
+    for ri in &rhs_extra_idx {
+        let src = rhs_col_ptrs[*ri];
+        let cls = m38_col_class_name(src);
+        let cell_pairs: Vec<(Option<usize>, Option<usize>)> = emit.clone();
+        // For these columns, take from rhs (Some(rr) row).  If
+        // Some(lr) but no Some(rr), use null.
+        let col_u64 = m39_pluck_column(
+            interp, src, cls.as_str(),
+            &cell_pairs, false, None, &rhs_col_ptrs,
+        );
+        out_cols.push(col_u64);
+    }
+    let nrows = emit.len() as i64;
+    Ok(m37_build_df(interp, &out_names, &out_cols, nrows))
+}
+
+/// Build an output column for a merge.  `is_lhs` chooses which side
+/// of each (lhs_row_opt, rhs_row_opt) pair contributes the value.
+/// When the chosen side is None, output a null cell.  If
+/// `rhs_fallback_idx` is provided (i.e. we're emitting an `on` column
+/// on the lhs side), and the lhs side is None, fall back to the rhs
+/// cell at `rhs_fallback_idx` for that row.
+fn m39_pluck_column(
+    interp: &mut Interpreter,
+    src: u64,
+    cls: &str,
+    emit: &[(Option<usize>, Option<usize>)],
+    is_lhs: bool,
+    rhs_fallback_idx: Option<usize>,
+    rhs_col_ptrs: &[u64],
+) -> u64 {
+    let (vals, nulls, _) = m37_col_fields(src);
+    let src_ns = m37_read_list_bool(nulls);
+    let n = emit.len() as i64;
+    let mut out_nulls: Vec<bool> = Vec::with_capacity(emit.len());
+    let mut out_i64: Vec<i64> = Vec::new();
+    let mut out_f64: Vec<f64> = Vec::new();
+    let mut out_str: Vec<String> = Vec::new();
+    let mut out_bool: Vec<bool> = Vec::new();
+    let src_i64: Vec<i64>;
+    let src_f64: Vec<f64>;
+    let src_str: Vec<String>;
+    let src_bool: Vec<bool>;
+    match cls {
+        "ColumnI64" | "ColumnDateTime" => {
+            src_i64 = m37_read_list_i64(vals);
+            src_f64 = Vec::new();
+            src_str = Vec::new();
+            src_bool = Vec::new();
+        }
+        "ColumnF64" => {
+            src_i64 = Vec::new();
+            src_f64 = m37_read_list_f64(vals);
+            src_str = Vec::new();
+            src_bool = Vec::new();
+        }
+        "ColumnStr" => {
+            src_i64 = Vec::new();
+            src_f64 = Vec::new();
+            src_str = m37_read_list_str_lst(vals);
+            src_bool = Vec::new();
+        }
+        "ColumnBool" => {
+            src_i64 = Vec::new();
+            src_f64 = Vec::new();
+            src_str = Vec::new();
+            src_bool = m37_read_list_bool(vals);
+        }
+        _ => {
+            src_i64 = Vec::new();
+            src_f64 = Vec::new();
+            src_str = Vec::new();
+            src_bool = Vec::new();
+        }
+    }
+    // Precompute fallback vectors if needed.
+    let fallback_src = rhs_fallback_idx.map(|ri| rhs_col_ptrs[ri]).unwrap_or(0);
+    let (fb_vals, fb_nulls, _) = if fallback_src != 0 {
+        m37_col_fields(fallback_src)
+    } else {
+        (std::ptr::null(), std::ptr::null(), 0i64)
+    };
+    let fb_ns = if !fb_nulls.is_null() { m37_read_list_bool(fb_nulls) } else { Vec::new() };
+    let fb_i64 = if fallback_src != 0 && (cls == "ColumnI64" || cls == "ColumnDateTime") {
+        m37_read_list_i64(fb_vals)
+    } else { Vec::new() };
+    let fb_f64 = if fallback_src != 0 && cls == "ColumnF64" {
+        m37_read_list_f64(fb_vals)
+    } else { Vec::new() };
+    let fb_str = if fallback_src != 0 && cls == "ColumnStr" {
+        m37_read_list_str_lst(fb_vals)
+    } else { Vec::new() };
+    let fb_bool = if fallback_src != 0 && cls == "ColumnBool" {
+        m37_read_list_bool(fb_vals)
+    } else { Vec::new() };
+    for (lo, ro) in emit {
+        let picked_row: Option<usize> = if is_lhs { *lo } else { *ro };
+        match picked_row {
+            Some(r) => {
+                out_nulls.push(src_ns.get(r).copied().unwrap_or(false));
+                match cls {
+                    "ColumnI64" | "ColumnDateTime" => out_i64.push(src_i64.get(r).copied().unwrap_or(0)),
+                    "ColumnF64" => out_f64.push(src_f64.get(r).copied().unwrap_or(0.0)),
+                    "ColumnStr" => out_str.push(src_str.get(r).cloned().unwrap_or_default()),
+                    "ColumnBool" => out_bool.push(src_bool.get(r).copied().unwrap_or(false)),
+                    _ => {}
+                }
+            }
+            None => {
+                // Fall back to rhs side if this is an `on` column.
+                if is_lhs && fallback_src != 0 {
+                    if let Some(rr) = ro {
+                        out_nulls.push(fb_ns.get(*rr).copied().unwrap_or(false));
+                        match cls {
+                            "ColumnI64" | "ColumnDateTime" => out_i64.push(fb_i64.get(*rr).copied().unwrap_or(0)),
+                            "ColumnF64" => out_f64.push(fb_f64.get(*rr).copied().unwrap_or(0.0)),
+                            "ColumnStr" => out_str.push(fb_str.get(*rr).cloned().unwrap_or_default()),
+                            "ColumnBool" => out_bool.push(fb_bool.get(*rr).copied().unwrap_or(false)),
+                            _ => {}
+                        }
+                        continue;
+                    }
+                }
+                out_nulls.push(true);
+                match cls {
+                    "ColumnI64" | "ColumnDateTime" => out_i64.push(0),
+                    "ColumnF64" => out_f64.push(0.0),
+                    "ColumnStr" => out_str.push(String::new()),
+                    "ColumnBool" => out_bool.push(false),
+                    _ => {}
+                }
+            }
+        }
+    }
+    let n_lst = m37_alloc_list_bool(interp, &out_nulls);
+    let v_lst = match cls {
+        "ColumnI64" | "ColumnDateTime" => m37_alloc_list_i64(interp, &out_i64),
+        "ColumnF64" => m37_alloc_list_f64(interp, &out_f64),
+        "ColumnStr" => m37_alloc_list_str(interp, &out_str),
+        "ColumnBool" => m37_alloc_list_bool(interp, &out_bool),
+        _ => m37_alloc_list_i64(interp, &out_i64),
+    };
+    m37_alloc_column(interp, cls, v_lst, n_lst, n) as u64
+}
+
+// ── M39 Phase C: pivot + melt ───────────────────────────────────────
+
+/// Stringify a single cell of a column (used to derive new column
+/// names from a `columns` argument's unique values in `pivot`).
+fn m39_cell_to_str(col: u64, row: usize) -> String {
+    let cls = m38_col_class_name(col);
+    let (vals, nulls, _) = m37_col_fields(col);
+    let ns = m37_read_list_bool(nulls);
+    if ns.get(row).copied().unwrap_or(false) {
+        return "null".into();
+    }
+    match cls.as_str() {
+        "ColumnI64" | "ColumnDateTime" => {
+            m37_read_list_i64(vals).get(row).copied().unwrap_or(0).to_string()
+        }
+        "ColumnF64" => {
+            format!("{}", m37_read_list_f64(vals).get(row).copied().unwrap_or(0.0))
+        }
+        "ColumnStr" => {
+            m37_read_list_str_lst(vals).get(row).cloned().unwrap_or_default()
+        }
+        "ColumnBool" => {
+            if m37_read_list_bool(vals).get(row).copied().unwrap_or(false) { "true".into() } else { "false".into() }
+        }
+        _ => String::new(),
+    }
+}
+
+/// `DataFrame.pivot(self, index, columns, values) -> DataFrame`.
+/// Long-to-wide reshape; raises ValueError on duplicate
+/// (index, columns) pairs.
+fn m39_df_pivot(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let index_name = arg_str(args, 1);
+    let cols_name = arg_str(args, 2);
+    let vals_name = arg_str(args, 3);
+    let (names_lst, _, nrows) = m37_df_fields(recv);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_ptrs = m37_df_col_ptrs(recv);
+    let resolve = |n: &str, where_: &str| -> Result<usize, VmError> {
+        match names.iter().position(|x| x == n) {
+            None => Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!("DataFrame.pivot: {} column {:?} not found", where_, n),
+            }),
+            Some(i) => Ok(i),
+        }
+    };
+    let idx_i = resolve(&index_name, "index")?;
+    let col_i = resolve(&cols_name, "columns")?;
+    let val_i = resolve(&vals_name, "values")?;
+    let idx_col = col_ptrs[idx_i];
+    let cols_col = col_ptrs[col_i];
+    let vals_col = col_ptrs[val_i];
+    let val_cls = m38_col_class_name(vals_col);
+    // Collect unique index values and unique columns values, in
+    // first-occurrence order.
+    let mut index_keys: Vec<String> = Vec::new();
+    let mut index_first_row: Vec<usize> = Vec::new();
+    let mut index_lookup: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut cols_keys: Vec<String> = Vec::new();
+    let mut cols_first_row: Vec<usize> = Vec::new();
+    let mut cols_lookup: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for r in 0..nrows as usize {
+        let ik = m39_cell_to_str(idx_col, r);
+        if !index_lookup.contains_key(&ik) {
+            index_lookup.insert(ik.clone(), index_keys.len());
+            index_keys.push(ik);
+            index_first_row.push(r);
+        }
+        let ck = m39_cell_to_str(cols_col, r);
+        if !cols_lookup.contains_key(&ck) {
+            cols_lookup.insert(ck.clone(), cols_keys.len());
+            cols_keys.push(ck);
+            cols_first_row.push(r);
+        }
+    }
+    let n_index = index_keys.len();
+    let n_cols = cols_keys.len();
+    // Cell-row map: for each (index_slot, col_slot) → source row index.
+    // We use Option<usize> per cell; duplicate (i, c) pair triggers
+    // ValueError.
+    let mut cell_row: Vec<Vec<Option<usize>>> = vec![vec![None; n_cols]; n_index];
+    for r in 0..nrows as usize {
+        let ik = m39_cell_to_str(idx_col, r);
+        let ck = m39_cell_to_str(cols_col, r);
+        let i = *index_lookup.get(&ik).unwrap();
+        let c = *cols_lookup.get(&ck).unwrap();
+        if cell_row[i][c].is_some() {
+            return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!(
+                    "DataFrame.pivot: duplicate (index={:?}, columns={:?}) pair",
+                    ik, ck
+                ),
+            });
+        }
+        cell_row[i][c] = Some(r);
+    }
+    // Build output columns.  First column is the index column (dtype
+    // preserved by `m37_column_take` on the source).
+    let out_index_col = m37_column_take(interp, idx_col, &index_first_row);
+    let mut out_names: Vec<String> = vec![index_name.clone()];
+    let mut out_cols: Vec<u64> = vec![out_index_col];
+    // One column per unique `cols_name` value, dtype-matched to the
+    // values column.  Build each by walking the n_index rows and
+    // pulling vals_col[row_or_none].
+    let (v_vals, v_nulls, _) = m37_col_fields(vals_col);
+    let v_ns = m37_read_list_bool(v_nulls);
+    for c in 0..n_cols {
+        out_names.push(cols_keys[c].clone());
+        let mut out_nulls: Vec<bool> = Vec::with_capacity(n_index);
+        let mut buf_i64: Vec<i64> = Vec::new();
+        let mut buf_f64: Vec<f64> = Vec::new();
+        let mut buf_str: Vec<String> = Vec::new();
+        let mut buf_bool: Vec<bool> = Vec::new();
+        let src_i64 = if val_cls == "ColumnI64" || val_cls == "ColumnDateTime" {
+            m37_read_list_i64(v_vals)
+        } else { Vec::new() };
+        let src_f64 = if val_cls == "ColumnF64" {
+            m37_read_list_f64(v_vals)
+        } else { Vec::new() };
+        let src_str = if val_cls == "ColumnStr" {
+            m37_read_list_str_lst(v_vals)
+        } else { Vec::new() };
+        let src_bool = if val_cls == "ColumnBool" {
+            m37_read_list_bool(v_vals)
+        } else { Vec::new() };
+        for i in 0..n_index {
+            match cell_row[i][c] {
+                None => {
+                    out_nulls.push(true);
+                    match val_cls.as_str() {
+                        "ColumnI64" | "ColumnDateTime" => buf_i64.push(0),
+                        "ColumnF64" => buf_f64.push(0.0),
+                        "ColumnStr" => buf_str.push(String::new()),
+                        "ColumnBool" => buf_bool.push(false),
+                        _ => {}
+                    }
+                }
+                Some(r) => {
+                    out_nulls.push(v_ns.get(r).copied().unwrap_or(false));
+                    match val_cls.as_str() {
+                        "ColumnI64" | "ColumnDateTime" => buf_i64.push(src_i64.get(r).copied().unwrap_or(0)),
+                        "ColumnF64" => buf_f64.push(src_f64.get(r).copied().unwrap_or(0.0)),
+                        "ColumnStr" => buf_str.push(src_str.get(r).cloned().unwrap_or_default()),
+                        "ColumnBool" => buf_bool.push(src_bool.get(r).copied().unwrap_or(false)),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let n_lst = m37_alloc_list_bool(interp, &out_nulls);
+        let v_lst = match val_cls.as_str() {
+            "ColumnI64" | "ColumnDateTime" => m37_alloc_list_i64(interp, &buf_i64),
+            "ColumnF64" => m37_alloc_list_f64(interp, &buf_f64),
+            "ColumnStr" => m37_alloc_list_str(interp, &buf_str),
+            "ColumnBool" => m37_alloc_list_bool(interp, &buf_bool),
+            _ => m37_alloc_list_i64(interp, &buf_i64),
+        };
+        out_cols.push(m37_alloc_column(interp, &val_cls, v_lst, n_lst, n_index as i64) as u64);
+    }
+    let _ = cols_first_row;
+    Ok(m37_build_df(interp, &out_names, &out_cols, n_index as i64))
+}
+
+/// `DataFrame.melt(self, id_vars, value_vars) -> DataFrame`.  Wide-
+/// to-long reshape.  All value_vars columns must share a dtype.
+fn m39_df_melt(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let id_vars = read_list_str(args, 1);
+    let value_vars = read_list_str(args, 2);
+    let (names_lst, _, nrows) = m37_df_fields(recv);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_ptrs = m37_df_col_ptrs(recv);
+    if value_vars.is_empty() {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "DataFrame.melt: value_vars must list at least one column".into(),
+        });
+    }
+    // Resolve indices, validate matching dtype across value_vars.
+    let id_idx: Vec<usize> = {
+        let mut out = Vec::with_capacity(id_vars.len());
+        for v in &id_vars {
+            match names.iter().position(|n| n == v) {
+                None => return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("DataFrame.melt: id_vars column {:?} not found", v),
+                }),
+                Some(i) => out.push(i),
+            }
+        }
+        out
+    };
+    let val_idx: Vec<usize> = {
+        let mut out = Vec::with_capacity(value_vars.len());
+        for v in &value_vars {
+            match names.iter().position(|n| n == v) {
+                None => return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("DataFrame.melt: value_vars column {:?} not found", v),
+                }),
+                Some(i) => out.push(i),
+            }
+        }
+        out
+    };
+    let first_cls = m38_col_class_name(col_ptrs[val_idx[0]]);
+    for vi in &val_idx[1..] {
+        let cls = m38_col_class_name(col_ptrs[*vi]);
+        if cls != first_cls {
+            return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!(
+                    "DataFrame.melt: value_vars dtype mismatch ({} vs {})",
+                    cls, first_cls
+                ),
+            });
+        }
+    }
+    // Build output: for each (source_row, value_var) pair, emit one
+    // output row.  Output column order: id_vars... + "variable" + "value".
+    let out_nrows = (nrows as usize) * value_vars.len();
+    let mut out_names: Vec<String> = id_vars.clone();
+    out_names.push("variable".into());
+    out_names.push("value".into());
+    // Per-column buffers: for each id_var, replicate each row's value
+    // value_vars.len() times.
+    let mut out_cols: Vec<u64> = Vec::with_capacity(id_idx.len() + 2);
+    for ii in &id_idx {
+        let src = col_ptrs[*ii];
+        // Build the index list: each row repeated value_vars.len() times.
+        let mut idx: Vec<usize> = Vec::with_capacity(out_nrows);
+        for r in 0..nrows as usize {
+            for _ in 0..value_vars.len() {
+                idx.push(r);
+            }
+        }
+        out_cols.push(m37_column_take(interp, src, &idx));
+    }
+    // `variable` column — str.
+    let mut var_vs: Vec<String> = Vec::with_capacity(out_nrows);
+    for _r in 0..nrows as usize {
+        for vname in &value_vars {
+            var_vs.push(vname.clone());
+        }
+    }
+    let var_v_lst = m37_alloc_list_str(interp, &var_vs);
+    let var_n_lst = m37_alloc_list_bool(interp, &vec![false; var_vs.len()]);
+    out_cols.push(
+        m37_alloc_column(interp, "ColumnStr", var_v_lst, var_n_lst, var_vs.len() as i64) as u64,
+    );
+    // `value` column — dtype = first_cls.  Walk per-row, per-value-var.
+    let mut val_nulls: Vec<bool> = Vec::with_capacity(out_nrows);
+    let mut val_i64: Vec<i64> = Vec::new();
+    let mut val_f64: Vec<f64> = Vec::new();
+    let mut val_str: Vec<String> = Vec::new();
+    let mut val_bool: Vec<bool> = Vec::new();
+    // Pre-read each value_vars column.
+    let mut by_var_i64: Vec<Vec<i64>> = Vec::new();
+    let mut by_var_f64: Vec<Vec<f64>> = Vec::new();
+    let mut by_var_str: Vec<Vec<String>> = Vec::new();
+    let mut by_var_bool: Vec<Vec<bool>> = Vec::new();
+    let mut by_var_nulls: Vec<Vec<bool>> = Vec::new();
+    for vi in &val_idx {
+        let src = col_ptrs[*vi];
+        let (vals, nulls, _) = m37_col_fields(src);
+        by_var_nulls.push(m37_read_list_bool(nulls));
+        match first_cls.as_str() {
+            "ColumnI64" | "ColumnDateTime" => {
+                by_var_i64.push(m37_read_list_i64(vals));
+                by_var_f64.push(Vec::new());
+                by_var_str.push(Vec::new());
+                by_var_bool.push(Vec::new());
+            }
+            "ColumnF64" => {
+                by_var_i64.push(Vec::new());
+                by_var_f64.push(m37_read_list_f64(vals));
+                by_var_str.push(Vec::new());
+                by_var_bool.push(Vec::new());
+            }
+            "ColumnStr" => {
+                by_var_i64.push(Vec::new());
+                by_var_f64.push(Vec::new());
+                by_var_str.push(m37_read_list_str_lst(vals));
+                by_var_bool.push(Vec::new());
+            }
+            "ColumnBool" => {
+                by_var_i64.push(Vec::new());
+                by_var_f64.push(Vec::new());
+                by_var_str.push(Vec::new());
+                by_var_bool.push(m37_read_list_bool(vals));
+            }
+            _ => {
+                by_var_i64.push(Vec::new());
+                by_var_f64.push(Vec::new());
+                by_var_str.push(Vec::new());
+                by_var_bool.push(Vec::new());
+            }
+        }
+    }
+    for r in 0..nrows as usize {
+        for v in 0..value_vars.len() {
+            val_nulls.push(by_var_nulls[v].get(r).copied().unwrap_or(false));
+            match first_cls.as_str() {
+                "ColumnI64" | "ColumnDateTime" => val_i64.push(by_var_i64[v].get(r).copied().unwrap_or(0)),
+                "ColumnF64" => val_f64.push(by_var_f64[v].get(r).copied().unwrap_or(0.0)),
+                "ColumnStr" => val_str.push(by_var_str[v].get(r).cloned().unwrap_or_default()),
+                "ColumnBool" => val_bool.push(by_var_bool[v].get(r).copied().unwrap_or(false)),
+                _ => {}
+            }
+        }
+    }
+    let val_n_lst = m37_alloc_list_bool(interp, &val_nulls);
+    let val_v_lst = match first_cls.as_str() {
+        "ColumnI64" | "ColumnDateTime" => m37_alloc_list_i64(interp, &val_i64),
+        "ColumnF64" => m37_alloc_list_f64(interp, &val_f64),
+        "ColumnStr" => m37_alloc_list_str(interp, &val_str),
+        "ColumnBool" => m37_alloc_list_bool(interp, &val_bool),
+        _ => m37_alloc_list_i64(interp, &val_i64),
+    };
+    out_cols.push(
+        m37_alloc_column(interp, &first_cls, val_v_lst, val_n_lst, val_nulls.len() as i64) as u64,
+    );
+    Ok(m37_build_df(interp, &out_names, &out_cols, out_nrows as i64))
 }
 
 #[cfg(test)]

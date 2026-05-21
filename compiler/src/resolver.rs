@@ -4624,6 +4624,49 @@ impl Resolver {
                     params: vec![m37_list_str.clone()],
                     ret: m38_gdf_ty.clone(),
                 },
+                // ── M39 Phase A: typed unique accessors (one per dtype) ──
+                MethodSig {
+                    name: "unique_i64".into(), params: vec![m37_str.clone()],
+                    ret: Ty::Nullable(Box::new(m37_col_i64_ty.clone())),
+                },
+                MethodSig {
+                    name: "unique_f64".into(), params: vec![m37_str.clone()],
+                    ret: Ty::Nullable(Box::new(m37_col_f64_ty.clone())),
+                },
+                MethodSig {
+                    name: "unique_str".into(), params: vec![m37_str.clone()],
+                    ret: Ty::Nullable(Box::new(m37_col_str_ty.clone())),
+                },
+                MethodSig {
+                    name: "unique_bool".into(), params: vec![m37_str.clone()],
+                    ret: Ty::Nullable(Box::new(m37_col_bool_ty.clone())),
+                },
+                MethodSig {
+                    name: "unique_datetime".into(), params: vec![m37_str.clone()],
+                    ret: Ty::Nullable(Box::new(m37_col_dt_ty.clone())),
+                },
+                // ── M39 Phase A: value_counts ──
+                MethodSig {
+                    name: "value_counts".into(), params: vec![m37_str.clone()],
+                    ret: m37_df_ty.clone(),
+                },
+                // ── M39 Phase B: merge ──
+                MethodSig {
+                    name: "merge".into(),
+                    params: vec![m37_df_ty.clone(), m37_list_str.clone(), m37_str.clone()],
+                    ret: m37_df_ty.clone(),
+                },
+                // ── M39 Phase C: pivot + melt ──
+                MethodSig {
+                    name: "pivot".into(),
+                    params: vec![m37_str.clone(), m37_str.clone(), m37_str.clone()],
+                    ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "melt".into(),
+                    params: vec![m37_list_str.clone(), m37_list_str.clone()],
+                    ret: m37_df_ty.clone(),
+                },
             ],
             generics: vec![], generic_tvars: vec![],
             is_native: false, payload_size: 24,
@@ -4761,6 +4804,30 @@ impl Resolver {
                         m37_df_ty.clone(),
                     ),
                     native_id: 925,
+                },
+                // ── M39 Phase A: concat_rows(dfs) / concat_cols(dfs) ──
+                // List[DataFrame] is built fresh here because the module-
+                // item list is the only consumer; column-class-id capture
+                // happens above so we have m37_df_ty available.
+                StdlibItem {
+                    name: "concat_rows".into(), kind: StdlibItemKind::Function,
+                    ty: m37_fn(
+                        vec![Ty::Generic {
+                            base: TypeCtor::List, args: vec![m37_df_ty.clone()],
+                        }],
+                        m37_df_ty.clone(),
+                    ),
+                    native_id: 941,
+                },
+                StdlibItem {
+                    name: "concat_cols".into(), kind: StdlibItemKind::Function,
+                    ty: m37_fn(
+                        vec![Ty::Generic {
+                            base: TypeCtor::List, args: vec![m37_df_ty.clone()],
+                        }],
+                        m37_df_ty.clone(),
+                    ),
+                    native_id: 942,
                 },
             ],
         };

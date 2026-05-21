@@ -911,6 +911,55 @@ pub enum NativeFn {
     /// `GroupedDataFrame.count(self) -> DataFrame`.
     M38TabGdfCount             = 934,
 
+    // ── 935–984: M39 (tabular Phase 4 — reshape ops) ─────────────────
+    // The bulk of these are DataFrame / Column reshape operations that
+    // build on the M37 sealed-class layouts and the M38 group-by
+    // hashing.  Dispatched class-method-style via
+    // `m39_tabular_class_method_native_id_by_name` in ir.rs (class
+    // methods) and the tabular module's StdlibItem list (module-level
+    // functions like `concat_rows`).
+    //
+    // Phase A — unique / value_counts / concat_rows / concat_cols.
+    /// `ColumnI64.unique(self) -> ColumnI64`.  Distinct non-null
+    /// values in first-occurrence order.
+    M39TabDfUniqueI64          = 935,
+    /// `DataFrame.unique_i64(self, col: str) -> ColumnI64?`.  Returns
+    /// `none` when the column is absent or has the wrong dtype.
+    /// (Name kept generic — see method dispatch table.)
+    M39TabDfUniqueF64          = 936,
+    /// `DataFrame.unique_str(self, col: str) -> ColumnStr?`.
+    M39TabDfUniqueStr          = 937,
+    /// `DataFrame.unique_bool(self, col: str) -> ColumnBool?`.
+    M39TabDfUniqueBool         = 938,
+    /// `DataFrame.unique_datetime(self, col: str) -> ColumnDateTime?`.
+    M39TabDfUniqueDateTime     = 939,
+    /// `DataFrame.value_counts(self, col: str) -> DataFrame`.  Two
+    /// columns: the source column's name (dtype preserved) + a
+    /// `count: i64` column.  Sorted by count descending, ties broken
+    /// by first-occurrence order.  Null cells are excluded.
+    M39TabDfValueCounts        = 940,
+    /// `tabular.concat_rows(dfs: List[DataFrame]) -> DataFrame`.
+    /// Module-level; vertical concatenation.  All input dfs must
+    /// have identical column schemas (names + dtypes in order).
+    M39TabConcatRows           = 941,
+    /// `tabular.concat_cols(dfs: List[DataFrame]) -> DataFrame`.
+    /// Module-level; horizontal concatenation.  All input dfs must
+    /// have identical row counts; column names must be globally
+    /// unique.
+    M39TabConcatCols           = 942,
+    /// `DataFrame.merge(self, other: DataFrame, on: List[str], how: str) -> DataFrame`.
+    /// Hash-join.  `how` ∈ {"inner","left","right","outer"}.  Null
+    /// cells in `on` columns never match (pandas/SQL semantics).
+    M39TabDfMerge              = 945,
+    /// `DataFrame.pivot(self, index: str, columns: str, values: str) -> DataFrame`.
+    /// Long-to-wide reshape.  Raises ValueError on duplicate
+    /// (index, columns) pairs.
+    M39TabDfPivot              = 950,
+    /// `DataFrame.melt(self, id_vars: List[str], value_vars: List[str]) -> DataFrame`.
+    /// Wide-to-long reshape.  All `value_vars` columns must share a
+    /// dtype.
+    M39TabDfMelt               = 951,
+
     // ── 250–289: M22 P2A (argparse + collections + csv) ─────────────────
     // Phase 2 starts here.  P2A's job is to bring three high-ROI stdlib
     // modules online on top of the M19 stdlib-module-table:
@@ -2402,6 +2451,18 @@ impl NativeFn {
             932 => Some(Self::M38TabGdfMin),
             933 => Some(Self::M38TabGdfMax),
             934 => Some(Self::M38TabGdfCount),
+            // ── M39 (tabular reshape) ───────────────────────────
+            935 => Some(Self::M39TabDfUniqueI64),
+            936 => Some(Self::M39TabDfUniqueF64),
+            937 => Some(Self::M39TabDfUniqueStr),
+            938 => Some(Self::M39TabDfUniqueBool),
+            939 => Some(Self::M39TabDfUniqueDateTime),
+            940 => Some(Self::M39TabDfValueCounts),
+            941 => Some(Self::M39TabConcatRows),
+            942 => Some(Self::M39TabConcatCols),
+            945 => Some(Self::M39TabDfMerge),
+            950 => Some(Self::M39TabDfPivot),
+            951 => Some(Self::M39TabDfMelt),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

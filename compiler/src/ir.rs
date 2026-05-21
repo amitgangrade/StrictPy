@@ -4232,6 +4232,20 @@ fn lower_method_call(
                     },
                 );
             }
+            // M39: `tabular` reshape methods — typed `unique_*` per dtype,
+            // `value_counts`, `merge`, `pivot`, `melt`.  Same class-name +
+            // method-name shape as M37/M38.
+            if let Some(nid) = m39_tabular_class_method_native_id_by_name(
+                layout.name.as_str(), method,
+            ) {
+                return fb.push_value(
+                    ret_ty,
+                    ValueKind::Op {
+                        op: IROp::NativeCall { native_id: nid },
+                        args: arg_vs,
+                    },
+                );
+            }
         }
     }
 
@@ -4640,6 +4654,35 @@ fn m38_tabular_class_method_native_id_by_name(
         ("GroupedDataFrame", "max")   => NativeFn::M38TabGdfMax as u32,
         ("GroupedDataFrame", "count") => NativeFn::M38TabGdfCount as u32,
         ("GroupedDataFrame", "agg")   => NativeFn::M38TabGdfAgg as u32,
+        _ => return None,
+    })
+}
+
+/// M39: dispatch a `tabular` DataFrame reshape method by class name +
+/// method name.  Mirrors `m37_tabular_class_method_native_id_by_name`
+/// and `m38_tabular_class_method_native_id_by_name` — every method
+/// here is one of the M39 Phase 4 reshape operations.
+///
+/// Per the M39 brief, all locals in shared compiler files use the
+/// `m39_` prefix.
+fn m39_tabular_class_method_native_id_by_name(
+    class_name: &str,
+    method: &str,
+) -> Option<u32> {
+    Some(match (class_name, method) {
+        // ── Phase A: typed unique accessors (one per dtype) ──
+        ("DataFrame", "unique_i64")      => NativeFn::M39TabDfUniqueI64 as u32,
+        ("DataFrame", "unique_f64")      => NativeFn::M39TabDfUniqueF64 as u32,
+        ("DataFrame", "unique_str")      => NativeFn::M39TabDfUniqueStr as u32,
+        ("DataFrame", "unique_bool")     => NativeFn::M39TabDfUniqueBool as u32,
+        ("DataFrame", "unique_datetime") => NativeFn::M39TabDfUniqueDateTime as u32,
+        // ── Phase A: value_counts ──
+        ("DataFrame", "value_counts")    => NativeFn::M39TabDfValueCounts as u32,
+        // ── Phase B: merge ──
+        ("DataFrame", "merge")           => NativeFn::M39TabDfMerge as u32,
+        // ── Phase C: pivot + melt ──
+        ("DataFrame", "pivot")           => NativeFn::M39TabDfPivot as u32,
+        ("DataFrame", "melt")            => NativeFn::M39TabDfMelt as u32,
         _ => return None,
     })
 }
