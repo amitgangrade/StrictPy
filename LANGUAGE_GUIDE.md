@@ -1,6 +1,6 @@
 # StrictPy — language guide for AI coding tools
 
-**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M38 (2026-05-22).
+**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M39 (2026-05-22).
 
 **Audience**: any AI coding tool (Claude, GPT, Gemini, etc.) being asked to write a StrictPy program. This file is the single source of truth for writing idiomatic StrictPy — you should NOT need to read the compiler source (`compiler/src/`) or VM source (`vm/src/`) to write correct code.
 
@@ -996,9 +996,9 @@ cur.row_count() -> i64                            # rows the underlying query pr
 
 All cells are stringified (v0.4 will add typed cell access).
 
-### tabular (M37, extended by M38)
+### tabular (M37, extended by M38, M39)
 
-First Pandas-shaped data package — native Rust impl (real pandas can't import). Sealed `Column` hierarchy + `DataFrame` with named columns + per-column null mask. First stdlib package to register its classes module-scoped from the start (no prelude bloat — see §6.2). M38 rounds out the M37 STOP-CRITERIA debt and adds per-column aggregations, `df.describe`, `Column.fill_null`, `tabular.from_dict`, and hash-based group-by via a new `GroupedDataFrame` class.
+First Pandas-shaped data package — native Rust impl (real pandas can't import). Sealed `Column` hierarchy + `DataFrame` with named columns + per-column null mask. First stdlib package to register its classes module-scoped from the start (no prelude bloat — see §6.2). M38 rounds out the M37 STOP-CRITERIA debt and adds per-column aggregations, `df.describe`, `Column.fill_null`, `tabular.from_dict`, and hash-based group-by via a new `GroupedDataFrame` class. M39 adds the Phase 4 reshape surface: per-dtype `unique`, `value_counts`, `concat_rows`/`concat_cols`, `df.merge` (hash-join), `df.pivot`, and `df.melt`.
 
 ```python
 import tabular
@@ -1162,6 +1162,53 @@ gdf.agg(specs: List[Tuple[str, str]]) -> DataFrame
 ```
 
 See `examples/tabular_groupby_demo.spy` for an end-to-end M38 walkthrough (filter → aggregate → group-by → rename).
+
+#### M39 additions — reshape
+
+**Per-dtype `unique` accessors.** Return a fresh column of distinct non-null values in first-occurrence order. Return `none` when the named column is absent OR has a different dtype (so callers don't need a separate dtype check).
+
+```python
+df.unique_i64(col: str) -> ColumnI64?
+df.unique_f64(col: str) -> ColumnF64?     # NaN-aware: bit-pattern equality
+df.unique_str(col: str) -> ColumnStr?
+df.unique_bool(col: str) -> ColumnBool?
+df.unique_datetime(col: str) -> ColumnDateTime?
+```
+
+**`df.value_counts(col)`.** Returns a 2-column frame: the source column's values (dtype preserved, name preserved) + a `count: i64` column. Sorted by count descending; ties broken by first-occurrence order (stable). Null cells are excluded. Raises `ValueError` if the column is missing.
+
+```python
+df.value_counts(col: str) -> DataFrame    # 2 cols: <col> + "count"
+```
+
+**`tabular.concat_rows(dfs)`.** Vertical concatenation (stack rows). All input dfs must have identical column schemas — same names + dtypes in the same order. Empty input list raises `ValueError`.
+
+**`tabular.concat_cols(dfs)`.** Horizontal concatenation (stitch columns). All input dfs must have identical row counts. Column names must be globally unique across all input dfs (no auto-rename in v1).
+
+```python
+tabular.concat_rows(dfs: List[DataFrame]) -> DataFrame
+tabular.concat_cols(dfs: List[DataFrame]) -> DataFrame
+```
+
+**`df.merge(other, on, how)`.** Hash-join. `on` is a list of column names that must exist in both frames with matching dtypes. `how` ∈ `"inner" | "left" | "right" | "outer"` (any other value raises `ValueError`). Output schema is `self`'s columns in order, then `other`'s non-`on` columns in order — no duplicate column names. A row whose `on` cells contain any null never matches (see §11.20).
+
+```python
+df.merge(other: DataFrame, on: List[str], how: str) -> DataFrame
+```
+
+**`df.pivot(index, columns, values)`.** Long-to-wide reshape. `index` chooses the row label column, `columns` chooses the value source whose unique values become new column headers, and `values` fills the cells. Output column names for the pivoted columns are stringified versions of the unique `columns` values. Raises `ValueError` on duplicate `(index, columns)` pairs (see §11.21). Missing pairs emit null cells.
+
+```python
+df.pivot(index: str, columns: str, values: str) -> DataFrame
+```
+
+**`df.melt(id_vars, value_vars)`.** Wide-to-long reshape. All `value_vars` columns must share a dtype (else `ValueError`). Output is `len(id_vars) + 2` columns × `nrows * len(value_vars)` rows: the id_vars columns + a `variable: str` column + a `value: <shared dtype>` column. Row order is source-row-major then value_var-minor.
+
+```python
+df.melt(id_vars: List[str], value_vars: List[str]) -> DataFrame
+```
+
+See `examples/tabular_reshape_demo.spy` for an end-to-end M39 walkthrough (unique → value_counts → merge → pivot → melt → concat).
 
 ### shutil (M27 P3c-A)
 
@@ -2053,6 +2100,14 @@ The null mask and "NaN" are two distinct concepts in `tabular`: `nulls[i] == tru
 `tabular.from_dict(d: Dict[str, Column])` returns a DataFrame whose column order follows `sorted(d.keys())`. This is a v1 simplification: the underlying `Dict[K, V]` storage (M5) is a `HashMap` and does NOT preserve insertion order, so we sort to get deterministic output. If you need a specific column order, either pass the names directly to `tabular.from_columns(names, cols)` or `select` after construction.
 
 A v0.4 migration of `Dict` to an order-preserving `IndexMap` would change this to "follow insertion order", matching real pandas's `pd.DataFrame(dict)` behavior.
+
+### 11.20 `tabular` merge: null join keys never match
+
+For the M39 `df.merge(other, on, how)`: a row whose `on` cells contain any null does NOT match anything on the other side, regardless of how the other side's null mask looks. This matches pandas's `null != null` SQL semantics. Consequence: in `inner`/`right` joins such rows are dropped; in `left`/`outer` joins they emit with the right-side columns null-filled. If you want null-keyed rows to match each other, replace nulls with a sentinel (`col.fill_null(...)`) before merging.
+
+### 11.21 `tabular` pivot raises on duplicate (index, columns) pairs
+
+`df.pivot(index, columns, values)` requires that each `(index_value, columns_value)` pair appears at most once in the source frame — otherwise it would have to choose between conflicting `values` cells. v1 raises `ValueError` on the first duplicate. If you have duplicates and want to aggregate them, run `df.group_by([index, columns]).agg(...)` first, then pivot the result. (A future `df.pivot_table(..., aggfunc=...)` matching pandas would fold the agg in, but v1 keeps the two operations separate.)
 
 ---
 

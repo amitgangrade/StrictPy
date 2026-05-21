@@ -1,0 +1,151 @@
+"""tabular_reshape_demo.spy — M39 walkthrough of the `tabular` reshape surface.
+
+Builds two small frames (an orders frame + a customers lookup frame),
+merges them, runs a few reshape operations (unique / value_counts /
+pivot / melt / concat), and prints each stage.  Output is deterministic
+so the `tabular_reshape_demo_runs` integration test can assert on it.
+
+Surface demonstrated (post-M39):
+
+  1. df.unique_str / .unique_i64 — typed per-dtype distinct-value accessors.
+  2. df.value_counts(col) — frequency table sorted desc + stable tie-break.
+  3. tabular.concat_rows / .concat_cols — stack / stitch frames.
+  4. df.merge(other, on, how) — hash-join (inner/left/right/outer).
+  5. df.pivot(index, columns, values) — long-to-wide reshape.
+  6. df.melt(id_vars, value_vars) — wide-to-long reshape.
+"""
+
+from tabular import Column, ColumnI64, ColumnStr, DataFrame
+import tabular
+
+
+fn build_orders() -> DataFrame:
+    """Construct a 5-row orders frame.
+
+    customer_id  region  qty
+    1            us      10
+    2            uk       5
+    1            uk       7
+    3            de       3
+    2            us       4
+    """
+    cids_v: List[i64] = []
+    cids_v.append(1i64)
+    cids_v.append(2i64)
+    cids_v.append(1i64)
+    cids_v.append(3i64)
+    cids_v.append(2i64)
+    cids: ColumnI64 = tabular.col_i64_simple(cids_v)
+
+    regions_v: List[str] = []
+    regions_v.append("us")
+    regions_v.append("uk")
+    regions_v.append("uk")
+    regions_v.append("de")
+    regions_v.append("us")
+    regions: ColumnStr = tabular.col_str_simple(regions_v)
+
+    qty_v: List[i64] = []
+    qty_v.append(10i64)
+    qty_v.append(5i64)
+    qty_v.append(7i64)
+    qty_v.append(3i64)
+    qty_v.append(4i64)
+    qty: ColumnI64 = tabular.col_i64_simple(qty_v)
+
+    cn: List[str] = []
+    cn.append("customer_id")
+    cn.append("region")
+    cn.append("qty")
+    cols: List[Column] = []
+    cols.append(cids)
+    cols.append(regions)
+    cols.append(qty)
+    return tabular.from_columns(cn, cols)
+
+
+fn build_customers() -> DataFrame:
+    """Construct a 3-row customers lookup.
+
+    customer_id  name
+    1            alice
+    2            bob
+    3            carol
+    """
+    cids_v: List[i64] = []
+    cids_v.append(1i64)
+    cids_v.append(2i64)
+    cids_v.append(3i64)
+    cids: ColumnI64 = tabular.col_i64_simple(cids_v)
+
+    names_v: List[str] = []
+    names_v.append("alice")
+    names_v.append("bob")
+    names_v.append("carol")
+    names: ColumnStr = tabular.col_str_simple(names_v)
+
+    cn: List[str] = []
+    cn.append("customer_id")
+    cn.append("name")
+    cols: List[Column] = []
+    cols.append(cids)
+    cols.append(names)
+    return tabular.from_columns(cn, cols)
+
+
+fn main() -> i32:
+    orders: DataFrame = build_orders()
+    customers: DataFrame = build_customers()
+    println("orders_nrows=" + str(orders.length()))
+    println("customers_nrows=" + str(customers.length()))
+
+    # 1. unique on a string column.
+    uniq_regions: ColumnStr? = orders.unique_str("region")
+    if uniq_regions is not none:
+        println("unique_regions=" + str(uniq_regions.length()))
+
+    # 2. value_counts on the region column — sorted desc with ties
+    # broken by first occurrence.  Expected: us=2, uk=2, de=1.
+    vc: DataFrame = orders.value_counts("region")
+    println("vc_nrows=" + str(vc.length()))
+    println("vc_top_row=" + vc.row(0i64)[0i32] + ":" + vc.row(0i64)[1i32])
+
+    # 3. merge orders with customers on customer_id (inner join).
+    on: List[str] = []
+    on.append("customer_id")
+    merged: DataFrame = orders.merge(customers, on, "inner")
+    println("merged_nrows=" + str(merged.length()))
+    println("merged_ncols=" + str(merged.ncols()))
+
+    # 4. pivot — region × name → qty matrix.  Each (region, name)
+    # pair appears at most once in our data, so pivot is unique.
+    piv: DataFrame = merged.pivot("region", "name", "qty")
+    println("piv_nrows=" + str(piv.length()))
+    println("piv_ncols=" + str(piv.ncols()))
+
+    # 5. melt the pivoted frame back.  id_vars=[region], value_vars
+    # = the per-name columns.  Result is 3 regions × 3 names = 9
+    # rows (many cells null since pivot had a sparse layout).
+    pivcols: List[str] = piv.columns()
+    name_cols: List[str] = []
+    pc_len: i64 = piv.ncols()
+    j: i64 = 0i64
+    while j < pc_len:
+        c: str = pivcols[i32(j)]
+        if c != "region":
+            name_cols.append(c)
+        j = j + 1i64
+    id_vars: List[str] = []
+    id_vars.append("region")
+    melted: DataFrame = piv.melt(id_vars, name_cols)
+    println("melted_nrows=" + str(melted.length()))
+
+    # 6. concat_rows: stack the original 5-row orders on top of itself.
+    dfs: List[DataFrame] = []
+    dfs.append(orders)
+    dfs.append(orders)
+    stacked: DataFrame = tabular.concat_rows(dfs)
+    println("stacked_nrows=" + str(stacked.length()))
+
+    println("done")
+    return 0
