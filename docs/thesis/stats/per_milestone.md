@@ -40,6 +40,7 @@ Benchmark data: `bench/history/`.
 | **M34** | **690** | 20,760 | 17,800 | 13,290 | 0 | 0 | 0 | 16/0/0 | 13.1 |
 | **M35** | **723** | **21,100** | **18,450** | **13,587** | 0 | 0 | 0 | 16/0/0 | 13.1 |
 | **M36** | 723 | **21,581** | 18,450 | 13,587 | 0 | 0 | 0 | 16/0/0 | 13.1 |
+| **M37** | **744** | **21,881** | **19,620** | **13,717** | 0 | 0 | 0 | 16/0/0 | 13.1 |
 
 Notes:
 - LOC is at end-of-milestone; M1's LOC are mostly lexer+parser+pretty (already in their final shape).
@@ -83,6 +84,7 @@ See `bench/history/` for the underlying JSON.
 | M34 (typed JsonValue tree — first stdlib classes) | 16 | 0 | 0 | 13.1 ms | sealed `JsonValue` + 6 subclasses (JNull/JBool/JInt/JFloat/JString/JList/JObject) registered in prelude (scope-down per brief). `json.parse(s) -> JsonValue` + `stringify` + constructor helpers. Closes the #1 M29 ergonomics gap (~50 LOC → ~10 LOC). +13 tests. Lesson 1 streak: 14. | — |
 | M35 (four more stdlib classes — 3 parallel agents) | 16 | 0 | 0 | 13.1 ms | `re.Pattern` (P4-A, NativeFn IDs 790-799), `sqlite3.Connection` + `Cursor` (P4-B, IDs 800-819), `hashlib.Hasher` streaming (P4-C, IDs 820-829). All four prelude-registered, extending M34's pattern. 11 stdlib classes now in the prelude → `StdlibItemKind::Class` refactor becomes urgent before M40. +33 tests, +3 demo programs. Lesson 1 streak: 17 consecutive clean agents. | — |
 | M36 (`StdlibItemKind::Class` refactor) | 16 | 0 | 0 | 13.1 ms | Single agent closes the M34/M35 scope-down debt. New `Class { class_id }` variant on `StdlibItemKind`; all 11 stdlib classes (JsonValue + Pattern + Connection + Cursor + Hasher) now published through their home modules. Honest scope-down: prelude bindings RETAINED for back-compat — M34/M35 tests reach class names by bare lookup, so hard removal would have regressed 39 tests. Phase D annotated the legacy "prelude wins" branch for future deletion. Tests unchanged at 723 / 0 / 1 (pure refactor). Lesson 1 streak: 18. | — |
+| M37 (`tabular` stdlib — first Pandas-shaped package) | 16 | 0 | 0 | 13.1 ms | First v0.3 stdlib package shipped via the post-M36 canonical class-registration path (no prelude additions). 6 new classes: sealed `Column` + 5 final subclasses (ColumnI64/F64/Str/Bool/DateTime) + `DataFrame`. Per-column null mask NA semantics. Phases A-E: core types + I/O (read_csv/write_csv/from_sql) + comparisons → ColumnBool masks + df.filter/select/drop/head/tail + stable sort_by. STOP CRITERIA cut Phase C between/ne/ge/le/starts_with — saved 10 NativeFn slots; M38 picks up. NativeFn IDs 830-877. +21 tests, +1 demo (130 LOC). Largest single-agent milestone to date (~2800 LOC). Lesson 1 streak: 19. | — |
 
 \* M7-unfair: Python timing included parse+compile time. Methodology bug
 caught and fixed at M10-prep; the M7-fair snapshot is the honest baseline.

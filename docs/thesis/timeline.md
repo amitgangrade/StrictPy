@@ -1117,6 +1117,104 @@ No language/compiler changes; new pure-bench infrastructure only.
 
 ---
 
+## M37 — `tabular` stdlib module (first Pandas-shaped package) (2026-05-21)
+
+The first stdlib package for tabular data — a from-scratch native
+DataFrame library following the M34 sealed-class pattern. Module
+name `tabular` (not `pandas`, to avoid the confusion of `import
+pandas` not meaning real pandas — see LANGUAGE_GUIDE.md §11.11).
+
+**Significance**: first stdlib package to register classes via the
+post-M36 `StdlibItemKind::Class` canonical path. No prelude bloat;
+classes available only via `from tabular import DataFrame, ColumnI64`
+or `tabular.DataFrame` as annotation type. End-to-end validation of
+the M36 infrastructure refactor.
+
+### Surface (`tabular` stdlib module)
+
+6 classes registered module-scoped:
+
+- `sealed class Column` + 5 final subclasses: `ColumnI64` /
+  `ColumnF64` / `ColumnStr` / `ColumnBool` / `ColumnDateTime`
+- `final class DataFrame`
+
+**NA semantics**: each Column stores `values: List[T] +
+nulls: List[bool]` of equal length. Uniform across dtypes; no NaN
+sentinel games; integrates with `is not none` narrowing on the
+typed accessor methods (`ColumnI64.get(i) -> i64?`).
+
+### Phases (5 commits, all clean)
+
+- **Phase A** — `tabular.col_*` factories, `from_columns`, `from_rows`;
+  inspection methods (`shape / columns / dtypes / get_column /
+  has_column`); ASCII `show()` table.
+- **Phase B** — I/O: `read_csv` / `write_csv` / `from_sql` (reuses
+  M35 typed Cursor!) / `from_rows`. Schema-driven parsing; empty
+  cells → null.
+- **Phase C** — per-column comparisons (i64+f64: `eq` / `gt` / `lt`;
+  str: `eq` / `contains`; bool: `eq`; datetime: `eq` / `gt` / `lt`)
+  producing null-aware ColumnBool masks; mask combinators
+  (`and_` / `or_` / `not_` / `count_true` / `count_false` /
+  `count_null`); `df.filter` / `select` / `drop` / `head` /
+  `tail` / `row`.
+- **Phase D** — stable `df.sort_by(col, ascending)` with
+  nulls-at-end (pandas default), per-Column-type comparator dispatch.
+- **Phase E** — 19 VM tests + 2 compiler integration tests +
+  `examples/tabular_demo.spy` (~130 LOC) + LANGUAGE_GUIDE.md §5
+  + §6.2 + §11 updates + agent report.
+
+### STOP CRITERIA invoked in Phase C
+
+Cut `between` / `ne` / `ge` / `le` (i64+f64), `starts_with` (str),
+`DataFrame.rename`. Saved ~10 NativeFn slots. Kept set covers the
+common 80% of filtering use cases; M38 picks the rest up.
+
+### Three findings worth knowing
+
+1. **`(*hdr).vtable` not `.ty`**: the ObjectHeader field rename
+   caught the agent in early Phase A. Build errors were clean and
+   pointed straight at the issue.
+2. **No `get_column(name) -> Column?`**: the sealed-class return
+   type can't be cleanly chosen at NativeFn time. Demo works
+   around this by holding typed Column references from construction.
+   M38 will add typed `get_column_i64` / `get_column_str` / etc.
+3. **No bare-name fallback for tabular classes**: confirms the
+   M36 refactor's promise. Users MUST write `from tabular import
+   DataFrame`; bare-name access only works after explicit import.
+   This is the post-M36 canonical behavior — M34/M35 classes
+   still have the legacy bare-name fallback for back-compat.
+
+### Tests + size
+
+- Tests: 723 → 744 (+21: 19 in `vm/tests/m37_tabular.rs`, 2 in
+  `compiler/tests/tabular_demo_runs.rs`).
+- Examples: 100 → 101 (`examples/tabular_demo.spy` ~130 LOC).
+- Stdlib modules: 37 → 38 (`tabular`).
+- LOC: `vm/src/builtins.rs` +1170, `compiler/src/resolver.rs` +300,
+  `shared/src/native.rs` +180, `compiler/src/ir.rs` +80, plus new
+  tests / example / report. Total ~2800 LOC — the largest single-
+  agent milestone to date. (Most was straightforward decode-then-
+  allocate handler code in `builtins.rs`; not load-bearing logic.)
+
+### Lesson 1 streak: 19 consecutive clean agents
+
+(M28 + M28.5 + M29 + M29.5 + M30×2 + M31 + M32 + M33 + M34 +
+M35×3 + M36 + M37). M37 ran 5 phase-commits across the largest
+single-agent milestone to date without breaking the streak.
+First commit (Phase A green) at ~25% of budget.
+
+### Methodology contribution
+
+M37 establishes the **scale-out template** for v0.3 stdlib packages
+that grow beyond a single class: one focused agent ships 5 phases
+sequentially behind the M36 canonical registration path, with
+per-phase STOP CRITERIA so the milestone ships a smaller-but-
+complete subset if budget runs out. The shape works for the next
+Pandas-shape phase (M38 group-by + aggregations), the deferred
+Phase 5 time-series work, and the eventual GUI binding milestone.
+
+---
+
 ## M36 — `StdlibItemKind::Class` refactor (2026-05-21)
 
 Single focused agent closes the M34/M35 scope-down debt. Pure

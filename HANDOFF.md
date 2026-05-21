@@ -1,4 +1,4 @@
-# Session handoff — 2026-05-21 (post-M36)
+# Session handoff — 2026-05-21 (post-M37)
 
 ## Read this FIRST in the next session
 
@@ -17,22 +17,49 @@ Everything you need to resume is in:
 ## Current head
 
 - Branch: `main`
-- Latest commit: `91b581e` (M36 E: LANGUAGE_GUIDE.md refresh + agent report)
+- Latest commit: `895da03` (M37 E: tabular tests + demo + LANGUAGE_GUIDE.md update + agent report)
 - Tag: `v0.2.0` (commit `121483f`, pushed)
-- Tests passing on main: **723** (unchanged from M35; M36 is a pure refactor)
+- Tests passing on main: **744** (+21 over M36)
 
 ## Status snapshot
 
 | Metric | Value |
 |---|---:|
-| Milestones complete on main | M0–M36 |
+| Milestones complete on main | M0–M37 |
 | **v0.2.0 release** | **Tagged at M30 (commit 121483f)** |
-| Tests | 723 / 0 fail / 1 ignored |
+| Tests | 744 / 0 fail / 1 ignored |
 | Bugs | 35 / 35 / **0 deferred** |
-| Stdlib modules | 37 |
-| Stdlib classes | 11 (JsonValue + 6 subclasses, Pattern, Connection, Cursor, Hasher) — **now also published as `StdlibItemKind::Class` items in their home modules**; prelude bindings retained for back-compat |
-| Example programs | 100 |
-| Lesson 1 streak | **18 consecutive clean-commit agents** (M28 → M36 — M36 agent committed cleanly per phase) |
+| Stdlib modules | **38** (+1 in M37: `tabular`) |
+| Stdlib classes | 11 (M34/M35) + **6 from M37** (ColumnI64/F64/Str/Bool/DateTime + DataFrame) = 17 total. M37 classes registered module-scoped from the start via the post-M36 `StdlibItemKind::Class` path (no prelude binding). |
+| Example programs | **101** (+1 in M37: `tabular_demo.spy`) |
+| Lesson 1 streak | **19 consecutive clean-commit agents** (M28 → M37 — M37 agent committed cleanly per phase across 5 phases) |
+
+## M37 — completed (single big agent, 5 phases, integrated as fast-forward)
+
+| Agent | Scope | Var prefix | NativeFn IDs | Commits |
+|---|---|---|---|---|
+| **M37 tabular** | First Pandas-shaped stdlib package | `m37_` | 830-877 | `0f40eaf` (A), `c01e3f1` (B), `2c74e39` (C), `1978346` (D), `895da03` (E) |
+
+### What shipped
+
+- **Module**: `tabular` (named to avoid `import pandas` confusion — see LANGUAGE_GUIDE.md §11.11)
+- **6 classes**: sealed `Column` + 5 final subclasses (`ColumnI64` / `F64` / `Str` / `Bool` / `DateTime`) + `DataFrame`. **First stdlib package using the post-M36 canonical class-registration path** — classes registered via `StdlibItemKind::Class` in `seed_stdlib_modules`, NOT in `seed_prelude`. Validates the M36 refactor end-to-end.
+- **NA semantics**: per-column `nulls: List[bool]` parallel to `values: List[T]`. Uniform across dtypes; no NaN sentinel games.
+- **Phase A (~400 LOC)**: Column/DataFrame allocation + construction helpers (`tabular.col_i64`, etc.) + inspection (shape/columns/dtypes/get_column) + `df.show(n)` ASCII table.
+- **Phase B (~300 LOC)**: `read_csv` / `write_csv` / `from_sql` (reuses M35 Cursor!) / `from_rows`. Schema-driven parsing; empty cells → null.
+- **Phase C (~400 LOC)**: per-column comparison ops (i64+f64: `eq`/`gt`/`lt`; str: `eq`/`contains`; bool: `eq`; datetime: `eq`/`gt`/`lt`) producing null-aware ColumnBool masks; combinators `and_` / `or_` / `not_` / `count_true`; `df.filter` / `select` / `drop` / `head` / `tail` / `row`.
+- **Phase D (~150 LOC)**: stable `df.sort_by(col, ascending)` with nulls-go-to-end, per-Column-type comparator dispatch.
+- **Phase E (~150 LOC)**: 19 VM tests + 2 compiler integration tests + `examples/tabular_demo.spy` + LANGUAGE_GUIDE.md updates + agent report.
+
+### STOP CRITERIA invoked
+
+Phase C cut `between`, `ne`, `ge`, `le`, `starts_with` — saved ~10 NativeFn slots. The kept set covers the common 80% filtering cases.
+
+### Three findings worth knowing
+
+1. **`(*hdr).vtable` not `.ty`**: ObjectHeader field name caught the agent in early Phase A; documented.
+2. **No `get_column(name) -> Column?`**: sealed-class return type can't be cleanly chosen at NativeFn time. Demo works around by holding typed Column references from construction. **M38 follow-up**: add typed `get_column_i64` / `get_column_str` / etc.
+3. **No bare-name fallback for tabular classes**: confirms the M36 refactor's promise. Users MUST write `from tabular import DataFrame`; `import tabular` + `tabular.DataFrame` works only as an annotation type. This is the post-M36 canonical behavior — M34/M35 classes still have the legacy bare-name fallback for back-compat.
 
 ## M36 — completed (single agent, integrated as fast-forward)
 
@@ -103,23 +130,41 @@ Per the THESIS §8.4 next-pass priority list + M34/M35 deferred items:
 
 ### Highest leverage (in order)
 
-1. **THESIS + BLOG_POST refresh to M35 + M36** (small writing task, ~30-60 min).
+1. **THESIS + BLOG_POST refresh to M35-M37** (small writing task, ~30-60 min).
    Both are frozen at M34. Concrete deltas to fold in:
-   - Tests: 690 → 723 (M35, +33; M36 unchanged — pure refactor)
-   - Stdlib classes: 7 → 11 in M35; M36 promoted them to proper
-     `StdlibItemKind::Class` items
-   - Demo programs: 97 → 100
-   - Lesson 1 streak: 14 → 18
+   - Tests: 690 → 744 (M35 +33; M36 unchanged — pure refactor; M37 +21)
+   - Stdlib classes: 7 → 17 (M35 +4; M36 promoted them via `StdlibItemKind::Class`;
+     M37 added 6 more — the first using the canonical post-M36 path)
+   - Stdlib modules: 37 → 38 (M37 added `tabular`)
+   - Demo programs: 97 → 101
+   - Lesson 1 streak: 14 → 19
+   - **New thesis chapter**: "Pandas-shaped data package as v0.3 stdlib growth"
 
-2. **M36 follow-up — flip M34/M35 tests to explicit imports + delete
+2. **M38 — tabular round-out + group-by** (the natural M37 follow-up).
+   M37's STOP CRITERIA cut some Phase C ops; M38 picks them up + adds
+   group-by/aggregate. Concrete punch list:
+   - Typed `get_column_i64` / `get_column_str` / `get_column_f64` /
+     `get_column_bool` / `get_column_datetime` on DataFrame (resolves
+     the M37 "can't return sealed Column" finding)
+   - Restore cut Phase C ops: `between` / `ne` / `ge` / `le` (i64+f64);
+     `starts_with` / `ends_with` (str); `rename` on DataFrame
+   - Aggregations per column: `sum / mean / min / max / count / std / var
+     / median` (drop f64 NaN cells)
+   - `df.describe() -> DataFrame` summary
+   - `df.group_by([cols]) -> GroupedDataFrame` + `.agg({col: "sum"})` /
+     `.sum() / .mean()` — hash-based aggregation
+   - `Column.fill_null(value)` for each subclass
+   - `tabular.from_dict(d: Dict[str, Column])` constructor
+
+3. **M36 follow-up — flip M34/M35 tests to explicit imports + delete
    the legacy "prelude wins" branch.** The infrastructure is in place;
    migration is mechanical. ~39 test files plus a handful of examples
    need `from json import JsonValue` (etc.) added. After the flip, the
    "still load-bearing" comment Phase D added in `resolver.rs` becomes
-   removable. Closes the M36 metadata-refactor honest-debt; the prelude
-   then truly hosts only the 6 base classes + 10 exception names.
+   removable. M37 confirmed the canonical path works — now mechanical
+   migration of legacy callers.
 
-3. **Real Cranelift safepoints** (replaces M33 shadow stack):
+4. **Real Cranelift safepoints** (replaces M33 shadow stack):
    `cranelift-jit 0.115` doesn't stably expose PC ranges; check if
    a newer cranelift-jit (0.116+ or trunk) exposes
    `MachBufferFinalized::pc_range_for_inst` or similar. If yes,
@@ -190,9 +235,11 @@ After v0.4 language/stdlib work, update:
 Document these in any new agent brief:
 
 1. **"FIRST commit before 60% of your time budget"** with explicit
-   20%/40%/60%/80% checkpoint discipline. **18 consecutive clean
-   agents** (M28 → M36) — the streak is the strongest empirical
-   data point in the project. Don't soften this language.
+   20%/40%/60%/80% checkpoint discipline. **19 consecutive clean
+   agents** (M28 → M37) — the streak is the strongest empirical
+   data point in the project. M37 ran 5 phase-commits across a
+   ~2800-LOC milestone without breaking the streak. Don't soften
+   this language.
 
 2. **Distinctive variable prefixes per agent** in shared files
    (resolver.rs, builtins.rs, interp.rs) — `p3b_a_` / `p3b_b_` /

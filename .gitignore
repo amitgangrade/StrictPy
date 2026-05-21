@@ -30,3 +30,7 @@ __pycache__/
 /examples/webserver/uploads/*
 !/examples/webserver/uploads/.gitkeep
 
+# M37 tabular_demo.spy writes a CSV to cwd. Demo could be tidied to use
+# a tempdir (M38 follow-up); for now ignore the artifact.
+/_tabular_demo.csv
+
