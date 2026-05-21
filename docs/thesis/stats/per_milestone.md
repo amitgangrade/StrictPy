@@ -39,6 +39,7 @@ Benchmark data: `bench/history/`.
 | ... | ... | ... | ... | ... | ... | ... | ... | ... | ... |
 | **M34** | **690** | 20,760 | 17,800 | 13,290 | 0 | 0 | 0 | 16/0/0 | 13.1 |
 | **M35** | **723** | **21,100** | **18,450** | **13,587** | 0 | 0 | 0 | 16/0/0 | 13.1 |
+| **M36** | 723 | **21,581** | 18,450 | 13,587 | 0 | 0 | 0 | 16/0/0 | 13.1 |
 
 Notes:
 - LOC is at end-of-milestone; M1's LOC are mostly lexer+parser+pretty (already in their final shape).
@@ -81,6 +82,7 @@ See `bench/history/` for the underlying JSON.
 | M33 (precise GC stack maps — shadow-stack fallback) | 16 | 0 | 0 | 13.1 ms | Replaces M9 `in_jit` pause with shadow-stack root enumeration. JIT spills registers + pushes window before each heap-allocating helper. **Zero cherry-pick conflicts** with M32 despite both touching interp.rs + lib.rs — first parallel-v0.3-agent round, cleanest parallel integration in project history. +4 tests. v0.4 swaps to full Cranelift safepoints. | — |
 | M34 (typed JsonValue tree — first stdlib classes) | 16 | 0 | 0 | 13.1 ms | sealed `JsonValue` + 6 subclasses (JNull/JBool/JInt/JFloat/JString/JList/JObject) registered in prelude (scope-down per brief). `json.parse(s) -> JsonValue` + `stringify` + constructor helpers. Closes the #1 M29 ergonomics gap (~50 LOC → ~10 LOC). +13 tests. Lesson 1 streak: 14. | — |
 | M35 (four more stdlib classes — 3 parallel agents) | 16 | 0 | 0 | 13.1 ms | `re.Pattern` (P4-A, NativeFn IDs 790-799), `sqlite3.Connection` + `Cursor` (P4-B, IDs 800-819), `hashlib.Hasher` streaming (P4-C, IDs 820-829). All four prelude-registered, extending M34's pattern. 11 stdlib classes now in the prelude → `StdlibItemKind::Class` refactor becomes urgent before M40. +33 tests, +3 demo programs. Lesson 1 streak: 17 consecutive clean agents. | — |
+| M36 (`StdlibItemKind::Class` refactor) | 16 | 0 | 0 | 13.1 ms | Single agent closes the M34/M35 scope-down debt. New `Class { class_id }` variant on `StdlibItemKind`; all 11 stdlib classes (JsonValue + Pattern + Connection + Cursor + Hasher) now published through their home modules. Honest scope-down: prelude bindings RETAINED for back-compat — M34/M35 tests reach class names by bare lookup, so hard removal would have regressed 39 tests. Phase D annotated the legacy "prelude wins" branch for future deletion. Tests unchanged at 723 / 0 / 1 (pure refactor). Lesson 1 streak: 18. | — |
 
 \* M7-unfair: Python timing included parse+compile time. Methodology bug
 caught and fixed at M10-prep; the M7-fair snapshot is the honest baseline.

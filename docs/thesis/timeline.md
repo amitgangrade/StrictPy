@@ -1117,6 +1117,74 @@ No language/compiler changes; new pure-bench infrastructure only.
 
 ---
 
+## M36 — `StdlibItemKind::Class` refactor (2026-05-21)
+
+Single focused agent closes the M34/M35 scope-down debt. Pure
+infrastructure refactor — no public API change, no test regressions.
+The 11 stdlib classes shipped in M34 + M35 are now properly published
+through their home stdlib modules; the prelude bindings remain for
+back-compat. Lesson 1 streak: 18.
+
+### What changed
+
+1. **`StdlibItemKind::Class { class_id: ClassId }` variant** added.
+   Enum-with-payload, not a `class_id: Option<ClassId>` field — the
+   field-flavour would have required adding `class_id: None` to all
+   345 existing `StdlibItem { … }` construction sites. The variant
+   is additive; zero changes to existing sites.
+
+2. **All 11 M34/M35 classes** (JsonValue + 6 subclasses, Pattern,
+   Connection + Cursor, Hasher) now appear as `Class` items on
+   their home modules (`json`, `re`, `sqlite3`, `hashlib`).
+
+3. **`from MOD import X as Y` route** extended to handle Class
+   items: aliased imports bind `Y` as a fresh `SymbolKind::Class`
+   pointing at the same `ClassId`. Non-aliased imports continue to
+   no-op via the legacy "prelude wins" branch.
+
+4. **Phase D annotation**: the legacy branch now carries an explicit
+   list of the 11 classes it remains load-bearing for. A future agent
+   migrating the M34/M35 tests to `from json import JsonValue`
+   forms can delete the branch in one go.
+
+### The honest scope-down
+
+The original brief framed M36 as "move classes OUT of the prelude".
+The agent flagged early that every M34/M35 integration test reaches
+class names by bare lookup after just `import json` / `import re` /
+etc. — no `from … import` form. A hard prelude removal would have
+regressed 39 tests. The agent's call (honoring the STOP CRITERIA):
+ship the metadata refactor that unblocks v0.4 stdlib growth, keep
+the prelude bindings for now, mark the legacy branch for future
+removal. This is exactly the M33/M34 scope-down shape — ship working
+infrastructure that the next-round agent can extend cleanly.
+
+### Tests + size
+
+- Tests: 723 (unchanged from M35 — pure refactor).
+- `compiler/src/resolver.rs`: +156 / −14 lines.
+- `LANGUAGE_GUIDE.md`: ~25 lines of prose updates (§3.12 Imports,
+  §4.3 Class types, §5 preamble, §6.2 Prelude classes, version banner).
+- No changes to `vm/src/`, `shared/src/`, examples, or any test files.
+
+### Significance
+
+The infrastructure is in place for v0.4 stdlib growth. Adding a
+Pandas-shaped library (or any 10+-class stdlib package) no longer
+requires touching the prelude — `StdlibItem { kind: Class { class_id }, … }`
+on the home module is the canonical path. The "prelude is crowded"
+risk that HANDOFF.md flagged as urgent-before-M40 is now mitigated
+in shape, even if not yet in deletion. Migration of the existing
+11 classes is mechanical and can happen incrementally.
+
+### Lesson 1 streak: 18 consecutive clean agents
+
+(M28 + M28.5 + M29 + M29.5 + M30×2 + M31 + M32 + M33 + M34 + M35×3 + M36).
+M36's agent committed in 2 clean phases (code + docs). No
+orchestrator-commit-on-behalf intervention.
+
+---
+
 ## M35 — Four more stdlib classes (parallel round) (2026-05-21)
 
 Follow-up to M34. Three parallel worktree agents shipped four new

@@ -1,4 +1,4 @@
-# Session handoff — 2026-05-21 (post-M35)
+# Session handoff — 2026-05-21 (post-M36)
 
 ## Read this FIRST in the next session
 
@@ -17,22 +17,62 @@ Everything you need to resume is in:
 ## Current head
 
 - Branch: `main`
-- Latest commit: `dd80ce2` (M35 P4-A: compiled re.Pattern class)
+- Latest commit: `91b581e` (M36 E: LANGUAGE_GUIDE.md refresh + agent report)
 - Tag: `v0.2.0` (commit `121483f`, pushed)
-- Tests passing on main: **723** (post-M35, +33 over M34)
+- Tests passing on main: **723** (unchanged from M35; M36 is a pure refactor)
 
 ## Status snapshot
 
 | Metric | Value |
 |---|---:|
-| Milestones complete on main | M0–M35 |
+| Milestones complete on main | M0–M36 |
 | **v0.2.0 release** | **Tagged at M30 (commit 121483f)** |
 | Tests | 723 / 0 fail / 1 ignored |
 | Bugs | 35 / 35 / **0 deferred** |
 | Stdlib modules | 37 |
-| Prelude classes | 6 base (Channel, Thread, File, Dict, Set, List) + 7 JsonValue (M34) + 4 M35 (Pattern, Connection, Cursor, Hasher) = **17 stdlib classes in the prelude** |
-| Example programs | 100 (+3 in M35: re_pattern_demo, sqlite_class_demo, hashlib_streaming_demo) |
-| Lesson 1 streak | **17 consecutive clean-commit agents** (M28 → M35 — 3 M35 agents all committed clean) |
+| Stdlib classes | 11 (JsonValue + 6 subclasses, Pattern, Connection, Cursor, Hasher) — **now also published as `StdlibItemKind::Class` items in their home modules**; prelude bindings retained for back-compat |
+| Example programs | 100 |
+| Lesson 1 streak | **18 consecutive clean-commit agents** (M28 → M36 — M36 agent committed cleanly per phase) |
+
+## M36 — completed (single agent, integrated as fast-forward)
+
+| Agent | Scope | Var prefix | Commits |
+|---|---|---|---|
+| **M36 refactor** | `StdlibItemKind::Class` infrastructure | `m36_` | `e72c9fb` (A+B+C+D), `91b581e` (E + report) |
+
+### Design call (worth knowing)
+
+The agent did NOT delete the prelude bindings for the 11 stdlib classes
+— every M34/M35 integration test reaches the class names by bare lookup
+after just `import json` / `import re` / `import sqlite3` / `import hashlib`
+(no `from … import` form). Removing the prelude bindings would have
+regressed 39 tests. **M36 is a metadata refactor**: the 11 classes are
+NOW also published through their home stdlib modules as
+`StdlibItemKind::Class { class_id }` items, but the legacy prelude
+bindings remain for back-compat. The infrastructure is in place for v0.4
+stdlib classes to register module-scoped from the start.
+
+Phase D added an explicit "still load-bearing for these 11 classes"
+comment on the legacy "prelude wins" branch. A future agent that flips
+the M34/M35 tests to explicit `from json import JsonValue` forms can
+then delete the branch in one go.
+
+### Key takeaway for v0.4 stdlib growth
+
+When you add a new stdlib class, the new path is now:
+
+```rust
+// in seed_stdlib_modules (or a per-module helper):
+items.push(StdlibItem {
+    name: "Foo".into(),
+    kind: StdlibItemKind::Class { class_id: foo_cid },
+    ty: Ty::Class(foo_cid),
+    native_id: 0,  // unused for Class variant
+});
+```
+
+Do NOT add to `seed_prelude`. Users will import via `from foo_mod import Foo`
+or use `foo_mod.Foo` after `import foo_mod`.
 
 ## M35 — completed (3 parallel agents, all integrated)
 
@@ -63,22 +103,21 @@ Per the THESIS §8.4 next-pass priority list + M34/M35 deferred items:
 
 ### Highest leverage (in order)
 
-1. **THESIS + BLOG_POST refresh to M35** (small writing task, ~30-60 min).
-   Both are frozen at M34. The M35 chapter has a natural shape:
-   "after JsonValue, three more class adders shipped in parallel; the
-   prelude now hosts 11 stdlib classes; the `StdlibItemKind::Class`
-   refactor becomes urgent before M40". Concrete numbers:
-   - Tests: 690 → 723 (+33)
-   - Prelude classes: 7 → 11
+1. **THESIS + BLOG_POST refresh to M35 + M36** (small writing task, ~30-60 min).
+   Both are frozen at M34. Concrete deltas to fold in:
+   - Tests: 690 → 723 (M35, +33; M36 unchanged — pure refactor)
+   - Stdlib classes: 7 → 11 in M35; M36 promoted them to proper
+     `StdlibItemKind::Class` items
    - Demo programs: 97 → 100
-   - Lesson 1 streak: 14 → 17
+   - Lesson 1 streak: 14 → 18
 
-2. **`StdlibItemKind::Class` infrastructure**: move M34 (JsonValue)
-   + M35 (Pattern, Connection, Cursor, Hasher) class registrations
-   from the prelude to module-scoped. Pure refactor — no API
-   change. The "right thing" the M34/M35 agents deferred. Probably
-   200-400 LOC in resolver.rs + typecheck.rs. **Becomes urgent
-   before M40** — 11 stdlib classes already in the prelude.
+2. **M36 follow-up — flip M34/M35 tests to explicit imports + delete
+   the legacy "prelude wins" branch.** The infrastructure is in place;
+   migration is mechanical. ~39 test files plus a handful of examples
+   need `from json import JsonValue` (etc.) added. After the flip, the
+   "still load-bearing" comment Phase D added in `resolver.rs` becomes
+   removable. Closes the M36 metadata-refactor honest-debt; the prelude
+   then truly hosts only the 6 base classes + 10 exception names.
 
 3. **Real Cranelift safepoints** (replaces M33 shadow stack):
    `cranelift-jit 0.115` doesn't stably expose PC ranges; check if
@@ -151,8 +190,8 @@ After v0.4 language/stdlib work, update:
 Document these in any new agent brief:
 
 1. **"FIRST commit before 60% of your time budget"** with explicit
-   20%/40%/60%/80% checkpoint discipline. **17 consecutive clean
-   agents** (M28 → M35) — the streak is the strongest empirical
+   20%/40%/60%/80% checkpoint discipline. **18 consecutive clean
+   agents** (M28 → M36) — the streak is the strongest empirical
    data point in the project. Don't soften this language.
 
 2. **Distinctive variable prefixes per agent** in shared files
