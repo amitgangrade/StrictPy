@@ -35,6 +35,8 @@ pub mod jit;
 pub mod jit_runtime;
 pub mod loader;
 pub mod object;
+#[cfg(feature = "jit")]
+pub mod stackmap_registry;
 
 use std::path::Path;
 

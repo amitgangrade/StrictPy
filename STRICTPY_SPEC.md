@@ -4463,6 +4463,15 @@ Polled via the `GC_SAFEPOINT` opcode (or a memory-protected page in JIT-ed code)
 
 Avoided. Resources are managed via `with` blocks. There is no `__del__`. (Open: weak references — deferred to v0.2.)
 
+### 15.7 Implementation status (v0.3)
+
+The v0.3 VM ships a **stop-the-world conservative mark-and-sweep** that approximates the spec's generational design enough to be memory-safe under the current benchmark and acceptance workloads. The specification above describes the v1.x design target; the milestones listed here trace which subset is live.
+
+- **M4** — conservative mark-and-sweep over a flat live-object list (no generations, no TLAB, no card marking). Roots: interpreter frame register files plus dict side-table values, all scanned conservatively (any aligned u64 that aliases a live allocation marks that object live).
+- **M9** — Cranelift JIT lands. JIT'd code holds heap pointers in CPU registers that the conservative scan can't see, so the GC was *paused* whenever any JIT'd frame was on the stack (via the `in_jit: AtomicUsize` counter on `SharedVm`). Correct but pathological for long-running allocation-heavy JIT code: the heap could grow unbounded.
+- **M33** — replaced the `in_jit` pause with **precise stack maps via per-thread shadow stack**. Each JIT'd function allocates a Cranelift stack slot sized to its register file; before every heap-allocating runtime helper (`rt_alloc`, `rt_list_*`, `rt_array_new`, `rt_virtual_call`, the native trampoline, `strictpy_alloc_str_const`) the JIT spills every register variable into that slot and pushes a `(buf, len)` window onto the per-thread shadow stack via `rt_shadow_push`; it pops after the helper returns. The GC scans every published window in addition to the interpreter's frame register files. GC now runs even while JIT'd code is on the stack. The Cranelift `enable_safepoints` / `declare_value_needs_stack_map` path was evaluated and deferred to v0.4: the shadow stack ships the same correctness property for ~200 LOC of book-keeping vs. machine-stack walking, at the cost of one conservative spill before each allocation-call (measured cost <5 ns per spill on x86_64).
+- Still deferred to v1.x: generational layout, TLABs, card-marking write barrier, safepoints on long-loop back-edges (a pure-compute JIT'd loop with no allocations still pauses other threads until it finishes), and any moving / compacting collector. v0.3's heap layout (object-header at offset 0, vtable pointer first, `GcKind` discriminator on the type table) assumes non-moving.
+
 ---
 
 ## 16. Concurrency Model

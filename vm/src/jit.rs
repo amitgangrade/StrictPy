@@ -105,6 +105,11 @@ pub struct Jit {
     rt_array_new_id: Option<FuncId>,
     rt_alloc_id: Option<FuncId>,
     rt_virtual_call_id: Option<FuncId>,
+    /// M33 shadow-stack helpers. Called immediately around every
+    /// heap-allocating runtime helper so the GC can see the JIT'd frame's
+    /// register-resident pointers without walking machine stacks.
+    m33_safepoint_push_id: Option<FuncId>,
+    m33_safepoint_pop_id: Option<FuncId>,
 }
 
 impl Jit {
@@ -148,6 +153,17 @@ impl Jit {
             "rt_virtual_call",
             crate::jit_runtime::rt_virtual_call as *const u8,
         );
+        // M33: per-thread shadow-stack publishers. Called around every
+        // heap-allocating helper so the GC has a precise-enough root set
+        // even while the JIT'd code is mid-execution.
+        builder.symbol(
+            "rt_shadow_push",
+            crate::stackmap_registry::rt_shadow_push as *const u8,
+        );
+        builder.symbol(
+            "rt_shadow_pop",
+            crate::stackmap_registry::rt_shadow_pop as *const u8,
+        );
         let module = JITModule::new(builder);
         Self {
             module: Some(module),
@@ -160,6 +176,8 @@ impl Jit {
             rt_array_new_id: None,
             rt_alloc_id: None,
             rt_virtual_call_id: None,
+            m33_safepoint_push_id: None,
+            m33_safepoint_pop_id: None,
         }
     }
 
@@ -225,6 +243,8 @@ impl Jit {
         let rt_array_new_sig = make_rt_array_new_sig();
         let rt_alloc_sig = make_rt_alloc_sig();
         let rt_virtual_call_sig = make_rt_virtual_call_sig();
+        let m33_safepoint_push_sig = make_m33_safepoint_push_sig();
+        let m33_safepoint_pop_sig = make_m33_safepoint_pop_sig();
 
         // Declare the native trampoline.
         let m = self.module.as_mut().expect("jit module live");
@@ -294,6 +314,26 @@ impl Jit {
         };
         self.rt_virtual_call_id = Some(rt_vc_id);
 
+        let m33_safepoint_push_id = match m.declare_function(
+            "rt_shadow_push",
+            Linkage::Import,
+            &m33_safepoint_push_sig,
+        ) {
+            Ok(id) => id,
+            Err(_) => return (0, module.functions.len()),
+        };
+        self.m33_safepoint_push_id = Some(m33_safepoint_push_id);
+
+        let m33_safepoint_pop_id = match m.declare_function(
+            "rt_shadow_pop",
+            Linkage::Import,
+            &m33_safepoint_pop_sig,
+        ) {
+            Ok(id) => id,
+            Err(_) => return (0, module.functions.len()),
+        };
+        self.m33_safepoint_pop_id = Some(m33_safepoint_pop_id);
+
         // Declare every JIT-eligible function up front for cross-calls.
         for (i, f) in module.functions.iter().enumerate() {
             if decoded[i].is_some() {
@@ -335,6 +375,10 @@ impl Jit {
             let rt_array_new_ref = m.declare_func_in_func(rt_an_id, &mut ctx.func);
             let rt_alloc_ref = m.declare_func_in_func(rt_alloc_id, &mut ctx.func);
             let rt_virtual_call_ref = m.declare_func_in_func(rt_vc_id, &mut ctx.func);
+            let m33_safepoint_push_ref =
+                m.declare_func_in_func(m33_safepoint_push_id, &mut ctx.func);
+            let m33_safepoint_pop_ref =
+                m.declare_func_in_func(m33_safepoint_pop_id, &mut ctx.func);
 
             let helpers = RuntimeHelpers {
                 rt_list_push: rt_list_push_ref,
@@ -342,6 +386,8 @@ impl Jit {
                 rt_array_new: rt_array_new_ref,
                 rt_alloc: rt_alloc_ref,
                 rt_virtual_call: rt_virtual_call_ref,
+                m33_safepoint_push: m33_safepoint_push_ref,
+                m33_safepoint_pop: m33_safepoint_pop_ref,
             };
 
             let ok = translate_function(
@@ -529,6 +575,10 @@ struct RuntimeHelpers {
     rt_array_new: FuncRef,
     rt_alloc: FuncRef,
     rt_virtual_call: FuncRef,
+    /// M33 shadow-stack publishers, called around every allocation
+    /// helper so the GC sees this frame's register-resident pointers.
+    m33_safepoint_push: FuncRef,
+    m33_safepoint_pop: FuncRef,
 }
 
 /// `rt_virtual_call(vm, vtable_slot, args_ptr, n_args) -> u64`.
@@ -540,6 +590,19 @@ fn make_rt_virtual_call_sig() -> Signature {
     sig.params.push(AbiParam::new(types::I32)); // n_args
     sig.returns.push(AbiParam::new(types::I64));
     sig
+}
+
+/// `rt_shadow_push(buf: *const u64, len: u64)` — M33 root publisher.
+fn make_m33_safepoint_push_sig() -> Signature {
+    let mut sig = Signature::new(host_call_conv());
+    sig.params.push(AbiParam::new(types::I64)); // buf ptr
+    sig.params.push(AbiParam::new(types::I64)); // len
+    sig
+}
+
+/// `rt_shadow_pop()` — M33 root unpublisher.
+fn make_m33_safepoint_pop_sig() -> Signature {
+    Signature::new(host_call_conv())
 }
 
 /// Emit a stub body that returns 0 immediately. Used when translation
@@ -597,6 +660,15 @@ fn translate_function(
         reg_var.push(v);
     }
 
+    // M33: one shadow stack slot per JIT'd function, sized for the full
+    // register file. Spilled before each heap-allocating helper call so
+    // the GC has a precise root window during collection.
+    let m33_shadow_slot = builder.create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        (nregs * 8) as u32,
+        3,
+    ));
+
     // Load each parameter from args[i] into the matching register variable.
     for i in 0..num_params {
         let off = (i * 8) as i32;
@@ -641,6 +713,9 @@ fn translate_function(
         rt_array_new_ref: helpers.rt_array_new,
         rt_alloc_ref: helpers.rt_alloc,
         rt_virtual_call_ref: helpers.rt_virtual_call,
+        m33_shadow_slot,
+        m33_safepoint_push_ref: helpers.m33_safepoint_push,
+        m33_safepoint_pop_ref: helpers.m33_safepoint_pop,
         module,
     };
 
@@ -712,6 +787,13 @@ struct Translator<'a> {
     rt_array_new_ref: FuncRef,
     rt_alloc_ref: FuncRef,
     rt_virtual_call_ref: FuncRef,
+    /// M33: per-function shadow stack slot. Holds `nregs * 8` bytes — one
+    /// u64 per StrictPy register. Spilled into right before every
+    /// heap-allocating runtime helper call and published via
+    /// `rt_shadow_push` so the GC can scan it as a root window.
+    m33_shadow_slot: cranelift::codegen::ir::StackSlot,
+    m33_safepoint_push_ref: FuncRef,
+    m33_safepoint_pop_ref: FuncRef,
     module: &'a Module,
 }
 
@@ -770,6 +852,43 @@ impl<'a> Translator<'a> {
         self.builder.ins().stack_addr(types::I64, slot, 0)
     }
 
+    /// M33: spill every StrictPy register variable into the per-function
+    /// shadow stack slot and publish the resulting window via
+    /// `rt_shadow_push`. Call this immediately before any heap-allocating
+    /// runtime helper; pair with [`Self::m33_safepoint_leave`] afterwards.
+    ///
+    /// The spill is conservative: we write every register, not just the
+    /// ones currently holding a pointer. False positives are safe (the
+    /// GC's `alive` set rejects integers that don't alias a live
+    /// allocation), and emitting one store per register is far cheaper
+    /// than running a Cranelift-level liveness analysis from inside the
+    /// translator.
+    fn m33_safepoint_enter(&mut self) {
+        let nregs = self.reg_var.len();
+        for r in 0..nregs {
+            let v = self.builder.use_var(self.reg_var[r]);
+            self.builder.ins().stack_store(
+                v,
+                self.m33_shadow_slot,
+                (r * 8) as i32,
+            );
+        }
+        let buf_addr = self
+            .builder
+            .ins()
+            .stack_addr(types::I64, self.m33_shadow_slot, 0);
+        let len_v = self.builder.ins().iconst(types::I64, nregs as i64);
+        self.builder
+            .ins()
+            .call(self.m33_safepoint_push_ref, &[buf_addr, len_v]);
+    }
+
+    /// M33: pop the matching shadow-stack window after the helper call
+    /// returns. Must balance every prior [`Self::m33_safepoint_enter`].
+    fn m33_safepoint_leave(&mut self) {
+        self.builder.ins().call(self.m33_safepoint_pop_ref, &[]);
+    }
+
     fn emit(&mut self, op: &Op) -> bool {
         match op {
             Op::ConstI32 { dst, val } => {
@@ -816,11 +935,16 @@ impl<'a> Translator<'a> {
                 // call per execution of the op, but that's fine for the
                 // current acceptance examples where ConstStr appears in
                 // `println(...)` arguments and the like.
+                //
+                // M33: publish the caller's register window so the GC has
+                // precise roots if the allocation triggers a collection.
                 let idx_v = self.builder.ins().iconst(types::I32, *idx as i64);
+                self.m33_safepoint_enter();
                 let call = self
                     .builder
                     .ins()
                     .call(self.alloc_str_ref, &[self.vm_ptr, idx_v]);
+                self.m33_safepoint_leave();
                 let result = self.builder.inst_results(call)[0];
                 self.write_reg(*dst, result);
             }
@@ -991,7 +1115,11 @@ impl<'a> Translator<'a> {
                         .ins()
                         .store(MemFlags::trusted(), v, buf, (i * 8) as i32);
                 }
+                // M33: another JIT'd function may allocate transitively.
+                // Publish before the call; pop after.
+                self.m33_safepoint_enter();
                 let call = self.builder.ins().call(func_ref, &[self.vm_ptr, buf]);
+                self.m33_safepoint_leave();
                 let result = self.builder.inst_results(call)[0];
                 self.write_reg(*dst, result);
             }
@@ -1006,10 +1134,15 @@ impl<'a> Translator<'a> {
                 }
                 let nid = self.builder.ins().iconst(types::I32, *native_id as i64);
                 let n_args = self.builder.ins().iconst(types::I32, n as i64);
+                // M33: the native trampoline re-enters the interpreter,
+                // which may run arbitrary builtins (`alloc_*`, `str`, etc.).
+                // Publish the register window before the call.
+                self.m33_safepoint_enter();
                 let call = self
                     .builder
                     .ins()
                     .call(self.trampoline_ref, &[self.vm_ptr, nid, buf, n_args]);
+                self.m33_safepoint_leave();
                 let result = self.builder.inst_results(call)[0];
                 self.write_reg(*dst, result);
             }
@@ -1077,37 +1210,50 @@ impl<'a> Translator<'a> {
             Op::ListPush { list, value } => {
                 let lp = self.read_reg(*list);
                 let vv = self.read_reg(*value);
+                // M33: list push may grow the backing buffer through the
+                // heap's `realloc_raw`. Publish before the call.
+                self.m33_safepoint_enter();
                 self.builder
                     .ins()
                     .call(self.rt_list_push_ref, &[self.vm_ptr, lp, vv]);
+                self.m33_safepoint_leave();
             }
             Op::ListNew { dst, capacity } => {
                 let elem_size = self.builder.ins().iconst(types::I32, 8);
                 let cap = self.builder.ins().iconst(types::I32, *capacity as i64);
+                self.m33_safepoint_enter();
                 let call = self
                     .builder
                     .ins()
                     .call(self.rt_list_new_ref, &[self.vm_ptr, elem_size, cap]);
+                self.m33_safepoint_leave();
                 let result = self.builder.inst_results(call)[0];
                 self.write_reg(*dst, result);
             }
             Op::ArrayNew { dst, length } => {
                 let elem_size = self.builder.ins().iconst(types::I32, 8);
                 let len_v = self.read_reg(*length);
+                self.m33_safepoint_enter();
                 let call = self
                     .builder
                     .ins()
                     .call(self.rt_array_new_ref, &[self.vm_ptr, elem_size, len_v]);
+                self.m33_safepoint_leave();
                 let result = self.builder.inst_results(call)[0];
                 self.write_reg(*dst, result);
             }
 
             Op::New { dst, type_id } => {
                 let tid = self.builder.ins().iconst(types::I32, *type_id as i64);
+                // M33: `rt_alloc` is the prototypical "may collect" call;
+                // it's the path the M26 btree(10k) workload exercises 10k
+                // times in a tight recursive loop.
+                self.m33_safepoint_enter();
                 let call = self
                     .builder
                     .ins()
                     .call(self.rt_alloc_ref, &[self.vm_ptr, tid]);
+                self.m33_safepoint_leave();
                 let result = self.builder.inst_results(call)[0];
                 self.write_reg(*dst, result);
             }
@@ -1154,10 +1300,14 @@ impl<'a> Translator<'a> {
                 }
                 let slot = self.builder.ins().iconst(types::I32, *vtable_slot as i64);
                 let n_args = self.builder.ins().iconst(types::I32, n as i64);
+                // M33: a virtual call dispatches through the interpreter's
+                // invoke, which may allocate. Publish the window.
+                self.m33_safepoint_enter();
                 let call = self.builder.ins().call(
                     self.rt_virtual_call_ref,
                     &[self.vm_ptr, slot, buf, n_args],
                 );
+                self.m33_safepoint_leave();
                 let result = self.builder.inst_results(call)[0];
                 self.write_reg(*dst, result);
             }

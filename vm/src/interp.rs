@@ -24,7 +24,6 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 use std::fs::File as FsFile;
 use std::io::Write;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -346,15 +345,9 @@ pub struct SharedVm {
     /// compiled in and the module loaded. Read-only after construction.
     #[cfg(feature = "jit")]
     pub jit: Option<Arc<crate::jit::JitCell>>,
-    /// M9: depth counter of currently-running JIT'd frames. The conservative
-    /// GC can't see heap pointers held in CPU registers by JIT'd code, so
-    /// any collection that fires while a JIT frame is on the stack risks
-    /// freeing reachable objects. As a temporary measure (until M10 lands
-    /// precise stack maps), we skip collection whenever this counter is
-    /// non-zero. JIT'd code itself never blocks here; only `maybe_collect`
-    /// reads it.
-    #[cfg(feature = "jit")]
-    pub in_jit: AtomicUsize,
+    // M33: the M9 `in_jit: AtomicUsize` pause counter has been removed.
+    // GC now runs even while JIT'd code is active; precise-enough roots
+    // come from the per-thread shadow stack in `crate::stackmap_registry`.
 }
 
 impl SharedVm {
@@ -414,8 +407,6 @@ impl SharedVm {
             stdout: Arc::new(Mutex::new(Box::new(RealStdout))),
             #[cfg(feature = "jit")]
             jit: None,
-            #[cfg(feature = "jit")]
-            in_jit: AtomicUsize::new(0),
         })
     }
 
@@ -476,7 +467,6 @@ impl SharedVm {
             tls_server_configs: std::sync::Mutex::new(vec![None]),
             stdout: Arc::new(Mutex::new(Box::new(RealStdout))),
             jit: Some(jit_cell),
-            in_jit: AtomicUsize::new(0),
         })
     }
 }
@@ -1884,14 +1874,12 @@ impl Interpreter {
             // `args` is owned by this stack frame and stays alive across
             // the call.
             //
-            // M9: bracket the call with `in_jit` ++ / -- so any allocation
-            // inside the JIT'd code (or its `rt_*` helpers) suppresses GC.
-            // The counter handles re-entry: a JIT'd function that calls
-            // another JIT'd function bumps the depth and only the outermost
-            // exit re-enables collection.
-            self.shared.in_jit.fetch_add(1, Ordering::AcqRel);
+            // M33: previously bracketed with `in_jit++` / `in_jit--` to
+            // suppress GC across the entire JIT'd subtree. That's gone —
+            // the JIT'd code now publishes a precise-enough root window
+            // via `rt_shadow_push` immediately before any heap-allocating
+            // helper, so collection can safely run mid-execution.
             let ret = unsafe { jf(vm_ptr, args_ptr) };
-            self.shared.in_jit.fetch_sub(1, Ordering::AcqRel);
             self.write_reg(dst, ret);
             return Ok(StepOutcome::Continue);
         }
@@ -2405,14 +2393,14 @@ impl Interpreter {
     }
 
     fn maybe_collect(&mut self) {
-        // M9: skip GC entirely while any JIT'd frame is running. JIT'd
-        // code holds heap pointers in CPU registers that the conservative
-        // scanner can't see, so collecting now could free reachable
-        // objects. M10 will replace this with precise stack maps.
-        #[cfg(feature = "jit")]
-        if self.shared.in_jit.load(Ordering::Acquire) > 0 {
-            return;
-        }
+        // M33: GC may now run even while JIT'd frames are on the stack.
+        // The JIT'd code maintains a per-thread shadow stack of register
+        // windows (one entry pushed before every heap-allocating helper
+        // call), and `Heap::collect` consults that stack as an additional
+        // root set. The M9 `in_jit` pause counter and its bracket calls
+        // in `op_call_direct` are gone — see
+        // `docs/thesis/design_decisions/conservative_gc_with_in_jit_pause.md`
+        // for the v0.3 update.
         let mut heap = self.shared.heap.lock().unwrap();
         if !heap.should_collect() {
             return;
@@ -2454,6 +2442,33 @@ impl Interpreter {
             .collect();
         for v in &dict_roots {
             roots.push(v.as_slice());
+        }
+        // M33: scan the per-thread JIT shadow stack. Each window is a
+        // pointer to a Cranelift stack slot in a live JIT'd frame; the
+        // JIT publishes it right before any heap-allocating helper call.
+        // Snapshot the (ptr, len) tuples first so the borrow on the
+        // thread-local RefCell doesn't span the (long) collect call.
+        #[cfg(feature = "jit")]
+        let m33_shadow_windows: Vec<&[u64]> = {
+            let snap = crate::stackmap_registry::snapshot();
+            snap.into_iter()
+                .filter_map(|(p, n)| {
+                    if p.is_null() || n == 0 {
+                        None
+                    } else {
+                        // SAFETY: p points to a live JIT stack slot —
+                        // the JIT'd frame that pushed it is on the same
+                        // thread's call stack and cannot have returned
+                        // yet (rt_shadow_pop runs *after* the helper
+                        // returns, and we are inside the helper now).
+                        Some(unsafe { std::slice::from_raw_parts(p, n) })
+                    }
+                })
+                .collect()
+        };
+        #[cfg(feature = "jit")]
+        for w in &m33_shadow_windows {
+            roots.push(*w);
         }
         heap.collect(&roots);
     }
