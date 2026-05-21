@@ -1,0 +1,126 @@
+"""tabular_groupby_demo.spy — M38 walkthrough of the `tabular` group-by surface.
+
+Builds a 6-row sales DataFrame, filters out cheap rows, groups by
+category, applies sum / mean / count aggregations, sorts by total,
+and prints each stage. Deterministic output so the
+`tabular_groupby_demo_runs` integration test can assert on it.
+
+Surface demonstrated (post-M38):
+
+  1. tabular.col_* factories + tabular.from_columns — same as M37.
+  2. df.get_column_f64 / get_column_i64 — typed accessors (M38 A).
+  3. col.between(lo, hi) — restored Phase C comparison (M38 A).
+  4. col.sum() / .mean() / .max() / .min() — per-column aggregations
+     (M38 B), with null-skip semantics.
+  5. df.group_by(cols) → GroupedDataFrame — M38 D entry point.
+  6. gdf.size() / .sum() / .mean() / .count() — shortcuts.
+  7. gdf.agg(specs) — custom (column, agg) tuples.
+  8. df.sort_by + df.rename — M37 + M38 A together.
+"""
+
+from tabular import Column, ColumnI64, ColumnF64, ColumnStr, ColumnBool, DataFrame, GroupedDataFrame
+import tabular
+
+
+fn build_sales() -> DataFrame:
+    """Construct a 6-row sales frame: category (str), qty (i64),
+    price (f64) — three rows in each of two categories ("food",
+    "tools") plus a "food" outlier with a very high price."""
+    cats_v: List[str] = []
+    cats_v.append("food")
+    cats_v.append("tools")
+    cats_v.append("food")
+    cats_v.append("tools")
+    cats_v.append("food")
+    cats_v.append("tools")
+    cats: ColumnStr = tabular.col_str_simple(cats_v)
+
+    qty_v: List[i64] = []
+    qty_v.append(10i64)
+    qty_v.append(2i64)
+    qty_v.append(7i64)
+    qty_v.append(5i64)
+    qty_v.append(3i64)
+    qty_v.append(1i64)
+    qty: ColumnI64 = tabular.col_i64_simple(qty_v)
+
+    price_v: List[f64] = []
+    price_v.append(1.50f64)
+    price_v.append(25.00f64)
+    price_v.append(2.25f64)
+    price_v.append(40.00f64)
+    price_v.append(3.75f64)
+    price_v.append(60.00f64)
+    price: ColumnF64 = tabular.col_f64_simple(price_v)
+
+    names: List[str] = []
+    names.append("category")
+    names.append("qty")
+    names.append("price")
+    cols: List[Column] = []
+    cols.append(cats)
+    cols.append(qty)
+    cols.append(price)
+    return tabular.from_columns(names, cols)
+
+
+fn main() -> i32:
+    df: DataFrame = build_sales()
+    println("nrows=" + str(df.length()))
+    println("ncols=" + str(df.ncols()))
+
+    # ── Phase A: typed accessor + restored Phase C `between` ──
+    price_col: ColumnF64? = df.get_column_f64("price")
+    if price_col is not none:
+        # Cheap row mask: price between 1.0 and 30.0 inclusive.
+        mask: ColumnBool = price_col.between(1.0f64, 30.0f64)
+        df = df.filter(mask)
+        println("filtered_nrows=" + str(df.length()))
+
+    # ── Phase B: column aggregations on the surviving frame ──
+    qc: ColumnI64? = df.get_column_i64("qty")
+    if qc is not none:
+        s: i64? = qc.sum()
+        if s is not none:
+            println("qty_total=" + str(s))
+        m: f64? = qc.mean()
+        if m is not none:
+            println("qty_mean=" + str(m))
+
+    # ── Phase D: group by category, sum qty ──
+    keys: List[str] = []
+    keys.append("category")
+    gdf: GroupedDataFrame = df.group_by(keys)
+    sizes: DataFrame = gdf.size()
+    println("groups=" + str(sizes.length()))
+
+    totals: DataFrame = gdf.sum()
+    # Sort by category ascending for deterministic print order.
+    totals = totals.sort_by("category", true)
+    # Read out the qty totals by category.
+    qty_totals: ColumnI64? = totals.get_column_i64("qty")
+    if qty_totals is not none:
+        food_total: i64? = qty_totals.get(0i64)
+        tools_total: i64? = qty_totals.get(1i64)
+        if food_total is not none:
+            println("food_qty=" + str(food_total))
+        if tools_total is not none:
+            println("tools_qty=" + str(tools_total))
+
+    # ── Phase D: custom agg specs ──
+    specs: List[Tuple[str, str]] = []
+    specs.append(("qty", "sum"))
+    specs.append(("price", "mean"))
+    agg_out: DataFrame = gdf.agg(specs)
+    agg_out = agg_out.sort_by("category", true)
+    println("agg_cols=" + str(agg_out.ncols()))
+
+    # ── Phase A: rename — produce a small renamed projection ──
+    rs: List[Tuple[str, str]] = []
+    rs.append(("category", "cat"))
+    renamed: DataFrame = totals.rename(rs)
+    new_names: List[str] = renamed.columns()
+    println("renamed_first=" + new_names[0i32])
+
+    println("done")
+    return 0

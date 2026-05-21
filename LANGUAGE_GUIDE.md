@@ -1,6 +1,6 @@
 # StrictPy — language guide for AI coding tools
 
-**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M37 (2026-05-21).
+**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M38 (2026-05-22).
 
 **Audience**: any AI coding tool (Claude, GPT, Gemini, etc.) being asked to write a StrictPy program. This file is the single source of truth for writing idiomatic StrictPy — you should NOT need to read the compiler source (`compiler/src/`) or VM source (`vm/src/`) to write correct code.
 
@@ -996,9 +996,9 @@ cur.row_count() -> i64                            # rows the underlying query pr
 
 All cells are stringified (v0.4 will add typed cell access).
 
-### tabular (M37)
+### tabular (M37, extended by M38)
 
-First Pandas-shaped data package — native Rust impl (real pandas can't import). Sealed `Column` hierarchy + `DataFrame` with named columns + per-column null mask. First stdlib package to register its classes module-scoped from the start (no prelude bloat — see §6.2).
+First Pandas-shaped data package — native Rust impl (real pandas can't import). Sealed `Column` hierarchy + `DataFrame` with named columns + per-column null mask. First stdlib package to register its classes module-scoped from the start (no prelude bloat — see §6.2). M38 rounds out the M37 STOP-CRITERIA debt and adds per-column aggregations, `df.describe`, `Column.fill_null`, `tabular.from_dict`, and hash-based group-by via a new `GroupedDataFrame` class.
 
 ```python
 import tabular
@@ -1076,6 +1076,92 @@ df.sort_by(col_name: str, ascending: bool) -> DataFrame
 **Null semantics**: every column has a parallel `nulls: List[bool]` mask. `nulls[i] == true` means cell `i` is NA. Comparisons OR the input null masks into the result; `count_true` treats null cells as not-true (so a 3-row column with one null and two passing cells has `count_true == 2`). Sorts route null rows to the end regardless of direction (matches `pandas.DataFrame.sort_values(..., na_position="last")`).
 
 See `examples/tabular_demo.spy` for an end-to-end walkthrough (construct → CSV round-trip → filter → sort → project).
+
+#### M38 additions
+
+**Typed DataFrame accessors.** Return `none` if the column is absent OR has a different dtype (so callers don't need a separate dtype check).
+
+```python
+df.get_column_i64(name: str) -> ColumnI64?
+df.get_column_f64(name: str) -> ColumnF64?
+df.get_column_str(name: str) -> ColumnStr?
+df.get_column_bool(name: str) -> ColumnBool?
+df.get_column_datetime(name: str) -> ColumnDateTime?
+```
+
+**Restored Phase C comparison ops.** Same null-propagation as M37's `eq`/`gt`/`lt`.
+
+```python
+ColumnI64.ne / ge / le(x: i64) -> ColumnBool
+ColumnI64.between(lo: i64, hi: i64) -> ColumnBool   # inclusive both ends
+ColumnF64.ne / ge / le(x: f64) -> ColumnBool
+ColumnF64.between(lo: f64, hi: f64) -> ColumnBool
+ColumnStr.starts_with(prefix: str) -> ColumnBool
+ColumnStr.ends_with(suffix: str) -> ColumnBool
+
+df.rename(renames: List[Tuple[str, str]]) -> DataFrame
+```
+
+**Per-column aggregations.** Skip null cells. `count_*` always returns a concrete `i64`; other aggregations return `T?` and produce `none` when every cell is null. NaN cells on `ColumnF64` are NOT treated as null — they propagate per IEEE-754 (see §11).
+
+```python
+ColumnI64.sum() -> i64?       # 0 only on all-null is wrong; returns none.
+ColumnI64.mean() -> f64?      # i64 column, f64 result.
+ColumnI64.min() -> i64?
+ColumnI64.max() -> i64?
+ColumnI64.count() -> i64      # non-null cell count.
+ColumnI64.std() -> f64?       # sample stdev (n-1); none if <2 non-null.
+ColumnI64.var() -> f64?       # sample variance.
+ColumnI64.median() -> f64?    # linear-interpolated 0.5 quantile.
+
+ColumnF64.{sum,mean,min,max,count,std,var,median}   # same shape; sum/min/max return f64?
+ColumnStr.{count,min,max}                            # min/max lexicographic, return str?
+ColumnBool.count() -> i64                            # count_true/false/null from M37 already.
+ColumnDateTime.{count,min,max}                       # min/max return i64? (epoch-ms).
+```
+
+**`df.describe`.** Returns a 5-row × (1 + ncols) summary frame. The row-index column is named "statistic" with values `["count", "mean", "std", "min", "max"]`; every cell is stringified. Non-numeric columns only populate the "count" row.
+
+```python
+df.describe() -> DataFrame
+```
+
+**`Column.fill_null(v)`.** Returns a fresh column with null cells replaced by `v` and the nulls mask zeroed.
+
+```python
+ColumnI64.fill_null(v: i64) -> ColumnI64
+ColumnF64.fill_null(v: f64) -> ColumnF64
+ColumnStr.fill_null(v: str) -> ColumnStr
+ColumnBool.fill_null(v: bool) -> ColumnBool
+ColumnDateTime.fill_null(v_ms: i64) -> ColumnDateTime
+```
+
+**`tabular.from_dict(d: Dict[str, Column]) -> DataFrame`.** Constructs a frame from a `(name → column)` dict. Column order follows lexicographic key sort (the M5 `Dict` storage does NOT preserve insertion order — see §11).
+
+**Group-by.** New `GroupedDataFrame` class. Multi-column keys serialize via `\x01` separators; null cells in a key column form their own "null" bucket (matches pandas's `dropna=False` mode; v1 default).
+
+```python
+df.group_by(cols: List[str]) -> GroupedDataFrame
+
+gdf.size() -> DataFrame                       # group_key cols + a "size" i64 col
+gdf.keys() -> DataFrame                       # just the group-key cols, one row per group
+
+# Aggregation shortcuts (skip key columns; apply to numeric cols
+# for sum/mean and to numeric+datetime for min/max):
+gdf.sum() -> DataFrame
+gdf.mean() -> DataFrame
+gdf.min() -> DataFrame
+gdf.max() -> DataFrame
+gdf.count() -> DataFrame                      # i64 column for every non-key column.
+
+# Custom agg via (col_name, agg_name) spec list:
+gdf.agg(specs: List[Tuple[str, str]]) -> DataFrame
+# specs e.g. [("price", "sum"), ("qty", "mean")] yields columns
+# "price_sum" + "qty_mean".  Valid agg names: sum / mean / min /
+# max / count / std / var / median.
+```
+
+See `examples/tabular_groupby_demo.spy` for an end-to-end M38 walkthrough (filter → aggregate → group-by → rename).
 
 ### shutil (M27 P3c-A)
 
@@ -1352,7 +1438,7 @@ These are available without import:
 
 **Stdlib classes are module-scoped.** `JsonValue` + 6 subclasses (`JNull` / `JBool` / `JInt` / `JFloat` / `JString` / `JList` / `JObject`), `Pattern`, `Connection` + `Cursor`, and `Hasher` are stdlib classes — import them from their home modules (`from json import JsonValue`, `from re import Pattern`, `from sqlite3 import Connection, Cursor`, `from hashlib import Hasher`). Pre-M36 these flattened into the prelude; M36 moved the metadata into the stdlib-module table. The bare names still resolve after a plain `import json` / `import re` / `import sqlite3` / `import hashlib` for back-compat with the M34/M35 test surface, but new code should prefer the explicit `from <mod> import` form.
 
-**M37 `tabular` is the first stdlib package to register its classes module-scoped from the start (no prelude bloat).** The 6 classes — `Column` + 5 final subclasses (`ColumnI64` / `ColumnF64` / `ColumnStr` / `ColumnBool` / `ColumnDateTime`) + `DataFrame` — are reachable only via `from tabular import …` (or `import tabular` + `tabular.ColumnI64` style annotations). There is no bare-name fallback. See §5 `tabular` entry for the full surface.
+**M37 `tabular` is the first stdlib package to register its classes module-scoped from the start (no prelude bloat).** The 6 classes — `Column` + 5 final subclasses (`ColumnI64` / `ColumnF64` / `ColumnStr` / `ColumnBool` / `ColumnDateTime`) + `DataFrame` — are reachable only via `from tabular import …` (or `import tabular` + `tabular.ColumnI64` style annotations). There is no bare-name fallback. M38 adds a 7th class to the module: `GroupedDataFrame` (returned by `df.group_by(cols)`) — same module-scoped registration. See §5 `tabular` entry for the full surface.
 
 ### 6.3 List, Dict, Set methods
 
@@ -1955,6 +2041,18 @@ For the M37 `tabular` module: `ColumnI64.gt(x)` / `ColumnStr.eq(x)` / etc. produ
 ### 11.17 No CSV header inference in `tabular.read_csv`
 
 `tabular.read_csv(path, schema)` requires you to pass the schema explicitly as `List[Tuple[str, str]]` with dtype strings in `{"i64", "f64", "str", "bool", "datetime"}`. The header row of the CSV is asserted against the schema column names (order-sensitive) — mismatched headers raise `ValueError`. There is no auto-inference of dtypes from cell values; this keeps `read_csv` deterministic and pulls schema decisions into source code where they're version-controlled.
+
+### 11.18 `tabular` f64 aggregations propagate NaN (don't skip)
+
+Aggregations over a `ColumnF64` (`sum` / `mean` / `min` / `max` / `std` / `var` / `median`) skip cells whose **null mask** is true, but they do NOT skip cells whose **value** is NaN. NaN propagates per IEEE-754: a `sum()` that touches a NaN cell returns NaN, a `mean()` of a NaN-bearing column is NaN, and `min`/`max` of a column containing any NaN return NaN. This matches how `numpy.sum`/`mean` (not `numpy.nansum`/`nanmean`) behave. If you want NaN-skip semantics, either set the null mask for the NaN cells or filter them out via `col.fill_null(...)` after coercing them to a sentinel.
+
+The null mask and "NaN" are two distinct concepts in `tabular`: `nulls[i] == true` means "the cell is missing"; a finite-NaN value at `values[i]` means "the cell holds the IEEE-754 NaN value" (legal for f64). The factory functions don't sniff NaN — they trust whatever you put in `values`.
+
+### 11.19 `tabular.from_dict` sorts column order lexicographically
+
+`tabular.from_dict(d: Dict[str, Column])` returns a DataFrame whose column order follows `sorted(d.keys())`. This is a v1 simplification: the underlying `Dict[K, V]` storage (M5) is a `HashMap` and does NOT preserve insertion order, so we sort to get deterministic output. If you need a specific column order, either pass the names directly to `tabular.from_columns(names, cols)` or `select` after construction.
+
+A v0.4 migration of `Dict` to an order-preserving `IndexMap` would change this to "follow insertion order", matching real pandas's `pd.DataFrame(dict)` behavior.
 
 ---
 
