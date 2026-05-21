@@ -1,0 +1,121 @@
+"""tabular_demo.spy — M37 walkthrough of the `tabular` stdlib module.
+
+Constructs a DataFrame in memory, writes it to CSV, reads it back,
+filters for rows passing a predicate, sorts the result by name
+ascending, and prints each stage.  Output is deterministic so the
+`tabular_demo_runs` integration test can assert on it.
+
+Surface demonstrated:
+
+  1. tabular.col_i64_simple / tabular.col_str_simple — typed column
+     factory functions (no null mask supplied).
+  2. tabular.col_i64(values, nulls) — explicit null mask.
+  3. tabular.from_columns(names, cols) — build a DataFrame.
+  4. df.show(n) — ASCII table rendering.
+  5. df.length / ncols / columns / dtypes / has_column — inspection.
+  6. tabular.write_csv / tabular.read_csv — round-trip persistence
+     with a schema describing each column's dtype.
+  7. ColumnI64.gt(x) — per-column comparison producing a ColumnBool
+     mask.  Mask combinators (and_ / or_ / not_).
+  8. df.filter(mask) — keep matching rows.
+  9. df.sort_by(name, ascending) — stable sort, nulls go to end.
+ 10. df.select / df.drop / df.head / df.tail — projection / row ops.
+"""
+
+from tabular import Column, ColumnI64, ColumnStr, ColumnBool, DataFrame
+import tabular
+
+
+fn build_people() -> DataFrame:
+    """Construct a 4-row DataFrame with an i64 age column (one null)
+    and a str name column."""
+    ages_v: List[i64] = []
+    ages_v.append(30i64)
+    ages_v.append(25i64)
+    ages_v.append(40i64)
+    ages_v.append(0i64)
+    ages_n: List[bool] = []
+    ages_n.append(false)
+    ages_n.append(false)
+    ages_n.append(false)
+    ages_n.append(true)
+    ages: ColumnI64 = tabular.col_i64(ages_v, ages_n)
+
+    names_v: List[str] = []
+    names_v.append("alice")
+    names_v.append("bob")
+    names_v.append("carol")
+    names_v.append("dave")
+    names: ColumnStr = tabular.col_str_simple(names_v)
+
+    col_names: List[str] = []
+    col_names.append("age")
+    col_names.append("name")
+    cols: List[Column] = []
+    cols.append(ages)
+    cols.append(names)
+    return tabular.from_columns(col_names, cols)
+
+
+fn main() -> i32:
+    # 1. Build a 4×2 frame and show it.
+    df: DataFrame = build_people()
+    println("nrows=" + str(df.length()))
+    println("ncols=" + str(df.ncols()))
+    println("has_age=" + str(df.has_column("age")))
+    println("has_height=" + str(df.has_column("height")))
+    println("--- initial ---")
+    println(df.show(-1i64))
+
+    # 2. Write to CSV (round-trip safe: nulls become empty cells; the
+    # read_csv path puts them back).
+    csv_path: str = "_tabular_demo.csv"
+    tabular.write_csv(csv_path, df)
+
+    schema: List[Tuple[str, str]] = []
+    schema.append(("age", "i64"))
+    schema.append(("name", "str"))
+    df2: DataFrame = tabular.read_csv(csv_path, schema)
+    println("--- round-tripped via CSV ---")
+    println("rt_nrows=" + str(df2.length()))
+    println(df2.show(-1i64))
+
+    # 3. Filter for age > 25.  `get_column` is a v0.4 follow-up; v0.3
+    # users either keep the typed Column reference around from
+    # construction time or rebuild it from the row interface.  Here we
+    # rebuild via tabular.col_i64_simple from row strings to show the
+    # round-trip path is structurally complete.
+    rebuilt_ages_v: List[i64] = []
+    i: i64 = 0i64
+    while i < df2.length():
+        r: List[str] = df2.row(i)
+        s: str = r[0i32]
+        if s == "null":
+            rebuilt_ages_v.append(0i64)
+        else:
+            rebuilt_ages_v.append(parse_i64(s))
+        i = i + 1i64
+    rebuilt: ColumnI64 = tabular.col_i64_simple(rebuilt_ages_v)
+    mask_gt25: ColumnBool = rebuilt.gt(25i64)
+    println("mask_count=" + str(mask_gt25.count_true()))
+    df3: DataFrame = df2.filter(mask_gt25)
+    println("--- filtered (age > 25) ---")
+    println(df3.show(-1i64))
+
+    # 4. Sort by name ascending and print.
+    sorted_df: DataFrame = df3.sort_by("name", true)
+    println("--- sorted by name asc ---")
+    println(sorted_df.show(-1i64))
+
+    # 5. select / drop / head / tail demonstration.
+    pick: List[str] = []
+    pick.append("name")
+    sel: DataFrame = sorted_df.select(pick)
+    println("--- selected name only ---")
+    println(sel.show(-1i64))
+
+    println("head1_nrows=" + str(sorted_df.head(1i64).length()))
+    println("tail1_nrows=" + str(sorted_df.tail(1i64).length()))
+
+    println("done")
+    return 0
