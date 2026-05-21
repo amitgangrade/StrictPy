@@ -4328,6 +4328,11 @@ fn m34_json_class_init_native_id(name: &str) -> Option<u32> {
 /// M34: dispatch a JList / JObject method by class name + method name.
 /// Returns `None` for any other (class, method) pair so the caller falls
 /// through to the regular dispatch.
+///
+/// M35 P4-C extension: streaming `Hasher` methods route through the
+/// same path.  Keeping one dispatcher for all class-by-name stdlib
+/// classes keeps the IR-side change small; the function name is
+/// `m34_*` historically but it now serves M34+M35 stdlib classes.
 fn m34_json_class_method_native_id_by_name(
     class_name: &str,
     method: &str,
@@ -4340,6 +4345,14 @@ fn m34_json_class_method_native_id_by_name(
         ("JObject", "has")    => NativeFn::JsonJObjectHas    as u32,
         ("JObject", "keys")   => NativeFn::JsonJObjectKeys   as u32,
         ("JObject", "length") => NativeFn::JsonJObjectLength as u32,
+        // M35 P4-C: streaming Hasher.  The class is `is_native: true`
+        // but we still route through this path (rather than
+        // `resolve_native_method`) so the method names "update" /
+        // "hexdigest" / "algorithm" don't have to compete with any
+        // future stdlib class that uses the same names.
+        ("Hasher",  "update")    => NativeFn::HasherUpdate    as u32,
+        ("Hasher",  "hexdigest") => NativeFn::HasherHexdigest as u32,
+        ("Hasher",  "algorithm") => NativeFn::HasherAlgorithm as u32,
         _ => return None,
     })
 }

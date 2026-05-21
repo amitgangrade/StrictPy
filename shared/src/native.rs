@@ -623,6 +623,39 @@ pub enum NativeFn {
     /// digest of HMAC-SHA256(key, data).  Backed by the `hmac` crate.
     HashlibHmacSha256 = 304,
 
+    // ── 820–829: streaming `Hasher` (M35 P4-C) ─────────────────────────
+    // Incremental hashing API.  The Hasher class is a `final` handle-
+    // backed prelude class (seed_prelude registers it alongside
+    // io.File / Thread / Channel); user code obtains an instance via
+    // `hashlib.new(algorithm)`.  Internally the heap object carries an
+    // i64 handle into `SharedVm.hashers`, a HashMap<i64, HasherState>
+    // (one of Sha256/Sha512/Sha1/Md5 + the algorithm name string).
+    //
+    // hexdigest is *idempotent* — it clones the in-progress state and
+    // finalises the clone, leaving the original free to accept further
+    // `update` calls.  This is friendlier than CPython's "you can call
+    // hexdigest multiple times, but anything after is on the same
+    // state" semantics; documented in spec §9.X.
+    //
+    // 825-829 reserved for v0.4 (Hasher.copy, Hasher.digest_size,
+    // SHAKE variants, etc.).
+    /// Reserved for direct `Hasher(...)` construction — not currently
+    /// reachable from the surface (users must call `hashlib.new`).
+    HasherCtor       = 820,
+    /// `hashlib.new(algorithm: str) -> Hasher` — fresh streaming hasher.
+    /// Raises ValueError for unknown algorithm names.
+    HashlibNew       = 821,
+    /// `Hasher.update(data: str) -> None`.  Treats `data` as a byte
+    /// buffer (each codepoint 0..=255 contributes one byte, matching
+    /// the M22 struct / M27 gzip convention).
+    HasherUpdate     = 822,
+    /// `Hasher.hexdigest() -> str`.  Finalises a *clone* of the in-
+    /// progress state so the original Hasher remains usable.
+    HasherHexdigest  = 823,
+    /// `Hasher.algorithm() -> str`.  Returns the canonical name passed
+    /// to `hashlib.new`: "sha256" / "sha512" / "sha1" / "md5".
+    HasherAlgorithm  = 824,
+
     // ── 250–289: M22 P2A (argparse + collections + csv) ─────────────────
     // Phase 2 starts here.  P2A's job is to bring three high-ROI stdlib
     // modules online on top of the M19 stdlib-module-table:
@@ -1615,6 +1648,12 @@ impl NativeFn {
             302 => Some(Self::HashlibSha256),
             303 => Some(Self::HashlibSha512),
             304 => Some(Self::HashlibHmacSha256),
+            // M35 P4-C: streaming Hasher.
+            820 => Some(Self::HasherCtor),
+            821 => Some(Self::HashlibNew),
+            822 => Some(Self::HasherUpdate),
+            823 => Some(Self::HasherHexdigest),
+            824 => Some(Self::HasherAlgorithm),
             // M22 P2C: itertools module.
             310 => Some(Self::ItertoolsRangeStep),
             311 => Some(Self::ItertoolsEnumerateStr),

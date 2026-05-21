@@ -1,0 +1,96 @@
+"""M35 P4-C streaming hashlib.Hasher demo.
+
+The v0.2 hashlib surface (M22 P2B) shipped only one-shot digests:
+`hashlib.sha256(data)` takes the entire input as one string.  Fine for
+hashing short tokens, but for a file checksum or a streaming log
+digest you'd have to materialise the whole content in memory first.
+
+M35 adds the streaming `Hasher` class.  Pattern:
+
+    h: Hasher = hashlib.new("sha256")
+    h.update(chunk_1)
+    h.update(chunk_2)
+    ...
+    digest: str = h.hexdigest()
+
+The digest matches `hashlib.sha256(chunk_1 + chunk_2 + ...)` byte-for-
+byte.  This demo verifies that on all four supported algorithms
+(sha256 / sha512 / sha1 / md5) and exercises hexdigest's
+clone-not-consume policy (you can call it twice without invalidating
+the in-progress state).
+
+Run it: `cargo run -p strictpy --release -- examples/hashlib_streaming_demo.spy`
+"""
+
+import hashlib
+
+fn check(label: str, streamed: str, one_shot: str) -> None:
+    if streamed == one_shot:
+        println(label + ": ok")
+    else:
+        println(label + ": MISMATCH")
+        println("  streamed: " + streamed)
+        println("  one-shot: " + one_shot)
+
+fn main() -> i32:
+    # ── sha256: the canonical use case ──────────────────────────────
+    # Feed the message in three pieces.  The final digest must match
+    # the one-shot digest of the concatenation.
+    sha256_h: Hasher = hashlib.new("sha256")
+    sha256_h.update("hello, ")
+    sha256_h.update("world")
+    sha256_h.update("!")
+    check("sha256", sha256_h.hexdigest(), hashlib.sha256("hello, world!"))
+    println("  algorithm() -> " + sha256_h.algorithm())
+
+    # ── sha1: 40-char digest ────────────────────────────────────────
+    sha1_h: Hasher = hashlib.new("sha1")
+    sha1_h.update("The quick brown fox ")
+    sha1_h.update("jumps over the lazy dog")
+    check(
+        "sha1",
+        sha1_h.hexdigest(),
+        hashlib.sha1("The quick brown fox jumps over the lazy dog"),
+    )
+
+    # ── sha512: 128-char digest ─────────────────────────────────────
+    sha512_h: Hasher = hashlib.new("sha512")
+    i: i64 = 0
+    while i < 4:
+        sha512_h.update("abc")
+        i = i + 1
+    check("sha512", sha512_h.hexdigest(), hashlib.sha512("abcabcabcabc"))
+
+    # ── md5: 32-char digest (checksum-grade only — not cryptographic) ─
+    md5_h: Hasher = hashlib.new("md5")
+    md5_h.update("foo")
+    md5_h.update("bar")
+    md5_h.update("baz")
+    check("md5", md5_h.hexdigest(), hashlib.md5("foobarbaz"))
+
+    # ── hexdigest is idempotent: clone-not-consume ──────────────────
+    # The user can call hexdigest() for an intermediate digest and
+    # keep updating afterwards.  Mirrors CPython's hashlib semantics.
+    idem_h: Hasher = hashlib.new("sha256")
+    idem_h.update("part_a")
+    snap1: str = idem_h.hexdigest()
+    snap2: str = idem_h.hexdigest()  # same as snap1
+    if snap1 != snap2:
+        println("idempotent: BAD (snapshots differ)")
+    else:
+        idem_h.update("|part_b")
+        final_d: str = idem_h.hexdigest()
+        expected: str = hashlib.sha256("part_a|part_b")
+        if final_d == expected:
+            println("idempotent: ok (intermediate + final digests both correct)")
+        else:
+            println("idempotent: BAD (final digest wrong)")
+
+    # ── error path: unknown algorithm raises ValueError ─────────────
+    try:
+        bad: Hasher = hashlib.new("blake2b")
+        println("error path: BAD (no exception)")
+    except ValueError as e:
+        println("error path: ok (caught: " + e.message + ")")
+
+    return 0

@@ -2094,16 +2094,99 @@ Semantics:
   construction handles oversize keys by SHA-256-folding them first).
   The key MUST NOT be empty in practice — pass a non-trivial secret.
 
-What v0.2 does **not** ship:
+What v0.2 does **not** ship (but v0.3 — see §9.20.1 below — does):
 
-* A streaming `update()` API.  Programs that need to digest more than
-  a single string concatenate first.  The `Hasher` handle is v0.3
-  work — it needs stdlib-class registration to expose `update` /
-  `hexdigest` methods.
+* A streaming `update()` API.  See §9.20.1 — M35 ships the typed
+  `Hasher` class with `update` / `hexdigest` / `algorithm` methods,
+  layered on top of the same RustCrypto crates as the one-shot
+  helpers.
 * SHA-3 (Keccak), BLAKE2/BLAKE3, RIPEMD.  Adding each is one crate +
   one handler; held back until a real-world example program asks.
 * `pbkdf2_hmac` / `scrypt` / `argon2`.  Password-hashing primitives
-  are deferred to v0.3.
+  are deferred to v0.4.
+
+#### 9.20.1 Streaming `Hasher` class (v0.3 — M35 P4-C)
+
+The streaming counterpart to the one-shot digests in §9.20.  Use this
+when the input arrives in pieces (file chunks, log lines, streamed
+uploads, etc.) — feeding the whole input to `hashlib.sha256` would
+require materialising it as one string.
+
+```
+final class Hasher:
+    fn update(self, data: str) -> None
+    fn hexdigest(self) -> str
+    fn algorithm(self) -> str
+
+fn hashlib.new(algorithm: str) -> Hasher
+```
+
+* `hashlib.new(algorithm)` allocates a fresh `Hasher` of the named
+  algorithm.  Supported names: `"sha256"`, `"sha512"`, `"sha1"`,
+  `"md5"`.  Any other name raises `ValueError`.
+* `Hasher.update(data)` feeds `data` into the in-progress hash.
+  `data` is treated as a byte buffer — each codepoint 0..=255
+  contributes one byte (the StrictPy str-as-byte-buffer convention,
+  matching the M22 `struct` / M27 `gzip` handlers).  For ASCII input
+  (the overwhelming common case) this is byte-identical to the UTF-8
+  encoding used by `hashlib.sha256(data)`.
+* `Hasher.hexdigest()` returns the lowercase hex digest of the
+  in-progress state.  Calling `hexdigest()` does NOT invalidate the
+  Hasher — the underlying state is cloned before finalising, so the
+  user can call `hexdigest()` multiple times for intermediate
+  digests AND continue calling `update()` afterwards.  This is the
+  **clone-not-consume** policy: friendlier than CPython's slightly
+  ambiguous "you can call hexdigest multiple times but the digest is
+  final after the next update" wording.
+
+  Concretely:
+
+  ```
+  h: Hasher = hashlib.new("sha256")
+  h.update("hello")
+  d1: str = h.hexdigest()      # sha256("hello")
+  d1_again: str = h.hexdigest()  # same as d1
+  h.update(", world")
+  d2: str = h.hexdigest()      # sha256("hello, world")
+  ```
+* `Hasher.algorithm()` returns the canonical algorithm name passed
+  to `hashlib.new` (one of the four strings above).  Useful for
+  generic code that handles a Hasher without knowing which algorithm
+  it was created for.
+
+The streaming digest matches the one-shot digest of the
+concatenation byte-for-byte:
+
+```
+let h: Hasher = hashlib.new("sha256")
+h.update(chunk_a); h.update(chunk_b); h.update(chunk_c)
+h.hexdigest() == hashlib.sha256(chunk_a + chunk_b + chunk_c)  # true
+```
+
+Implementation:
+
+* The `Hasher` class is registered in the resolver prelude (same
+  table as `io.File`, `Channel`, `Thread`); `final`, handle-backed,
+  with `is_native: true` and zero declared fields.  The heap object
+  is a private `HasherRepr` carrying an `i64` slot handle.
+* `SharedVm.hashers` is a `HashMap<i64, HasherSlot>` where each slot
+  owns one of `sha2::Sha256` / `sha2::Sha512` / `sha1::Sha1` /
+  `md5::Md5` plus the algorithm-name string.  `next_hasher_id` is a
+  monotonic `AtomicI64` starting at 1.
+* Method dispatch routes through the M34 class-by-name table in
+  `ir::lower_method_call`, so the method names `update` / `hexdigest`
+  / `algorithm` don't have to compete with any future class using
+  the same names via `NativeFn::from_name`.
+
+What v0.3 does **not** ship for `Hasher`:
+
+* `Hasher.copy()` — explicit branch-the-state operation.  Trivial
+  given clone-not-consume already does the underlying work; held
+  for v0.4 once a real-world program asks.
+* `Hasher.digest_size: i64` constant.  Add when needed.
+* SHA-3 / BLAKE2 / BLAKE3 algorithm names.  One crate + one
+  `HasherState` variant + one `hashlib.new` arm each — pure
+  additive work; held back until justified by a shipping demo.
 
 ### 9.21 Module `argparse` (v0.2 — M22 P2A)
 

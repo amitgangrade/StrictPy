@@ -2204,6 +2204,167 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             Ok(p as u64)
         }
 
+        // ── M35 P4-C: streaming `Hasher` class ─────────────────────────
+        //
+        // `hashlib.new(algo) -> Hasher` allocates a fresh slot in
+        // `SharedVm.hashers` and a `HasherRepr` heap object pointing at
+        // it.  Subsequent method calls (`update` / `hexdigest` /
+        // `algorithm`) take the `HasherRepr` as their first argument and
+        // route through the same slot table.
+        //
+        // `hexdigest` *clones* the in-progress state before finalising
+        // so the original Hasher remains usable for further `update`
+        // calls (spec §9.X documents this).  CPython's `hexdigest()`
+        // returns the digest of the current state and *also* leaves the
+        // state usable; the clone-not-consume approach here gives the
+        // same observable behaviour without depending on whether the
+        // particular Rust hasher crate's `.finalize()` consumes `self`.
+        NativeFn::HasherCtor => {
+            // Not reachable from the surface in v0.3 — users must call
+            // `hashlib.new(algo)`.  Trap explicitly so any future
+            // miswiring shows up as a clear runtime error instead of a
+            // silent default-Sha256 result.
+            Err(VmError::UncaughtException {
+                type_name: "TypeError".into(),
+                message: "Hasher(...) is not constructible; use hashlib.new(algorithm)".into(),
+            })
+        }
+        NativeFn::HashlibNew => {
+            use crate::interp::{HasherSlot, HasherState};
+            let p4c_algo = arg_str(args, 0);
+            let (p4c_state, p4c_canonical) = match p4c_algo.as_str() {
+                "sha256" => (HasherState::Sha256(<sha2::Sha256 as sha2::Digest>::new()), "sha256"),
+                "sha512" => (HasherState::Sha512(<sha2::Sha512 as sha2::Digest>::new()), "sha512"),
+                "sha1"   => (HasherState::Sha1(<sha1::Sha1 as sha1::Digest>::new()),   "sha1"),
+                "md5"    => (HasherState::Md5(<md5::Md5 as md5::Digest>::new()),       "md5"),
+                _ => {
+                    return Err(VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "hashlib.new: unknown algorithm {:?} (supported: sha256, sha512, sha1, md5)",
+                            p4c_algo
+                        ),
+                    });
+                }
+            };
+            let p4c_handle = interp
+                .shared
+                .next_hasher_id
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            interp.shared.hashers.lock().unwrap().insert(
+                p4c_handle,
+                HasherSlot { state: p4c_state, algo_name: p4c_canonical.to_string() },
+            );
+            let p4c_hp = interp.alloc_hasher(p4c_handle);
+            Ok(p4c_hp as u64)
+        }
+        NativeFn::HasherUpdate => {
+            use crate::interp::HasherState;
+            use sha2::Digest as Sha2Digest;
+            use sha1::Digest as Sha1Digest;
+            use md5::Digest as Md5Digest;
+            let p4c_hp = arg_u64(args, 0) as *const crate::object::HasherRepr;
+            if p4c_hp.is_null() {
+                return Err(VmError::UncaughtException {
+                    type_name: "NullPointerError".into(),
+                    message: "Hasher.update: null receiver".into(),
+                });
+            }
+            // SAFETY: p4c_hp is a heap pointer to a HasherRepr;
+            // dereferencing the `handle` field is the same shape the
+            // io.File / Channel handlers use.
+            let p4c_handle = unsafe { (*p4c_hp).handle };
+            let p4c_data = arg_str(args, 1);
+            let mut p4c_tbl = interp.shared.hashers.lock().unwrap();
+            let p4c_slot = p4c_tbl.get_mut(&p4c_handle).ok_or_else(|| {
+                VmError::UncaughtException {
+                    type_name: "RuntimeError".into(),
+                    message: format!("Hasher.update: stale handle {}", p4c_handle),
+                }
+            })?;
+            // str-as-byte-buffer convention: each codepoint 0..=255
+            // contributes one byte.  For ASCII (the overwhelmingly
+            // common case) this is byte-identical to UTF-8; for the
+            // generic case we go through `as_bytes()` which gives the
+            // UTF-8 encoding — matching what `hashlib.sha256(s)` does.
+            let p4c_bytes = p4c_data.as_bytes();
+            match &mut p4c_slot.state {
+                HasherState::Sha256(h) => Sha2Digest::update(h, p4c_bytes),
+                HasherState::Sha512(h) => Sha2Digest::update(h, p4c_bytes),
+                HasherState::Sha1(h)   => Sha1Digest::update(h, p4c_bytes),
+                HasherState::Md5(h)    => Md5Digest::update(h, p4c_bytes),
+            }
+            Ok(0)
+        }
+        NativeFn::HasherHexdigest => {
+            use crate::interp::HasherState;
+            use sha2::Digest as Sha2Digest;
+            use sha1::Digest as Sha1Digest;
+            use md5::Digest as Md5Digest;
+            let p4c_hp = arg_u64(args, 0) as *const crate::object::HasherRepr;
+            if p4c_hp.is_null() {
+                return Err(VmError::UncaughtException {
+                    type_name: "NullPointerError".into(),
+                    message: "Hasher.hexdigest: null receiver".into(),
+                });
+            }
+            // SAFETY: see HasherUpdate above.
+            let p4c_handle = unsafe { (*p4c_hp).handle };
+            // Clone the in-progress state under the table lock, then
+            // finalise the *clone* outside.  Holding the table lock
+            // across `finalize` would serialise concurrent hashers
+            // unnecessarily and (more importantly) is the only way to
+            // implement the "hexdigest is idempotent" semantics
+            // documented in spec §9.X without `take`ing the slot's
+            // hasher and re-inserting it.
+            let p4c_clone = {
+                let p4c_tbl = interp.shared.hashers.lock().unwrap();
+                let p4c_slot = p4c_tbl.get(&p4c_handle).ok_or_else(|| {
+                    VmError::UncaughtException {
+                        type_name: "RuntimeError".into(),
+                        message: format!("Hasher.hexdigest: stale handle {}", p4c_handle),
+                    }
+                })?;
+                match &p4c_slot.state {
+                    HasherState::Sha256(h) => HasherState::Sha256(h.clone()),
+                    HasherState::Sha512(h) => HasherState::Sha512(h.clone()),
+                    HasherState::Sha1(h)   => HasherState::Sha1(h.clone()),
+                    HasherState::Md5(h)    => HasherState::Md5(h.clone()),
+                }
+            };
+            let p4c_hex = match p4c_clone {
+                HasherState::Sha256(h) => to_hex_lower(&Sha2Digest::finalize(h)),
+                HasherState::Sha512(h) => to_hex_lower(&Sha2Digest::finalize(h)),
+                HasherState::Sha1(h)   => to_hex_lower(&Sha1Digest::finalize(h)),
+                HasherState::Md5(h)    => to_hex_lower(&Md5Digest::finalize(h)),
+            };
+            let p4c_sp = interp.alloc_string(&p4c_hex);
+            Ok(p4c_sp as u64)
+        }
+        NativeFn::HasherAlgorithm => {
+            let p4c_hp = arg_u64(args, 0) as *const crate::object::HasherRepr;
+            if p4c_hp.is_null() {
+                return Err(VmError::UncaughtException {
+                    type_name: "NullPointerError".into(),
+                    message: "Hasher.algorithm: null receiver".into(),
+                });
+            }
+            // SAFETY: see HasherUpdate above.
+            let p4c_handle = unsafe { (*p4c_hp).handle };
+            let p4c_name = {
+                let p4c_tbl = interp.shared.hashers.lock().unwrap();
+                let p4c_slot = p4c_tbl.get(&p4c_handle).ok_or_else(|| {
+                    VmError::UncaughtException {
+                        type_name: "RuntimeError".into(),
+                        message: format!("Hasher.algorithm: stale handle {}", p4c_handle),
+                    }
+                })?;
+                p4c_slot.algo_name.clone()
+            };
+            let p4c_sp = interp.alloc_string(&p4c_name);
+            Ok(p4c_sp as u64)
+        }
+
         // ── M22 P2A: `argparse` module ─────────────────────────────────
         // Storage convention:
         //   parser["_prog_"]   = program name

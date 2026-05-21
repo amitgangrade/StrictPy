@@ -164,6 +164,31 @@ pub struct PqSlot {
     pub next_seq: u64,
 }
 
+/// M35 P4-C: in-progress streaming hash state.  Stored in
+/// `SharedVm.hashers` keyed by an i64 handle that the heap-side
+/// `HasherRepr` carries.  One variant per algorithm — `hashlib.new`
+/// constructs the matching variant.
+///
+/// `algo_name` is the user-facing string ("sha256" etc.) — kept on the
+/// state so `Hasher.algorithm()` can return it without re-deriving from
+/// the variant discriminant (the round-trip would also work, but
+/// stashing it is one fewer place to keep in sync).
+///
+/// p4c_: per the M35-round file-ownership protocol, locals introduced
+/// into shared files use the `p4c_` prefix.  Public type/field names
+/// follow the existing house style.
+pub struct HasherSlot {
+    pub state: HasherState,
+    pub algo_name: String,
+}
+
+pub enum HasherState {
+    Sha256(sha2::Sha256),
+    Sha512(sha2::Sha512),
+    Sha1(sha1::Sha1),
+    Md5(md5::Md5),
+}
+
 /// Wrapper providing `Ord` for `f64`. NaN sorts as the greatest value so
 /// the binary-heap invariant holds; programs shouldn't insert NaN
 /// priorities but if they do, NaN bubbles down to the bottom (max-priority
@@ -241,6 +266,18 @@ pub struct SharedVm {
     pub semaphores: Arc<Mutex<Vec<Option<SemaphoreSlot>>>>,
     /// M23 P3a-C: `queue.PriorityQueue` slots. Index 0 reserved.
     pub priority_queues: Arc<Mutex<Vec<Option<PqSlot>>>>,
+    /// M35 P4-C: in-progress streaming `Hasher` instances, keyed by
+    /// monotonically-increasing i64 handle.  Each `HasherSlot` owns one
+    /// algorithm-specific Rust hasher object plus the canonical algorithm
+    /// name.  Keyed by a HashMap (not a Vec) so we can drop the entry on
+    /// GC without leaving a dead vec slot — the handle is stored on the
+    /// heap-side `HasherRepr` and the corresponding HashMap entry is
+    /// kept alive by the GC root scan in `Interpreter::maybe_collect`
+    /// (which walks live HasherRepr objects).  Slot 0 is unused —
+    /// `next_hasher_id` starts at 1 so handle 0 unambiguously means "no
+    /// hasher attached" (mirrors the io.File / Channel convention).
+    pub hashers: std::sync::Mutex<HashMap<i64, HasherSlot>>,
+    pub next_hasher_id: std::sync::atomic::AtomicI64,
     /// M23 P3a-D: open SQLite connections, indexed by i64 handle.  Slot 0
     /// is reserved as "no connection".
     pub sqlite_connections: Arc<Mutex<Vec<Option<rusqlite::Connection>>>>,
@@ -377,6 +414,10 @@ impl SharedVm {
             locks: Arc::new(Mutex::new(vec![None])),
             semaphores: Arc::new(Mutex::new(vec![None])),
             priority_queues: Arc::new(Mutex::new(vec![None])),
+            // M35 P4-C: streaming hashers.  HashMap (not vec) keyed by
+            // monotonic i64 starting at 1.
+            hashers: std::sync::Mutex::new(HashMap::new()),
+            next_hasher_id: std::sync::atomic::AtomicI64::new(1),
             sqlite_connections: Arc::new(Mutex::new(vec![None])),
             // M27 P3c-E: default level WARNING (matches CPython's pre-
             // basicConfig default); no file sink.
@@ -443,6 +484,9 @@ impl SharedVm {
             locks: Arc::new(Mutex::new(vec![None])),
             semaphores: Arc::new(Mutex::new(vec![None])),
             priority_queues: Arc::new(Mutex::new(vec![None])),
+            // M35 P4-C: streaming hashers (JIT path mirror).
+            hashers: std::sync::Mutex::new(HashMap::new()),
+            next_hasher_id: std::sync::atomic::AtomicI64::new(1),
             sqlite_connections: Arc::new(Mutex::new(vec![None])),
             // M27 P3c-E: see comment on the non-JIT constructor.
             log_level: std::sync::atomic::AtomicI32::new(30),
@@ -2238,6 +2282,44 @@ impl Interpreter {
             (*cp).handle = handle;
         }
         cp
+    }
+
+    /// M35 P4-C: allocate a fresh `HasherRepr` linked to the given slot
+    /// handle.  Caller (the `HashlibNew` handler) is responsible for
+    /// inserting the corresponding `HasherSlot` into `shared.hashers`
+    /// *before* publishing the handle to user code.
+    ///
+    /// The heap object uses `GcKind::Class` with no scanned fields
+    /// (`HasherRepr` carries an `i64` not a heap pointer; the GC's
+    /// class-scanner would walk it as a u64 and try to dereference it,
+    /// but small monotonically-incrementing handle values don't alias
+    /// real heap addresses so `maybe_push`'s alive-set check filters
+    /// them out cleanly — same trick used by TLS / SQL connection
+    /// handles registered through this VM).
+    pub(crate) fn alloc_hasher(&mut self, handle: i64) -> *mut crate::object::HasherRepr {
+        let p4c_size = std::mem::size_of::<crate::object::HasherRepr>();
+        // Find the runtime type the compiler emitted for the "Hasher"
+        // prelude class.  If the program never references Hasher
+        // explicitly the type *should* still be reachable through the
+        // hashlib.new return type, but defend with a null pointer just
+        // in case (matches M34's m34_alloc_class_obj fallback).
+        let p4c_ty_arc = self.shared.types.types.values()
+            .find(|rt| rt.name == "Hasher")
+            .cloned();
+        let p4c_ty_ptr: *const RuntimeType = match &p4c_ty_arc {
+            Some(rt) => Arc::as_ptr(rt),
+            None => std::ptr::null(),
+        };
+        let p4c_raw = self.shared.heap.lock().unwrap()
+            .alloc(p4c_size, p4c_ty_ptr, GcKind::Class);
+        let p4c_hp = p4c_raw as *mut crate::object::HasherRepr;
+        // SAFETY: just allocated `p4c_size` bytes, exactly the size of
+        // HasherRepr.  Writing the handle is the only initialisation
+        // needed beyond what `Heap::alloc` already did to the header.
+        unsafe {
+            (*p4c_hp).handle = handle;
+        }
+        p4c_hp
     }
 
     /// Allocate a `ThreadRepr` recording the closure pointer it will invoke.

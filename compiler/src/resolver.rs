@@ -1663,6 +1663,25 @@ impl Resolver {
         const HASHLIB_SHA256: u32      = 302;
         const HASHLIB_SHA512: u32      = 303;
         const HASHLIB_HMAC_SHA256: u32 = 304;
+        // M35 P4-C: streaming Hasher. `hashlib.new(algo) -> Hasher` is the
+        // sole stdlib-module entry; the Hasher class itself is registered
+        // in seed_prelude (this builder runs before that, so we can't
+        // refer to its ClassId here — the resolver retrofits the return
+        // type by looking up "Hasher" in `class_name_to_id` at lookup
+        // time).
+        const HASHLIB_NEW: u32         = 821;
+
+        // The return type of `hashlib.new` needs to be `Class(Hasher)`.
+        // seed_prelude (which registers Hasher) runs *before*
+        // seed_stdlib_modules per the M34 ordering, so this lookup is
+        // valid.
+        let hasher_ret_ty = match self.class_name_to_id.get("Hasher").copied() {
+            Some(cid) => Ty::Class(cid),
+            // Defensive fallback: if Hasher registration ever moves, the
+            // typechecker will still produce a reasonable error.  Tests
+            // would catch a mis-ordering immediately.
+            None => Ty::Never,
+        };
 
         let hashlib_mod = StdlibModule {
             name: "hashlib".into(),
@@ -1699,6 +1718,15 @@ impl Resolver {
                         str_ty.clone(),
                     ),
                     native_id: HASHLIB_HMAC_SHA256,
+                },
+                // M35 P4-C: `hashlib.new(algorithm: str) -> Hasher`.  See
+                // spec §9.X (streaming Hasher subsection).  Supported
+                // algorithm names: "sha256" / "sha512" / "sha1" / "md5".
+                StdlibItem {
+                    name: "new".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], hasher_ret_ty),
+                    native_id: HASHLIB_NEW,
                 },
             ],
         };
@@ -4431,6 +4459,62 @@ impl Resolver {
             // is_native: see JList comment above.
             is_native: false,
             payload_size: 16,
+        });
+
+        // ── M35 P4-C: streaming `Hasher` class ────────────────────────
+        //
+        // `final` handle-backed class.  Returned by `hashlib.new(algo)`;
+        // user code calls `update(chunk)` / `hexdigest()` / `algorithm()`
+        // on it.  Layout mirrors io.File / Channel / Thread: the visible
+        // class has zero declared fields and `is_native: true` (no
+        // vtable, methods dispatch via NativeFn); the VM stores the
+        // per-instance i64 slot handle on a private `HasherRepr` struct,
+        // and the actual in-progress hash state lives in
+        // `SharedVm.hashers` keyed by that handle.
+        //
+        // p4c_*: per the M35-round file-ownership protocol, locals
+        // introduced into shared compiler files use the `p4c_` prefix.
+        let p4c_hasher_cid = self.fresh_class();
+        let p4c_hasher_sid = self.make_symbol(scope, "Hasher", SymbolKind::Class,
+                                                Span::DUMMY, Some(Ty::Class(p4c_hasher_cid)));
+        self.table.get_mut(p4c_hasher_sid).class_id = Some(p4c_hasher_cid);
+        self.class_of_symbol.insert(p4c_hasher_sid, p4c_hasher_cid);
+        self.symbol_of_class.insert(p4c_hasher_cid, p4c_hasher_sid);
+        self.class_name_to_id.insert("Hasher".into(), p4c_hasher_cid);
+        self.class_layouts.insert(p4c_hasher_cid, ClassLayout {
+            id: p4c_hasher_cid,
+            name: "Hasher".into(),
+            base: None,
+            // final class — `is_open: false`, `is_sealed: false` matches
+            // io.File / Thread which are also leaf handle wrappers.
+            is_open: false,
+            is_sealed: false,
+            fields: vec![],
+            methods: vec![
+                // `update(data: str) -> None` — feed bytes into the hash.
+                MethodSig { name: "update".into(),
+                              params: vec![Ty::Primitive(PrimTy::Str)],
+                              ret: Ty::Primitive(PrimTy::Unit) },
+                // `hexdigest() -> str` — finalize-and-format.  Idempotent
+                // (clone-not-consume policy — see spec §9.X).
+                MethodSig { name: "hexdigest".into(),
+                              params: vec![],
+                              ret: Ty::Primitive(PrimTy::Str) },
+                // `algorithm() -> str` — the canonical name passed to
+                // `hashlib.new`.
+                MethodSig { name: "algorithm".into(),
+                              params: vec![],
+                              ret: Ty::Primitive(PrimTy::Str) },
+            ],
+            generics: vec![],
+            generic_tvars: vec![],
+            // Handle-backed (like io.File / Channel / Thread).  Method
+            // dispatch is routed through the M34 class-by-name path in
+            // `ir::lower_method_call` (extended by M35 P4-C to recognise
+            // Hasher).  Constructor `Hasher(...)` is NOT supported — users
+            // must call `hashlib.new(algorithm)`.
+            is_native: true,
+            payload_size: 0,
         });
 
         // Convenience: bare booleans `True`/`False` (capitalised variants).

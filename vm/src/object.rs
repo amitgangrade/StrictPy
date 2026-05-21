@@ -208,6 +208,19 @@ pub struct DictRepr {
     pub _padding: u32,
 }
 
+/// M35 P4-C: heap layout for a streaming `Hasher` instance.  The actual
+/// in-progress hash state lives in `SharedVm.hashers` keyed by `handle`;
+/// the heap object itself carries no Rust-side hasher (so GC tracing
+/// stays trivial — same pattern as FileRepr / ChannelRepr / ThreadRepr).
+#[repr(C)]
+pub struct HasherRepr {
+    pub header: ObjectHeader,
+    /// Index into `SharedVm.hashers`.  0 means "freed/never set" but in
+    /// practice every freshly allocated HasherRepr has a positive
+    /// handle assigned by `Interpreter::alloc_hasher`.
+    pub handle: i64,
+}
+
 /// Shared global pool of [`RuntimeType`]s built once at load time. The
 /// interpreter holds one of these and hands raw pointers to objects.
 ///
