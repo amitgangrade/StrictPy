@@ -1,4 +1,4 @@
-# Session handoff — 2026-05-21 (post-M37)
+# Session handoff — 2026-05-22 (post-M38)
 
 ## Read this FIRST in the next session
 
@@ -17,22 +17,43 @@ Everything you need to resume is in:
 ## Current head
 
 - Branch: `main`
-- Latest commit: `895da03` (M37 E: tabular tests + demo + LANGUAGE_GUIDE.md update + agent report)
+- Latest commit: `ec9d9d0` (M38 E: tabular round-out — group-by demo + LANGUAGE_GUIDE update + agent report)
 - Tag: `v0.2.0` (commit `121483f`, pushed)
-- Tests passing on main: **744** (+21 over M36)
+- Tests passing on main: **769** (+25 over M37)
 
 ## Status snapshot
 
 | Metric | Value |
 |---|---:|
-| Milestones complete on main | M0–M37 |
+| Milestones complete on main | M0–M38 |
 | **v0.2.0 release** | **Tagged at M30 (commit 121483f)** |
-| Tests | 744 / 0 fail / 1 ignored |
+| Tests | 769 / 0 fail / 1 ignored |
 | Bugs | 35 / 35 / **0 deferred** |
-| Stdlib modules | **38** (+1 in M37: `tabular`) |
-| Stdlib classes | 11 (M34/M35) + **6 from M37** (ColumnI64/F64/Str/Bool/DateTime + DataFrame) = 17 total. M37 classes registered module-scoped from the start via the post-M36 `StdlibItemKind::Class` path (no prelude binding). |
-| Example programs | **101** (+1 in M37: `tabular_demo.spy`) |
-| Lesson 1 streak | **19 consecutive clean-commit agents** (M28 → M37 — M37 agent committed cleanly per phase across 5 phases) |
+| Stdlib modules | 38 |
+| Stdlib classes | 17 from M34/M35/M37 + **1 from M38** (`GroupedDataFrame`) = **18 total**. M37/M38 classes registered module-scoped via the post-M36 `StdlibItemKind::Class` path (no prelude binding). |
+| Example programs | **102** (+1 in M38: `tabular_groupby_demo.spy`) |
+| Lesson 1 streak | **20 consecutive clean-commit agents** (M28 → M38 — M38 agent shipped all 5 phases clean with no STOP CRITERIA cuts) |
+
+## M38 — completed (single big agent, 5 phases, no STOP CRITERIA cuts)
+
+| Agent | Scope | Var prefix | NativeFn IDs | Commits |
+|---|---|---|---|---|
+| **M38 round-out** | `tabular` aggregations + group-by | `m38_` | 880-934 | `8e2c045` (A), `f95fa0c` (B), `294a6d7` (C), `604a912` (D), `ec9d9d0` (E) |
+
+### What shipped
+
+- **Phase A**: typed `df.get_column_i64 / f64 / str / bool / datetime` accessors (resolves the M37 sealed-class-return-type finding); restored Phase C ops — `between / ne / ge / le` on i64+f64, `starts_with / ends_with` on str, `df.rename`.
+- **Phase B**: per-column aggregations — `sum / mean / min / max / count / std / var / median` on numeric columns (with sample n-1 std/var); `min / max / count` on str + datetime; `count` on bool. Null-skipping semantics throughout.
+- **Phase C**: `df.describe() -> DataFrame` (count/mean/std/min/max/50% for numeric; count only for non-numeric); `Column.fill_null(v)` per subclass (5 methods); `tabular.from_dict(d: Dict[str, Column])` constructor.
+- **Phase D**: new `GroupedDataFrame` class (registered via M36 `StdlibItemKind::Class`); `df.group_by(cols) -> GroupedDataFrame`; `gdf.size / keys / sum / mean / min / max / count` shortcuts; `gdf.agg(specs: List[Tuple[str, str]])` custom aggregator. Hash-based with `\x01`-joined multi-column keys.
+- **Phase E**: 25 new tests (23 VM + 2 demo); `examples/tabular_groupby_demo.spy` (~110 LOC); LANGUAGE_GUIDE.md §5/§6.2/§11.18/§11.19 updates.
+
+### Four findings worth knowing
+
+1. **`Dict` has no insertion order** — M5's `Dict` is a `HashMap`. `tabular.from_dict` lex-sorts column names by key. Documented as LANGUAGE_GUIDE.md §11.19.
+2. **NaN propagation on f64 aggregations** — matches `numpy.sum` (NaN propagates) NOT `numpy.nansum` (skips NaN). Nulls ARE skipped; NaN values are NOT. Documented as §11.18.
+3. **Null-keyed group bucket** — rows with a null in any group-key column go into a synthesized null-group bucket (pandas's `dropna=False` mode).
+4. **Edit-tool worktree leak (recurring)**: same as M37 — the agent's Edit tool writes leaked into the project-root copy mid-implementation. The agent recovered with a `cp -r` patch. **Orchestrator workaround**: when integrating, ALWAYS check `git status` on main first; if main has partial modifications, `git checkout --` them and `git merge --ff-only` the worktree branch. The worktree branch HEAD is authoritative.
 
 ## M37 — completed (single big agent, 5 phases, integrated as fast-forward)
 
@@ -130,39 +151,34 @@ Per the THESIS §8.4 next-pass priority list + M34/M35 deferred items:
 
 ### Highest leverage (in order)
 
-1. **THESIS + BLOG_POST refresh to M35-M37** (small writing task, ~30-60 min).
+1. **THESIS + BLOG_POST refresh to M35-M38** (small writing task, ~30-60 min).
    Both are frozen at M34. Concrete deltas to fold in:
-   - Tests: 690 → 744 (M35 +33; M36 unchanged — pure refactor; M37 +21)
-   - Stdlib classes: 7 → 17 (M35 +4; M36 promoted them via `StdlibItemKind::Class`;
-     M37 added 6 more — the first using the canonical post-M36 path)
-   - Stdlib modules: 37 → 38 (M37 added `tabular`)
-   - Demo programs: 97 → 101
-   - Lesson 1 streak: 14 → 19
+   - Tests: 690 → 769 (M35 +33; M36 pure refactor; M37 +21; M38 +25)
+   - Stdlib classes: 7 → 18 (M35 +4; M36 promoted via `StdlibItemKind::Class`;
+     M37 added 6 module-scoped; M38 added 1 GroupedDataFrame)
+   - Stdlib modules: 37 → 38 (M37 added `tabular`; M38 extended it)
+   - Demo programs: 97 → 102
+   - Lesson 1 streak: 14 → 20
    - **New thesis chapter**: "Pandas-shaped data package as v0.3 stdlib growth"
+     — M37 ships Phase 1+2 (Column/DataFrame/IO/filter/sort), M38 ships
+     Phase 3 (aggregations + group-by). Phase 4 (pivot/melt/join) is M39.
 
-2. **M38 — tabular round-out + group-by** (the natural M37 follow-up).
-   M37's STOP CRITERIA cut some Phase C ops; M38 picks them up + adds
-   group-by/aggregate. Concrete punch list:
-   - Typed `get_column_i64` / `get_column_str` / `get_column_f64` /
-     `get_column_bool` / `get_column_datetime` on DataFrame (resolves
-     the M37 "can't return sealed Column" finding)
-   - Restore cut Phase C ops: `between` / `ne` / `ge` / `le` (i64+f64);
-     `starts_with` / `ends_with` (str); `rename` on DataFrame
-   - Aggregations per column: `sum / mean / min / max / count / std / var
-     / median` (drop f64 NaN cells)
-   - `df.describe() -> DataFrame` summary
-   - `df.group_by([cols]) -> GroupedDataFrame` + `.agg({col: "sum"})` /
-     `.sum() / .mean()` — hash-based aggregation
-   - `Column.fill_null(value)` for each subclass
-   - `tabular.from_dict(d: Dict[str, Column])` constructor
+2. **M39 — tabular Phase 4: pivot / melt / join** (the natural M38 follow-up).
+   Concrete punch list per the original Pandas plan:
+   - `df.pivot(index, columns, values) -> DataFrame` — wide reshape
+   - `df.melt(id_vars, value_vars) -> DataFrame` — long reshape
+   - `df.merge(other, on, how) -> DataFrame` — inner/left/right/outer joins
+   - `df.concat([dfs]) -> DataFrame` — row- and column-wise
+   - `df.unique(col) -> Column` + `df.value_counts(col) -> DataFrame`
+   - Estimated ~1500-2000 LOC. Group-by infrastructure from M38 is reusable.
 
 3. **M36 follow-up — flip M34/M35 tests to explicit imports + delete
    the legacy "prelude wins" branch.** The infrastructure is in place;
    migration is mechanical. ~39 test files plus a handful of examples
    need `from json import JsonValue` (etc.) added. After the flip, the
    "still load-bearing" comment Phase D added in `resolver.rs` becomes
-   removable. M37 confirmed the canonical path works — now mechanical
-   migration of legacy callers.
+   removable. M37 + M38 confirmed the canonical path works — now
+   mechanical migration of legacy callers.
 
 4. **Real Cranelift safepoints** (replaces M33 shadow stack):
    `cranelift-jit 0.115` doesn't stably expose PC ranges; check if
@@ -235,11 +251,11 @@ After v0.4 language/stdlib work, update:
 Document these in any new agent brief:
 
 1. **"FIRST commit before 60% of your time budget"** with explicit
-   20%/40%/60%/80% checkpoint discipline. **19 consecutive clean
-   agents** (M28 → M37) — the streak is the strongest empirical
-   data point in the project. M37 ran 5 phase-commits across a
-   ~2800-LOC milestone without breaking the streak. Don't soften
-   this language.
+   20%/40%/60%/80% checkpoint discipline. **20 consecutive clean
+   agents** (M28 → M38) — the streak is the strongest empirical
+   data point in the project. M37 + M38 each ran 5 phase-commits
+   across ~2800 + ~2530 LOC milestones without breaking the streak.
+   Don't soften this language.
 
 2. **Distinctive variable prefixes per agent** in shared files
    (resolver.rs, builtins.rs, interp.rs) — `p3b_a_` / `p3b_b_` /

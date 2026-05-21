@@ -1117,6 +1117,100 @@ No language/compiler changes; new pure-bench infrastructure only.
 
 ---
 
+## M38 — `tabular` round-out: aggregations + group-by (2026-05-22)
+
+Round-out of the M37 `tabular` module. Picks up the M37 STOP CRITERIA
+debt and adds aggregations + hash-based group-by — the foundation for
+M39's pivot/melt/join. Single big agent, 5 phase commits, **zero
+STOP CRITERIA cuts**. Largest single-agent milestone with full
+feature delivery to date.
+
+### Surface (extends `tabular` module)
+
+- **Phase A**: typed `df.get_column_i64 / f64 / str / bool / datetime`
+  accessors (resolves the M37 sealed-class-return-type finding) + restored
+  Phase C ops (`between` / `ne` / `ge` / `le` on numeric, `starts_with` /
+  `ends_with` on str, `df.rename`).
+- **Phase B**: per-column aggregations — `sum / mean / min / max /
+  count / std / var / median` on numeric; `min / max / count` on str
+  + datetime; `count` on bool. Sample n-1 std/var. Null-skipping
+  throughout; NaN propagation on f64 (matches `numpy.sum` not
+  `numpy.nansum`).
+- **Phase C**: `df.describe() -> DataFrame` (count/mean/std/min/50%/max
+  for numeric; count for non-numeric); `Column.fill_null(v)` per
+  subclass (5 methods); `tabular.from_dict(d: Dict[str, Column])`
+  constructor.
+- **Phase D**: new `GroupedDataFrame` class registered via M36 path
+  (no prelude bloat — 2nd stdlib class on the canonical M36 path
+  after M37's 6 classes); `df.group_by(cols) -> GroupedDataFrame`;
+  shortcuts `size / keys / sum / mean / min / max / count`; custom
+  `agg(specs: List[Tuple[str, str]])`. Hash-based with `\x01`-joined
+  multi-column keys.
+- **Phase E**: 25 new tests + `examples/tabular_groupby_demo.spy`
+  (~110 LOC) + LANGUAGE_GUIDE.md §5 / §6.2 / §11.18 / §11.19 updates.
+
+### Four findings worth recording
+
+1. **`Dict` has no insertion order** — M5's `Dict` is a `HashMap`.
+   `tabular.from_dict` lex-sorts column names by key. Documented as
+   LANGUAGE_GUIDE.md §11.19.
+2. **NaN propagation on f64 aggregations** — matches `numpy.sum` (NaN
+   propagates) NOT `numpy.nansum` (skips NaN). Nulls ARE skipped; NaN
+   values are NOT. Documented as §11.18.
+3. **Null-keyed group bucket** — rows with a null in any group-key
+   column go into a synthesized null-group bucket (pandas's
+   `dropna=False` mode).
+4. **Edit-tool worktree leak (recurring methodology issue)** — same as
+   M37, the agent's Edit tool writes leaked into the project-root
+   copy of files mid-implementation. Agent recovered with a `cp -r`
+   patch from worktree to project-root. Orchestrator workaround now
+   recorded in HANDOFF.md: during integration, `git checkout --`
+   main's partial modifications and `git merge --ff-only` the worktree
+   branch. **This is the first non-Lesson-1 issue to repeat across
+   M37 + M38 — worth a methodology note**: parallel-worktree agents
+   are reliable on the *commit* discipline but unreliable on the
+   *file-write-target* discipline when both worktree and project root
+   are open in the orchestrator's view.
+
+### Tests + size
+
+- Tests: 744 → 769 (+25: 23 in `vm/tests/m38_tabular_ops.rs`, 2 in
+  `compiler/tests/tabular_groupby_demo_runs.rs`).
+- Examples: 101 → 102 (`examples/tabular_groupby_demo.spy` ~110 LOC).
+- Stdlib modules: unchanged at 38 (extends M37's `tabular`).
+- Stdlib classes: 17 → 18 (`GroupedDataFrame`).
+- LOC: `vm/src/builtins.rs` +1246, `compiler/src/resolver.rs` +271,
+  `shared/src/native.rs` +184, `compiler/src/ir.rs` +94, plus new
+  tests / example / report. Total ~2530 LOC.
+
+### Lesson 1 streak: 20 consecutive clean agents
+
+(M28 + M28.5 + M29 + M29.5 + M30×2 + M31 + M32 + M33 + M34 + M35×3 +
+M36 + M37 + M38). Two consecutive ~2500+ LOC big-bang milestones
+delivered clean.
+
+### M37 + M38 together: the v0.3 stdlib "package" template
+
+What started as M34's "ship one class family in the prelude" pattern
+has now scaled to a full Pandas-shaped data package:
+
+- **M34**: JsonValue (7 classes, prelude — scope-down infrastructure)
+- **M35**: Pattern + Connection + Cursor + Hasher (4 classes,
+  prelude — parallel three-agent round)
+- **M36**: `StdlibItemKind::Class` infrastructure
+- **M37**: `tabular` core (6 classes, module-scoped — first canonical
+  v0.3 stdlib package, Phase 1+2 of Pandas plan)
+- **M38**: `tabular` round-out (1 class, module-scoped — Phase 3 of
+  Pandas plan)
+
+M39 picks up Phase 4 (pivot / melt / join). The shape now scales
+linearly: one focused agent per package phase, the M36 canonical
+class-registration path means no resolver coordination needed,
+NativeFn IDs disjoint by 50 per round, distinctive variable
+prefixes per round.
+
+---
+
 ## M37 — `tabular` stdlib module (first Pandas-shaped package) (2026-05-21)
 
 The first stdlib package for tabular data — a from-scratch native
