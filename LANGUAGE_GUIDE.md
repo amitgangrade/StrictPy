@@ -1,6 +1,6 @@
 # StrictPy — language guide for AI coding tools
 
-**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M36 (2026-05-21).
+**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M37 (2026-05-21).
 
 **Audience**: any AI coding tool (Claude, GPT, Gemini, etc.) being asked to write a StrictPy program. This file is the single source of truth for writing idiomatic StrictPy — you should NOT need to read the compiler source (`compiler/src/`) or VM source (`vm/src/`) to write correct code.
 
@@ -996,6 +996,87 @@ cur.row_count() -> i64                            # rows the underlying query pr
 
 All cells are stringified (v0.4 will add typed cell access).
 
+### tabular (M37)
+
+First Pandas-shaped data package — native Rust impl (real pandas can't import). Sealed `Column` hierarchy + `DataFrame` with named columns + per-column null mask. First stdlib package to register its classes module-scoped from the start (no prelude bloat — see §6.2).
+
+```python
+import tabular
+from tabular import Column, ColumnI64, ColumnF64, ColumnStr, ColumnBool, ColumnDateTime, DataFrame
+
+# Column factories (values + optional null mask).
+tabular.col_i64(values: List[i64], nulls: List[bool]) -> ColumnI64
+tabular.col_i64_simple(values: List[i64]) -> ColumnI64           # nulls all false
+tabular.col_f64(values: List[f64], nulls: List[bool]) -> ColumnF64
+tabular.col_f64_simple(values: List[f64]) -> ColumnF64
+tabular.col_str(values: List[str], nulls: List[bool]) -> ColumnStr
+tabular.col_str_simple(values: List[str]) -> ColumnStr
+tabular.col_bool(values: List[bool], nulls: List[bool]) -> ColumnBool
+tabular.col_bool_simple(values: List[bool]) -> ColumnBool
+tabular.col_datetime(values: List[i64], nulls: List[bool]) -> ColumnDateTime
+                                                                 # values are epoch ms
+
+# DataFrame construction.
+tabular.from_columns(names: List[str], cols: List[Column]) -> DataFrame
+tabular.from_rows(rows: List[List[str]],
+                  schema: List[Tuple[str, str]]) -> DataFrame    # dtype-driven parsing
+
+# I/O.
+tabular.read_csv(path: str, schema: List[Tuple[str, str]]) -> DataFrame
+tabular.write_csv(path: str, df: DataFrame) -> None
+tabular.from_sql(cur: Cursor, schema: List[Tuple[str, str]]) -> DataFrame
+                                                                 # drains a sqlite3 Cursor
+
+# Schema dtype strings: "i64" | "f64" | "str" | "bool" | "datetime".
+
+# Per-Column shared methods.
+col.length() -> i64
+col.dtype() -> str                              # "i64"/"f64"/"str"/"bool"/"datetime"
+col.is_null(i: i64) -> bool                     # bounds-checked
+col.null_count() -> i64
+
+# Per-Column typed accessors.
+ColumnI64.get(i: i64) -> i64?                   # none if null
+ColumnF64.get(i: i64) -> f64?
+ColumnStr.get(i: i64) -> str?
+ColumnBool.get(i: i64) -> bool?
+ColumnDateTime.get_ms(i: i64) -> i64?
+
+# Per-Column comparisons → ColumnBool mask (null-propagating).
+ColumnI64.eq / gt / lt(x: i64) -> ColumnBool
+ColumnF64.eq / gt / lt(x: f64) -> ColumnBool
+ColumnStr.eq(x: str) -> ColumnBool
+ColumnStr.contains(needle: str) -> ColumnBool
+
+# Mask combinators.
+mask.and_(other: ColumnBool) -> ColumnBool
+mask.or_(other: ColumnBool) -> ColumnBool
+mask.not_() -> ColumnBool
+mask.count_true() -> i64                        # nulls treated as not-true
+
+# DataFrame inspection.
+df.length() -> i64                              # nrows
+df.ncols() -> i64
+df.columns() -> List[str]                       # defensive copy
+df.dtypes() -> List[str]
+df.has_column(name: str) -> bool
+df.show(n: i64) -> str                          # ASCII table; n=-1 for all rows
+
+# DataFrame projection / filter / row ops.
+df.filter(mask: ColumnBool) -> DataFrame        # keep rows where mask is true
+df.select(cols: List[str]) -> DataFrame         # raises if a col is absent
+df.drop(cols: List[str]) -> DataFrame           # no-op if col absent
+df.head(n: i64) -> DataFrame
+df.tail(n: i64) -> DataFrame
+df.row(i: i64) -> List[str]                     # stringified; "null" for null cells
+df.sort_by(col_name: str, ascending: bool) -> DataFrame
+                                                 # stable; nulls go to END
+```
+
+**Null semantics**: every column has a parallel `nulls: List[bool]` mask. `nulls[i] == true` means cell `i` is NA. Comparisons OR the input null masks into the result; `count_true` treats null cells as not-true (so a 3-row column with one null and two passing cells has `count_true == 2`). Sorts route null rows to the end regardless of direction (matches `pandas.DataFrame.sort_values(..., na_position="last")`).
+
+See `examples/tabular_demo.spy` for an end-to-end walkthrough (construct → CSV round-trip → filter → sort → project).
+
 ### shutil (M27 P3c-A)
 
 ```python
@@ -1270,6 +1351,8 @@ These are available without import:
 | 10 exception names | See §3.10 | M15 |
 
 **Stdlib classes are module-scoped.** `JsonValue` + 6 subclasses (`JNull` / `JBool` / `JInt` / `JFloat` / `JString` / `JList` / `JObject`), `Pattern`, `Connection` + `Cursor`, and `Hasher` are stdlib classes — import them from their home modules (`from json import JsonValue`, `from re import Pattern`, `from sqlite3 import Connection, Cursor`, `from hashlib import Hasher`). Pre-M36 these flattened into the prelude; M36 moved the metadata into the stdlib-module table. The bare names still resolve after a plain `import json` / `import re` / `import sqlite3` / `import hashlib` for back-compat with the M34/M35 test surface, but new code should prefer the explicit `from <mod> import` form.
+
+**M37 `tabular` is the first stdlib package to register its classes module-scoped from the start (no prelude bloat).** The 6 classes — `Column` + 5 final subclasses (`ColumnI64` / `ColumnF64` / `ColumnStr` / `ColumnBool` / `ColumnDateTime`) + `DataFrame` — are reachable only via `from tabular import …` (or `import tabular` + `tabular.ColumnI64` style annotations). There is no bare-name fallback. See §5 `tabular` entry for the full surface.
 
 ### 6.3 List, Dict, Set methods
 
@@ -1864,6 +1947,14 @@ fn divmod(a: i32, b: i32) -> Tuple[i32, i32]:
 
 let q, r = divmod(17, 5)
 ```
+
+### 11.16 `tabular` comparisons null-propagate
+
+For the M37 `tabular` module: `ColumnI64.gt(x)` / `ColumnStr.eq(x)` / etc. produce a `ColumnBool` whose null mask is the OR of the input null masks — null in, null out. `mask.count_true()` treats null cells as not-true (so for a 3-row column with one null + two passing cells, `count_true()` is 2). `df.filter(mask)` drops null mask rows (a null cell does not "pass" the filter). If you want a different convention, fill nulls before comparing (v0.4 will add a `column.fill_null(default)` helper; for now you can rebuild the column from `column.get(i)` via `if got is none: default else got`).
+
+### 11.17 No CSV header inference in `tabular.read_csv`
+
+`tabular.read_csv(path, schema)` requires you to pass the schema explicitly as `List[Tuple[str, str]]` with dtype strings in `{"i64", "f64", "str", "bool", "datetime"}`. The header row of the CSV is asserted against the schema column names (order-sensitive) — mismatched headers raise `ValueError`. There is no auto-inference of dtypes from cell values; this keeps `read_csv` deterministic and pulls schema decisions into source code where they're version-controlled.
 
 ---
 
