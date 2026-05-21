@@ -3390,9 +3390,248 @@ impl Resolver {
                     ty: fn_ty(vec![], str_ty.clone()),
                     native_id: SOCKET_GETHOSTNAME,
                 },
+                // ── M32 async-variant socket functions (spec §9.43.3) ──
+                // Non-blocking accept/recv/send that hand back a
+                // `Future[...]` instead of blocking the calling thread.
+                // Internal implementation: thread-per-task (Shape A);
+                // v0.4 swaps to a mio/polling event loop.
+                StdlibItem {
+                    name: "async_accept".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![i64_ty_sock.clone()],
+                        Ty::Generic {
+                            base: TypeCtor::Future,
+                            args: vec![p3b_a_sock_accept_tuple.clone()],
+                        },
+                    ),
+                    native_id: 720, // SocketAsyncAccept
+                },
+                StdlibItem {
+                    name: "async_recv".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![i64_ty_sock.clone(), i32_ty_sock.clone()],
+                        Ty::Generic {
+                            base: TypeCtor::Future,
+                            args: vec![str_ty.clone()],
+                        },
+                    ),
+                    native_id: 721, // SocketAsyncRecv
+                },
+                StdlibItem {
+                    name: "async_send".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![i64_ty_sock.clone(), str_ty.clone()],
+                        Ty::Generic {
+                            base: TypeCtor::Future,
+                            args: vec![i32_ty_sock.clone()],
+                        },
+                    ),
+                    native_id: 722, // SocketAsyncSend
+                },
             ],
         };
         self.stdlib_modules.insert("socket".into(), p3b_a_socket_mod);
+
+        // ── M32: `asyncio` module (spec §9.43) ─────────────────────────
+        // Thread-per-task async runtime façade (Shape A).  The surface
+        // matches what a real event-loop-backed runtime would expose;
+        // v0.4 will swap the internal scheduler to a mio/polling event
+        // loop without changing this surface.
+        const ASYNCIO_RUN_I32: u32        = 700;
+        const ASYNCIO_RUN_UNIT: u32       = 701;
+        const ASYNCIO_SPAWN_I32: u32      = 702;
+        const ASYNCIO_SPAWN_I64: u32      = 703;
+        const ASYNCIO_SPAWN_STR: u32      = 704;
+        const ASYNCIO_SPAWN_BOOL: u32     = 705;
+        const ASYNCIO_SPAWN_UNIT: u32     = 706;
+        const ASYNCIO_SLEEP: u32          = 707;
+        const ASYNCIO_GATHER_2_I32: u32   = 710;
+        const ASYNCIO_GATHER_2_STR: u32   = 711;
+        const ASYNCIO_GATHER_3_I32: u32   = 712;
+        const ASYNCIO_GATHER_3_STR: u32   = 713;
+        const ASYNCIO_GATHER_4_I32: u32   = 714;
+
+        let m32_async_i32_ty = Ty::Primitive(PrimTy::I32);
+        let m32_async_i64_ty = Ty::Primitive(PrimTy::I64);
+        let m32_async_str_ty = Ty::Primitive(PrimTy::Str);
+        let m32_async_bool_ty = Ty::Primitive(PrimTy::Bool);
+        let m32_async_unit_ty = Ty::Primitive(PrimTy::Unit);
+        let m32_async_f64_ty = Ty::Primitive(PrimTy::F64);
+
+        let future_of = |arg: Ty| Ty::Generic {
+            base: TypeCtor::Future,
+            args: vec![arg],
+        };
+        let closure_of = |ret: Ty| Ty::Function {
+            params: vec![],
+            ret: Box::new(ret),
+        };
+
+        let asyncio_mod = StdlibModule {
+            name: "asyncio".into(),
+            items: vec![
+                StdlibItem {
+                    name: "run_i32".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![closure_of(m32_async_i32_ty.clone())],
+                        m32_async_i32_ty.clone(),
+                    ),
+                    native_id: ASYNCIO_RUN_I32,
+                },
+                StdlibItem {
+                    name: "run_unit".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![closure_of(m32_async_unit_ty.clone())],
+                        m32_async_unit_ty.clone(),
+                    ),
+                    native_id: ASYNCIO_RUN_UNIT,
+                },
+                StdlibItem {
+                    name: "spawn_i32".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![closure_of(m32_async_i32_ty.clone())],
+                        future_of(m32_async_i32_ty.clone()),
+                    ),
+                    native_id: ASYNCIO_SPAWN_I32,
+                },
+                StdlibItem {
+                    name: "spawn_i64".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![closure_of(m32_async_i64_ty.clone())],
+                        future_of(m32_async_i64_ty.clone()),
+                    ),
+                    native_id: ASYNCIO_SPAWN_I64,
+                },
+                StdlibItem {
+                    name: "spawn_str".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![closure_of(m32_async_str_ty.clone())],
+                        future_of(m32_async_str_ty.clone()),
+                    ),
+                    native_id: ASYNCIO_SPAWN_STR,
+                },
+                StdlibItem {
+                    name: "spawn_bool".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![closure_of(m32_async_bool_ty.clone())],
+                        future_of(m32_async_bool_ty.clone()),
+                    ),
+                    native_id: ASYNCIO_SPAWN_BOOL,
+                },
+                StdlibItem {
+                    name: "spawn_unit".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![closure_of(m32_async_unit_ty.clone())],
+                        future_of(m32_async_unit_ty.clone()),
+                    ),
+                    native_id: ASYNCIO_SPAWN_UNIT,
+                },
+                StdlibItem {
+                    name: "sleep".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![m32_async_f64_ty.clone()],
+                        m32_async_unit_ty.clone(),
+                    ),
+                    native_id: ASYNCIO_SLEEP,
+                },
+                StdlibItem {
+                    name: "gather_2_i32".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![
+                            future_of(m32_async_i32_ty.clone()),
+                            future_of(m32_async_i32_ty.clone()),
+                        ],
+                        Ty::Tuple(vec![
+                            m32_async_i32_ty.clone(),
+                            m32_async_i32_ty.clone(),
+                        ]),
+                    ),
+                    native_id: ASYNCIO_GATHER_2_I32,
+                },
+                StdlibItem {
+                    name: "gather_2_str".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![
+                            future_of(m32_async_str_ty.clone()),
+                            future_of(m32_async_str_ty.clone()),
+                        ],
+                        Ty::Tuple(vec![
+                            m32_async_str_ty.clone(),
+                            m32_async_str_ty.clone(),
+                        ]),
+                    ),
+                    native_id: ASYNCIO_GATHER_2_STR,
+                },
+                StdlibItem {
+                    name: "gather_3_i32".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![
+                            future_of(m32_async_i32_ty.clone()),
+                            future_of(m32_async_i32_ty.clone()),
+                            future_of(m32_async_i32_ty.clone()),
+                        ],
+                        Ty::Tuple(vec![
+                            m32_async_i32_ty.clone(),
+                            m32_async_i32_ty.clone(),
+                            m32_async_i32_ty.clone(),
+                        ]),
+                    ),
+                    native_id: ASYNCIO_GATHER_3_I32,
+                },
+                StdlibItem {
+                    name: "gather_3_str".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![
+                            future_of(m32_async_str_ty.clone()),
+                            future_of(m32_async_str_ty.clone()),
+                            future_of(m32_async_str_ty.clone()),
+                        ],
+                        Ty::Tuple(vec![
+                            m32_async_str_ty.clone(),
+                            m32_async_str_ty.clone(),
+                            m32_async_str_ty.clone(),
+                        ]),
+                    ),
+                    native_id: ASYNCIO_GATHER_3_STR,
+                },
+                StdlibItem {
+                    name: "gather_4_i32".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![
+                            future_of(m32_async_i32_ty.clone()),
+                            future_of(m32_async_i32_ty.clone()),
+                            future_of(m32_async_i32_ty.clone()),
+                            future_of(m32_async_i32_ty.clone()),
+                        ],
+                        Ty::Tuple(vec![
+                            m32_async_i32_ty.clone(),
+                            m32_async_i32_ty.clone(),
+                            m32_async_i32_ty.clone(),
+                            m32_async_i32_ty.clone(),
+                        ]),
+                    ),
+                    native_id: ASYNCIO_GATHER_4_I32,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("asyncio".into(), asyncio_mod);
+
         // ── M28 P3b-B: `ssl` module ────────────────────────────────────
         // TLS-over-TCP client.  Opens an encrypted connection in one
         // shot (TCP socket + TLS handshake bundled), returning an i64
@@ -3709,6 +3948,7 @@ impl Resolver {
             ("Tuple", TypeCtor::Tuple),
             ("Channel", TypeCtor::Channel),   // stdlib: producer.spy
             ("Atomic", TypeCtor::Atomic),     // stdlib: §16.4
+            ("Future", TypeCtor::Future),     // M32: spec §9.43 (asyncio)
             ("Range", TypeCtor::Range),       // stdlib: §9.1
             ("Iterable", TypeCtor::Iterable),
             ("Iterator", TypeCtor::Iterator),
@@ -4960,6 +5200,7 @@ fn ctor_from_name(name: &str) -> Option<TypeCtor> {
         "Tuple" => TypeCtor::Tuple,
         "Channel" => TypeCtor::Channel,
         "Atomic" => TypeCtor::Atomic,
+        "Future" => TypeCtor::Future,
         "Range" => TypeCtor::Range,
         "Iterable" => TypeCtor::Iterable,
         "Iterator" => TypeCtor::Iterator,

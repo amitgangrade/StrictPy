@@ -6599,6 +6599,40 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             Ok(p3b_c_stt_ptr as u64)
         }
 
+        // ── M32 asyncio + async-socket variants (spec §9.43) ─────────
+        // All handlers go through helpers below — the dispatch arms
+        // stay one-liners for readability.
+        NativeFn::AsyncioRunI32 => m32_asyncio_run(interp, args, crate::FutureValueKind::Int),
+        NativeFn::AsyncioRunUnit => m32_asyncio_run(interp, args, crate::FutureValueKind::Unit),
+        NativeFn::AsyncioSpawnI32 => m32_asyncio_spawn(interp, args, crate::FutureValueKind::Int),
+        NativeFn::AsyncioSpawnI64 => m32_asyncio_spawn(interp, args, crate::FutureValueKind::Int),
+        NativeFn::AsyncioSpawnStr => m32_asyncio_spawn(interp, args, crate::FutureValueKind::Str),
+        NativeFn::AsyncioSpawnBool => m32_asyncio_spawn(interp, args, crate::FutureValueKind::Int),
+        NativeFn::AsyncioSpawnUnit => m32_asyncio_spawn(interp, args, crate::FutureValueKind::Unit),
+        NativeFn::AsyncioSleep => {
+            let m32_async_secs = arg_f64(args, 0);
+            if !m32_async_secs.is_finite() || m32_async_secs < 0.0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("asyncio.sleep: invalid duration {m32_async_secs}"),
+                });
+            }
+            // Shape A: thread::sleep blocks the calling OS thread. Shape
+            // B would yield to the event loop here (spec §9.43.5).
+            std::thread::sleep(std::time::Duration::from_secs_f64(m32_async_secs));
+            Ok(0)
+        }
+        NativeFn::AsyncioFutureAwait => m32_asyncio_future_await(interp, args),
+        NativeFn::AsyncioFutureIsReady => m32_asyncio_future_is_ready(interp, args),
+        NativeFn::AsyncioGather2I32
+        | NativeFn::AsyncioGather2Str
+        | NativeFn::AsyncioGather3I32
+        | NativeFn::AsyncioGather3Str
+        | NativeFn::AsyncioGather4I32 => m32_asyncio_gather(interp, args, nf),
+        NativeFn::SocketAsyncAccept => m32_socket_async_accept(interp, args),
+        NativeFn::SocketAsyncRecv => m32_socket_async_recv(interp, args),
+        NativeFn::SocketAsyncSend => m32_socket_async_send(interp, args),
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
@@ -9529,6 +9563,405 @@ fn fnmatch_translate(pattern: &str) -> String {
     // `re.search` composition path the brief calls out.
     out.push_str(r")\z");
     out
+}
+
+// ─── M32 asyncio: thread-per-task scheduler (Shape A) ─────────────────
+//
+// Each `spawn_*` call:
+//   1. Allocates a `FutureSlot` in `SharedVm.futures` and gets the
+//      handle (slot index).
+//   2. Extracts the closure's (fn_id, captures) from its heap repr —
+//      the same `extract_closure_target` the threading runtime uses.
+//   3. Spawns an OS thread that runs the closure on a fresh
+//      `Interpreter::from_shared`.  When the closure returns, the
+//      thread fills the slot under the slot's `Mutex` + `Condvar`
+//      and notifies any waiter.
+//
+// Each `await` call locks the slot's mutex and waits on its condvar
+// until `ready = true`, then reads the value out under the relevant
+// type tag.
+//
+// All m32_* names use the `m32_` prefix per the Lesson 2 variable-
+// prefix convention so cherry-picks don't false-anchor on existing
+// `p3b_a_*` / `p3c_d_*` etc. handlers.
+
+/// Allocate a fresh future slot and return its `(handle, arc)` pair.
+/// The handle is the slot index in `SharedVm.futures`; the arc is the
+/// reference the spawning thread will fill on completion.
+fn m32_alloc_future_slot(
+    interp: &Interpreter,
+) -> (i64, std::sync::Arc<crate::FutureSlot>) {
+    let m32_async_arc = std::sync::Arc::new(crate::FutureSlot::new());
+    let mut m32_async_table = interp.shared.futures.lock().unwrap();
+    let m32_async_handle = m32_async_table.len() as i64;
+    m32_async_table.push(Some(m32_async_arc.clone()));
+    (m32_async_handle, m32_async_arc)
+}
+
+/// Look up a future by handle and clone its Arc.  Releases the table
+/// mutex before returning so blocking on the slot's condvar doesn't
+/// also block sibling future operations.
+fn m32_lookup_future(
+    interp: &Interpreter,
+    handle: i64,
+    who: &str,
+) -> Result<std::sync::Arc<crate::FutureSlot>, VmError> {
+    if handle <= 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("{}: invalid future handle {}", who, handle),
+        });
+    }
+    let m32_async_table = interp.shared.futures.lock().unwrap();
+    let m32_async_slot = m32_async_table
+        .get(handle as usize)
+        .ok_or_else(|| VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("{}: unknown future handle {}", who, handle),
+        })?;
+    let m32_async_arc = m32_async_slot.as_ref().ok_or_else(|| VmError::UncaughtException {
+        type_name: "ValueError".into(),
+        message: format!("{}: future handle {} has been released", who, handle),
+    })?;
+    Ok(m32_async_arc.clone())
+}
+
+/// Spawn an OS thread that runs the user-supplied closure target and
+/// fills the future slot when it returns.  This is the load-bearing
+/// helper for every Shape A spawn variant.
+fn m32_spawn_future_thread(
+    interp: &mut Interpreter,
+    closure_ptr: u64,
+    slot: std::sync::Arc<crate::FutureSlot>,
+    kind: crate::FutureValueKind,
+) -> Result<(), VmError> {
+    let m32_async_target = extract_closure_target(closure_ptr)?;
+    let m32_async_shared = std::sync::Arc::clone(&interp.shared);
+    std::thread::Builder::new()
+        .name("strictpy-asyncio".into())
+        .spawn(move || {
+            let mut m32_async_worker = Interpreter::from_shared(m32_async_shared);
+            let m32_async_result = m32_async_worker
+                .invoke_with_captures(m32_async_target.fn_id, &m32_async_target.captures, &[]);
+            let mut m32_async_st = slot.state.lock().unwrap();
+            m32_async_st.ready = true;
+            match m32_async_result {
+                Ok(v) => {
+                    m32_async_st.kind = kind;
+                    m32_async_st.value0 = v;
+                }
+                Err(VmError::UncaughtException { type_name: _, message }) => {
+                    m32_async_st.error = Some(message);
+                }
+                Err(e) => {
+                    m32_async_st.error = Some(format!("{:?}", e));
+                }
+            }
+            slot.cv.notify_all();
+        })
+        .map_err(|e| VmError::Trap(format!("asyncio: failed to spawn task thread: {e}")))?;
+    Ok(())
+}
+
+/// `asyncio.spawn_*` shared handler.  Returns the future handle as a
+/// u64; the static type at the call site is `Future[T]`.
+fn m32_asyncio_spawn(
+    interp: &mut Interpreter,
+    args: &[u64],
+    kind: crate::FutureValueKind,
+) -> Result<u64, VmError> {
+    let m32_async_closure_ptr = arg_u64(args, 0);
+    if m32_async_closure_ptr == 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "NullPointerError".into(),
+            message: "asyncio.spawn: target closure is null".into(),
+        });
+    }
+    let (m32_async_handle, m32_async_slot) = m32_alloc_future_slot(interp);
+    m32_spawn_future_thread(interp, m32_async_closure_ptr, m32_async_slot, kind)?;
+    Ok(m32_async_handle as u64)
+}
+
+/// `asyncio.run_*` shared handler.  Equivalent to spawn + await — runs
+/// the target closure as the root task and blocks until it completes.
+/// We do this *without* a worker thread (just invoke the closure in
+/// the current interpreter) because there's nothing else running on
+/// the main thread to be served concurrently.  This keeps the simple
+/// `asyncio.run(main)` shape from costing a needless thread hop.
+fn m32_asyncio_run(
+    interp: &mut Interpreter,
+    args: &[u64],
+    kind: crate::FutureValueKind,
+) -> Result<u64, VmError> {
+    let m32_async_closure_ptr = arg_u64(args, 0);
+    if m32_async_closure_ptr == 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "NullPointerError".into(),
+            message: "asyncio.run: target closure is null".into(),
+        });
+    }
+    let m32_async_target = extract_closure_target(m32_async_closure_ptr)?;
+    let m32_async_value =
+        interp.invoke_with_captures(m32_async_target.fn_id, &m32_async_target.captures, &[])?;
+    // `kind` decides what we hand back — match the spec's Future
+    // payload shape so a future v0.4 swap that goes through the slot
+    // table doesn't change the public surface.
+    let _ = kind; // future-proofing — the value is already type-erased.
+    Ok(m32_async_value)
+}
+
+/// `Future[T].await()` — block on the slot's condvar until the spawned
+/// task fills it, then return its value.  The static type at the call
+/// site decides how the caller interprets the u64 payload.
+fn m32_asyncio_future_await(
+    interp: &mut Interpreter,
+    args: &[u64],
+) -> Result<u64, VmError> {
+    let m32_async_handle = arg_i64(args, 0);
+    let m32_async_arc = m32_lookup_future(interp, m32_async_handle, "Future.await")?;
+    let mut m32_async_st = m32_async_arc.state.lock().unwrap();
+    while !m32_async_st.ready {
+        m32_async_st = m32_async_arc.cv.wait(m32_async_st).unwrap();
+    }
+    if let Some(msg) = &m32_async_st.error {
+        return Err(VmError::UncaughtException {
+            type_name: "IOError".into(),
+            message: format!("future task failed: {}", msg),
+        });
+    }
+    // For TupleI64Str the payload was already materialised as a heap
+    // tuple pointer when the spawning helper resolved its work; value0
+    // holds that pointer.  For other kinds value0 is the raw scalar
+    // or string pointer.  Either way, return value0 as the canonical
+    // single-u64 payload.
+    Ok(m32_async_st.value0)
+}
+
+/// `Future[T].is_ready() -> bool` — non-blocking ready check.
+fn m32_asyncio_future_is_ready(
+    interp: &mut Interpreter,
+    args: &[u64],
+) -> Result<u64, VmError> {
+    let m32_async_handle = arg_i64(args, 0);
+    let m32_async_arc = m32_lookup_future(interp, m32_async_handle, "Future.is_ready")?;
+    let m32_async_st = m32_async_arc.state.lock().unwrap();
+    Ok(if m32_async_st.ready { 1 } else { 0 })
+}
+
+/// `asyncio.gather_N_*` — sequentially await each input future and
+/// build a result tuple.  The underlying threads run concurrently, so
+/// sequential awaits don't serialise the work; they just serialise the
+/// observation of the results.
+fn m32_asyncio_gather(
+    interp: &mut Interpreter,
+    args: &[u64],
+    which: NativeFn,
+) -> Result<u64, VmError> {
+    let m32_async_arity: usize = match which {
+        NativeFn::AsyncioGather2I32 | NativeFn::AsyncioGather2Str => 2,
+        NativeFn::AsyncioGather3I32 | NativeFn::AsyncioGather3Str => 3,
+        NativeFn::AsyncioGather4I32 => 4,
+        _ => unreachable!("m32_asyncio_gather called with non-gather native id"),
+    };
+    let mut m32_async_results: Vec<u64> = Vec::with_capacity(m32_async_arity);
+    for i in 0..m32_async_arity {
+        let m32_async_h = arg_i64(args, i);
+        let m32_async_arc = m32_lookup_future(interp, m32_async_h, "asyncio.gather")?;
+        let mut m32_async_st = m32_async_arc.state.lock().unwrap();
+        while !m32_async_st.ready {
+            m32_async_st = m32_async_arc.cv.wait(m32_async_st).unwrap();
+        }
+        if let Some(msg) = &m32_async_st.error {
+            return Err(VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("asyncio.gather: future {} failed: {}", i, msg),
+            });
+        }
+        m32_async_results.push(m32_async_st.value0);
+    }
+    let m32_async_tup = interp.alloc_tuple_obj(&m32_async_results);
+    Ok(m32_async_tup as u64)
+}
+
+/// `socket.async_accept(listener) -> Future[Tuple[i64, str]]`.
+/// Allocates a future slot and spawns an OS thread that performs the
+/// blocking `accept` and fills the slot with a `Tuple[i64, str]`
+/// heap pointer.  The Tuple is allocated on the worker interpreter's
+/// heap (which is shared with the main interp via `SharedVm.heap`).
+fn m32_socket_async_accept(
+    interp: &mut Interpreter,
+    args: &[u64],
+) -> Result<u64, VmError> {
+    let m32_async_listener_handle = arg_i64(args, 0);
+    if m32_async_listener_handle <= 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "socket.async_accept: invalid handle {}",
+                m32_async_listener_handle
+            ),
+        });
+    }
+    // Pre-grab the listener Arc so the worker doesn't have to round-trip
+    // through the table mutex.  Eager validation also surfaces "unknown
+    // handle" before spawning a thread.
+    let m32_async_listener_arc = {
+        let m32_async_table = interp.shared.tcp_listeners.lock().unwrap();
+        let m32_async_slot = m32_async_table
+            .get(m32_async_listener_handle as usize)
+            .ok_or_else(|| VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!(
+                    "socket.async_accept: unknown handle {}",
+                    m32_async_listener_handle
+                ),
+            })?;
+        let m32_async_listener = m32_async_slot.as_ref().ok_or_else(|| VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "socket.async_accept: handle {} is closed",
+                m32_async_listener_handle
+            ),
+        })?;
+        m32_async_listener.clone()
+    };
+    let (m32_async_handle, m32_async_future_slot) = m32_alloc_future_slot(interp);
+    let m32_async_shared = std::sync::Arc::clone(&interp.shared);
+    std::thread::Builder::new()
+        .name("strictpy-asyncio-accept".into())
+        .spawn(move || {
+            let m32_async_accept_result = m32_async_listener_arc.accept();
+            let mut m32_async_worker = Interpreter::from_shared(m32_async_shared);
+            let mut m32_async_st = m32_async_future_slot.state.lock().unwrap();
+            m32_async_st.ready = true;
+            match m32_async_accept_result {
+                Ok((m32_async_stream, m32_async_peer)) => {
+                    let m32_async_peer_str = m32_async_peer.to_string();
+                    let m32_async_new_handle = {
+                        let mut m32_async_streams =
+                            m32_async_worker.shared.tcp_streams.lock().unwrap();
+                        let m32_async_h = m32_async_streams.len() as i64;
+                        m32_async_streams.push(Some(std::sync::Arc::new(m32_async_stream)));
+                        m32_async_h
+                    };
+                    let m32_async_peer_ptr =
+                        m32_async_worker.alloc_string(&m32_async_peer_str) as u64;
+                    let m32_async_tup = m32_async_worker.alloc_tuple_obj(&[
+                        m32_async_new_handle as u64,
+                        m32_async_peer_ptr,
+                    ]);
+                    m32_async_st.kind = crate::FutureValueKind::TupleI64Str;
+                    m32_async_st.value0 = m32_async_tup as u64;
+                }
+                Err(e) => {
+                    m32_async_st.error =
+                        Some(format!("socket.async_accept: {}", e));
+                }
+            }
+            m32_async_future_slot.cv.notify_all();
+        })
+        .map_err(|e| VmError::Trap(format!("asyncio: failed to spawn accept task: {e}")))?;
+    Ok(m32_async_handle as u64)
+}
+
+/// `socket.async_recv(handle, max_bytes) -> Future[str]`.
+fn m32_socket_async_recv(
+    interp: &mut Interpreter,
+    args: &[u64],
+) -> Result<u64, VmError> {
+    use std::io::Read;
+    let m32_async_handle = arg_i64(args, 0);
+    let m32_async_max = arg_i64(args, 1) as i32;
+    if m32_async_handle <= 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("socket.async_recv: invalid handle {}", m32_async_handle),
+        });
+    }
+    if m32_async_max < 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "socket.async_recv: negative max_bytes {}",
+                m32_async_max
+            ),
+        });
+    }
+    let m32_async_stream_arc =
+        arc_tcp_stream(interp, m32_async_handle, "socket.async_recv")?;
+    let (m32_async_future_handle, m32_async_future_slot) = m32_alloc_future_slot(interp);
+    let m32_async_shared = std::sync::Arc::clone(&interp.shared);
+    let m32_async_max_usize = m32_async_max as usize;
+    std::thread::Builder::new()
+        .name("strictpy-asyncio-recv".into())
+        .spawn(move || {
+            let mut m32_async_buf = vec![0u8; m32_async_max_usize];
+            let m32_async_read_result = (&*m32_async_stream_arc).read(&mut m32_async_buf);
+            let mut m32_async_worker = Interpreter::from_shared(m32_async_shared);
+            let mut m32_async_st = m32_async_future_slot.state.lock().unwrap();
+            m32_async_st.ready = true;
+            match m32_async_read_result {
+                Ok(n) => {
+                    m32_async_buf.truncate(n);
+                    let m32_async_str = bytes_to_packed_str(&m32_async_buf);
+                    let m32_async_ptr =
+                        m32_async_worker.alloc_string(&m32_async_str) as u64;
+                    m32_async_st.kind = crate::FutureValueKind::Str;
+                    m32_async_st.value0 = m32_async_ptr;
+                }
+                Err(e) => {
+                    m32_async_st.error = Some(format!("socket.async_recv: {}", e));
+                }
+            }
+            m32_async_future_slot.cv.notify_all();
+        })
+        .map_err(|e| VmError::Trap(format!("asyncio: failed to spawn recv task: {e}")))?;
+    Ok(m32_async_future_handle as u64)
+}
+
+/// `socket.async_send(handle, data) -> Future[i32]`.
+fn m32_socket_async_send(
+    interp: &mut Interpreter,
+    args: &[u64],
+) -> Result<u64, VmError> {
+    use std::io::Write;
+    let m32_async_handle = arg_i64(args, 0);
+    let m32_async_data = arg_str(args, 1);
+    if m32_async_handle <= 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("socket.async_send: invalid handle {}", m32_async_handle),
+        });
+    }
+    let m32_async_bytes = packed_str_to_bytes(
+        &m32_async_data,
+        0,
+        m32_async_data.chars().count(),
+        "socket.async_send",
+    )?;
+    let m32_async_stream_arc =
+        arc_tcp_stream(interp, m32_async_handle, "socket.async_send")?;
+    let (m32_async_future_handle, m32_async_future_slot) = m32_alloc_future_slot(interp);
+    std::thread::Builder::new()
+        .name("strictpy-asyncio-send".into())
+        .spawn(move || {
+            let m32_async_write_result =
+                (&*m32_async_stream_arc).write(&m32_async_bytes);
+            let mut m32_async_st = m32_async_future_slot.state.lock().unwrap();
+            m32_async_st.ready = true;
+            match m32_async_write_result {
+                Ok(n) => {
+                    m32_async_st.kind = crate::FutureValueKind::Int;
+                    m32_async_st.value0 = (n as i32) as u32 as u64;
+                }
+                Err(e) => {
+                    m32_async_st.error = Some(format!("socket.async_send: {}", e));
+                }
+            }
+            m32_async_future_slot.cv.notify_all();
+        })
+        .map_err(|e| VmError::Trap(format!("asyncio: failed to spawn send task: {e}")))?;
+    Ok(m32_async_future_handle as u64)
 }
 
 #[cfg(test)]

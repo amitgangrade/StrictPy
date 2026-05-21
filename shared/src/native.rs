@@ -1290,6 +1290,54 @@ pub enum NativeFn {
     HttpClientStatusText       = 630,
     // 631-649 reserved for v0.3 (connection pooling, cookies, etc.).
 
+    // ── 700-749: `asyncio` + async-variant sockets (M32 v0.3) ───────────
+    // Shape A scheduler: each spawn allocates a Future slot and an OS
+    // thread; await blocks on a Condvar inside the slot.  The v0.4 swap
+    // to a mio/polling-based event loop preserves these ids and the API
+    // surface — see spec §9.43.4.
+    //
+    // 700-719: asyncio module entry points.
+    /// `asyncio.run_i32(target: fn() -> i32) -> i32` — top-level entry.
+    AsyncioRunI32       = 700,
+    /// `asyncio.run_unit(target: fn() -> None) -> None`.
+    AsyncioRunUnit      = 701,
+    /// `asyncio.spawn_i32(target: fn() -> i32) -> Future[i32]`.
+    AsyncioSpawnI32     = 702,
+    /// `asyncio.spawn_i64(target: fn() -> i64) -> Future[i64]`.
+    AsyncioSpawnI64     = 703,
+    /// `asyncio.spawn_str(target: fn() -> str) -> Future[str]`.
+    AsyncioSpawnStr     = 704,
+    /// `asyncio.spawn_bool(target: fn() -> bool) -> Future[bool]`.
+    AsyncioSpawnBool    = 705,
+    /// `asyncio.spawn_unit(target: fn() -> None) -> Future[None]`.
+    AsyncioSpawnUnit    = 706,
+    /// `asyncio.sleep(secs: f64) -> None`.
+    AsyncioSleep        = 707,
+    /// `Future.await()` — type-erased on the value side (the value is
+    /// stored as `u64` in the slot and the static type at the call site
+    /// drives interpretation).  Receiver dispatch via the
+    /// `resolve_native_method` path on a `Generic { Future, .. }` recv.
+    AsyncioFutureAwait  = 708,
+    /// `Future.is_ready() -> bool`.
+    AsyncioFutureIsReady = 709,
+    /// `asyncio.gather_2_i32` / variants — fixed-arity (no variadics).
+    AsyncioGather2I32   = 710,
+    AsyncioGather2Str   = 711,
+    AsyncioGather3I32   = 712,
+    AsyncioGather3Str   = 713,
+    AsyncioGather4I32   = 714,
+    // 715-719 reserved for v0.3 follow-ups (more gather variants).
+
+    // 720-729: async-variant socket functions.
+    /// `socket.async_accept(listener: i64) -> Future[Tuple[i64, str]]`.
+    SocketAsyncAccept   = 720,
+    /// `socket.async_recv(handle: i64, max_bytes: i32) -> Future[str]`.
+    SocketAsyncRecv     = 721,
+    /// `socket.async_send(handle: i64, data: str) -> Future[i32]`.
+    SocketAsyncSend     = 722,
+    // 723-729 reserved for v0.3 follow-ups (async connect, etc.).
+    // 730-749 reserved for v0.4 extensions (async ssl / file I/O).
+
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
     /// encounters. The VM treats this as a runtime error.
@@ -1714,6 +1762,25 @@ impl NativeFn {
             628 => Some(Self::HttpClientUrldecode),
             629 => Some(Self::HttpClientUrlParse),
             630 => Some(Self::HttpClientStatusText),
+            // M32: asyncio + async-variant sockets (700-722; 723-749 reserved).
+            700 => Some(Self::AsyncioRunI32),
+            701 => Some(Self::AsyncioRunUnit),
+            702 => Some(Self::AsyncioSpawnI32),
+            703 => Some(Self::AsyncioSpawnI64),
+            704 => Some(Self::AsyncioSpawnStr),
+            705 => Some(Self::AsyncioSpawnBool),
+            706 => Some(Self::AsyncioSpawnUnit),
+            707 => Some(Self::AsyncioSleep),
+            708 => Some(Self::AsyncioFutureAwait),
+            709 => Some(Self::AsyncioFutureIsReady),
+            710 => Some(Self::AsyncioGather2I32),
+            711 => Some(Self::AsyncioGather2Str),
+            712 => Some(Self::AsyncioGather3I32),
+            713 => Some(Self::AsyncioGather3Str),
+            714 => Some(Self::AsyncioGather4I32),
+            720 => Some(Self::SocketAsyncAccept),
+            721 => Some(Self::SocketAsyncRecv),
+            722 => Some(Self::SocketAsyncSend),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }
@@ -1784,6 +1851,14 @@ impl NativeFn {
             // dispatcher. The receiver is implicit (the list pointer),
             // so the IR appends it as the first argument before the call.
             "pop"         => Some(Self::ListPop),
+
+            // M32: Future[T] method dispatch (special-cased to
+            // `AsyncioFutureAwait` / `AsyncioFutureIsReady` in the IR via
+            // `resolve_native_method`, but having `from_name` know about
+            // them keeps the table consistent for any caller that walks
+            // method names by string).
+            "await"       => Some(Self::AsyncioFutureAwait),
+            "is_ready"    => Some(Self::AsyncioFutureIsReady),
 
             _ => None,
         }

@@ -4237,6 +4237,19 @@ fn resolve_native_method(recv_ty: &Ty, method: &str) -> u32 {
                 .unwrap_or(NativeFn::Unknown as u32),
         };
     }
+    // M32: Future[T] method dispatch (recv_ty is `Generic { Future, [..] }`).
+    // The element type is type-erased at the native-call boundary — the
+    // value lives in the Future slot as a u64 and the static type at the
+    // call site (recv_ty's first arg) drives how the caller interprets it.
+    if let Ty::Generic { base: TypeCtor::Future, .. } = recv_ty {
+        return match method {
+            "await"    => NativeFn::AsyncioFutureAwait   as u32,
+            "is_ready" => NativeFn::AsyncioFutureIsReady as u32,
+            _ => NativeFn::from_name(method)
+                .map(|n| n as u32)
+                .unwrap_or(NativeFn::Unknown as u32),
+        };
+    }
     // Dict-specific overrides (recv_ty is `Generic { Dict, [..] }`).
     if let Ty::Generic { base: TypeCtor::Dict, .. } = recv_ty {
         return match method {

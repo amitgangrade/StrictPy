@@ -66,6 +66,11 @@ pub enum TypeCtor {
     Channel,
     /// `Atomic[T]` runtime container — stdlib: spec §16.4
     Atomic,
+    /// `Future[T]` runtime container (spec §9.43) — M32 asyncio.
+    /// Receiver shape mirrors `Channel[T]` (await/is_ready are
+    /// special-cased in the typechecker + IR — see
+    /// `resolve_native_method`).
+    Future,
     /// `Range` iterable returned by `range(...)` — stdlib: spec §9.1
     Range,
     /// `Iterable[T]` / `Iterator[T]` protocols treated as generic constructors

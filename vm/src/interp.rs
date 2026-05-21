@@ -290,6 +290,14 @@ pub struct SharedVm {
     /// M28 P3b-A: UDP socket slots. Slot 0 reserved.  `Arc`-wrapped for
     /// the same reason — `send_to` / `recv_from` take `&self`.
     pub udp_sockets: Arc<Mutex<Vec<Option<Arc<std::net::UdpSocket>>>>>,
+    /// M32 asyncio: Future[T] slot table.  Each slot owns the future's
+    /// state — readiness flag, result value (type-erased as up to two
+    /// u64 cells so we can hold either a primitive or a `Tuple[i64, str]`),
+    /// optional error, and a Condvar `await` blocks on.  Slot 0
+    /// reserved as "no future".  Shape A (v0.3): each spawn launches an
+    /// OS thread that fills the slot on completion.  Shape B (v0.4)
+    /// would have the runtime's event loop fill it instead.
+    pub futures: Arc<Mutex<Vec<Option<Arc<crate::FutureSlot>>>>>,
     /// M28 P3b-B: open TLS-over-TCP client connections, keyed by opaque
     /// i64 handle.  Each entry is a `rustls::StreamOwned<ClientConnection,
     /// TcpStream>` — the canonical "TLS over TCP" wrapper.  Indexed by
@@ -389,6 +397,8 @@ impl SharedVm {
             tcp_streams: Arc::new(Mutex::new(vec![None])),
             tcp_listeners: Arc::new(Mutex::new(vec![None])),
             udp_sockets: Arc::new(Mutex::new(vec![None])),
+            // M32 asyncio: Future slot table. Slot 0 reserved.
+            futures: Arc::new(Mutex::new(vec![None])),
             // M28 P3b-B: ssl module — empty handle map, next handle = 1
             // (handle 0 is reserved as "no connection"), verify defaults
             // to true (matches CPython's `ssl.create_default_context()`
@@ -454,6 +464,8 @@ impl SharedVm {
             tcp_streams: Arc::new(Mutex::new(vec![None])),
             tcp_listeners: Arc::new(Mutex::new(vec![None])),
             udp_sockets: Arc::new(Mutex::new(vec![None])),
+            // M32 asyncio: Future slot table. Slot 0 reserved.
+            futures: Arc::new(Mutex::new(vec![None])),
             // M28 P3b-B: ssl module — see comment on the non-JIT ctor.
             tls_streams: std::sync::Mutex::new(HashMap::new()),
             next_tls_id: std::sync::atomic::AtomicI64::new(1),

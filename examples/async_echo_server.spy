@@ -1,0 +1,144 @@
+"""async_echo_server.spy — M32 v0.3 asyncio + non-blocking sockets demo.
+
+Demonstrates that the new async surface composes cleanly:
+
+  * `asyncio.spawn_*` runs a closure as a concurrent task,
+  * `socket.async_accept` returns a `Future[Tuple[i64, str]]` for an
+    incoming connection without blocking the caller,
+  * `socket.async_recv` / `socket.async_send` carry per-connection
+    work off the accept loop.
+
+Server behaviour:
+
+  * Bind a loopback listener on an ephemeral port (range 50016..50031
+    — well inside IANA registered range, sibling to the M28 socket
+    demo's 50000..50015 to avoid CI collisions).
+  * Accept up to 3 clients concurrently, each on their own task.
+  * Per client: recv up to 256 bytes, echo them back, close.
+  * Park the main thread on a shared "all clients done" lock until
+    every spawned task has signalled completion, then close the
+    listener and exit.
+
+Shared state pattern (List[i64] + threading.Lock) is the M23 P3a-C
+canonical pattern; we use it here for the "remaining clients"
+counter that signals the main thread when to wind down.
+
+A matching integration test in
+`compiler/tests/async_echo_server_runs.rs` connects N client sockets
+in parallel, sends bytes from each, and asserts the echoes match.
+
+Implementation shape: Shape A (thread-per-task) on v0.3 — spec
+§9.43.4.  The same source code will work unchanged on v0.4's
+mio/polling event loop without recompilation; only the binary that
+links the new VM picks up the perf improvement.
+"""
+
+from threading import Thread, lock_new, lock_acquire, lock_release
+import asyncio
+from asyncio import Future
+import socket
+
+# How many clients we expect to handle before winding down. Matches the
+# integration test's loop count.
+fn expected_clients() -> i32:
+    return 3i32
+
+# Per-client task: blocks (via async_recv) until the client sends a
+# request, then echoes the bytes back via async_send, then closes the
+# connection and decrements the shared "remaining" counter.
+fn handle_client(conn: i64, remaining_lock: i64, remaining_cell: List[i32]) -> i32:
+    # Generous timeout so a misbehaving client doesn't pin the server.
+    socket.set_timeout_secs(conn, 5.0)
+    recv_future: Future[str] = socket.async_recv(conn, 256i32)
+    payload: str = recv_future.await()
+
+    send_future: Future[i32] = socket.async_send(conn, payload)
+    sent_back: i32 = send_future.await()
+
+    socket.close(conn)
+
+    # Decrement the remaining-counter under the lock so the main thread
+    # can wake up once every task reports done.
+    lock_acquire(remaining_lock)
+    remaining_cell[0] = remaining_cell[0] - 1i32
+    lock_release(remaining_lock)
+
+    return sent_back
+
+# Find a loopback port we can bind to.  Falls back across a small
+# range so a sibling CI test that has already grabbed a port can't
+# race us into a permanent failure.
+fn bind_loopback() -> Tuple[i32, i64]:
+    chosen: i32 = 0i32
+    listener: i64 = 0i64
+    attempt: i32 = 0i32
+    while attempt < 16i32 and chosen == 0i32:
+        candidate: i32 = 50016i32 + attempt
+        try:
+            listener = socket.listen_tcp("127.0.0.1", candidate, 16i32)
+            chosen = candidate
+        except IOError as e:
+            chosen = 0i32
+        attempt = attempt + 1i32
+    return (chosen, listener)
+
+fn main() -> i32:
+    pair: Tuple[i32, i64] = bind_loopback()
+    port: i32 = pair.0
+    listener: i64 = pair.1
+    if port == 0i32:
+        println("could-not-bind-any-port")
+        return 1
+    println("bound-port=" + str(port))
+
+    # Shared "remaining" counter.  Initialised to expected_clients;
+    # each task decrements it to 0 to signal the main thread.
+    remaining_lock: i64 = lock_new()
+    remaining_cell: List[i32] = [expected_clients()]
+
+    # Async accept loop.  For each expected client, kick off an
+    # async_accept (returns immediately with a Future), then `.await()`
+    # the connection's (handle, peer_addr) tuple and spawn a per-client
+    # task to handle it.
+    i: i32 = 0i32
+    while i < expected_clients():
+        accept_future: Future[Tuple[i64, str]] = socket.async_accept(listener)
+        accepted: Tuple[i64, str] = accept_future.await()
+        conn: i64 = accepted.0
+        # accepted.1 is the peer address; we don't use it here but it
+        # would be the natural thing to log in a real server.
+        # Spawn a task to handle this client.  Each task is independent
+        # — multiple concurrent clients are served simultaneously
+        # because each handle_client runs on its own OS thread (Shape A;
+        # v0.4 will multiplex on a single thread).
+        rl: i64 = remaining_lock
+        rc: List[i32] = remaining_cell
+        c: i64 = conn
+        task: Future[i32] = asyncio.spawn_i32(fn() -> i32:
+            handle_client(c, rl, rc)
+        )
+        # The integration test doesn't need the task handle — the
+        # shared counter is what tells us when all tasks are done — so
+        # we deliberately do NOT await `task` here.  In a non-toy
+        # server we would either await on shutdown or pool the
+        # handles for a graceful drain.
+        # Reference the variable so the typechecker / liveness pass
+        # keeps it around until the main loop joins via the counter.
+        if task.is_ready():
+            # Fast-path: the task already finished before we got here.
+            # Equally valid; we don't take any branch.
+            pass
+
+        i = i + 1i32
+
+    # Spin-wait on the shared counter.  In a real server we'd use a
+    # Condvar (threading.Semaphore would also work — release-on-done,
+    # acquire N times in main); for this demo a small sleep loop is
+    # the simplest readable shape.
+    while remaining_cell[0] > 0i32:
+        asyncio.sleep(0.02)
+
+    socket.close_listener(listener)
+    println("clients-served=" + str(expected_clients()))
+    println("done")
+    return 0

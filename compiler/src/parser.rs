@@ -1456,10 +1456,27 @@ impl Parser {
                     // excludes the sign (handled by unary minus) and the
                     // lexer doesn't emit hex here because `.0xff` wouldn't
                     // parse as a number after `.`.
+                    //
+                    // M32: `await` and `async` are reserved keywords (for
+                    // the v0.4 async/await syntax extension), but the
+                    // v0.3 asyncio API uses `.await()` as a method name
+                    // on Future[T]. After `.` the keyword form is
+                    // syntactically unambiguous — it can only be a method
+                    // name — so we accept it here as a contextual
+                    // identifier. The same handling generalises any
+                    // future keyword we add ("async-method-name"-style).
                     let name = match self.peek_kind().clone() {
                         TokenKind::IntLit { value, .. } => {
                             self.bump();
                             value.to_string()
+                        }
+                        TokenKind::KwAwait => {
+                            self.bump();
+                            "await".to_string()
+                        }
+                        TokenKind::KwAsync => {
+                            self.bump();
+                            "async".to_string()
                         }
                         _ => self.expect_ident()?,
                     };

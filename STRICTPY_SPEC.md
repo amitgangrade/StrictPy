@@ -3603,6 +3603,181 @@ harness and point StrictPy code at the bound port.  This avoids any
 public-network dependency.  See
 `compiler/tests/http_client_demo_runs.rs` for the canonical shape.
 
+### 9.43 Module `asyncio` (v0.3 — M32)
+
+A library-level asynchronous I/O surface.  StrictPy v0.3 ships the
+*public API shape* of an async runtime — `asyncio.run` /
+`asyncio.spawn_*` / `asyncio.sleep` / `asyncio.gather_*` / `Future[T]`
+and the async-variant `socket` functions — backed internally by a
+thread-per-task scheduler (Shape A).  The same API surface will become
+backed by a real `mio`/`polling`-based single-thread event loop in
+v0.4 (Shape B); user code written against v0.3 will continue to work
+unchanged.  This honours the spec's "API shape now, internal perf
+swap later" rule (see §16.4 history note).
+
+#### 9.43.1 API surface
+
+```
+# Top-level entry — runs the closure as the root task and blocks
+# until it completes.  Returns its result.  Mirrors Python's
+# asyncio.run(main()).
+fn run_i32(target: fn() -> i32) -> i32
+fn run_unit(target: fn() -> None) -> None
+
+# Task management — start a closure as a concurrent task; returns
+# immediately with a Future the caller can later .await().
+# Monomorphic variants because stdlib functions are not generic
+# (see §9.28 — pq_*_i64 / pq_*_str for the same pattern).
+fn spawn_i32(target: fn() -> i32)  -> Future[i32]
+fn spawn_i64(target: fn() -> i64)  -> Future[i64]
+fn spawn_str(target: fn() -> str)  -> Future[str]
+fn spawn_bool(target: fn() -> bool) -> Future[bool]
+fn spawn_unit(target: fn() -> None) -> Future[None]
+
+# Yield control for `secs` seconds.  In v0.3 (Shape A) this is just
+# `thread::sleep`; in v0.4 (Shape B) it yields to the event loop.
+fn sleep(secs: f64) -> None
+
+# Wait for both / three / four futures concurrently; return their
+# results as a tuple.  Positional variants because StrictPy has no
+# variadics yet (cf. §5.5).
+fn gather_2_i32(a: Future[i32], b: Future[i32]) -> Tuple[i32, i32]
+fn gather_2_str(a: Future[str], b: Future[str]) -> Tuple[str, str]
+fn gather_3_i32(a: Future[i32], b: Future[i32], c: Future[i32])
+    -> Tuple[i32, i32, i32]
+fn gather_3_str(a: Future[str], b: Future[str], c: Future[str])
+    -> Tuple[str, str, str]
+fn gather_4_i32(a: Future[i32], b: Future[i32], c: Future[i32], d: Future[i32])
+    -> Tuple[i32, i32, i32, i32]
+```
+
+#### 9.43.2 `Future[T]`
+
+`Future[T]` is a parameterised runtime type — the receiver shape
+matches `Channel[T]` (§16.3) and `Atomic[T]` (§16.4).  Two methods:
+
+```
+# Block until the future is ready; return its value.
+fn await(self) -> T
+
+# Non-blocking ready check.
+fn is_ready(self) -> bool
+```
+
+Calling `.await()` twice on the same future is allowed; the second
+call returns the cached value without re-blocking.  The future is
+released (its slot freed in the runtime's future table) when the
+parent program exits or — in v0.4 — when the last reference drops.
+
+The supported element types in v0.3 are `i32`, `i64`, `str`, `bool`,
+and `None` (the latter is the return type of `Future[None]` from
+`spawn_unit`).  Other element types are a v0.4 extension and trigger
+a typecheck error.  This mirrors the v0.2 stdlib monomorphisation
+rule (see §9.28 / §9.16) — async surface scales by element type the
+same way the rest of the stdlib does.
+
+#### 9.43.3 Non-blocking socket variants
+
+The async surface extends the `socket` module (§9.40) with three
+non-blocking variants of the existing accept / recv / send pair.  All
+three return `Future[...]` instances that resolve when the
+corresponding background work is done:
+
+```
+# Returns immediately with a Future that resolves to (conn_handle,
+# peer_addr_string).  The accept is performed in a spawned task
+# (Shape A) or registered with the event loop (Shape B).
+fn async_accept(listener: i64) -> Future[Tuple[i64, str]]
+
+# Background recv up to max_bytes; resolves with the received str
+# (empty str on EOF).
+fn async_recv(handle: i64, max_bytes: i32) -> Future[str]
+
+# Background send; resolves with the actual bytes written.
+fn async_send(handle: i64, data: str) -> Future[i32]
+```
+
+`async_accept` returns a `Future` over a Tuple, which v0.3 doesn't
+yet support as a monomorphic spawn variant in §9.43.1's positive
+list.  The async-socket surface is allowed to mint these
+"compound-element" futures because they go through dedicated
+NativeFn handlers (in the 720-729 ID range) rather than the generic
+`spawn_*` plumbing.
+
+#### 9.43.4 Implementation shape: thread-per-task (v0.3) → event loop (v0.4)
+
+The v0.3 runtime is deliberately a thin façade over the existing M6
+thread infrastructure (see §16.1).  Each `spawn_*` allocates a
+`Future[T]` slot in `SharedVm.futures`, spawns an OS thread to run
+the target closure, and stores the closure's return value back into
+the slot under the slot's `Mutex` + `Condvar` when the thread
+completes.  `Future.await()` parks on the same `Condvar` until the
+slot transitions to "ready".  `gather_*` is just sequential
+`.await()` over the inputs (because the underlying threads are
+already running concurrently, sequential awaits don't serialise the
+work — they only serialise the result observation).
+
+```text
+asyncio.spawn_i32(f) ─────────┐
+                              │ alloc Future slot
+                              │ spawn OS thread to run f
+                              │ return Future[i32] handle
+                              ▼
+                     ┌─────────────────┐
+                     │ Future slot 17  │
+                     │ ready: false    │
+                     │ value: ???      │
+                     │ cv: Condvar     │
+                     └─────────────────┘
+                              ▲
+                              │ thread completes → set ready+value, notify cv
+                              │
+asyncio.await on Future[i32] ─┘ block on cv.wait until ready
+                                return value
+```
+
+**Real perf gap**: in v0.3 the runtime still consumes one OS thread
+per concurrent task — there is no perf improvement over plain
+`threading.Thread`.  The benefit is the *API shape*: programs written
+against `asyncio.spawn_*` + `socket.async_*` will continue to work
+when v0.4 swaps the internal scheduler for a `mio`/`polling`-based
+single-threaded event loop and the OS-thread cost vanishes.
+
+**v0.4 swap plan**:
+
+* Add a single global `EventLoop` to `SharedVm` (replaces the
+  per-task `JoinHandle`).
+* `spawn_*` becomes "register state-machine coroutine"; `socket.async_*`
+  registers a non-blocking-socket interest with the loop.
+* `Future.await` either picks up the cached result or runs the loop
+  until the future's slot becomes ready.
+* `gather_*` becomes meaningfully concurrent (today it's already
+  concurrent via OS threads — v0.4 makes it concurrent on a single
+  thread).
+
+The handle shape (`Future[T]` opaque i64), the public surface, and
+the typechecker treatment do not change.  v0.4 is a perf swap, not
+an API swap.
+
+#### 9.43.5 Limitations (v0.3)
+
+* No `async` / `await` keyword — the surface is library-only.  The
+  parser does not recognise `async def`; `await` is not a reserved
+  word.  Adding keyword-level syntax is a v0.4 task.
+* No async file I/O.  Sockets only.
+* No cancellation / timeouts on Future — `await` blocks until the
+  task completes or the program exits.  v0.4.
+* No variadic `asyncio.gather(*futures)`.  Ship `gather_2_*` /
+  `gather_3_*` / `gather_4_*` positional variants; the underlying
+  monomorphisation rule is the same as the rest of the stdlib.
+* `Future[T]` is not yet a fully open generic — its element type is
+  pinned at the spawn-call site by the `spawn_*` variant.  Bridging
+  the M31 user-defined-generic-class machinery to stdlib types is a
+  v0.4 task (see §16.4 history note).
+* `asyncio.sleep` blocks the calling OS thread (Shape A).  In Shape B
+  the wall-clock duration matches but the OS thread is free to run
+  other tasks.
+
 ---
 
 ## 10. Compiler Architecture

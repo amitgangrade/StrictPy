@@ -1599,6 +1599,22 @@ impl TypeChecker {
             (Ty::Generic { base: TypeCtor::Channel, args: _ }, "close") => {
                 return Ok(Ty::Primitive(PrimTy::Unit));
             }
+            // M32: Future[T] methods — `await()` returns T, `is_ready()`
+            // returns bool.  Shape mirrors Channel[T] above.  Spec §9.43.2.
+            (Ty::Generic { base: TypeCtor::Future, args: a }, "await") if a.len() == 1 => {
+                if !args.is_empty() {
+                    return Err(type_err(span, codes::TYPE_ARITY,
+                        "Future.await() takes no arguments".into()));
+                }
+                return Ok(a[0].clone());
+            }
+            (Ty::Generic { base: TypeCtor::Future, args: _ }, "is_ready") => {
+                if !args.is_empty() {
+                    return Err(type_err(span, codes::TYPE_ARITY,
+                        "Future.is_ready() takes no arguments".into()));
+                }
+                return Ok(Ty::Primitive(PrimTy::Bool));
+            }
             _ => {}
         }
         // Class / protocol method lookup.

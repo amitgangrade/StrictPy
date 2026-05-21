@@ -76,6 +76,80 @@ pub enum TarWriteHandle {
     Bz2(tar::Builder<bzip2::write::BzEncoder<std::fs::File>>),
 }
 
+// ─── M32 asyncio: Future slot ──────────────────────────────────────────
+//
+// A Future is an opaque i64 handle into `SharedVm.futures` (a
+// `Vec<Option<Arc<FutureSlot>>>`).  Each slot holds the future's state
+// behind a `Mutex<FutureState>` + `Condvar`.  `await` parks on the
+// condvar until the slot transitions to `ready`.  The Shape A scheduler
+// spawns one OS thread per future; that thread fills the slot when its
+// target closure returns.  Shape B (v0.4) would have the event loop's
+// reactor fill the same slot instead.
+
+/// Type tag for the value stored in a `FutureState`.  We type-erase the
+/// payload as up to two `u64` cells so a single slot type can hold any
+/// primitive, a String (via a heap-pointer to a StringRepr), or a
+/// 2-tuple `Tuple[i64, str]` (which the async_accept handler returns).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FutureValueKind {
+    /// Empty — only valid when `ready = false`.
+    Unset,
+    /// `i32` / `i64` / `bool` — payload in `value0` (sign-extended for
+    /// signed primitives; bool is 0 / 1).
+    Int,
+    /// `f64` — payload bit-pattern in `value0`.
+    F64,
+    /// `str` — heap pointer to a `StringRepr` in `value0`.
+    Str,
+    /// `Tuple[i64, str]` — i64 in `value0`, str-pointer in `value1`.
+    /// Used by `async_accept`.
+    TupleI64Str,
+    /// Unit / `None` — no payload.  Used by `spawn_unit` /
+    /// `run_unit`.
+    Unit,
+}
+
+/// Mutable state behind a Future's `Mutex`.
+pub struct FutureState {
+    pub ready: bool,
+    pub kind: FutureValueKind,
+    pub value0: u64,
+    pub value1: u64,
+    /// If the target closure raised an uncaught exception, the message
+    /// is stashed here and `await` re-raises an `IOError` with this
+    /// message.  Type-name is always `"IOError"` for v0.3 — preserving
+    /// the original exception class is a v0.4 task.
+    pub error: Option<String>,
+}
+
+/// A future slot.  `state` is the mutable payload; `cv` is the condvar
+/// `await` parks on (notified by whoever sets `ready = true`).
+pub struct FutureSlot {
+    pub state: std::sync::Mutex<FutureState>,
+    pub cv: std::sync::Condvar,
+}
+
+impl FutureSlot {
+    pub fn new() -> Self {
+        Self {
+            state: std::sync::Mutex::new(FutureState {
+                ready: false,
+                kind: FutureValueKind::Unset,
+                value0: 0,
+                value1: 0,
+                error: None,
+            }),
+            cv: std::sync::Condvar::new(),
+        }
+    }
+}
+
+impl Default for FutureSlot {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Load `.spyc` bytecode from `path`, link it, execute its `main` function,
 /// and return the integer exit code.
 pub fn run_file(path: &Path) -> Result<i32, VmError> {
