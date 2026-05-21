@@ -2662,10 +2662,23 @@ impl Resolver {
         const SQLITE3_LAST_INSERT_ROWID: u32   = 446;
         const SQLITE3_CHANGES: u32             = 447;
         const SQLITE3_COLUMN_NAMES: u32        = 448;
+        // M35 P4-B: typed-class entry point (alloc + connect + populate
+        // a `Connection` instance in one shot).
+        const SQLITE3_OPEN_TYPED: u32          = 801;
 
         let list_list_str_ty_sqlite = Ty::Generic {
             base: TypeCtor::List,
             args: vec![list_str_ty.clone()],
+        };
+
+        // M35 P4-B: pull the prelude-registered `Connection` class id
+        // so `sqlite3.open(path)` has the right return type.  Fallback
+        // to `Ty::Never` if the prelude was somehow skipped, which
+        // surfaces as a type error at the first call site rather than
+        // silent miscompilation (same pattern as M34's json module).
+        let p4b_conn_ty = match self.class_name_to_id.get("Connection") {
+            Some(cid) => Ty::Class(*cid),
+            None => Ty::Never,
         };
 
         let sqlite3_mod = StdlibModule {
@@ -2739,6 +2752,18 @@ impl Resolver {
                         list_str_ty.clone(),
                     ),
                     native_id: SQLITE3_COLUMN_NAMES,
+                },
+                // M35 P4-B: typed-class entry point.  `sqlite3.open(path)`
+                // mirrors Python's `sqlite3.connect(path)` but returns a
+                // `Connection` instance (rather than an i64 handle) so
+                // method-call ergonomics work.  The flat
+                // `sqlite3.connect(path) -> i64` is still available for
+                // the M29 framework and the M23 P3a-D demo.
+                StdlibItem {
+                    name: "open".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], p4b_conn_ty.clone()),
+                    native_id: SQLITE3_OPEN_TYPED,
                 },
             ],
         };
@@ -4515,6 +4540,136 @@ impl Resolver {
             // must call `hashlib.new(algorithm)`.
             is_native: true,
             payload_size: 0,
+        });
+
+        // ── M35 P4-B: typed `sqlite3.Connection` + `Cursor` classes ───
+        //
+        // Wraps the M23 P3a-D opaque-handle API (`sqlite3.connect(path)
+        // -> i64` + flat function family) in two classes:
+        //
+        //   final class Connection { handle: i64; ... methods ... }
+        //   final class Cursor     { handle: i64; ... methods ... }
+        //
+        // Both follow the same prelude-class pattern as Channel /
+        // Thread / io.File (handle-backed, `is_native: true`) — every
+        // method dispatches via NativeFn to the M23 P3a-D logic in
+        // builtins.rs.  The `handle` field at offset 0 holds the slot
+        // index into `SharedVm.sqlite_connections` (Connection) or
+        // `SharedVm.sqlite_cursors` (Cursor).  Constructors are
+        // intercepted in the IR (`m35_p4b_sqlite_class_init_native_id`
+        // in ir.rs) so the receiver-style `__init__` populates the
+        // handle slot at offset 0; the type-checker is taught the
+        // constructor signature via `m35_p4b_sqlite_class_ctor_param_tys`
+        // in typecheck.rs.
+        //
+        // Backwards compatibility: the existing `sqlite3.connect` /
+        // `sqlite3.execute` / `sqlite3.query` flat surface remains
+        // available; the M29 web framework + the M23 P3a-D demo
+        // continue to work unchanged.  Users opt into the class
+        // surface via `sqlite3.open(path)`.
+        let p4b_jv_cid = self.fresh_class();
+        let p4b_conn_sid = self.make_symbol(scope, "Connection", SymbolKind::Class,
+                                            Span::DUMMY, Some(Ty::Class(p4b_jv_cid)));
+        self.table.get_mut(p4b_conn_sid).class_id = Some(p4b_jv_cid);
+        self.class_of_symbol.insert(p4b_conn_sid, p4b_jv_cid);
+        self.symbol_of_class.insert(p4b_jv_cid, p4b_conn_sid);
+        self.class_name_to_id.insert("Connection".into(), p4b_jv_cid);
+
+        // Cursor class id — registered before we build Connection's
+        // method list because `query` / `query_params` return Cursor.
+        let p4b_cur_cid = self.fresh_class();
+        let p4b_cur_sid = self.make_symbol(scope, "Cursor", SymbolKind::Class,
+                                            Span::DUMMY, Some(Ty::Class(p4b_cur_cid)));
+        self.table.get_mut(p4b_cur_sid).class_id = Some(p4b_cur_cid);
+        self.class_of_symbol.insert(p4b_cur_sid, p4b_cur_cid);
+        self.symbol_of_class.insert(p4b_cur_cid, p4b_cur_sid);
+        self.class_name_to_id.insert("Cursor".into(), p4b_cur_cid);
+
+        let p4b_str_ty = Ty::Primitive(PrimTy::Str);
+        let p4b_list_str_ty = Ty::Generic {
+            base: TypeCtor::List,
+            args: vec![p4b_str_ty.clone()],
+        };
+        let p4b_list_list_str_ty = Ty::Generic {
+            base: TypeCtor::List,
+            args: vec![p4b_list_str_ty.clone()],
+        };
+
+        // Connection layout: single `handle: i64` field at offset 0.
+        // `is_native: true` so the M11 vtable path is skipped — methods
+        // dispatch via the IR's class-name + method-name lookup
+        // (`m35_p4b_sqlite_class_method_native_id_by_name`).  See the
+        // analogous Channel / Thread layout for the same shape.
+        self.class_layouts.insert(p4b_jv_cid, ClassLayout {
+            id: p4b_jv_cid, name: "Connection".into(), base: None,
+            is_open: false, is_sealed: false,
+            fields: vec![
+                FieldInfo {
+                    name: "handle".into(),
+                    ty: Ty::Primitive(PrimTy::I64),
+                    offset: 0,
+                },
+            ],
+            methods: vec![
+                MethodSig { name: "execute".into(),
+                              params: vec![p4b_str_ty.clone()],
+                              ret: Ty::Primitive(PrimTy::Unit) },
+                MethodSig { name: "execute_params".into(),
+                              params: vec![p4b_str_ty.clone(), p4b_list_str_ty.clone()],
+                              ret: Ty::Primitive(PrimTy::Unit) },
+                MethodSig { name: "query".into(),
+                              params: vec![p4b_str_ty.clone()],
+                              ret: Ty::Class(p4b_cur_cid) },
+                MethodSig { name: "query_params".into(),
+                              params: vec![p4b_str_ty.clone(), p4b_list_str_ty.clone()],
+                              ret: Ty::Class(p4b_cur_cid) },
+                MethodSig { name: "last_insert_rowid".into(),
+                              params: vec![],
+                              ret: Ty::Primitive(PrimTy::I64) },
+                MethodSig { name: "changes".into(),
+                              params: vec![],
+                              ret: Ty::Primitive(PrimTy::I32) },
+                MethodSig { name: "close".into(),
+                              params: vec![],
+                              ret: Ty::Primitive(PrimTy::Unit) },
+            ],
+            generics: vec![], generic_tvars: vec![],
+            // is_native: handle-backed, no vtable; dispatch via NativeFn
+            // through the M35 P4-B IR special-case (mirrors Channel /
+            // Thread / io.File).
+            is_native: true,
+            payload_size: 8,
+        });
+
+        // Cursor layout: single `handle: i64` field at offset 0 —
+        // index into `SharedVm.sqlite_cursors`.
+        self.class_layouts.insert(p4b_cur_cid, ClassLayout {
+            id: p4b_cur_cid, name: "Cursor".into(), base: None,
+            is_open: false, is_sealed: false,
+            fields: vec![
+                FieldInfo {
+                    name: "handle".into(),
+                    ty: Ty::Primitive(PrimTy::I64),
+                    offset: 0,
+                },
+            ],
+            methods: vec![
+                MethodSig { name: "fetchone".into(),
+                              params: vec![],
+                              ret: Ty::Nullable(Box::new(p4b_list_str_ty.clone())) },
+                MethodSig { name: "fetchall".into(),
+                              params: vec![],
+                              ret: p4b_list_list_str_ty.clone() },
+                MethodSig { name: "column_names".into(),
+                              params: vec![],
+                              ret: p4b_list_str_ty.clone() },
+                MethodSig { name: "row_count".into(),
+                              params: vec![],
+                              ret: Ty::Primitive(PrimTy::I64) },
+            ],
+            generics: vec![], generic_tvars: vec![],
+            is_native: true,
+            payload_size: 8,
         });
 
         // Convenience: bare booleans `True`/`False` (capitalised variants).

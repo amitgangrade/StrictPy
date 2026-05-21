@@ -1,0 +1,119 @@
+"""sqlite_class_demo.spy — M35 P4-B demo of the typed sqlite3.Connection
+and sqlite3.Cursor classes.
+
+The M23 P3a-D `sqlite3` module exposed only a flat handle-passing API
+(`sqlite3.connect(path) -> i64`, then `sqlite3.execute(handle, sql)` /
+`sqlite3.query(handle, sql)` / etc.).  Functional, but every call site
+threaded the handle through manually — error-prone and visually noisy.
+
+M35 P4-B adds two typed classes — `Connection` and `Cursor` — that
+wrap the same underlying slot tables in a method-call ergonomics
+layer.  The flat surface is preserved unchanged for backwards
+compatibility (see `examples/sqlite_demo.spy` for the original form).
+
+Demonstrated in this file:
+
+  1. `sqlite3.open(path) -> Connection` (mirrors Python's `connect`).
+  2. `conn.execute(sql)` for DDL.
+  3. `conn.execute_params(sql, params)` for parameter-bound INSERT —
+     same SQL-injection safety as the flat surface.
+  4. `conn.query(sql) -> Cursor` for SELECT.
+  5. `cur.fetchone() -> List[str]?` for row-by-row iteration with
+     none-on-exhaustion semantics.
+  6. `cur.fetchall() -> List[List[str]]` for bulk retrieval.
+  7. `cur.row_count() / column_names()` for cursor introspection.
+  8. `conn.last_insert_rowid() / changes()` for write-side metadata.
+  9. `conn.close()` (idempotent).
+"""
+
+import sqlite3
+
+
+fn main() -> i32:
+    # 1. Open an in-memory database via the typed entry point.  The
+    # return type is `Connection` rather than `i64`, so method-call
+    # ergonomics work directly.
+    conn: Connection = sqlite3.open(":memory:")
+
+    # 2. Create a `notes` table.  Method dispatch reads
+    # `Connection.handle` from the receiver's payload (offset 0) and
+    # threads it through the same M23 P3a-D logic the flat surface uses.
+    conn.execute("CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT, body TEXT)")
+
+    # 3. Insert three rows via parameter binding.  Each `?` placeholder
+    # is bound to the matching position in the `params` list — same
+    # injection-safe shape as the flat `sqlite3.execute_params`.
+    row1: List[str] = []
+    row1.append("first")
+    row1.append("hello world")
+    conn.execute_params("INSERT INTO notes (title, body) VALUES (?, ?)", row1)
+
+    row2: List[str] = []
+    row2.append("second")
+    row2.append("body two")
+    conn.execute_params("INSERT INTO notes (title, body) VALUES (?, ?)", row2)
+
+    row3: List[str] = []
+    row3.append("O'Brien")
+    row3.append("'; drop table notes;--")
+    conn.execute_params("INSERT INTO notes (title, body) VALUES (?, ?)", row3)
+
+    # 4. Write-side metadata.  `last_insert_rowid` returns the auto-
+    # incremented PRIMARY KEY of the most recent INSERT; `changes`
+    # returns the row count affected by the most recent statement.
+    last: i64 = conn.last_insert_rowid()
+    println("last_insert_rowid=" + str(last))
+
+    # 5. SELECT — `query` returns a Cursor that has already
+    # eagerly-materialised every result row.  `row_count` is the total
+    # number of rows; `column_names` mirrors the SELECT list.
+    cur: Cursor = conn.query("SELECT id, title, body FROM notes ORDER BY id")
+
+    println("rows=" + str(cur.row_count()))
+
+    cols: List[str] = cur.column_names()
+    print("columns:")
+    ci: i32 = 0i32
+    while ci < i32(i64(len(cols))):
+        print(" " + cols[ci])
+        ci = ci + 1i32
+    println("")
+
+    # 6. fetchone iteration — returns the next row (as `List[str]`) or
+    # `none` when exhausted.  The `is not none` narrowing pattern
+    # gives us non-nullable access to the row inside the branch.
+    while true:
+        row: List[str]? = cur.fetchone()
+        if row is not none:
+            println("row id=" + row[0i32] + " title=" + row[1i32] + " body=" + row[2i32])
+        else:
+            break
+
+    # 7. fetchall after exhaustion is the empty list (cursor is drained).
+    leftover: List[List[str]] = cur.fetchall()
+    println("leftover=" + str(i32(i64(len(leftover)))))
+
+    # 8. Re-issue the same SELECT to demonstrate cursor independence.
+    # Each query call produces a fresh Cursor with its own iteration
+    # state — multiple cursors over the same connection coexist.
+    cur2: Cursor = conn.query("SELECT title FROM notes WHERE title LIKE 'O%' ORDER BY id")
+    println("oh_rows=" + str(cur2.row_count()))
+    all_oh: List[List[str]] = cur2.fetchall()
+    oi: i32 = 0i32
+    while oi < i32(i64(len(all_oh))):
+        r: List[str] = all_oh[oi]
+        println("oh_title=" + r[0i32])
+        oi = oi + 1i32
+
+    # 9. UPDATE + changes() metadata.
+    conn.execute("UPDATE notes SET body = 'redacted' WHERE id <= 2")
+    n: i32 = conn.changes()
+    println("updated=" + str(n))
+
+    # 10. Tear down.  Close is idempotent so accidental double-close
+    # is harmless.
+    conn.close()
+    conn.close()
+    println("closed")
+
+    return 0

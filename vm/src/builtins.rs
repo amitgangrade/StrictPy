@@ -6849,6 +6849,22 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         NativeFn::JsonJObjectKeys     => m34_jobject_keys(interp, args),
         NativeFn::JsonJObjectLength   => m34_jobject_length(interp, args),
 
+        // ── M35 P4-B: typed sqlite3.Connection + Cursor classes ─────
+        NativeFn::Sqlite3ConnectionInit       => p4b_init_handle_slot(args),
+        NativeFn::Sqlite3OpenTyped            => p4b_sqlite_open_typed(interp, args),
+        NativeFn::Sqlite3ConnectionExecute    => p4b_conn_execute(interp, args),
+        NativeFn::Sqlite3ConnectionExecuteParams => p4b_conn_execute_params(interp, args),
+        NativeFn::Sqlite3ConnectionQuery      => p4b_conn_query(interp, args),
+        NativeFn::Sqlite3ConnectionQueryParams => p4b_conn_query_params(interp, args),
+        NativeFn::Sqlite3ConnectionLastInsertRowid => p4b_conn_last_insert_rowid(interp, args),
+        NativeFn::Sqlite3ConnectionChanges    => p4b_conn_changes(interp, args),
+        NativeFn::Sqlite3ConnectionClose      => p4b_conn_close(interp, args),
+        NativeFn::Sqlite3CursorInit           => p4b_init_handle_slot(args),
+        NativeFn::Sqlite3CursorFetchOne       => p4b_cur_fetchone(interp, args),
+        NativeFn::Sqlite3CursorFetchAll       => p4b_cur_fetchall(interp, args),
+        NativeFn::Sqlite3CursorColumnNames    => p4b_cur_column_names(interp, args),
+        NativeFn::Sqlite3CursorRowCount       => p4b_cur_row_count(interp, args),
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
@@ -10851,6 +10867,388 @@ fn m34_jobject_length(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, Vm
     let (keys, _) = m34_jobject_get_lists(arg_u64(args, 0));
     let len = if keys.is_null() { 0 } else { unsafe { (*keys).length } };
     Ok(len as u64)
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// M35 P4-B: typed `sqlite3.Connection` + `sqlite3.Cursor` classes.
+//
+// Both classes wrap an i64 handle stored at payload offset 0 (HDR + 0).
+// Connection.handle indexes into `SharedVm.sqlite_connections` (the
+// same M23 P3a-D slot table the flat-function surface uses); Cursor.handle
+// indexes into the new `SharedVm.sqlite_cursors` HashMap.  Methods
+// dispatch via the M35 P4-B class-name + method-name special-case in
+// `ir.rs` (mirrors M34's JList/JObject pattern).
+//
+// All handlers route through `p4b_*` to keep the M35 P4-B locals
+// distinct from any other agent's work in shared files (Lesson 2).
+// ─────────────────────────────────────────────────────────────────────
+
+/// Receiver-style `__init__` for `Connection(handle)` and
+/// `Cursor(handle)`: write the i64 handle into the freshly-allocated
+/// receiver at payload offset 0.  Returns the receiver.
+///
+/// Both classes share this handler because their payload shape is
+/// identical (single i64 field at offset 0).
+fn p4b_init_handle_slot(args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let handle = arg_i64(args, 1);
+    m34_store_payload_u64(recv, handle as u64, 0);
+    Ok(recv)
+}
+
+/// Read the i64 handle out of a Connection / Cursor receiver.
+/// Returns 0 for a null receiver (the caller's "use after close" /
+/// "invalid handle" check will trip in the slot lookup).
+fn p4b_read_handle(recv_ptr: u64) -> i64 {
+    let obj = recv_ptr as *const u8;
+    if obj.is_null() {
+        return 0;
+    }
+    unsafe {
+        let slot = obj.add(HDR) as *const i64;
+        std::ptr::read_unaligned(slot)
+    }
+}
+
+/// Allocate a fresh `Connection` heap object with the given handle in
+/// its `handle: i64` field.  Returns the object pointer.
+fn p4b_alloc_connection(interp: &mut Interpreter, handle: i64) -> *mut u8 {
+    let p = m34_alloc_class_obj(interp, "Connection", 8);
+    unsafe {
+        let slot = p.add(HDR) as *mut i64;
+        std::ptr::write_unaligned(slot, handle);
+    }
+    p
+}
+
+/// Allocate a fresh `Cursor` heap object with the given handle.
+fn p4b_alloc_cursor(interp: &mut Interpreter, handle: i64) -> *mut u8 {
+    let p = m34_alloc_class_obj(interp, "Cursor", 8);
+    unsafe {
+        let slot = p.add(HDR) as *mut i64;
+        std::ptr::write_unaligned(slot, handle);
+    }
+    p
+}
+
+/// `sqlite3.open(path) -> Connection` — open or create the DB file
+/// at `path`, push it onto the connection slot table, and wrap the
+/// returned slot index in a `Connection` instance.  Mirrors
+/// `sqlite3.connect(path) -> i64`'s logic exactly so the M29 framework
+/// can keep using the flat surface while new code uses the typed one.
+fn p4b_sqlite_open_typed(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let path = arg_str(args, 0);
+    let conn = rusqlite::Connection::open(&path).map_err(|e| {
+        VmError::UncaughtException {
+            type_name: "IOError".into(),
+            message: format!("sqlite3.open({:?}): {}", path, e),
+        }
+    })?;
+    let handle = {
+        let mut tab = interp.shared.sqlite_connections.lock().unwrap();
+        let h = tab.len() as i64;
+        tab.push(Some(conn));
+        h
+    };
+    let obj = p4b_alloc_connection(interp, handle);
+    Ok(obj as u64)
+}
+
+/// `Connection.execute(self, sql)` — dispatches to the same logic the
+/// flat `sqlite3.execute(handle, sql)` runs.  Reads the handle out of
+/// the receiver's payload at offset 0.
+fn p4b_conn_execute(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let handle = p4b_read_handle(arg_u64(args, 0));
+    let sql = arg_str(args, 1);
+    sqlite3_with_conn(interp, handle, |conn| {
+        conn.execute(&sql, []).map(|_| ()).map_err(|e| {
+            VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!("Connection.execute: {}", e),
+            }
+        })
+    })?;
+    Ok(0)
+}
+
+/// `Connection.execute_params(self, sql, params)`.
+fn p4b_conn_execute_params(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let handle = p4b_read_handle(arg_u64(args, 0));
+    let sql = arg_str(args, 1);
+    let params = sqlite3_read_str_list(args, 2)?;
+    sqlite3_with_conn(interp, handle, |conn| {
+        let bound: Vec<&dyn rusqlite::ToSql> =
+            params.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        conn.execute(&sql, rusqlite::params_from_iter(bound.iter()))
+            .map(|_| ())
+            .map_err(|e| VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!("Connection.execute_params: {}", e),
+            })
+    })?;
+    Ok(0)
+}
+
+/// `Connection.query(self, sql) -> Cursor` — run a SELECT, eagerly
+/// materialise the rows + column names into a `CursorState`, insert
+/// into `sqlite_cursors`, and return a `Cursor` instance whose handle
+/// points at the new slot.
+fn p4b_conn_query(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let handle = p4b_read_handle(arg_u64(args, 0));
+    let sql = arg_str(args, 1);
+    let (rows, column_names) = sqlite3_with_conn(interp, handle, |conn| {
+        p4b_run_query_with_cols(conn, &sql, &[])
+    })?;
+    let p4b_cursor_handle = p4b_register_cursor(interp, rows, column_names);
+    let obj = p4b_alloc_cursor(interp, p4b_cursor_handle);
+    Ok(obj as u64)
+}
+
+/// `Connection.query_params(self, sql, params) -> Cursor`.
+fn p4b_conn_query_params(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let handle = p4b_read_handle(arg_u64(args, 0));
+    let sql = arg_str(args, 1);
+    let params = sqlite3_read_str_list(args, 2)?;
+    let (rows, column_names) = sqlite3_with_conn(interp, handle, |conn| {
+        p4b_run_query_with_cols(conn, &sql, &params)
+    })?;
+    let p4b_cursor_handle = p4b_register_cursor(interp, rows, column_names);
+    let obj = p4b_alloc_cursor(interp, p4b_cursor_handle);
+    Ok(obj as u64)
+}
+
+/// `Connection.last_insert_rowid(self) -> i64`.
+fn p4b_conn_last_insert_rowid(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let handle = p4b_read_handle(arg_u64(args, 0));
+    let rowid = sqlite3_with_conn(interp, handle, |conn| {
+        Ok(conn.last_insert_rowid())
+    })?;
+    Ok(rowid as u64)
+}
+
+/// `Connection.changes(self) -> i32`.
+fn p4b_conn_changes(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let handle = p4b_read_handle(arg_u64(args, 0));
+    let n = sqlite3_with_conn(interp, handle, |conn| {
+        Ok(conn.changes() as i32)
+    })?;
+    Ok(n as u32 as u64)
+}
+
+/// `Connection.close(self) -> None` — idempotent.  Tearing down the
+/// rusqlite::Connection drops every prepared statement; cursors that
+/// were created from this connection keep working because their rows
+/// were eagerly materialised at query time.
+fn p4b_conn_close(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let handle = p4b_read_handle(arg_u64(args, 0));
+    if handle <= 0 {
+        return Ok(0);
+    }
+    let mut tab = interp.shared.sqlite_connections.lock().unwrap();
+    if let Some(slot) = tab.get_mut(handle as usize) {
+        *slot = None;
+    }
+    Ok(0)
+}
+
+/// Run a prepared statement and collect rows + column names.  Pattern
+/// matches `sqlite3_run_query` but also returns the column names so
+/// the Cursor can serve `column_names()` after iteration completes.
+fn p4b_run_query_with_cols(
+    conn: &mut rusqlite::Connection,
+    sql: &str,
+    params: &[String],
+) -> Result<(Vec<Vec<String>>, Vec<String>), VmError> {
+    let mut stmt = conn.prepare(sql).map_err(|e| VmError::UncaughtException {
+        type_name: "ValueError".into(),
+        message: format!("Connection.query: prepare: {}", e),
+    })?;
+    let n_cols = stmt.column_count();
+    let column_names: Vec<String> = stmt
+        .column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let bound: Vec<&dyn rusqlite::ToSql> =
+        params.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+    let mut rows_iter = stmt
+        .query(rusqlite::params_from_iter(bound.iter()))
+        .map_err(|e| VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("Connection.query: query: {}", e),
+        })?;
+    let mut out: Vec<Vec<String>> = Vec::new();
+    loop {
+        let row = rows_iter.next().map_err(|e| VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("Connection.query: row: {}", e),
+        })?;
+        let row = match row {
+            Some(r) => r,
+            None => break,
+        };
+        let mut cells: Vec<String> = Vec::with_capacity(n_cols);
+        for i in 0..n_cols {
+            let val: rusqlite::types::Value =
+                row.get(i).map_err(|e| VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("Connection.query: column {}: {}", i, e),
+                })?;
+            cells.push(sqlite3_stringify(&val));
+        }
+        out.push(cells);
+    }
+    Ok((out, column_names))
+}
+
+/// Allocate a fresh `next_cursor_id`, insert a CursorState into the
+/// table, and return the new handle.
+fn p4b_register_cursor(
+    interp: &Interpreter,
+    rows: Vec<Vec<String>>,
+    column_names: Vec<String>,
+) -> i64 {
+    let handle = interp
+        .shared
+        .next_cursor_id
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let mut tab = interp.shared.sqlite_cursors.lock().unwrap();
+    tab.insert(
+        handle,
+        crate::interp::CursorState {
+            rows,
+            column_names,
+            next_row: 0,
+        },
+    );
+    handle
+}
+
+/// `Cursor.fetchone(self) -> List[str]?` — return the next row (and
+/// advance the iteration pointer) or `none` if exhausted.
+///
+/// **NONE_SENTINEL gotcha**: nullable returns from native handlers
+/// signal `none` via `0x8000_0000_0000_0000`, NOT zero.  The M34
+/// agent's report called this out explicitly; tests catch the
+/// mistake (a returned zero would be indistinguishable from a real
+/// pointer).
+fn p4b_cur_fetchone(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let handle = p4b_read_handle(arg_u64(args, 0));
+    if handle <= 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("Cursor.fetchone: invalid cursor handle {}", handle),
+        });
+    }
+    // Take the row out of the slot.  We need to drop the table lock
+    // before allocating (which itself locks the heap), so we extract
+    // the row data into a local before doing any further work.
+    let row_opt: Option<Vec<String>> = {
+        let mut tab = interp.shared.sqlite_cursors.lock().unwrap();
+        match tab.get_mut(&handle) {
+            None => return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!("Cursor.fetchone: unknown cursor handle {}", handle),
+            }),
+            Some(state) => {
+                if state.next_row >= state.rows.len() {
+                    None
+                } else {
+                    let idx = state.next_row;
+                    state.next_row = idx + 1;
+                    Some(state.rows[idx].clone())
+                }
+            }
+        }
+    };
+    match row_opt {
+        None => Ok(NONE_SENTINEL),
+        Some(cells) => {
+            let lst = interp.alloc_list(cells.len());
+            for c in &cells {
+                let sp = interp.alloc_string(c) as u64;
+                // SAFETY: lst freshly allocated, owned by us.
+                unsafe { interp.list_push(lst, sp) };
+            }
+            Ok(lst as u64)
+        }
+    }
+}
+
+/// `Cursor.fetchall(self) -> List[List[str]]` — return all remaining
+/// rows.  Advances `next_row` to the end (a subsequent fetchall
+/// returns the empty list, matching Python's iteration semantics).
+fn p4b_cur_fetchall(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let handle = p4b_read_handle(arg_u64(args, 0));
+    if handle <= 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("Cursor.fetchall: invalid cursor handle {}", handle),
+        });
+    }
+    let remaining: Vec<Vec<String>> = {
+        let mut tab = interp.shared.sqlite_cursors.lock().unwrap();
+        match tab.get_mut(&handle) {
+            None => return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!("Cursor.fetchall: unknown cursor handle {}", handle),
+            }),
+            Some(state) => {
+                let start = state.next_row.min(state.rows.len());
+                let rest: Vec<Vec<String>> = state.rows[start..].to_vec();
+                state.next_row = state.rows.len();
+                rest
+            }
+        }
+    };
+    Ok(sqlite3_alloc_rows(interp, &remaining) as u64)
+}
+
+/// `Cursor.column_names(self) -> List[str]`.
+fn p4b_cur_column_names(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let handle = p4b_read_handle(arg_u64(args, 0));
+    if handle <= 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("Cursor.column_names: invalid cursor handle {}", handle),
+        });
+    }
+    let cols: Vec<String> = {
+        let tab = interp.shared.sqlite_cursors.lock().unwrap();
+        match tab.get(&handle) {
+            None => return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!("Cursor.column_names: unknown cursor handle {}", handle),
+            }),
+            Some(state) => state.column_names.clone(),
+        }
+    };
+    let lst = interp.alloc_list(cols.len());
+    for n in &cols {
+        let sp = interp.alloc_string(n) as u64;
+        unsafe { interp.list_push(lst, sp) };
+    }
+    Ok(lst as u64)
+}
+
+/// `Cursor.row_count(self) -> i64` — total rows the underlying query
+/// produced.  Independent of the iteration cursor.
+fn p4b_cur_row_count(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let handle = p4b_read_handle(arg_u64(args, 0));
+    if handle <= 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("Cursor.row_count: invalid cursor handle {}", handle),
+        });
+    }
+    let tab = interp.shared.sqlite_cursors.lock().unwrap();
+    match tab.get(&handle) {
+        None => Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("Cursor.row_count: unknown cursor handle {}", handle),
+        }),
+        Some(state) => Ok(state.rows.len() as u64),
+    }
 }
 
 #[cfg(test)]

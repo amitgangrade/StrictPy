@@ -1447,6 +1447,59 @@ pub enum NativeFn {
     // 784-789 reserved for v0.4 (set / iter_items / values on a
     // mutable JObject).
 
+    // ── 800-819: M35 P4-B — `sqlite3.Connection` + `sqlite3.Cursor` ─────
+    //
+    // The M23 P3a-D flat function surface (`sqlite3.connect(path) -> i64`
+    // + `sqlite3.execute(handle, sql)` etc.) remains in place; this
+    // block adds typed classes that wrap the same i64 connection slot
+    // table on `SharedVm.sqlite_connections` plus a new per-Cursor
+    // sidecar table (`sqlite_cursors`).  Pattern mirrors M34's class-
+    // constructor split: ID 800 is the receiver-style `__init__` for
+    // `Connection(handle)` (called from `sqlite3.open` via Alloc +
+    // NativeCall), 811 is the same for `Cursor`.  Method NativeFns
+    // (802-810, 812-816) receive the class instance as arg 0 and read
+    // the i64 slot handle out of payload offset 0.
+    //
+    // Layouts (registered in resolver::seed_prelude):
+    //   Connection: { handle: i64 } — 8 bytes payload
+    //   Cursor:     { handle: i64 } — 8 bytes payload (index into
+    //                                  SharedVm.sqlite_cursors)
+    /// `Connection.__init__(self, handle: i64) -> None` — receiver-style.
+    Sqlite3ConnectionInit       = 800,
+    /// `sqlite3.open(path: str) -> Connection` — alloc+init helper.
+    Sqlite3OpenTyped            = 801,
+    /// `Connection.execute(self, sql: str) -> None`.
+    Sqlite3ConnectionExecute    = 802,
+    /// `Connection.execute_params(self, sql: str, params: List[str]) -> None`.
+    Sqlite3ConnectionExecuteParams = 803,
+    /// `Connection.query(self, sql: str) -> Cursor`.
+    Sqlite3ConnectionQuery      = 804,
+    /// `Connection.query_params(self, sql: str, params: List[str]) -> Cursor`.
+    Sqlite3ConnectionQueryParams = 805,
+    /// `Connection.last_insert_rowid(self) -> i64`.
+    Sqlite3ConnectionLastInsertRowid = 806,
+    /// `Connection.changes(self) -> i32`.
+    Sqlite3ConnectionChanges    = 807,
+    /// `Connection.close(self) -> None` — idempotent.
+    Sqlite3ConnectionClose      = 808,
+    // 809-810 reserved for v0.3 follow-ups (commit / rollback once
+    // explicit transactions land).
+    /// `Cursor.__init__(self, handle: i64) -> None` — receiver-style.
+    Sqlite3CursorInit           = 811,
+    /// `Cursor.fetchone(self) -> List[str]?` — next row or `none`
+    /// when exhausted.  Uses `NONE_SENTINEL` (`0x8000_0000_0000_0000`),
+    /// NOT zero — see M34 report's NONE_SENTINEL gotcha.
+    Sqlite3CursorFetchOne       = 812,
+    /// `Cursor.fetchall(self) -> List[List[str]]` — remaining rows.
+    Sqlite3CursorFetchAll       = 813,
+    /// `Cursor.column_names(self) -> List[str]`.
+    Sqlite3CursorColumnNames    = 814,
+    /// `Cursor.row_count(self) -> i64` — total rows the underlying
+    /// query produced (not "rows remaining").
+    Sqlite3CursorRowCount       = 815,
+    // 816-819 reserved for v0.4 (Cursor iteration support /
+    // Connection.commit / Connection.rollback).
+
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
     /// encounters. The VM treats this as a runtime error.
@@ -1921,6 +1974,22 @@ impl NativeFn {
             781 => Some(Self::JsonJObjectHas),
             782 => Some(Self::JsonJObjectKeys),
             783 => Some(Self::JsonJObjectLength),
+            // M35 P4-B: sqlite3.Connection + Cursor classes (800-815).
+            // 816-819 reserved for v0.4.
+            800 => Some(Self::Sqlite3ConnectionInit),
+            801 => Some(Self::Sqlite3OpenTyped),
+            802 => Some(Self::Sqlite3ConnectionExecute),
+            803 => Some(Self::Sqlite3ConnectionExecuteParams),
+            804 => Some(Self::Sqlite3ConnectionQuery),
+            805 => Some(Self::Sqlite3ConnectionQueryParams),
+            806 => Some(Self::Sqlite3ConnectionLastInsertRowid),
+            807 => Some(Self::Sqlite3ConnectionChanges),
+            808 => Some(Self::Sqlite3ConnectionClose),
+            811 => Some(Self::Sqlite3CursorInit),
+            812 => Some(Self::Sqlite3CursorFetchOne),
+            813 => Some(Self::Sqlite3CursorFetchAll),
+            814 => Some(Self::Sqlite3CursorColumnNames),
+            815 => Some(Self::Sqlite3CursorRowCount),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

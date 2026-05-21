@@ -3709,6 +3709,26 @@ fn lower_call(
                             );
                             return alloc;
                         }
+                        // M35 P4-B: typed sqlite3.Connection / Cursor
+                        // constructors — same shape as the M34 hook
+                        // above.  Users don't normally write
+                        // `Connection(h)` literally; this path keeps
+                        // the IR uniform if they do, and is also used
+                        // internally by the `sqlite3.open` /
+                        // `Connection.query` paths through Alloc +
+                        // NativeCall(Init).
+                        if let Some(nid) = m35_p4b_sqlite_class_init_native_id(name) {
+                            let mut call_args = vec![alloc];
+                            call_args.extend(arg_vs);
+                            fb.push_value(
+                                Ty::Primitive(PrimTy::Unit),
+                                ValueKind::Op {
+                                    op: IROp::NativeCall { native_id: nid },
+                                    args: call_args,
+                                },
+                            );
+                            return alloc;
+                        }
                         let init_name = format!("{}.__init__", name);
                         if let Some(FuncId(fid)) = ctx.fn_id_by_name.get(&init_name).copied() {
                             let mut call_args = vec![alloc];
@@ -4143,6 +4163,25 @@ fn lower_method_call(
                     },
                 );
             }
+            // M35 P4-B: typed sqlite3.Connection / Cursor method
+            // dispatch — same class-name + method-name shape as M34.
+            // Connection / Cursor are `is_native: true` so the M11
+            // vtable path below is skipped; we intercept here so the
+            // NativeFn ids 802-808 / 812-815 fire instead of going
+            // through `resolve_native_method`'s NativeFn::from_name
+            // lookup (which would collide on method names like
+            // `close` and dispatch the FileClose handler).
+            if let Some(nid) = m35_p4b_sqlite_class_method_native_id_by_name(
+                layout.name.as_str(), method,
+            ) {
+                return fb.push_value(
+                    ret_ty,
+                    ValueKind::Op {
+                        op: IROp::NativeCall { native_id: nid },
+                        args: arg_vs,
+                    },
+                );
+            }
         }
     }
 
@@ -4353,6 +4392,46 @@ fn m34_json_class_method_native_id_by_name(
         ("Hasher",  "update")    => NativeFn::HasherUpdate    as u32,
         ("Hasher",  "hexdigest") => NativeFn::HasherHexdigest as u32,
         ("Hasher",  "algorithm") => NativeFn::HasherAlgorithm as u32,
+        _ => return None,
+    })
+}
+
+/// M35 P4-B: map a constructor name to the matching
+/// `Sqlite3{Connection,Cursor}Init` NativeFn id, or `None` if `name`
+/// isn't one of the typed sqlite3 classes.  Mirrors
+/// `m34_json_class_init_native_id` — used by `lower_call` to route
+/// `Connection(handle)` / `Cursor(handle)` through a native initialiser
+/// instead of looking for a user `__init__`.  Programs do not
+/// normally call these constructors directly (the `sqlite3.open` /
+/// `Connection.query` paths allocate them internally), but having the
+/// constructor hook here keeps the IR shape uniform with the M34
+/// JsonValue family.
+fn m35_p4b_sqlite_class_init_native_id(name: &str) -> Option<u32> {
+    Some(match name {
+        "Connection" => NativeFn::Sqlite3ConnectionInit as u32,
+        "Cursor"     => NativeFn::Sqlite3CursorInit     as u32,
+        _ => return None,
+    })
+}
+
+/// M35 P4-B: dispatch a typed sqlite3 class method by class name +
+/// method name.  Same shape as M34's JList/JObject dispatcher.
+fn m35_p4b_sqlite_class_method_native_id_by_name(
+    class_name: &str,
+    method: &str,
+) -> Option<u32> {
+    Some(match (class_name, method) {
+        ("Connection", "execute")            => NativeFn::Sqlite3ConnectionExecute            as u32,
+        ("Connection", "execute_params")     => NativeFn::Sqlite3ConnectionExecuteParams     as u32,
+        ("Connection", "query")              => NativeFn::Sqlite3ConnectionQuery              as u32,
+        ("Connection", "query_params")       => NativeFn::Sqlite3ConnectionQueryParams       as u32,
+        ("Connection", "last_insert_rowid")  => NativeFn::Sqlite3ConnectionLastInsertRowid  as u32,
+        ("Connection", "changes")            => NativeFn::Sqlite3ConnectionChanges            as u32,
+        ("Connection", "close")              => NativeFn::Sqlite3ConnectionClose              as u32,
+        ("Cursor",     "fetchone")           => NativeFn::Sqlite3CursorFetchOne           as u32,
+        ("Cursor",     "fetchall")           => NativeFn::Sqlite3CursorFetchAll           as u32,
+        ("Cursor",     "column_names")       => NativeFn::Sqlite3CursorColumnNames       as u32,
+        ("Cursor",     "row_count")          => NativeFn::Sqlite3CursorRowCount          as u32,
         _ => return None,
     })
 }

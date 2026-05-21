@@ -1269,6 +1269,20 @@ impl TypeChecker {
                         }
                         return Ok(Ty::Class(cid));
                     }
+                    // M35 P4-B: typed sqlite3.Connection / Cursor
+                    // constructors — same shape as M34 above.  Each
+                    // takes a single `handle: i64`.
+                    if let Some(param_tys) = m35_p4b_sqlite_ctor_param_tys(&cl.name) {
+                        if args.len() != param_tys.len() {
+                            return Err(type_err(span, codes::TYPE_ARITY,
+                                format!("constructor of `{}` expects {} args, got {}",
+                                        cl.name, param_tys.len(), args.len())));
+                        }
+                        for (a, pt) in args.iter().zip(param_tys.iter()) {
+                            let _ = self.check_expr(&a.value, pt, env, ctx, r)?;
+                        }
+                        return Ok(Ty::Class(cid));
+                    }
                     // No explicit __init__ — only valid with no args (default ctor).
                     if !args.is_empty() {
                         return Err(type_err(span, codes::TYPE_ARITY,
@@ -1879,6 +1893,19 @@ fn m34_json_ctor_param_tys(class_name: &str, ctx: &Ctx<'_>) -> Option<Vec<Ty>> {
                 jv_ty,
             ])],
         }],
+        _ => return None,
+    })
+}
+
+/// M35 P4-B: parameter types for the typed sqlite3 class
+/// constructors (`Connection(handle)` / `Cursor(handle)`).  Both take
+/// a single `handle: i64` — the slot index into the matching
+/// `SharedVm` table.  Like `m34_json_ctor_param_tys`, returns `None`
+/// for any class outside the family.
+fn m35_p4b_sqlite_ctor_param_tys(class_name: &str) -> Option<Vec<Ty>> {
+    Some(match class_name {
+        "Connection" => vec![Ty::Primitive(PrimTy::I64)],
+        "Cursor"     => vec![Ty::Primitive(PrimTy::I64)],
         _ => return None,
     })
 }

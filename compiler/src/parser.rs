@@ -1478,6 +1478,16 @@ impl Parser {
                             self.bump();
                             "async".to_string()
                         }
+                        // M35 P4-B: `sqlite3.open(path) -> Connection` —
+                        // `open` is reserved as a class modifier but
+                        // makes sense as a module-level function name
+                        // (matches Python's `io.open` / `sqlite3.connect`
+                        // naming) and is syntactically unambiguous after
+                        // a `.`.  Same logic as the await/async case above.
+                        TokenKind::KwOpen => {
+                            self.bump();
+                            "open".to_string()
+                        }
                         _ => self.expect_ident()?,
                     };
                     let span = merge_spans(start, self.prev_span());

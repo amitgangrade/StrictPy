@@ -2703,6 +2703,94 @@ same conn) is a runtime error ("connection in use") rather than a
 deadlock — but v0.2 has no callback / hook surface so user code can't
 hit this path organically.
 
+#### 9.29.1 `Connection` and `Cursor` classes (v0.3 — M35 P4-B)
+
+The flat handle-passing surface above remains the underlying primitive
+— the M29 web framework and existing demos use it unchanged — but
+v0.3 adds two typed classes that give method-call ergonomics for new
+code:
+
+```
+final class Connection:
+    handle: i64                              # slot index — internal
+    fn execute(self, sql: str) -> None
+    fn execute_params(self, sql: str, params: List[str]) -> None
+    fn query(self, sql: str) -> Cursor
+    fn query_params(self, sql: str, params: List[str]) -> Cursor
+    fn last_insert_rowid(self) -> i64
+    fn changes(self) -> i32
+    fn close(self) -> None                   # idempotent
+
+final class Cursor:
+    handle: i64                              # slot index — internal
+    fn fetchone(self) -> List[str]?          # next row, or none if exhausted
+    fn fetchall(self) -> List[List[str]]     # remaining rows
+    fn column_names(self) -> List[str]
+    fn row_count(self) -> i64                # total rows from the query
+```
+
+Entry point:
+
+```
+fn open(path: str) -> Connection
+```
+
+Named `open` rather than `connect` because the flat-function `connect`
+is already a top-level name in this module.  Semantics match the flat
+`connect`: opens or creates the DB file, raises `IOError` on
+filesystem / permission failure.
+
+Method semantics:
+
+* `Connection.execute` / `execute_params` / `last_insert_rowid` /
+  `changes` / `close` are direct wrappers over the matching flat
+  functions — the i64 stored in the `handle: i64` field at payload
+  offset 0 is threaded through to the same M23 P3a-D logic.
+* `Connection.query` / `query_params` eagerly materialise the result
+  set into a `CursorState` on `SharedVm.sqlite_cursors` and return a
+  fresh `Cursor` instance whose `handle: i64` field points at the new
+  slot.  Each query produces an independent cursor; multiple cursors
+  over the same connection coexist.
+* `Cursor.fetchone()` reads the next row from the cursor's row buffer
+  and advances the iteration index.  Returns the row as `List[str]`
+  if available, or `none` when exhausted.  Subsequent calls after
+  exhaustion continue to return `none`.
+* `Cursor.fetchall()` returns the *remaining* rows (not all rows from
+  the original query) and advances the iteration index to the end —
+  so a `fetchone` followed by `fetchall` yields disjoint sets, and a
+  second `fetchall` after the first is the empty list.
+* `Cursor.column_names()` and `row_count()` are independent of the
+  iteration cursor; they return the column-name list reported by the
+  prepared statement and the total row count from the original query.
+* Cell stringification is identical to the flat surface (`INTEGER` →
+  decimal text, `REAL` → `format!("{}", f64)`, `TEXT` → as-is,
+  `NULL` → `""`, `BLOB` → lowercase hex).
+* Cursors outlive their parent `Connection`: closing the connection
+  doesn't invalidate cursors that were created from it (every row was
+  copied out at query time), so an `INSERT`/`query`/`close` sequence
+  is fine to follow with cursor iteration.
+
+Backwards compatibility: nothing on the flat surface changes.  The
+two surfaces share `SharedVm.sqlite_connections` so a `Connection`
+opened via `sqlite3.open` cannot be passed to a flat-function call
+(the i64 handle is encapsulated in the class instance), and vice
+versa — but this is by design, not a limitation.
+
+What's still deferred to v0.4:
+
+* Cursor iteration via `for row in cur:` — needs the iterator-protocol
+  hook on stdlib classes.  v0.3 users compose `fetchone` in a
+  `while true:` loop, see `examples/sqlite_class_demo.spy`.
+* Explicit transaction methods (`Connection.commit` / `rollback`) —
+  v0.3 users still run raw `BEGIN`/`COMMIT`/`ROLLBACK` SQL through
+  `execute`.
+* Typed parameter binding (bind non-`str` values directly without
+  formatting them first) — same constraint as the flat surface.
+
+NativeFn IDs 800-819 are reserved for this block (800: `ConnectionCtor`,
+801: `Sqlite3OpenTyped`, 802-808: Connection methods, 811: `CursorCtor`,
+812-815: Cursor methods, 809-810 + 816-819 reserved for v0.4 follow-ups).
+
 ### 9.39 Module `logging` (v0.2 — M27 P3c-E)
 
 Application logging.  v0.2 ships a **single global logger** — threshold,

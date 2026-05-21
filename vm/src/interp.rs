@@ -223,6 +223,34 @@ impl Ord for F64Ord {
     }
 }
 
+/// M35 P4-B: state backing one `sqlite3.Cursor` instance.
+///
+/// At query time the M23 P3a-D logic eagerly materialises every result
+/// row into a `Vec<Vec<String>>` (each cell stringified per the spec
+/// §9 sqlite3 rendering rules).  The typed `Cursor` class wraps that
+/// buffer plus the column-name list reported by the prepared statement
+/// at preparation time and a pointer to the next row to hand out
+/// through `fetchone`.
+///
+/// Lifetime: each `Connection.query` / `query_params` call allocates
+/// a fresh `CursorState` and inserts it into `SharedVm.sqlite_cursors`
+/// keyed by a monotonically-increasing i64 (so re-using a stale handle
+/// traps rather than aliasing).  The slot lives until the program ends
+/// — `Cursor.fetchall` does not remove it (the next `fetchall` returns
+/// an empty list, matching Python's iteration semantics).
+pub struct CursorState {
+    /// Stringified result rows, eagerly materialised at query time.
+    /// Each inner Vec has length == column_names.len().
+    pub rows: Vec<Vec<String>>,
+    /// Column names from the prepared statement (preserved across
+    /// iteration because `column_names()` is meant to be queryable
+    /// after the result set is exhausted).
+    pub column_names: Vec<String>,
+    /// Index of the next row to hand out through `fetchone`.  When
+    /// >= rows.len(), fetchone returns `none`.
+    pub next_row: usize,
+}
+
 /// Bundle of [`RuntimeType`]s built once at module load and shared between
 /// every interpreter (parent + spawned thread workers) that runs against
 /// the same module. `Arc<TypeBundle>` is cheap to clone and free of locking.
@@ -281,6 +309,15 @@ pub struct SharedVm {
     /// M23 P3a-D: open SQLite connections, indexed by i64 handle.  Slot 0
     /// is reserved as "no connection".
     pub sqlite_connections: Arc<Mutex<Vec<Option<rusqlite::Connection>>>>,
+    /// M35 P4-B: `sqlite3.Cursor` state, keyed by monotonic i64 handle.
+    /// Each entry holds an eagerly-materialised result-row buffer plus
+    /// column names and an iteration cursor.  Slot 0 is reserved (i.e.
+    /// the first issued handle is 1) — keeps a "no cursor" sentinel
+    /// distinguishable from a real slot.
+    pub sqlite_cursors: std::sync::Mutex<HashMap<i64, CursorState>>,
+    /// M35 P4-B: monotonic allocator for `sqlite_cursors` keys.  Starts
+    /// at 1 (handle 0 is reserved).
+    pub next_cursor_id: std::sync::atomic::AtomicI64,
     /// M27 P3c-E: `logging` module threshold.  Encoded with CPython's
     /// integer level constants — 10=DEBUG, 20=INFO, 30=WARNING, 40=ERROR,
     /// 50=CRITICAL.  Default `30` (WARNING) matches CPython's
@@ -419,6 +456,9 @@ impl SharedVm {
             hashers: std::sync::Mutex::new(HashMap::new()),
             next_hasher_id: std::sync::atomic::AtomicI64::new(1),
             sqlite_connections: Arc::new(Mutex::new(vec![None])),
+            // M35 P4-B: Cursor slot table — empty map, next handle = 1.
+            sqlite_cursors: std::sync::Mutex::new(HashMap::new()),
+            next_cursor_id: std::sync::atomic::AtomicI64::new(1),
             // M27 P3c-E: default level WARNING (matches CPython's pre-
             // basicConfig default); no file sink.
             log_level: std::sync::atomic::AtomicI32::new(30),
@@ -488,6 +528,9 @@ impl SharedVm {
             hashers: std::sync::Mutex::new(HashMap::new()),
             next_hasher_id: std::sync::atomic::AtomicI64::new(1),
             sqlite_connections: Arc::new(Mutex::new(vec![None])),
+            // M35 P4-B: Cursor slot table — empty map, next handle = 1.
+            sqlite_cursors: std::sync::Mutex::new(HashMap::new()),
+            next_cursor_id: std::sync::atomic::AtomicI64::new(1),
             // M27 P3c-E: see comment on the non-JIT constructor.
             log_level: std::sync::atomic::AtomicI32::new(30),
             log_file: std::sync::Mutex::new(None),
