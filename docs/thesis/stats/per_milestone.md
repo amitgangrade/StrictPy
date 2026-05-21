@@ -72,6 +72,8 @@ See `bench/history/` for the underlying JSON.
 | M29 (webserver framework stress test) | 16 | 0 | 0 | 13.1 ms | (1,446-LOC user-code framework; **zero new bugs** in M28/M28.5 — first stress round in project history with zero finds) | — |
 | M29.5 (framework Tier 1 round-out) | 16 | 0 | 0 | 13.1 ms | (+keep-alive, chunked TE, multipart, graceful shutdown, HTML errors; **found BUG-040** `socket.close_listener` doesn't unblock accept) | — |
 | M30 (last two open bugs closed) | 16 | 0 | 0 | 13.1 ms | (BUG-028 lexer line continuation + BUG-040 socket.close_listener; **35 found / 35 fixed / 0 deferred** — v0.2-frozen-clean state) | — |
+| **v0.2.0 tag** (2026-05-21) | 16 | 0 | 0 | 13.1 ms | First frozen release. 656 tests, 35 bugs all fixed, 36 stdlib modules, web framework working. Cargo workspace 0.1.0 → 0.2.0; spec banner updated; RELEASE_NOTES_v0.2.md shipped. | — |
+| M31 (generic classes — first v0.3 feature) | 16 | 0 | 0 | 13.1 ms | `class Box[T]:` / `Pair[K,V]:` / `Stack[T]:` via extension of M17 worklist. Per-instantiation type_id + method bodies. +8 tests. Unblocks v0.3 stdlib classes. | — |
 
 \* M7-unfair: Python timing included parse+compile time. Methodology bug
 caught and fixed at M10-prep; the M7-fair snapshot is the honest baseline.

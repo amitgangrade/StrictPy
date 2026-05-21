@@ -1117,6 +1117,46 @@ No language/compiler changes; new pure-bench infrastructure only.
 
 ---
 
+## M31 — Generic classes (first v0.3 feature) (2026-05-21)
+
+The first item on the THESIS.md §8.4 v0.3 priority list shipped: generic
+classes (`class Box[T]:`, `class Pair[K, V]:`, `class Stack[T]:`).
+Extends M17's worklist-driven monomorphisation infrastructure from
+free functions to classes.
+
+Surface: field types, method param/return types, and method-body
+locals all parameterised over T. Constructor-site type inference (no
+explicit `Box[i64]()` syntax — that's a v0.4 follow-up). Distinct
+runtime type_id + distinct method bodies per instantiation (mangling:
+`Box__i64`, `Pair__str_i32`). Existing M11 vtable infrastructure
+handles dispatch — zero new VM opcodes.
+
+Implementation: new `ClassLayout.generic_tvars` field; new
+`class_generic_scope` in resolver; `field_offset` accepts both
+`Ty::Class(c)` and `Ty::Generic{TypeCtor::Class(c), ..}`; field
+offsets forced to 8-byte slots when type contains unbound `Ty::Var`;
+new IR Pass 2.7 (seed class instantiations + emit per-instantiation
+`TypeTableEntry`) and Pass 3.6 (drain class-inst worklist, lower
+method bodies), running to joint fixpoint with M17's free-function
+worklist inside an outer loop.
+
+Scope-downs to v0.4 (documented in spec §5.1.5):
+- Bounded class generics (`T: Comparable`)
+- Variance markers, HKT, explicit type-argument syntax
+- Subclassing a parameterised class
+- Fully-internal transitive construction the typechecker never sees
+  (clean VM trap path via `u32::MAX`)
+
+Tests: 656 → 664 (+8). Agent followed Lesson 1 discipline cleanly
+— 4 commits, first inside the 15%-of-budget window. Lesson 1 streak
+now at **11 consecutive clean agents**.
+
+Why this matters for v0.3: unblocks typed stdlib classes (typed
+`JsonValue` tree, `Request`/`Response`, `re.Pattern`, etc.) that
+would shrink the M29 web framework ~30% in LOC.
+
+---
+
 ## M30 — Last two open bugs closed (2026-05-21)
 
 Two focused parallel agents closed the last two open bugs in the
