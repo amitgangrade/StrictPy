@@ -1117,6 +1117,78 @@ No language/compiler changes; new pure-bench infrastructure only.
 
 ---
 
+## M34 — Typed JsonValue tree (first stdlib classes) (2026-05-21)
+
+The first stdlib classes shipped in v0.3. Closes the #1 ergonomics
+gap documented in the M29 framework agent's report: the framework's
+POST body parser hand-walks `json.parse_to_string` output for ~50
+LOC where a typed JsonValue tree drops it to ~10.
+
+### Surface
+
+- `sealed class JsonValue` + 6 final subclasses (JNull, JBool, JInt,
+  JFloat, JString, JList, JObject) registered in the prelude
+- `json.parse(s) -> JsonValue` and `json.stringify(v) -> str`
+- Constructor convenience helpers (`json.j_*`)
+- Methods: `JList.length / get / items`; `JObject.get / has / keys
+  / length`
+- Existing `json.parse_to_string` / `is_valid` / `minify` /
+  `pretty` / `escape` all preserved (backwards-compatible).
+
+### Design choice — scope-down to prelude registration
+
+Per the brief's STOP CRITERIA: agent registered the 7 classes in
+the **prelude** (alongside Channel, Thread, io.File) rather than
+building proper `StdlibItemKind::Class` infrastructure for
+module-level class items. The legacy "prelude wins" branch in the
+import resolver makes `from json import JsonValue` work transparently.
+The infrastructure refactor is a pure implementation cleanup — no
+API change — deferred to v0.4.
+
+This was the right call: it shipped JsonValue in 3 commits (~50%
+budget) while leaving the harder infrastructure question for an
+agent that doesn't also have to design 7 classes simultaneously.
+
+### Three findings worth recording
+
+1. **JList storing `List[JsonValue]` worked first-try under M11 +
+   M31** — no fallback to opaque handles needed. The class system
+   is now stable enough that "recursive type with self in a List"
+   just works.
+2. **GC root scanning was free**: existing `GcKind::Class` traces
+   8-byte slots; `GcKind::List` traces list elements; the recursive
+   JsonValue tree needs no bespoke code paths.
+3. **Helper-vs-constructor needs two NativeFn IDs per shape**: the
+   M11 class constructor convention takes args from object slots;
+   helper functions take args from the NativeCall stack. JNull's
+   zero-arg case caught this; the agent added separate
+   `JsonJNullCtor` (used by `JNull()`) and `JsonJNull` (used by
+   `json.j_null()`) NativeFns.
+
+### Tests + size
+
+- Tests: 677 → 690 (+13: 11 in vm/tests/m34_json_value.rs, 2 in
+  json_typed_demo_runs.rs).
+- Examples: +1 (`examples/json_typed_demo.spy`, ~140 LOC).
+- Stdlib modules: unchanged at 37 (json was already there; just
+  extended).
+- Prelude classes: 7 new (JsonValue + 6 subclasses).
+
+### Lesson 1 streak: 14 consecutive clean agents
+
+(M28 + M28.5 + M29 + M29.5 + M30×2 + M31 + M32 + M33 + M34). First
+commit at ~50% of budget. The strengthened brief language has now
+produced 14 clean commits across 4 calendar days.
+
+### Next: M35 parallel round
+
+The M34 prelude-registration pattern enables a parallel round of
+class-adders to follow without coordinating on infrastructure:
+M35 will ship `re.Pattern` (compiled regex), `sqlite3.Connection`
++ `Cursor`, and streaming `Hasher` in 3 parallel agents.
+
+---
+
 ## M32 + M33 — async I/O + precise GC stack maps (2026-05-21)
 
 The second and third v0.3 features per THESIS.md §8.4 priority list,
