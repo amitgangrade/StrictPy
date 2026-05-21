@@ -389,6 +389,189 @@ fn main() -> i32:
     assert!(out.contains("ncols=2"), "got: {out:?}");
 }
 
+// ── Phase B: merge (hash-join) ───────────────────────────────────────
+
+fn merge_setup(how: &str) -> String {
+    // Two frames sharing `customer_id`.
+    // left:  customer_id=[1,2,3,4]   spend=[10,20,30,40]
+    // right: customer_id=[1,2,3,5]   country=["US","UK","DE","FR"]
+    // inner: 3 rows (cid 1,2,3); left: 4 rows; right: 4 rows; outer: 5 rows.
+    format!(
+        "
+from tabular import ColumnI64, ColumnStr, DataFrame, Column
+import tabular
+fn build_left() -> DataFrame:
+    ids: List[i64] = []
+    ids.append(1i64)
+    ids.append(2i64)
+    ids.append(3i64)
+    ids.append(4i64)
+    spend: List[i64] = []
+    spend.append(10i64)
+    spend.append(20i64)
+    spend.append(30i64)
+    spend.append(40i64)
+    c1: ColumnI64 = tabular.col_i64_simple(ids)
+    c2: ColumnI64 = tabular.col_i64_simple(spend)
+    cn: List[str] = []
+    cn.append(\"cid\")
+    cn.append(\"spend\")
+    cs: List[Column] = []
+    cs.append(c1)
+    cs.append(c2)
+    return tabular.from_columns(cn, cs)
+fn build_right() -> DataFrame:
+    ids: List[i64] = []
+    ids.append(1i64)
+    ids.append(2i64)
+    ids.append(3i64)
+    ids.append(5i64)
+    country: List[str] = []
+    country.append(\"US\")
+    country.append(\"UK\")
+    country.append(\"DE\")
+    country.append(\"FR\")
+    c1: ColumnI64 = tabular.col_i64_simple(ids)
+    c2: ColumnStr = tabular.col_str_simple(country)
+    cn: List[str] = []
+    cn.append(\"cid\")
+    cn.append(\"country\")
+    cs: List[Column] = []
+    cs.append(c1)
+    cs.append(c2)
+    return tabular.from_columns(cn, cs)
+fn main() -> i32:
+    L: DataFrame = build_left()
+    R: DataFrame = build_right()
+    on: List[str] = []
+    on.append(\"cid\")
+    out: DataFrame = L.merge(R, on, \"{how}\")
+    println(\"nrows=\" + str(out.length()))
+    println(\"ncols=\" + str(out.ncols()))
+    i: i64 = 0i64
+    while i < out.length():
+        r: List[str] = out.row(i)
+        println(\"row=\" + r[0i32] + \",\" + r[1i32] + \",\" + r[2i32])
+        i = i + 1i64
+    return 0
+",
+        how = how
+    )
+}
+
+#[test]
+fn merge_inner_basic() {
+    let src = merge_setup("inner");
+    let out = run("merge_inner", &src);
+    assert!(out.contains("nrows=3"), "got: {out:?}");
+    assert!(out.contains("ncols=3"), "got: {out:?}");
+    // No row should have null cells (inner join).
+    assert!(!out.contains("null"), "got: {out:?}");
+}
+
+#[test]
+fn merge_left_emits_unmatched() {
+    let src = merge_setup("left");
+    let out = run("merge_left", &src);
+    assert!(out.contains("nrows=4"), "got: {out:?}");
+    // The unmatched left row (cid=4) should have country=null.
+    assert!(out.contains("row=4,40,null"), "got: {out:?}");
+}
+
+#[test]
+fn merge_right_emits_unmatched() {
+    let src = merge_setup("right");
+    let out = run("merge_right", &src);
+    assert!(out.contains("nrows=4"), "got: {out:?}");
+    // The unmatched right row (cid=5) should have spend=null with cid
+    // carried over from rhs.
+    assert!(out.contains("row=5,null,FR"), "got: {out:?}");
+}
+
+#[test]
+fn merge_outer_emits_both_sides_unmatched() {
+    let src = merge_setup("outer");
+    let out = run("merge_outer", &src);
+    assert!(out.contains("nrows=5"), "got: {out:?}");
+    assert!(out.contains("row=4,40,null"), "got: {out:?}");
+    assert!(out.contains("row=5,null,FR"), "got: {out:?}");
+}
+
+#[test]
+fn merge_invalid_how_raises() {
+    let src = "\
+from tabular import ColumnI64, DataFrame, Column
+import tabular
+fn make1() -> DataFrame:
+    ids: List[i64] = []
+    ids.append(1i64)
+    c1: ColumnI64 = tabular.col_i64_simple(ids)
+    cn: List[str] = []
+    cn.append(\"k\")
+    cs: List[Column] = []
+    cs.append(c1)
+    return tabular.from_columns(cn, cs)
+fn main() -> i32:
+    L: DataFrame = make1()
+    R: DataFrame = make1()
+    on: List[str] = []
+    on.append(\"k\")
+    try:
+        out: DataFrame = L.merge(R, on, \"semi\")
+        println(\"unexpected ok\")
+    except ValueError as e:
+        println(\"raised\")
+    return 0
+";
+    let out = run("merge_invalid_how", src);
+    assert!(out.contains("raised"), "got: {out:?}");
+}
+
+#[test]
+fn merge_null_join_keys_drop_in_inner() {
+    // A row with a null key in lhs must NOT match anything on inner;
+    // in left it emits with rhs side null.
+    let src = "\
+from tabular import ColumnI64, ColumnStr, DataFrame, Column
+import tabular
+fn main() -> i32:
+    lids: List[i64] = []
+    lids.append(1i64)
+    lids.append(0i64)
+    lns: List[bool] = []
+    lns.append(false)
+    lns.append(true)
+    lc: ColumnI64 = tabular.col_i64(lids, lns)
+    lcn: List[str] = []
+    lcn.append(\"k\")
+    lcs: List[Column] = []
+    lcs.append(lc)
+    L: DataFrame = tabular.from_columns(lcn, lcs)
+    rids: List[i64] = []
+    rids.append(1i64)
+    rc: ColumnI64 = tabular.col_i64_simple(rids)
+    rnames: List[str] = []
+    rnames.append(\"hit\")
+    rname_col: ColumnStr = tabular.col_str_simple(rnames)
+    rcn: List[str] = []
+    rcn.append(\"k\")
+    rcn.append(\"label\")
+    rcs: List[Column] = []
+    rcs.append(rc)
+    rcs.append(rname_col)
+    R: DataFrame = tabular.from_columns(rcn, rcs)
+    on: List[str] = []
+    on.append(\"k\")
+    inner: DataFrame = L.merge(R, on, \"inner\")
+    println(\"inner_nrows=\" + str(inner.length()))
+    left: DataFrame = L.merge(R, on, \"left\")
+    println(\"left_nrows=\" + str(left.length()))
+    return 0
+";
+    let out = run("merge_null_keys", src);
+    assert!(out.contains("inner_nrows=1"), "got: {out:?}");
+    assert!(out.contains("left_nrows=2"), "got: {out:?}");
+}
 #[test]
 fn concat_cols_row_mismatch_raises() {
     let src = "\
