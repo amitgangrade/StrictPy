@@ -49,6 +49,11 @@ pub struct TypedModule {
     /// Stored as `Vec` (not `HashSet`) because `Ty` is not Hash/Eq.
     /// De-duplicated by `display_ty(type_args)` while building.
     pub instantiations: Vec<(SymbolId, Vec<Ty>)>,
+    /// M31: every (class_id, type_args) pair discovered at a constructor site
+    /// during typecheck. The IR lowerer materialises one mangled class layout
+    /// + per-instantiation method bodies per entry. Same dedup semantics as
+    /// `instantiations` above.
+    pub class_instantiations: Vec<(ClassId, Vec<Ty>)>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -62,6 +67,9 @@ pub struct TypeChecker {
     /// Set of `(sid, mangled_args_key)` already in `instantiations`, used to
     /// dedupe across call sites (and across transitive monomorphisations).
     instantiation_keys: HashSet<(SymbolId, String)>,
+    /// M31: like `instantiations`, but for generic-class constructor sites.
+    class_instantiations: Vec<(ClassId, Vec<Ty>)>,
+    class_instantiation_keys: HashSet<(ClassId, String)>,
 }
 
 /// One frame of local-binding type info.  Used for flow-sensitive narrowing
@@ -125,6 +133,7 @@ impl TypeChecker {
             resolved,
             expr_types: self.expr_types,
             instantiations: self.instantiations,
+            class_instantiations: self.class_instantiations,
         })
     }
 
@@ -1221,6 +1230,16 @@ impl TypeChecker {
                 // Constructor call.  Look up __init__ in the class layout.
                 let cl = ctx.classes.get(&cid).cloned();
                 if let Some(cl) = cl {
+                    // M31: generic class — infer type args from constructor
+                    // arguments. Delegates to the same call-site unification
+                    // M17 uses for free functions, but binds the class's TVs
+                    // and records a class-instantiation entry instead of a
+                    // function one.
+                    if !cl.generic_tvars.is_empty() {
+                        return self.check_generic_class_construct(
+                            cid, &cl, args, span, env, ctx, r,
+                        );
+                    }
                     if let Some(init) = cl.methods.iter().find(|m| m.name == "__init__") {
                         if args.len() != init.params.len() {
                             return Err(type_err(span, codes::TYPE_ARITY,
@@ -1358,6 +1377,115 @@ impl TypeChecker {
         Ok(ret)
     }
 
+    /// M31: constructor-site inference for `class Box[T1, T2, ...]`.
+    /// Mirrors `check_generic_call` but operates on the class's `__init__`
+    /// method signature (whose param types carry `Ty::Var(...)` from the
+    /// class's generic scope) and records a `class_instantiations` entry
+    /// instead of a `instantiations` one. The return type is the parameterised
+    /// `Ty::Generic { base: TypeCtor::Class(cid), args: <inferred> }` so that
+    /// downstream field accesses and method calls can substitute correctly.
+    ///
+    /// A class with type parameters but no explicit `__init__` is supported
+    /// only when no constructor args are passed — there's no inference
+    /// driver, so every `T` must be solved via `Box[i64]()` syntax. v0.3 does
+    /// not yet implement the explicit-type-argument syntax; flag as
+    /// E2_GENERIC_CLASS_NEEDS_INIT to give a clear error.
+    fn check_generic_class_construct(
+        &mut self,
+        cid: ClassId,
+        cl: &ClassLayout,
+        args: &[Arg],
+        span: Span,
+        env: &Env,
+        ctx: &Ctx,
+        r: &ResolvedModule,
+    ) -> Result<Ty, CompileError> {
+        let init = cl.methods.iter().find(|m| m.name == "__init__");
+        let Some(init) = init else {
+            if !args.is_empty() {
+                return Err(type_err(
+                    span,
+                    codes::TYPE_ARITY,
+                    format!(
+                        "generic class `{}` has no __init__; cannot infer type parameters from {} arg(s)",
+                        cl.name, args.len()
+                    ),
+                ));
+            }
+            // No __init__, no args. Every TV remains unbound — currently an
+            // error (the user can't pin T any other way in v0.3). Surface a
+            // helpful diagnostic.
+            return Err(type_err(
+                span,
+                codes::TYPE_MISMATCH,
+                format!(
+                    "cannot infer type parameter(s) for `{}`; add a constructor or supply an annotation site that pins T",
+                    cl.name
+                ),
+            ));
+        };
+        if args.len() != init.params.len() {
+            return Err(type_err(
+                span,
+                codes::TYPE_ARITY,
+                format!(
+                    "constructor of `{}` expects {} args, got {}",
+                    cl.name,
+                    init.params.len(),
+                    args.len()
+                ),
+            ));
+        }
+        let mut subst: HashMap<u32, Ty> = HashMap::new();
+        for (i, ptype) in init.params.iter().enumerate() {
+            let expected = subst_ty(ptype, &subst);
+            let got = if contains_unbound_var(&expected) {
+                self.synth_expr(&args[i].value, env, ctx, r)?
+            } else {
+                self.check_expr(&args[i].value, &expected, env, ctx, r)?
+            };
+            unify_one(&expected, &got, &mut subst).map_err(|m| {
+                type_err(
+                    span,
+                    codes::TYPE_MISMATCH,
+                    format!(
+                        "constructor of `{}`: argument {} type {} doesn't match parameter type {} ({})",
+                        cl.name,
+                        i + 1,
+                        got.display(),
+                        expected.display(),
+                        m
+                    ),
+                )
+            })?;
+        }
+        let mut type_args: Vec<Ty> = Vec::with_capacity(cl.generic_tvars.len());
+        for tv in &cl.generic_tvars {
+            match subst.get(&tv.0).cloned() {
+                Some(t) => type_args.push(t),
+                None => {
+                    return Err(type_err(
+                        span,
+                        codes::TYPE_MISMATCH,
+                        format!(
+                            "cannot infer type parameter for generic class `{}`; supply constructor arguments that pin every type variable",
+                            cl.name
+                        ),
+                    ));
+                }
+            }
+        }
+        let key = mangle_args_key(&type_args);
+        if self.class_instantiation_keys.insert((cid, key)) {
+            self.class_instantiations.push((cid, type_args.clone()));
+        }
+        let _ = ctx;
+        Ok(Ty::Generic {
+            base: TypeCtor::Class(cid),
+            args: type_args,
+        })
+    }
+
     fn synth_method_call(&mut self, recv: &Ty, method: &str, args: &[Arg], span: Span,
                           env: &Env, ctx: &Ctx, r: &ResolvedModule) -> Result<Ty, CompileError>
     {
@@ -1479,6 +1607,22 @@ impl TypeChecker {
             Ty::Generic { base: TypeCtor::Class(c), .. } => Some(*c),
             _ => None,
         };
+        // M31: if the receiver is a parameterised class, build the
+        // tv → concrete substitution so the method's parameter & return
+        // types specialise correctly (e.g. `Box[i64].unwrap()` returns i64,
+        // not the raw Ty::Var(0)).
+        let recv_subst: HashMap<u32, Ty> = match recv {
+            Ty::Generic { base: TypeCtor::Class(c), args } => {
+                if let Some(cl) = ctx.classes.get(c) {
+                    let mut s = HashMap::new();
+                    for (tv, arg) in cl.generic_tvars.iter().zip(args.iter()) {
+                        s.insert(tv.0, arg.clone());
+                    }
+                    s
+                } else { HashMap::new() }
+            }
+            _ => HashMap::new(),
+        };
         if let Some(cid) = cid {
             // Walk class chain.
             let mut cur = Some(cid);
@@ -1490,9 +1634,10 @@ impl TypeChecker {
                                 format!("method `{}` expects {} args, got {}", method, m.params.len(), args.len())));
                         }
                         for (a, pt) in args.iter().zip(m.params.iter()) {
-                            let _ = self.check_expr(&a.value, pt, env, ctx, r)?;
+                            let expected = subst_ty(pt, &recv_subst);
+                            let _ = self.check_expr(&a.value, &expected, env, ctx, r)?;
                         }
-                        return Ok(m.ret.clone());
+                        return Ok(subst_ty(&m.ret, &recv_subst));
                     }
                     cur = cl.base;
                 } else { break; }
@@ -1536,12 +1681,26 @@ impl TypeChecker {
             Ty::Generic { base: TypeCtor::Class(c), .. } => Some(*c),
             _ => None,
         };
+        // M31: build the receiver's tv → concrete subst (empty for
+        // non-parameterised classes / non-generic field types).
+        let recv_subst: HashMap<u32, Ty> = match obj_ty {
+            Ty::Generic { base: TypeCtor::Class(c), args } => {
+                if let Some(cl) = ctx.classes.get(c) {
+                    let mut s = HashMap::new();
+                    for (tv, arg) in cl.generic_tvars.iter().zip(args.iter()) {
+                        s.insert(tv.0, arg.clone());
+                    }
+                    s
+                } else { HashMap::new() }
+            }
+            _ => HashMap::new(),
+        };
         if let Some(cid) = cid {
             let mut cur = Some(cid);
             while let Some(c) = cur {
                 if let Some(cl) = ctx.classes.get(&c) {
                     if let Some(f) = cl.fields.iter().find(|f| f.name == name) {
-                        return Ok(f.ty.clone());
+                        return Ok(subst_ty(&f.ty, &recv_subst));
                     }
                     cur = cl.base;
                 } else { break; }

@@ -247,6 +247,12 @@ pub struct Resolver {
     class_stack: Vec<ClassId>,
     /// Map class name → id, for resolving types before bodies are walked.
     class_name_to_id: HashMap<String, ClassId>,
+    /// M31: per-generic-class, the scope in which the class type-parameters
+    /// (`T`, `K`, `V`, ...) are bound as TypeAlias symbols carrying
+    /// `Ty::Var(...)`. Field lowering, method-sig lowering, and method-body
+    /// resolution all use this scope so every occurrence of `T` inside the
+    /// class lowers to the same `Ty::Var`.
+    class_generic_scope: HashMap<ClassId, ScopeId>,
     /// Map proto name → id.
     proto_name_to_id: HashMap<String, ProtoId>,
     /// Type-alias name → semantic Ty.
@@ -3793,6 +3799,7 @@ impl Resolver {
                 ],
                 methods: vec![],
                 generics: vec![],
+                generic_tvars: vec![],
                 // stdlib: exception classes carry no methods of their own and
                 // are raised/caught by name; not handle-backed, so not native.
                 is_native: false,
@@ -3834,6 +3841,7 @@ impl Resolver {
                 MethodSig { name: "close".into(), params: vec![], ret: Ty::Primitive(PrimTy::Unit) },
             ],
             generics: vec![],
+            generic_tvars: vec![],
             // stdlib: io.File is handle-backed (FileRepr in vm/src/object.rs);
             // dispatch read/write/close via NativeFn, not a vtable.
             is_native: true,
@@ -3880,6 +3888,7 @@ impl Resolver {
                 },
             ],
             generics: vec![],
+            generic_tvars: vec![],
             // stdlib: Thread is handle-backed (ThreadRepr in vm/src/object.rs);
             // start/join dispatch via NativeFn, not a vtable.
             is_native: true,
@@ -4099,6 +4108,24 @@ impl Resolver {
         self.class_of_symbol.insert(sid, cid);
         self.symbol_of_class.insert(cid, sid);
         self.class_name_to_id.insert(c.name.clone(), cid);
+        // M31: if the class declares `[T1, T2, ...]`, allocate one TypeVarId
+        // per parameter and seed each name as a TypeAlias symbol carrying
+        // `Ty::Var(tv_i)` inside a fresh scope nested under `scope`. Field
+        // types, method signatures, and method bodies all lower against
+        // this scope so every occurrence of `T` becomes the *same* Ty::Var
+        // — the type-checker's per-instantiation substitution then replaces
+        // them uniformly.
+        let mut generic_tvars: Vec<TypeVarId> = Vec::new();
+        if !c.generics.is_empty() {
+            let gscope = self.table.new_scope(Some(scope), false);
+            for g in &c.generics {
+                let tv = self.fresh_tvar();
+                generic_tvars.push(tv);
+                self.make_symbol(gscope, &g.name, SymbolKind::TypeAlias, g.span,
+                                  Some(Ty::Var(tv)));
+            }
+            self.class_generic_scope.insert(cid, gscope);
+        }
         // Empty layout — fields/methods filled in later.
         self.class_layouts.insert(cid, ClassLayout {
             id: cid, name: c.name.clone(), base: None,
@@ -4107,6 +4134,7 @@ impl Resolver {
             fields: vec![],
             methods: vec![],
             generics: c.generics.iter().map(|g| g.name.clone()).collect(),
+            generic_tvars,
             // User-defined classes always go through the vtable for method
             // dispatch — only built-in stdlib classes are native.
             is_native: false,
@@ -4159,10 +4187,18 @@ impl Resolver {
 
     fn layout_class(&mut self, scope: ScopeId, c: &ClassDecl) -> Result<(), CompileError> {
         let cid = *self.class_name_to_id.get(&c.name).unwrap();
+        // M31: for generic classes, lower field/method types against a scope
+        // where each type-parameter resolves to its `Ty::Var`.
+        let cscope = self.class_generic_scope.get(&cid).copied().unwrap_or(scope);
+
+        // Push the class onto class_stack so `Self` resolves; also so the
+        // lowered field/method types correctly bind `T` (the class scope
+        // chains up to the module scope).
+        self.class_stack.push(cid);
 
         // Resolve base.
         let base_cid = if let Some(base_ty) = c.bases.first() {
-            if let Ok(t) = self.lower_ast_type(base_ty, scope) {
+            if let Ok(t) = self.lower_ast_type(base_ty, cscope) {
                 match t {
                     Ty::Class(b) => Some(b),
                     Ty::Protocol(_) => None,
@@ -4201,11 +4237,23 @@ impl Resolver {
         } else {
             (Vec::<FieldInfo>::new(), 0u32)
         };
-        // Fields with offsets (natural alignment per spec §8.3).
+        // M31: generic-class field types may reference `T`. Lower against the
+        // class's generic scope (if any) so each `T` becomes its `Ty::Var`;
+        // the IR worklist substitutes them per instantiation.
+        //
+        // Field SIZE/ALIGN for an as-yet-abstract `T` is conservatively
+        // 8 bytes (pointer / 64-bit slot). Every concrete instantiation
+        // uses the *same* slot footprint — strings, classes, i64 all fit
+        // in 8 bytes; smaller primitives (i32, bool) also occupy a full
+        // 8-byte slot in the heap payload because there's only one
+        // generic layout. This keeps field offsets stable across
+        // instantiations, which is essential because the IR emits one
+        // offset per source-level field access and that offset must work
+        // for every Box__i64 / Box__str / etc.
         for f in &c.fields {
-            let ty = self.lower_ast_type(&f.ty, scope)?;
-            let size = size_of_ty(&ty);
-            let align = align_of_ty(&ty);
+            let ty = self.lower_ast_type(&f.ty, cscope)?;
+            let size = if contains_unbound_var(&ty) { 8 } else { size_of_ty(&ty) };
+            let align = if contains_unbound_var(&ty) { 8 } else { align_of_ty(&ty) };
             offset = align_up(offset, align);
             fields.push(FieldInfo { name: f.name.clone(), ty, offset });
             offset += size;
@@ -4247,7 +4295,7 @@ impl Resolver {
             Vec::new()
         };
         let init_sig: Option<MethodSig> = if let Some(init) = &c.init {
-            let sig = self.build_method_sig(scope, init, cid)?;
+            let sig = self.build_method_sig(cscope, init, cid)?;
             Some(sig)
         } else {
             None
@@ -4259,7 +4307,7 @@ impl Resolver {
             methods.insert(0, sig);
         }
         for m in &c.methods {
-            let sig = self.build_method_sig(scope, m, cid)?;
+            let sig = self.build_method_sig(cscope, m, cid)?;
             // Override semantics: if a parent already has this method,
             // replace its entry in-place so the vtable slot stays put.
             if let Some(slot) = methods.iter().position(|p| p.name == sig.name) {
@@ -4272,6 +4320,7 @@ impl Resolver {
         layout.fields = fields;
         layout.methods = methods;
         layout.payload_size = payload_size;
+        self.class_stack.pop();
         Ok(())
     }
 
@@ -4374,12 +4423,15 @@ impl Resolver {
         -> Result<(), CompileError>
     {
         let cid = *self.class_name_to_id.get(&c.name).unwrap();
+        // M31: walk method bodies with the class generic scope as parent so
+        // `T` resolves to its `Ty::Var` everywhere inside the class.
+        let body_scope = self.class_generic_scope.get(&cid).copied().unwrap_or(scope);
         self.class_stack.push(cid);
         if let Some(init) = &c.init {
-            self.resolve_func_decl(init, scope, Some(cid))?;
+            self.resolve_func_decl(init, body_scope, Some(cid))?;
         }
         for m in &c.methods {
-            self.resolve_func_decl(m, scope, Some(cid))?;
+            self.resolve_func_decl(m, body_scope, Some(cid))?;
         }
         self.class_stack.pop();
         Ok(())
@@ -4934,6 +4986,22 @@ fn align_of_ty(t: &Ty) -> u32 {
 
 fn align_up(off: u32, align: u32) -> u32 {
     (off + align - 1) & !(align - 1)
+}
+
+/// M31: does `t` reference any `Ty::Var`? Used by `layout_class` to fall
+/// back to a 8-byte slot for fields whose declared type is an abstract
+/// class type-parameter — concrete instantiations all fit in one slot,
+/// keeping field offsets stable across instantiations.
+fn contains_unbound_var(t: &Ty) -> bool {
+    match t {
+        Ty::Var(_) => true,
+        Ty::Generic { args, .. } | Ty::Tuple(args) => args.iter().any(contains_unbound_var),
+        Ty::Function { params, ret } => {
+            params.iter().any(contains_unbound_var) || contains_unbound_var(ret)
+        }
+        Ty::Nullable(inner) => contains_unbound_var(inner),
+        _ => false,
+    }
 }
 
 // Silence the unused warning on HashSet (used by integration test crate elsewhere).

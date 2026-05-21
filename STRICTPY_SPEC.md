@@ -515,15 +515,126 @@ Implemented:
    inside `quicksort[T]` lowers to a direct call to the matching
    per-instantiation function, not back to the template.
 
-##### v0.1 limits (deferred to v0.2)
+##### v0.3 (M31) generic classes
 
-- **No generic classes.** Parser accepts `class Box[T]:` but the type
-  checker rejects field-typed references to `T`. (v0.2 will extend
-  monomorphisation through class layouts.)
+Implemented:
+
+1. **Declaration.** A class may carry one or more type parameters
+   between square brackets after the name. Type parameters are visible
+   inside field annotations, method-parameter / return annotations, and
+   inside method bodies (so a method can declare locals of type `T`,
+   construct `List[T]`, etc.).
+
+   ```python
+   final class Box[T]:
+       value: T
+
+       fn __init__(self, value: T) -> None:
+           self.value = value
+
+       fn unwrap(self) -> T:
+           return self.value
+
+   final class Pair[K, V]:
+       first: K
+       second: V
+
+       fn __init__(self, first: K, second: V) -> None:
+           self.first = first
+           self.second = second
+   ```
+
+2. **Constructor-site inference.** As with generic free functions, type
+   arguments are not written at the call; the type checker unifies the
+   class's `__init__` parameter types (which carry `Ty::Var(...)` for
+   each declared type parameter) against the constructor arguments. The
+   substitution must collapse to a unique solution; otherwise the call
+   site reports `E2001`.
+
+   ```python
+   bi: Box[i64] = Box(big)          # T := i64 (from argument type)
+   bs: Box[str] = Box("hi")         # T := str
+   p: Pair[str, i32] = Pair(s, n)   # K := str, V := i32
+   ```
+
+   A generic class with no `__init__` and a non-empty type-parameter
+   list cannot be constructed by argument inference alone — every type
+   variable would remain unbound. (Explicit type-argument syntax such
+   as `Box[i64]()` is deferred to v0.4.)
+
+3. **Field layout invariance.** Every field declared with an abstract
+   type parameter occupies one 8-byte slot in the heap payload,
+   regardless of the concrete substituted type. Concrete primitives
+   that would naturally fit in a smaller slot (`i32`, `bool`, ...) are
+   still allocated a full 8 bytes when stored at a generic-class field
+   site. This keeps field *offsets* identical across instantiations —
+   essential for the IR, which emits a single `Load`/`Store` operand
+   per source-level field access and that offset must work for every
+   monomorphisation.
+
+4. **Monomorphisation.** Each distinct `(class_id, type_args)` pair
+   produces:
+
+   - one `TypeTableEntry` with substituted field types (and therefore
+     substituted per-field type ids) and its own vtable;
+   - one mangled `__init__` IRFunction (if the source declares one);
+   - one mangled IRFunction per declared method.
+
+   Mangled names follow `<class_name>__<arg1>_<arg2>...` (e.g.
+   `Box__i64`, `Pair__str_i32`, `Stack__class3`). Method IRFunctions
+   are named `<mangled_class>.<method>` (e.g. `Box__i64.unwrap`).
+   Different instantiations have distinct runtime `type_id`s, so
+   `isinstance(x, Box)` semantics for one instantiation do not
+   accidentally match another — though the explicit `isinstance` form
+   itself does not yet support parameterised target types (v0.4).
+
+5. **Method dispatch on parameterised receivers.** A `MethodCall` whose
+   receiver is statically typed `Ty::Generic { base: TypeCtor::Class(c),
+   args: [T1, ...] }` dispatches to the per-instantiation method
+   `FuncId` via a `DirectCall` — never through the abstract template's
+   vtable slot. The receiver's substituted type args are mangled to the
+   same key the type-table emission used, so dispatch is O(1) and the
+   VM's vtable infrastructure (`VirtualCall`) is not needed.
+
+6. **Field reads / writes on parameterised receivers.** Both
+   `field_offset` (the IR helper) and the typechecker's `attr_type`
+   substitute the receiver's type args through the field's declared
+   type before returning. So `Box[i64].value` types as `i64`, not as
+   `Ty::Var(0)`; assignments require the concrete substituted type.
+
+##### v0.3 limits (deferred to v0.4)
+
+- **No bounded class generics.** `class Box[T: Comparable]:` parses
+  but the bound is ignored (same status as free-function bounds —
+  see §5.1.5 v0.2 limits below).
+- **No variance.** All generic class parameters are invariant. There
+  is no syntax for marking a parameter covariant / contravariant.
+- **No higher-kinded type parameters.** `class Container[F[_]]:` is
+  rejected at parse time.
+- **No explicit type-argument syntax at constructor sites.**
+  `Box[i64]()` is parsed as an indexing expression on `Box`, not as
+  an explicit type-application. Every type variable must be pinned by
+  a constructor argument's static type (or, for `Stack[T]` where the
+  field is `List[T]`, by a sentinel argument whose type drives `T`).
+- **Subclassing a parameterised class** is not supported. Generic
+  classes participate in the inheritance hierarchy only as leaves;
+  their `base_type` is always `NO_BASE_TYPE`.
+- **Transitive construction in a generic body** is best-effort. The
+  typechecker records every concrete `(class, type_args)` pair it
+  observes at user-visible call sites, and the IR pre-registers each.
+  A `class Outer[T]:` whose method body constructs `Box[T]` will work
+  when the outer is instantiated from a non-generic context (the
+  inner instantiation gets discovered at the outer's typecheck);
+  fully-internal cycles where a generic body manufactures a class
+  instantiation that the typechecker never sees are documented to
+  fall back to a `u32::MAX` placeholder tid (the VM traps cleanly).
+
+##### v0.2 free-function generic limits (deferred to v0.4)
+
 - **No bounds.** `T: Comparable` parses but the checker ignores the
   bound. A body that uses `<` on `T` typechecks, and instantiations
   where `<` is unsupported (e.g. user-defined class without comparison)
-  trap at runtime rather than reject at compile time. (v0.2 will add
+  trap at runtime rather than reject at compile time. (v0.4 will add
   protocol-typed bounds and per-instantiation re-typecheck.)
 - **No auto-inference from return-type context.** `let x: i64 = id(0)`
   does *not* propagate the i64 expectation into the call; the

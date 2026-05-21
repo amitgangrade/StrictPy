@@ -1,0 +1,90 @@
+"""Generic classes — Box[T], Pair[K, V], and Stack[T].
+
+M31 closes the second half of the user-code generics gap: M17 shipped
+generic free functions, and M31 brings the same lazy-worklist
+monomorphisation to user-defined classes.
+
+The compiler emits one runtime type (and one set of method bodies) per
+*distinct* instantiation: `Box[i64]`, `Box[str]`, and `Pair[str, i32]`
+each get their own type_id, vtable, and IR functions
+(`Box__i64.unwrap`, `Box__str.unwrap`, `Pair__str_i32.first`, ...).
+Field access goes through the substituted type — `Box[i64].value` is
+i64-typed, `Box[str].value` is str-typed, and the typechecker enforces
+the right argument types at every call site.
+
+Three patterns are exercised:
+
+  - Single type parameter with a method: `Box[T]` and `b.unwrap() -> T`.
+  - Two type parameters with no methods: `Pair[K, V]` as a typed
+    record. (The fields are public; access is `p.first` / `p.second`.)
+  - Single type parameter with mutation and a List[T] field: `Stack[T]`
+    holding a List[T] of values, push/pop returning T.
+"""
+
+final class Box[T]:
+    value: T
+
+    fn __init__(self, value: T) -> None:
+        self.value = value
+
+    fn unwrap(self) -> T:
+        return self.value
+
+
+final class Pair[K, V]:
+    first: K
+    second: V
+
+    fn __init__(self, first: K, second: V) -> None:
+        self.first = first
+        self.second = second
+
+
+final class Stack[T]:
+    items: List[T]
+
+    fn __init__(self, seed: T) -> None:
+        # We need a concrete element type for the List allocation.
+        # The seed is consumed to pin T; the resulting stack starts
+        # with one element.
+        self.items = [seed]
+
+    fn push(self, x: T) -> None:
+        self.items.append(x)
+
+    fn pop(self) -> T:
+        return self.items.pop()
+
+    fn size(self) -> i64:
+        return i64(len(self.items))
+
+
+fn main() -> i32:
+    # ── Box[i64] vs Box[str] — distinct instantiations, distinct
+    # method bodies, distinct field types.
+    big: i64 = 900000000000
+    bi: Box[i64] = Box(big)
+    println(str(bi.unwrap()))
+
+    bs: Box[str] = Box("hello")
+    println(bs.unwrap())
+
+    # ── Pair[str, i32] — two type parameters, no methods, just typed
+    # field access.
+    p: Pair[str, i32] = Pair("answer", 42)
+    println(p.first)
+    println(str(p.second))
+
+    # ── Stack[i64] — generic container with mutation.
+    seed: i64 = 10
+    st: Stack[i64] = Stack(seed)
+    twenty: i64 = 20
+    thirty: i64 = 30
+    st.push(twenty)
+    st.push(thirty)
+    println(str(st.size()))
+    println(str(st.pop()))
+    println(str(st.pop()))
+    println(str(st.size()))
+
+    return 0

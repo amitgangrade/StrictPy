@@ -195,6 +195,11 @@ pub struct ClassLayout {
     pub methods: Vec<MethodSig>,
     /// Generic type-parameter names declared on the class (e.g. `T` in `List[T]`).
     pub generics: Vec<String>,
+    /// M31: one [`TypeVarId`] per entry of `generics`, in declaration order.
+    /// Empty for non-generic and built-in classes. Resolver-allocated so the
+    /// type-checker can build substitutions at constructor sites by index,
+    /// exactly as M17 does for free functions.
+    pub generic_tvars: Vec<TypeVarId>,
     /// True for built-in stdlib classes (Channel, Thread, io.File, Dict, str)
     /// whose methods are dispatched via NativeFn rather than a vtable.
     /// User-defined classes are always false. See ir.rs::lower_method_call.

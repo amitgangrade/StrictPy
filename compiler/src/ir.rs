@@ -293,6 +293,10 @@ struct Lowerer {
     /// Indexed by source name. Used to look up the FuncDecl when lowering
     /// per-instantiation copies.
     generic_fn_decls: HashMap<String, FuncDecl>,
+    /// M31: every generic class declaration (`class Box[T]:`). Indexed by
+    /// `ClassId` so per-instantiation lowering can recover the source
+    /// FuncDecls for `__init__` + methods.
+    generic_class_decls: HashMap<ClassId, ast::ClassDecl>,
     /// M17: source name → SymbolId, so the typechecker-recorded instantiation
     /// list can be located.
     generic_fn_sid: HashMap<String, SymbolId>,
@@ -312,6 +316,23 @@ struct Lowerer {
     /// `typed.instantiations` at startup, extended on-the-fly when a
     /// generic body calls another generic (transitive monomorphisation).
     inst_worklist: Vec<(SymbolId, Vec<Ty>)>,
+    /// M31: per-instantiation type_id for generic classes. Key is
+    /// `(class_id, mangle_args_key(type_args))`.
+    class_inst_type_id: HashMap<(ClassId, String), u32>,
+    /// M31: per-instantiation `__init__` FuncId. Same key.
+    class_inst_init_fn: HashMap<(ClassId, String), FuncId>,
+    /// M31: per-instantiation method FuncId, keyed by
+    /// `(class_id, mangle_args_key, method_name)`.
+    class_inst_method_fn: HashMap<(ClassId, String, String), FuncId>,
+    /// M31: mangled class name per instantiation (e.g. `Box__i64`) — used
+    /// when emitting TypeTableEntry name index and IRFunction names.
+    class_inst_name: HashMap<(ClassId, String), String>,
+    /// M31: class-instantiation worklist. Each entry is a
+    /// `(class_id, type_args)` pair whose `__init__` + methods still need
+    /// lowering. Populated from `typed.class_instantiations` at startup,
+    /// extended on-the-fly when a generic body constructs another generic
+    /// class (transitive monomorphisation).
+    class_inst_worklist: Vec<(ClassId, Vec<Ty>)>,
 }
 
 impl Lowerer {
@@ -327,12 +348,18 @@ impl Lowerer {
             next_fn_id: 0,
             next_type_id: 16,
             generic_fn_decls: HashMap::new(),
+            generic_class_decls: HashMap::new(),
             generic_fn_sid: HashMap::new(),
             fn_id_for_inst: HashMap::new(),
             type_args_for_inst: HashMap::new(),
             mangled_name_for_inst: HashMap::new(),
             tvars_for_sid: HashMap::new(),
             inst_worklist: Vec::new(),
+            class_inst_type_id: HashMap::new(),
+            class_inst_init_fn: HashMap::new(),
+            class_inst_method_fn: HashMap::new(),
+            class_inst_name: HashMap::new(),
+            class_inst_worklist: Vec::new(),
         }
     }
 
@@ -395,6 +422,20 @@ impl Lowerer {
                 }
                 TopDecl::Class(c) => {
                     // Pre-assign type id for the class so cross-references work.
+                    // M31: generic classes get one type_id *per instantiation*
+                    // rather than a single shared id — registered later in
+                    // Pass 2.7. The class_type_id slot here is unused for
+                    // generic classes (lookups go through class_inst_type_id).
+                    if !c.generics.is_empty() {
+                        if let Some(cid_sid) = self.lookup_module_symbol(&c.name) {
+                            if let Some(cid) = self.typed.resolved.symbols.get(cid_sid).class_id {
+                                self.generic_class_decls.insert(cid, c.clone());
+                            }
+                        }
+                        // Don't pre-allocate any FuncIds — they're minted
+                        // per-instantiation as the class_inst worklist drains.
+                        continue;
+                    }
                     if let Some(cid_sid) = self.lookup_module_symbol(&c.name) {
                         if let Some(cid) = self.typed.resolved.symbols.get(cid_sid).class_id {
                             let tid = self.fresh_type_id();
@@ -441,6 +482,10 @@ impl Lowerer {
                 Some(l) => l,
                 None => continue,
             };
+            // M31: skip generic classes. Their type-table entries are
+            // emitted per-instantiation in Pass 2.7 below — the abstract
+            // layout (with `Ty::Var` field types) has no runtime form.
+            if !layout.generic_tvars.is_empty() { continue; }
             let tid = *self.class_type_id.entry(cid_raw).or_insert_with(|| {
                 let id = self.next_type_id;
                 self.next_type_id += 1;
@@ -534,6 +579,20 @@ impl Lowerer {
             self.register_instantiation(sid, type_args);
         }
 
+        // Pass 2.7 (M31): same dance for generic *classes*. For each
+        // typechecker-recorded `(class_id, type_args)`, pre-allocate a
+        // per-instantiation type_id, a per-instantiation `__init__` FuncId
+        // (if the source declares one), and a FuncId per declared method.
+        // The corresponding TypeTableEntry is emitted immediately so
+        // Alloc operands can reference the concrete tid. Method bodies are
+        // lowered later in Pass 3.6 by draining `class_inst_worklist`.
+        let class_initial: Vec<(ClassId, Vec<Ty>)> =
+            self.typed.class_instantiations.clone();
+        for (cid, type_args) in class_initial {
+            if type_args.iter().any(has_unbound_var) { continue; }
+            self.register_class_instantiation(cid, type_args);
+        }
+
         // Pass 3: lower function bodies.
         for d in &decls {
             match d {
@@ -547,6 +606,9 @@ impl Lowerer {
                     self.out.functions.push(irfn);
                 }
                 TopDecl::Class(c) => {
+                    // M31: skip generic-class templates — their methods
+                    // produce one IRFunction per instantiation in Pass 3.6.
+                    if !c.generics.is_empty() { continue; }
                     let recv_cid = self
                         .lookup_module_symbol(&c.name)
                         .and_then(|sid| self.typed.resolved.symbols.get(sid).class_id);
@@ -571,34 +633,298 @@ impl Lowerer {
             }
         }
 
-        // Pass 3.5 (M17): drive the monomorphisation worklist. Each entry is
-        // a `(sid, type_args)` discovered either by the typechecker or as a
-        // transitive instantiation introduced while lowering a previous
-        // entry's body. We pop until the worklist drains; new entries can
-        // appear during `lower_func_instantiation` via `lower_call`.
-        while let Some((sid, type_args)) = self.inst_worklist.pop() {
-            let key = mangle_args_key(&type_args);
-            let fid = match self.fn_id_for_inst.get(&(sid, key.clone())).copied() {
+        // Pass 3.5 (M17) + 3.6 (M31): drive the monomorphisation worklists
+        // to fixpoint. The two are interleaved because:
+        //
+        //   * lowering a generic-fn body can discover a *class*
+        //     instantiation (e.g. `fn unbox[T](b: Box[T]) -> T:`
+        //     transitively constructs `Box[i64]` when called with
+        //     `Box[i64]` arg);
+        //   * lowering a generic-class method body can discover a *fn*
+        //     instantiation (e.g. `Stack[T].push` calling `swap[T]`).
+        //
+        // We loop until both worklists are drained simultaneously.
+        loop {
+            let fn_pending = !self.inst_worklist.is_empty();
+            let cls_pending = !self.class_inst_worklist.is_empty();
+            if !fn_pending && !cls_pending { break; }
+
+            while let Some((sid, type_args)) = self.inst_worklist.pop() {
+                let key = mangle_args_key(&type_args);
+                let fid = match self.fn_id_for_inst.get(&(sid, key.clone())).copied() {
+                    Some(f) => f,
+                    None => continue,
+                };
+                let mangled = self.mangled_name_for_inst
+                    .get(&(sid, key.clone())).cloned().unwrap_or_default();
+                let src_name = self.typed.resolved.symbols.get(sid).name.clone();
+                let decl = match self.generic_fn_decls.get(&src_name).cloned() {
+                    Some(d) => d,
+                    None => continue,
+                };
+                let tvars = self.tvars_for_sid.get(&sid).cloned().unwrap_or_default();
+                let mut subst: HashMap<u32, Ty> = HashMap::new();
+                for (tv, ty_arg) in tvars.iter().zip(&type_args) {
+                    subst.insert(tv.0, ty_arg.clone());
+                }
+                let irfn = self.lower_func_instantiation(fid, &decl, &mangled, &subst);
+                self.register_fn_table(&irfn);
+                self.out.functions.push(irfn);
+            }
+
+            while let Some((cid, type_args)) = self.class_inst_worklist.pop() {
+                self.lower_class_instantiation(cid, &type_args);
+            }
+        }
+    }
+
+    /// M31: register a fresh type_id, per-instantiation `__init__` FuncId,
+    /// and one FuncId per declared method for a generic-class instantiation
+    /// `(class_id, type_args)`. Emits the TypeTableEntry immediately so
+    /// Alloc operands at call sites can reference the concrete tid.
+    /// Idempotent — repeated calls with the same key are no-ops. Pushes
+    /// the entry onto `class_inst_worklist` so the bodies get lowered in
+    /// Pass 3.6.
+    fn register_class_instantiation(&mut self, cid: ClassId, type_args: Vec<Ty>) {
+        let key = mangle_args_key(&type_args);
+        if self.class_inst_type_id.contains_key(&(cid, key.clone())) {
+            return;
+        }
+        let layout = match self.typed.resolved.class_layouts.get(&cid).cloned() {
+            Some(l) => l,
+            None => return,
+        };
+        // Build the substitution {tv_i -> type_args[i]}.
+        let mut subst: HashMap<u32, Ty> = HashMap::new();
+        for (tv, ty_arg) in layout.generic_tvars.iter().zip(&type_args) {
+            subst.insert(tv.0, ty_arg.clone());
+        }
+        // Mangled class name (e.g. `Box__i64`, `Pair__str_i32`). Stored
+        // both for the type-table's name entry and for naming the
+        // per-instantiation IRFunctions.
+        let mangled = format!("{}__{}", layout.name, key);
+        let tid = self.fresh_type_id();
+        self.class_inst_type_id.insert((cid, key.clone()), tid);
+        self.class_inst_name.insert((cid, key.clone()), mangled.clone());
+
+        // Pre-allocate FuncIds for __init__ + each method. We also look up
+        // the source FuncDecl from `generic_class_decls`. If a method body
+        // happens to call into another generic class, the eager FuncId
+        // allocation here means the body lowering can resolve the call
+        // directly.
+        let class_decl = self.generic_class_decls.get(&cid).cloned();
+        let has_init = class_decl.as_ref().map(|c| c.init.is_some()).unwrap_or(false);
+        if has_init {
+            let fid = self.fresh_fn_id();
+            self.class_inst_init_fn.insert((cid, key.clone()), fid);
+        }
+        if let Some(c_decl) = &class_decl {
+            for m in &c_decl.methods {
+                let fid = self.fresh_fn_id();
+                self.class_inst_method_fn
+                    .insert((cid, key.clone(), m.name.clone()), fid);
+            }
+        }
+
+        // Emit the TypeTableEntry for this instantiation. Field offsets
+        // come from the abstract layout (every Ty::Var field uses an
+        // 8-byte slot, so offsets remain valid). Field types are
+        // substituted so the runtime type_id of each field references the
+        // concrete type.
+        //
+        // The vtable: one fn id per non-`__init__` method in the layout's
+        // method list. We resolve each name via `class_inst_method_fn`.
+        let name_idx = self.intern_str(&mangled);
+        let mut fields_out = Vec::new();
+        for f in &layout.fields {
+            let sub_ty = subst_ty(&f.ty, &subst);
+            let fname = self.intern_str(&f.name);
+            fields_out.push(TypeFieldEntry {
+                name_idx: fname,
+                type_id: self.type_id_of_ty(&sub_ty),
+                offset: f.offset,
+            });
+        }
+        let mut vtable = Vec::new();
+        for m in &layout.methods {
+            if m.name == "__init__" { continue; }
+            let fid = self
+                .class_inst_method_fn
+                .get(&(cid, key.clone(), m.name.clone()))
+                .map(|f| f.0)
+                .unwrap_or(u32::MAX);
+            vtable.push(fid);
+        }
+        // M31: payload sizing follows the M11 BUG-016 conservative formula
+        // — at least one 8-byte word per field, padded to layout.payload_size.
+        let words = (layout.fields.len() as u32).max((layout.payload_size + 7) / 8);
+        let size = 16 + words * 8;
+        self.out.type_table.push(TypeTableEntry {
+            type_id: tid,
+            kind: 1, // class
+            name_idx,
+            size,
+            // Generic classes have no inheritance support in M31 — the
+            // base must be None per the language scope. We surface
+            // NO_BASE_TYPE here. (Subclassing a parameterised class is
+            // documented as v0.4 work.)
+            base_type: strictpy_shared::file_format::NO_BASE_TYPE,
+            fields: fields_out,
+            vtable,
+        });
+
+        self.class_inst_worklist.push((cid, type_args));
+    }
+
+    /// M31: lower one body of a generic-class instantiation. Emits
+    /// `__init__` (if declared) and every method as a separate IRFunction
+    /// under the substitution `{tv_i -> type_args[i]}`. The class body
+    /// must have been pre-registered in `class_inst_*` tables — this
+    /// function panics if not. Naming: each emitted IRFunction is
+    /// `Box__i64.__init__`, `Box__i64.unwrap`, etc., so the function
+    /// table dump remains debuggable.
+    fn lower_class_instantiation(&mut self, cid: ClassId, type_args: &[Ty]) {
+        let key = mangle_args_key(type_args);
+        let layout = match self.typed.resolved.class_layouts.get(&cid).cloned() {
+            Some(l) => l,
+            None => return,
+        };
+        let class_decl = match self.generic_class_decls.get(&cid).cloned() {
+            Some(d) => d,
+            None => return,
+        };
+        let mangled = self
+            .class_inst_name
+            .get(&(cid, key.clone()))
+            .cloned()
+            .unwrap_or_default();
+        let mut subst: HashMap<u32, Ty> = HashMap::new();
+        for (tv, ty_arg) in layout.generic_tvars.iter().zip(type_args.iter()) {
+            subst.insert(tv.0, ty_arg.clone());
+        }
+        // Lower __init__ if present.
+        if let Some(init) = &class_decl.init {
+            if let Some(fid) = self
+                .class_inst_init_fn
+                .get(&(cid, key.clone()))
+                .copied()
+            {
+                let irfn = self.lower_method_instantiation(
+                    fid,
+                    init,
+                    &format!("{}.__init__", mangled),
+                    Some(cid),
+                    &subst,
+                );
+                self.register_fn_table(&irfn);
+                self.out.functions.push(irfn);
+            }
+        }
+        for m in &class_decl.methods {
+            let fid = match self
+                .class_inst_method_fn
+                .get(&(cid, key.clone(), m.name.clone()))
+                .copied()
+            {
                 Some(f) => f,
-                None => continue, // shouldn't happen — register_instantiation pre-assigns
-            };
-            let mangled = self.mangled_name_for_inst
-                .get(&(sid, key.clone())).cloned().unwrap_or_default();
-            // Look up the source name from the SymbolId.
-            let src_name = self.typed.resolved.symbols.get(sid).name.clone();
-            let decl = match self.generic_fn_decls.get(&src_name).cloned() {
-                Some(d) => d,
                 None => continue,
             };
-            let tvars = self.tvars_for_sid.get(&sid).cloned().unwrap_or_default();
-            let mut subst: HashMap<u32, Ty> = HashMap::new();
-            for (tv, ty_arg) in tvars.iter().zip(&type_args) {
-                subst.insert(tv.0, ty_arg.clone());
-            }
-            let irfn = self.lower_func_instantiation(fid, &decl, &mangled, &subst);
+            let irfn = self.lower_method_instantiation(
+                fid,
+                m,
+                &format!("{}.{}", mangled, m.name),
+                Some(cid),
+                &subst,
+            );
             self.register_fn_table(&irfn);
             self.out.functions.push(irfn);
         }
+    }
+
+    /// M31: like `lower_func_instantiation`, but also handles the
+    /// implicit `self` parameter. The body sees `self: Ty::Class(cid)` —
+    /// field accesses and method dispatch on `self` then resolve through
+    /// the (substituted) class layout, exactly as a non-generic method
+    /// body does. The `subst` map is applied to every type lookup so
+    /// per-instantiation field/local types come out concrete.
+    fn lower_method_instantiation(
+        &mut self,
+        id: FuncId,
+        f: &FuncDecl,
+        mangled_name: &str,
+        recv: Option<ClassId>,
+        subst: &HashMap<u32, Ty>,
+    ) -> IRFunction {
+        let mut fb = FuncBuilder::new(id, mangled_name);
+        let mut param_tys: Vec<Ty> = Vec::new();
+        if let Some(cid) = recv {
+            param_tys.push(Ty::Class(cid));
+            fb.params.push(("self".to_string(), Ty::Class(cid)));
+        }
+        for p in &f.params {
+            if recv.is_some() && p.name == "self" { continue; }
+            let raw = self.lookup_ast_ty(&p.ty).unwrap_or(Ty::Primitive(PrimTy::Unit));
+            let ty = subst_ty(&raw, subst);
+            param_tys.push(ty.clone());
+            fb.params.push((p.name.clone(), ty));
+        }
+        let raw_ret = self.lookup_ast_ty(&f.return_ty).unwrap_or(Ty::Primitive(PrimTy::Unit));
+        let ret_ty = subst_ty(&raw_ret, subst);
+
+        let entry = fb.new_block();
+        fb.current = entry;
+        for (idx, (name, ty)) in fb.params.clone().iter().enumerate() {
+            let v = fb.push_value(ty.clone(), ValueKind::Param { idx: idx as u32 });
+            let slot = fb.alloc_slot(name, ty.clone());
+            fb.emit_write_local(slot, v);
+        }
+
+        let mut lifted: Vec<IRFunction> = Vec::new();
+        {
+            let mut ctx = LowerCtx {
+                typed: &self.typed,
+                str_intern: &mut self.str_intern,
+                string_table: &mut self.out.string_table,
+                fn_id_by_name: &self.fn_id_by_name,
+                class_layouts: &self.typed.resolved.class_layouts,
+                class_type_id: &self.class_type_id,
+                tuple_type_id: &self.tuple_type_id,
+                module_consts: &self.module_consts,
+                next_fn_id: &mut self.next_fn_id,
+                lifted_functions: &mut lifted,
+                type_subst: subst.clone(),
+                generic_fn_sid: &self.generic_fn_sid,
+                fn_id_for_inst: &mut self.fn_id_for_inst,
+                mangled_name_for_inst: &mut self.mangled_name_for_inst,
+                tvars_for_sid: &self.tvars_for_sid,
+                inst_worklist: &mut self.inst_worklist,
+                class_inst_type_id: &mut self.class_inst_type_id,
+                class_inst_init_fn: &mut self.class_inst_init_fn,
+                class_inst_method_fn: &mut self.class_inst_method_fn,
+                class_inst_name: &mut self.class_inst_name,
+                class_inst_worklist: &mut self.class_inst_worklist,
+            };
+            let _ = lower_block(&mut fb, &mut ctx, &f.body);
+        }
+
+        let cur_id = fb.current;
+        let cur_idx = cur_id.0 as usize;
+        if let Terminator::Unreachable = fb.blocks[cur_idx].terminator {
+            fb.blocks[cur_idx].terminator = Terminator::Ret { value: None };
+        }
+
+        let main_irfn = IRFunction {
+            id,
+            name: mangled_name.to_string(),
+            params: param_tys,
+            ret: ret_ty,
+            blocks: fb.blocks,
+        };
+        for lf in lifted {
+            self.register_fn_table(&lf);
+            self.out.functions.push(lf);
+        }
+        main_irfn
     }
 
     /// M17: register a fresh `FuncId` and mangled name for a generic-fn
@@ -669,6 +995,11 @@ impl Lowerer {
                 mangled_name_for_inst: &mut self.mangled_name_for_inst,
                 tvars_for_sid: &self.tvars_for_sid,
                 inst_worklist: &mut self.inst_worklist,
+                class_inst_type_id: &mut self.class_inst_type_id,
+                class_inst_init_fn: &mut self.class_inst_init_fn,
+                class_inst_method_fn: &mut self.class_inst_method_fn,
+                class_inst_name: &mut self.class_inst_name,
+                class_inst_worklist: &mut self.class_inst_worklist,
             };
             let _ = lower_block(&mut fb, &mut ctx, &f.body);
         }
@@ -894,6 +1225,11 @@ impl Lowerer {
                 mangled_name_for_inst: &mut self.mangled_name_for_inst,
                 tvars_for_sid: &self.tvars_for_sid,
                 inst_worklist: &mut self.inst_worklist,
+                class_inst_type_id: &mut self.class_inst_type_id,
+                class_inst_init_fn: &mut self.class_inst_init_fn,
+                class_inst_method_fn: &mut self.class_inst_method_fn,
+                class_inst_name: &mut self.class_inst_name,
+                class_inst_worklist: &mut self.class_inst_worklist,
             };
             let _ = lower_block(&mut fb, &mut ctx, &f.body);
         }
@@ -1106,6 +1442,16 @@ struct LowerCtx<'a> {
     /// `lower_call` pushes here when it mints a new FuncId; the outer
     /// `run()` loop pops from here.
     inst_worklist: &'a mut Vec<(SymbolId, Vec<Ty>)>,
+    /// M31: per-instantiation tables for generic classes. Mirrors the
+    /// generic-fn maps above. Mutable so `lower_call` (constructor of a
+    /// generic class with concrete type args discovered transitively in
+    /// a generic body) can register fresh instantiations and emit
+    /// well-typed `Alloc + DirectCall` immediately.
+    class_inst_type_id: &'a mut HashMap<(ClassId, String), u32>,
+    class_inst_init_fn: &'a mut HashMap<(ClassId, String), FuncId>,
+    class_inst_method_fn: &'a mut HashMap<(ClassId, String, String), FuncId>,
+    class_inst_name: &'a mut HashMap<(ClassId, String), String>,
+    class_inst_worklist: &'a mut Vec<(ClassId, Vec<Ty>)>,
 }
 
 impl<'a> LowerCtx<'a> {
@@ -2056,8 +2402,16 @@ fn field_offset(
     obj_ty: &Ty,
     name: &str,
 ) -> Option<u32> {
-    if let Ty::Class(cid) = obj_ty {
-        if let Some(layout) = class_layouts.get(cid) {
+    let cid = match obj_ty {
+        Ty::Class(c) => Some(*c),
+        // M31: parameterised generic-class receiver. Field offsets are the
+        // *same* as on the abstract layout (every Ty::Var field occupies
+        // one 8-byte slot; instantiations don't reshuffle).
+        Ty::Generic { base: TypeCtor::Class(c), .. } => Some(*c),
+        _ => None,
+    };
+    if let Some(cid) = cid {
+        if let Some(layout) = class_layouts.get(&cid) {
             if let Some(f) = layout.fields.iter().find(|f| f.name == name) {
                 return Some(f.offset);
             }
@@ -3072,6 +3426,27 @@ fn lower_short_circuit(
     fb.emit_read_local(slot)
 }
 
+/// M31: look up the per-instantiation (type_id, __init__ FuncId) for a
+/// generic class. Returns `(u32::MAX, None)` if this `(class_id,
+/// type_args)` hasn't been pre-registered by Pass 2.7 — meaning the
+/// instantiation was discovered transitively while lowering another
+/// generic body. v0.3 documents transitive generic-class construction
+/// from inside another generic body as an open follow-up (the
+/// typechecker DOES record the instantiation at every concrete site
+/// in the user-visible call graph, so this path is rare in practice).
+fn resolve_or_mint_class_inst(
+    ctx: &LowerCtx,
+    cid: ClassId,
+    _type_args: &[Ty],
+    key: &str,
+) -> (u32, Option<FuncId>) {
+    if let Some(tid) = ctx.class_inst_type_id.get(&(cid, key.to_string())).copied() {
+        let init_fid = ctx.class_inst_init_fn.get(&(cid, key.to_string())).copied();
+        return (tid, init_fid);
+    }
+    (u32::MAX, None)
+}
+
 /// M17: does `t` reference any `Ty::Var`? Used by Pass 2.6 to skip
 /// typechecker-recorded instantiations that are still abstract.
 fn has_unbound_var(t: &Ty) -> bool {
@@ -3246,6 +3621,54 @@ fn lower_call(
                                         args: arg_vs,
                                     },
                                 );
+                            }
+                            // M31: generic class — the call site's expr_ty
+                            // is `Ty::Generic { base: TypeCtor::Class(cid),
+                            // args: <concrete> }`. We resolve to the
+                            // per-instantiation tid + __init__ FuncId,
+                            // minting a fresh instantiation on the fly if
+                            // this is the first call with these type args
+                            // (e.g. inside another generic body, post
+                            // active-subst).
+                            if !layout.generic_tvars.is_empty() {
+                                // The expr_ty for the call already had the
+                                // active substitution applied in expr_ty,
+                                // so it contains concrete types.
+                                let call_ty = ret_ty.clone();
+                                let type_args: Vec<Ty> = match &call_ty {
+                                    Ty::Generic { base: TypeCtor::Class(c), args }
+                                        if *c == cid => args.clone(),
+                                    // Fallback — shouldn't normally happen.
+                                    _ => Vec::new(),
+                                };
+                                if !type_args.is_empty()
+                                    && !type_args.iter().any(has_unbound_var)
+                                {
+                                    let key = mangle_args_key(&type_args);
+                                    let (tid, init_fid) =
+                                        resolve_or_mint_class_inst(ctx, cid, &type_args, &key);
+                                    let alloc = fb.push_value(
+                                        Ty::Class(cid),
+                                        ValueKind::Op {
+                                            op: IROp::Alloc { class_id: tid },
+                                            args: vec![],
+                                        },
+                                    );
+                                    if let Some(FuncId(fid)) = init_fid {
+                                        let mut call_args = vec![alloc];
+                                        call_args.extend(arg_vs);
+                                        fb.push_value(
+                                            Ty::Primitive(PrimTy::Unit),
+                                            ValueKind::Op {
+                                                op: IROp::DirectCall {
+                                                    fn_id: FuncId(fid),
+                                                },
+                                                args: call_args,
+                                            },
+                                        );
+                                    }
+                                    return alloc;
+                                }
                             }
                         }
                         // Allocate + call __init__ (if present).
@@ -3653,6 +4076,33 @@ fn lower_method_call(
     let mut arg_vs = vec![recv];
     for a in args {
         arg_vs.push(lower_expr(fb, ctx, &a.value));
+    }
+
+    // M31: method dispatch on a parameterised generic class receiver.
+    // The expr_ty for the receiver carries the concrete type args after
+    // any active substitution; we mangle them to the same key
+    // Pass 2.7/3.6 used and dispatch directly to the per-instantiation
+    // mangled method FuncId. Each Box[i64] / Box[str] / etc. has its
+    // own DirectCall target, never a vtable slot. (Generic classes do
+    // not yet participate in inheritance hierarchies, so virtual
+    // dispatch isn't needed in M31.)
+    if let Ty::Generic { base: TypeCtor::Class(cid), args: targs } = &recv_ty {
+        if !targs.iter().any(has_unbound_var) {
+            let key = mangle_args_key(targs);
+            if let Some(FuncId(fid)) = ctx
+                .class_inst_method_fn
+                .get(&(*cid, key.clone(), method.to_string()))
+                .copied()
+            {
+                return fb.push_value(
+                    ret_ty,
+                    ValueKind::Op {
+                        op: IROp::DirectCall { fn_id: FuncId(fid) },
+                        args: arg_vs,
+                    },
+                );
+            }
+        }
     }
 
     // If the receiver type names a known user class with this method, prefer
