@@ -107,6 +107,13 @@ fn main() -> i32:
     println("--- sorted by name asc ---")
     println(sorted_df.show(-1i64))
 
+    # 4b. Numeric sort descending on the original frame (which still has
+    # the null row).  Nulls sink to the end regardless of direction —
+    # matches pandas' nulls_position="last" default.
+    by_age: DataFrame = df.sort_by("age", false)
+    last_row: List[str] = by_age.row(by_age.length() - 1i64)
+    println("nulls_at_end=" + last_row[0i32])
+
     # 5. select / drop / head / tail demonstration.
     pick: List[str] = []
     pick.append("name")

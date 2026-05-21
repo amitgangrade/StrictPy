@@ -65,6 +65,9 @@ fn tabular_demo_runs_via_spy_exe() {
     assert!(stdout.contains("mask_count=2"), "mask count; stdout:\n{stdout}");
     // Sorted by name asc — alice first.
     assert!(stdout.contains("--- sorted by name asc ---"), "sort header; stdout:\n{stdout}");
+    // Numeric sort descending puts the null row at the end (dave's
+    // age was null in the demo's construction step).
+    assert!(stdout.contains("nulls_at_end=null"), "nulls last; stdout:\n{stdout}");
     // After projection.
     assert!(stdout.contains("head1_nrows=1"), "head1; stdout:\n{stdout}");
     assert!(stdout.contains("tail1_nrows=1"), "tail1; stdout:\n{stdout}");
