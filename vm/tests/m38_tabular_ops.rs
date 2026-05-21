@@ -395,6 +395,128 @@ fn main() -> i32:
     assert!(out.contains("max=cherry"), "got: {out:?}");
 }
 
+// ── Phase C: describe + fill_null + from_dict ───────────────────────
+
+#[test]
+fn df_describe_basic_shape_and_stats() {
+    // describe() returns a 5-row × (1 + ncols) frame. Row index column
+    // is named "statistic"; cells are stringified.
+    let src = "\
+from tabular import DataFrame, Column, ColumnI64, ColumnStr
+import tabular
+fn main() -> i32:
+    vs: List[i64] = []
+    vs.append(1i64)
+    vs.append(2i64)
+    vs.append(3i64)
+    vs.append(4i64)
+    ci: ColumnI64 = tabular.col_i64_simple(vs)
+    ss: List[str] = []
+    ss.append(\"a\")
+    ss.append(\"b\")
+    ss.append(\"c\")
+    ss.append(\"d\")
+    cs: ColumnStr = tabular.col_str_simple(ss)
+    names: List[str] = []
+    names.append(\"n\")
+    names.append(\"s\")
+    cols: List[Column] = []
+    cols.append(ci)
+    cols.append(cs)
+    df: DataFrame = tabular.from_columns(names, cols)
+    d: DataFrame = df.describe()
+    println(\"d_rows=\" + str(d.length()))
+    println(\"d_cols=\" + str(d.ncols()))
+    out_names: List[str] = d.columns()
+    println(\"first=\" + out_names[0i32])
+    return 0
+";
+    let out = run("df_describe", src);
+    assert!(out.contains("d_rows=5"), "got: {out:?}");
+    // 1 statistic col + 2 source cols = 3
+    assert!(out.contains("d_cols=3"), "got: {out:?}");
+    assert!(out.contains("first=statistic"), "got: {out:?}");
+}
+
+#[test]
+fn col_i64_fill_null_replaces_null_cells() {
+    let src = "\
+from tabular import ColumnI64
+import tabular
+fn main() -> i32:
+    vs: List[i64] = []
+    vs.append(10i64)
+    vs.append(0i64)
+    vs.append(30i64)
+    ns: List[bool] = []
+    ns.append(false)
+    ns.append(true)
+    ns.append(false)
+    c: ColumnI64 = tabular.col_i64(vs, ns)
+    filled: ColumnI64 = c.fill_null(99i64)
+    println(\"nulls_after=\" + str(filled.null_count()))
+    g: i64? = filled.get(1i64)
+    if g is not none:
+        println(\"g1=\" + str(g))
+    return 0
+";
+    let out = run("i64_fill_null", src);
+    assert!(out.contains("nulls_after=0"), "got: {out:?}");
+    assert!(out.contains("g1=99"), "got: {out:?}");
+}
+
+#[test]
+fn col_str_fill_null_replaces_null_cells() {
+    let src = "\
+from tabular import ColumnStr
+import tabular
+fn main() -> i32:
+    vs: List[str] = []
+    vs.append(\"x\")
+    vs.append(\"\")
+    ns: List[bool] = []
+    ns.append(false)
+    ns.append(true)
+    c: ColumnStr = tabular.col_str(vs, ns)
+    f: ColumnStr = c.fill_null(\"missing\")
+    println(\"nulls_after=\" + str(f.null_count()))
+    g: str? = f.get(1i64)
+    if g is not none:
+        println(\"g1=\" + g)
+    return 0
+";
+    let out = run("str_fill_null", src);
+    assert!(out.contains("nulls_after=0"), "got: {out:?}");
+    assert!(out.contains("g1=missing"), "got: {out:?}");
+}
+
+#[test]
+fn tabular_from_dict_builds_dataframe() {
+    let src = "\
+from tabular import DataFrame, Column, ColumnI64
+import tabular
+fn main() -> i32:
+    a_v: List[i64] = []
+    a_v.append(1i64)
+    a_v.append(2i64)
+    ca: ColumnI64 = tabular.col_i64_simple(a_v)
+    b_v: List[i64] = []
+    b_v.append(10i64)
+    b_v.append(20i64)
+    cb: ColumnI64 = tabular.col_i64_simple(b_v)
+    d: Dict[str, Column] = {}
+    d[\"a\"] = ca
+    d[\"b\"] = cb
+    df: DataFrame = tabular.from_dict(d)
+    println(\"nrows=\" + str(df.length()))
+    println(\"ncols=\" + str(df.ncols()))
+    return 0
+";
+    let out = run("from_dict_basic", src);
+    assert!(out.contains("nrows=2"), "got: {out:?}");
+    assert!(out.contains("ncols=2"), "got: {out:?}");
+}
+
 #[test]
 fn col_datetime_min_max() {
     let src = "\
