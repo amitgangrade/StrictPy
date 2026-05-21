@@ -1338,6 +1338,82 @@ pub enum NativeFn {
     // 723-729 reserved for v0.3 follow-ups (async connect, etc.).
     // 730-749 reserved for v0.4 extensions (async ssl / file I/O).
 
+    // ── 750-789: M34 — `json` typed `JsonValue` tree ────────────────────
+    // First stdlib *classes* in the project.  The 7-class hierarchy
+    // (JsonValue + JNull/JBool/JInt/JFloat/JString/JList/JObject) is
+    // registered in `seed_prelude` alongside Channel/Thread/io.File
+    // because v0.3 doesn't yet have proper module-scoped class
+    // registration; the stdlib import path falls through to the
+    // pre-existing prelude binding (resolver.rs's legacy "prelude wins"
+    // branch) so user code can still write `from json import JsonValue`.
+    //
+    // Subclass instances carry one concrete field at offset 0:
+    //   - JNull:    no field
+    //   - JBool:    value: bool (stored as u64)
+    //   - JInt:     value: i64
+    //   - JFloat:   value: f64 (bit-cast through u64)
+    //   - JString:  value: str (StringRepr pointer)
+    //   - JList:    data: opaque ListRepr pointer (elements are JsonValue ptrs)
+    //   - JObject:  data: opaque ListRepr pointer of interleaved [key_ptr, value_ptr]
+    //
+    /// `json.parse(s: str) -> JsonValue` — parse JSON into a typed
+    /// JsonValue tree.  Raises `ValueError` on malformed input.
+    JsonParse           = 750,
+    /// `json.stringify(v: JsonValue) -> str` — compact canonical
+    /// serialization (no whitespace, sorted-key-friendly).
+    JsonStringify       = 751,
+    /// `json.stringify_pretty(v: JsonValue, indent: i32) -> str` —
+    /// indented serialization (typical indent 2 or 4; clamped to [0,32]).
+    JsonStringifyPretty = 752,
+    /// `JNull()` — construct a JsonNull singleton instance.  Also the
+    /// `json.j_null()` convenience helper.
+    JsonJNullNew        = 753,
+    /// `JBool(b: bool)` — construct.  Also `json.j_bool(b)`.
+    JsonJBoolNew        = 754,
+    /// `JInt(n: i64)`.  Also `json.j_int(n)`.
+    JsonJIntNew         = 755,
+    /// `JFloat(f: f64)`.  Also `json.j_float(f)`.
+    JsonJFloatNew       = 756,
+    /// `JString(s: str)`.  Also `json.j_string(s)`.
+    JsonJStringNew      = 757,
+    /// `JList(items: List[JsonValue])`.  Also `json.j_list(items)`.
+    JsonJListNew        = 758,
+    /// `JObject(entries: List[Tuple[str, JsonValue]])` constructor
+    /// (receiver-style, see `JsonJ*New` block comment).
+    JsonJObjectNew      = 759,
+    // 760-766: `json.j_*` module helpers.  Same effect as the class
+    // constructors above but allocate-and-populate in one call (no
+    // pre-allocated receiver from the IR).  Two ID slots per shape
+    // (e.g. `j_string` vs `JString(...)`) keeps the handler bodies
+    // separate so a future v0.4 split is easier.
+    JsonHelperJNull     = 760,
+    JsonHelperJBool     = 761,
+    JsonHelperJInt      = 762,
+    JsonHelperJFloat    = 763,
+    JsonHelperJString   = 764,
+    JsonHelperJList     = 765,
+    JsonHelperJObject   = 766,
+    // 767-769 reserved for v0.4 (e.g. j_bigint).
+    /// `JList.length(self) -> i64`.
+    JsonJListLength     = 770,
+    /// `JList.get(self, i: i64) -> JsonValue` — raises `IndexError`
+    /// out-of-bounds.
+    JsonJListGet        = 771,
+    /// `JList.items(self) -> List[JsonValue]` — defensive copy of the
+    /// underlying list so user code can iterate without aliasing.
+    JsonJListItems      = 772,
+    // 773-779 reserved for v0.4 (append / set / pop on a mutable JList).
+    /// `JObject.get(self, k: str) -> JsonValue?` — none if absent.
+    JsonJObjectGet      = 780,
+    /// `JObject.has(self, k: str) -> bool`.
+    JsonJObjectHas      = 781,
+    /// `JObject.keys(self) -> List[str]` — insertion-order copy.
+    JsonJObjectKeys     = 782,
+    /// `JObject.length(self) -> i64` — entry count.
+    JsonJObjectLength   = 783,
+    // 784-789 reserved for v0.4 (set / iter_items / values on a
+    // mutable JObject).
+
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
     /// encounters. The VM treats this as a runtime error.
@@ -1781,6 +1857,31 @@ impl NativeFn {
             720 => Some(Self::SocketAsyncAccept),
             721 => Some(Self::SocketAsyncRecv),
             722 => Some(Self::SocketAsyncSend),
+            // M34: typed JsonValue tree.
+            750 => Some(Self::JsonParse),
+            751 => Some(Self::JsonStringify),
+            752 => Some(Self::JsonStringifyPretty),
+            753 => Some(Self::JsonJNullNew),
+            754 => Some(Self::JsonJBoolNew),
+            755 => Some(Self::JsonJIntNew),
+            756 => Some(Self::JsonJFloatNew),
+            757 => Some(Self::JsonJStringNew),
+            758 => Some(Self::JsonJListNew),
+            759 => Some(Self::JsonJObjectNew),
+            760 => Some(Self::JsonHelperJNull),
+            761 => Some(Self::JsonHelperJBool),
+            762 => Some(Self::JsonHelperJInt),
+            763 => Some(Self::JsonHelperJFloat),
+            764 => Some(Self::JsonHelperJString),
+            765 => Some(Self::JsonHelperJList),
+            766 => Some(Self::JsonHelperJObject),
+            770 => Some(Self::JsonJListLength),
+            771 => Some(Self::JsonJListGet),
+            772 => Some(Self::JsonJListItems),
+            780 => Some(Self::JsonJObjectGet),
+            781 => Some(Self::JsonJObjectHas),
+            782 => Some(Self::JsonJObjectKeys),
+            783 => Some(Self::JsonJObjectLength),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

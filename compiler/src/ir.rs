@@ -3690,6 +3690,25 @@ fn lower_call(
                             Ty::Class(cid),
                             ValueKind::Op { op: IROp::Alloc { class_id: tid }, args: vec![] },
                         );
+                        // M34: JsonValue subclass constructors — these
+                        // have no user-level `__init__`; we synthesise
+                        // initialisation by calling the matching
+                        // NativeFn::JsonJ*New handler with the allocated
+                        // object as the first arg.  The handler does the
+                        // field stores (and any sidecar list allocation
+                        // for JList/JObject).
+                        if let Some(nid) = m34_json_class_init_native_id(name) {
+                            let mut call_args = vec![alloc];
+                            call_args.extend(arg_vs);
+                            fb.push_value(
+                                Ty::Primitive(PrimTy::Unit),
+                                ValueKind::Op {
+                                    op: IROp::NativeCall { native_id: nid },
+                                    args: call_args,
+                                },
+                            );
+                            return alloc;
+                        }
                         let init_name = format!("{}.__init__", name);
                         if let Some(FuncId(fid)) = ctx.fn_id_by_name.get(&init_name).copied() {
                             let mut call_args = vec![alloc];
@@ -4105,6 +4124,28 @@ fn lower_method_call(
         }
     }
 
+    // M34: JList / JObject method calls — these are non-native classes
+    // (so they have real heap layouts that pattern-matching can use),
+    // but their methods are NativeFn-backed (no user body to call).
+    // We dispatch by *class name* via the receiver's class layout to
+    // avoid clashing with the M11/M16 vtable path for user classes
+    // that happen to share method names like "get" / "length".
+    if let Ty::Class(cid) = &recv_ty {
+        if let Some(layout) = ctx.class_layouts.get(cid) {
+            if let Some(nid) = m34_json_class_method_native_id_by_name(
+                layout.name.as_str(), method,
+            ) {
+                return fb.push_value(
+                    ret_ty,
+                    ValueKind::Op {
+                        op: IROp::NativeCall { native_id: nid },
+                        args: arg_vs,
+                    },
+                );
+            }
+        }
+    }
+
     // If the receiver type names a known user class with this method, prefer
     // a virtual call (slot = index of method in the *virtual* method list,
     // i.e. layout.methods minus `__init__` — see resolver.rs).
@@ -4265,6 +4306,42 @@ fn resolve_native_method(recv_ty: &Ty, method: &str) -> u32 {
     NativeFn::from_name(method)
         .map(|n| n as u32)
         .unwrap_or(NativeFn::Unknown as u32)
+}
+
+/// M34: map a constructor name to the matching `JsonJ*New` NativeFn id,
+/// or `None` if `name` isn't one of the registered JsonValue subclasses.
+/// Used by `lower_call` to route `JString("hi")` through a native
+/// initialiser rather than the missing user `__init__`.
+fn m34_json_class_init_native_id(name: &str) -> Option<u32> {
+    Some(match name {
+        "JNull"   => NativeFn::JsonJNullNew    as u32,
+        "JBool"   => NativeFn::JsonJBoolNew    as u32,
+        "JInt"    => NativeFn::JsonJIntNew     as u32,
+        "JFloat"  => NativeFn::JsonJFloatNew   as u32,
+        "JString" => NativeFn::JsonJStringNew  as u32,
+        "JList"   => NativeFn::JsonJListNew    as u32,
+        "JObject" => NativeFn::JsonJObjectNew  as u32,
+        _ => return None,
+    })
+}
+
+/// M34: dispatch a JList / JObject method by class name + method name.
+/// Returns `None` for any other (class, method) pair so the caller falls
+/// through to the regular dispatch.
+fn m34_json_class_method_native_id_by_name(
+    class_name: &str,
+    method: &str,
+) -> Option<u32> {
+    Some(match (class_name, method) {
+        ("JList",   "length") => NativeFn::JsonJListLength   as u32,
+        ("JList",   "get")    => NativeFn::JsonJListGet      as u32,
+        ("JList",   "items")  => NativeFn::JsonJListItems    as u32,
+        ("JObject", "get")    => NativeFn::JsonJObjectGet    as u32,
+        ("JObject", "has")    => NativeFn::JsonJObjectHas    as u32,
+        ("JObject", "keys")   => NativeFn::JsonJObjectKeys   as u32,
+        ("JObject", "length") => NativeFn::JsonJObjectLength as u32,
+        _ => return None,
+    })
 }
 
 /// Pretty-print an IRFunction for debugging. Format is one line per value,

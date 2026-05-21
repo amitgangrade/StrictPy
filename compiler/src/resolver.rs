@@ -329,8 +329,14 @@ impl Resolver {
         let prelude_scope = self.table.new_scope(None, false);
         let module_scope = self.table.new_scope(Some(prelude_scope), false);
 
-        self.seed_stdlib_modules();
+        // M34: prelude runs first so its registered classes (notably
+        // the JsonValue hierarchy) are visible by name when
+        // `seed_stdlib_modules` builds the `json` module's typed
+        // signatures.  Pre-M34 the order was swapped — flipping is safe
+        // because `seed_stdlib_modules` doesn't read from any prelude
+        // state at the top of the file, only at the json block.
         self.seed_prelude(prelude_scope);
+        self.seed_stdlib_modules();
 
         // ── Pass 1: register all top-level declarations (so order doesn't matter)
         self.register_top_decls(module_scope, &module)?;
@@ -969,23 +975,44 @@ impl Resolver {
         };
         self.stdlib_modules.insert("math".into(), math_mod);
 
-        // ── M20c: `json` module ────────────────────────────────────────
-        // Validation + canonical reserialize.  The typed-JsonValue tree
-        // (sealed class hierarchy) remains out-of-band as the M18
-        // example `examples/json_parse_v2.spy`; exposing that as a
-        // stdlib surface would require registering classes in the
-        // stdlib module table, which is v0.3 work.  For v0.2 we ship
-        // the validate-and-reserialize subset, which covers every
-        // practical JSON-config-file use case.
+        // ── M20c + M34: `json` module ──────────────────────────────────
+        // M20c shipped the flat validate-and-reserialize surface
+        // (parse_to_string / is_valid / pretty / escape / minify).
+        // M34 adds the typed JsonValue tree on top: `parse` returns a
+        // sealed-class tree, `stringify` walks it back to canonical
+        // compact JSON, and `j_null` / `j_bool` / `j_int` / etc. are
+        // module-level constructor helpers that alias the prelude class
+        // constructors.  Both surfaces co-exist — existing programs that
+        // hand-walk `parse_to_string` output (e.g. the M29 framework)
+        // continue to work, while new programs get pattern-matching
+        // ergonomics.
         const JSON_PARSE_TO_STRING: u32 = 213;
         const JSON_IS_VALID: u32        = 214;
         const JSON_PRETTY: u32          = 215;
         const JSON_ESCAPE: u32          = 216;
         const JSON_MINIFY: u32          = 217;
+        // M34: typed-tree surface — see shared/src/native.rs §750-789.
+        const JSON_PARSE: u32             = 750;
+        const JSON_STRINGIFY: u32         = 751;
+        const JSON_STRINGIFY_PRETTY: u32  = 752;
+        // 753-759 used internally by lower_call for the class
+        // constructor (receiver-style) entry points; see
+        // shared::NativeFn::JsonJ*New.  The j_* module helpers below
+        // use the parallel 760-766 block.
 
+        // M34: pull the real `Ty::Class(JsonValueId)` from the prelude
+        // (which ran first — see `resolve()`).  Defensive fallback to
+        // `Ty::Never` if `seed_prelude` was somehow skipped, which would
+        // surface as a "type mismatch" at the first call site rather
+        // than a silent miscompilation.
+        let jv_ty = match self.class_name_to_id.get("JsonValue") {
+            Some(cid) => Ty::Class(*cid),
+            None => Ty::Never,
+        };
         let json_mod = StdlibModule {
             name: "json".into(),
             items: vec![
+                // Pre-existing flat surface — unchanged.
                 StdlibItem {
                     name: "parse_to_string".into(),
                     kind: StdlibItemKind::Function,
@@ -1015,6 +1042,93 @@ impl Resolver {
                     kind: StdlibItemKind::Function,
                     ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
                     native_id: JSON_MINIFY,
+                },
+                // M34: typed surface — `parse` returns a JsonValue
+                // tree, `stringify` walks it.  Type signatures use the
+                // real `Ty::Class(JsonValueId)` looked up from the
+                // prelude (which ran first in `resolve()`).
+                StdlibItem {
+                    name: "parse".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], jv_ty.clone()),
+                    native_id: JSON_PARSE,
+                },
+                StdlibItem {
+                    name: "stringify".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![jv_ty.clone()], str_ty.clone()),
+                    native_id: JSON_STRINGIFY,
+                },
+                StdlibItem {
+                    name: "stringify_pretty".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![jv_ty.clone(), i32_ty.clone()], str_ty.clone()),
+                    native_id: JSON_STRINGIFY_PRETTY,
+                },
+                // Convenience constructors.  These map to a *different*
+                // set of NativeFn ids than the bare class constructors
+                // because the helpers must `alloc + populate + return`
+                // while the class constructors receive a pre-Alloc'd
+                // receiver and just populate it (see IR's `lower_call`
+                // M34 special-case).  Naming convention: same numeric
+                // range, but `_Helper` suffix isn't needed because each
+                // helper has a unique ID slot (760-769 reserved earlier).
+                StdlibItem {
+                    name: "j_null".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], jv_ty.clone()),
+                    native_id: 760, // JsonHelperJNull
+                },
+                StdlibItem {
+                    name: "j_bool".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![bool_ty.clone()], jv_ty.clone()),
+                    native_id: 761, // JsonHelperJBool
+                },
+                StdlibItem {
+                    name: "j_int".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], jv_ty.clone()),
+                    native_id: 762, // JsonHelperJInt
+                },
+                StdlibItem {
+                    name: "j_float".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![f64_ty.clone()], jv_ty.clone()),
+                    native_id: 763, // JsonHelperJFloat
+                },
+                StdlibItem {
+                    name: "j_string".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], jv_ty.clone()),
+                    native_id: 764, // JsonHelperJString
+                },
+                StdlibItem {
+                    name: "j_list".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![Ty::Generic {
+                            base: TypeCtor::List,
+                            args: vec![jv_ty.clone()],
+                        }],
+                        jv_ty.clone(),
+                    ),
+                    native_id: 765, // JsonHelperJList
+                },
+                StdlibItem {
+                    name: "j_object".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![Ty::Generic {
+                            base: TypeCtor::List,
+                            args: vec![Ty::Tuple(vec![
+                                str_ty.clone(),
+                                jv_ty.clone(),
+                            ])],
+                        }],
+                        jv_ty.clone(),
+                    ),
+                    native_id: 766, // JsonHelperJObject
                 },
             ],
         };
@@ -4137,6 +4251,187 @@ impl Resolver {
 
         // math module — stdlib: spec §9, used by mandelbrot if needed
         self.make_symbol(scope, "math", SymbolKind::BuiltinModule, Span::DUMMY, None);
+
+        // ── M34: typed `json.JsonValue` tree ──────────────────────────
+        //
+        // Seven prelude classes — sealed base + 6 final subclasses —
+        // backing the `json.parse` / `json.stringify` typed surface.
+        // Registered in the prelude rather than under the `json` module
+        // because v0.3 does not yet have module-scoped class
+        // registration; the legacy "prelude wins" branch in the import
+        // resolution code means `from json import JsonValue` still
+        // works correctly (it's a no-op since the name is already in
+        // scope).  M11 + M16 + M31 do all the heavy lifting — these are
+        // ordinary `is_native: false` classes that participate in the
+        // standard vtable / isinstance / match infrastructure.
+        //
+        // Constructors are special-cased in the IR lowerer
+        // (`lower_call` in ir.rs) — JNull..JString call NativeFn::JsonJ*New
+        // which allocate a heap object and store the single payload
+        // field at offset 0.  JList / JObject's storage is a sidecar
+        // ListRepr whose pointer is parked in the `data` field; the GC's
+        // class-scanner traces it as a root automatically.
+        //
+        // BUG SHAPE WARNING: the field offsets / payload_sizes here MUST
+        // match what the VM allocates in `vm/src/builtins.rs::alloc_json_*`.
+        // If you add a field, bump payload_size to (n_fields * 8) and add
+        // a matching store in the VM constructor handler.
+        let jv_cid = self.fresh_class();
+        let jv_sid = self.make_symbol(scope, "JsonValue", SymbolKind::Class, Span::DUMMY,
+                                        Some(Ty::Class(jv_cid)));
+        self.table.get_mut(jv_sid).class_id = Some(jv_cid);
+        self.class_of_symbol.insert(jv_sid, jv_cid);
+        self.symbol_of_class.insert(jv_cid, jv_sid);
+        self.class_name_to_id.insert("JsonValue".into(), jv_cid);
+        self.class_layouts.insert(jv_cid, ClassLayout {
+            id: jv_cid, name: "JsonValue".into(), base: None,
+            // sealed lets subclasses be defined in this module (the
+            // prelude) but not in user code — mirrors the M16 sealed-
+            // hierarchy pattern documented in examples/json_parse_v2.spy.
+            is_open: false, is_sealed: true,
+            fields: vec![], methods: vec![],
+            generics: vec![], generic_tvars: vec![],
+            is_native: false, payload_size: 0,
+        });
+
+        // Helper closure: register one final subclass of JsonValue. Each
+        // subclass has zero or one fields at offset 0 (parent payload is
+        // 0). The constructor is special-cased in lower_call to route
+        // through the matching NativeFn::JsonJ*New, which allocates a
+        // heap object with the right type_id and stores the arg.
+        let register_jv_subclass = |this: &mut Self,
+                                          name: &str,
+                                          field: Option<(&str, Ty)>|
+        {
+            let cid = this.fresh_class();
+            let sid = this.make_symbol(scope, name, SymbolKind::Class,
+                                          Span::DUMMY, Some(Ty::Class(cid)));
+            this.table.get_mut(sid).class_id = Some(cid);
+            this.class_of_symbol.insert(sid, cid);
+            this.symbol_of_class.insert(cid, sid);
+            this.class_name_to_id.insert(name.into(), cid);
+            let (fields, payload) = match field {
+                None => (vec![], 0u32),
+                Some((fname, fty)) => (
+                    vec![FieldInfo {
+                        name: fname.into(),
+                        ty: fty,
+                        offset: 0,
+                    }],
+                    8u32,
+                ),
+            };
+            this.class_layouts.insert(cid, ClassLayout {
+                id: cid, name: name.into(), base: Some(jv_cid),
+                is_open: false, is_sealed: false,
+                fields,
+                methods: vec![],
+                generics: vec![], generic_tvars: vec![],
+                is_native: false,
+                payload_size: payload,
+            });
+            cid
+        };
+
+        register_jv_subclass(self, "JNull",   None);
+        register_jv_subclass(self, "JBool",   Some(("value", Ty::Primitive(PrimTy::Bool))));
+        register_jv_subclass(self, "JInt",    Some(("value", Ty::Primitive(PrimTy::I64))));
+        register_jv_subclass(self, "JFloat",  Some(("value", Ty::Primitive(PrimTy::F64))));
+        register_jv_subclass(self, "JString", Some(("value", Ty::Primitive(PrimTy::Str))));
+
+        // JList — one List[JsonValue] field at offset 0. The IR lowerer
+        // for `JList(items)` calls JsonJListNew which allocates the
+        // object and stores the items list pointer; the GC's
+        // GcKind::Class scanner traces that pointer.
+        let jlist_items_ty = Ty::Generic {
+            base: TypeCtor::List,
+            args: vec![Ty::Class(jv_cid)],
+        };
+        let jlist_cid = self.fresh_class();
+        let jlist_sid = self.make_symbol(scope, "JList", SymbolKind::Class,
+                                            Span::DUMMY, Some(Ty::Class(jlist_cid)));
+        self.table.get_mut(jlist_sid).class_id = Some(jlist_cid);
+        self.class_of_symbol.insert(jlist_sid, jlist_cid);
+        self.symbol_of_class.insert(jlist_cid, jlist_sid);
+        self.class_name_to_id.insert("JList".into(), jlist_cid);
+        self.class_layouts.insert(jlist_cid, ClassLayout {
+            id: jlist_cid, name: "JList".into(), base: Some(jv_cid),
+            is_open: false, is_sealed: false,
+            fields: vec![
+                FieldInfo {
+                    name: "data".into(),
+                    ty: jlist_items_ty.clone(),
+                    offset: 0,
+                },
+            ],
+            methods: vec![
+                MethodSig { name: "length".into(), params: vec![],
+                              ret: Ty::Primitive(PrimTy::I64) },
+                MethodSig { name: "get".into(),
+                              params: vec![Ty::Primitive(PrimTy::I64)],
+                              ret: Ty::Class(jv_cid) },
+                MethodSig { name: "items".into(), params: vec![],
+                              ret: jlist_items_ty.clone() },
+            ],
+            generics: vec![], generic_tvars: vec![],
+            // is_native = false even though methods dispatch via
+            // NativeFn.  Setting is_native = true would route the
+            // *constructor* through `NativeFn::from_name`, which we
+            // don't want — JList's constructor allocs + stores the data
+            // field via the M34 special-case in `lower_call` above.
+            // Method dispatch is intercepted in `lower_method_call`
+            // (the M34 fall-through path) so this `methods` list never
+            // actually drives a vtable.
+            is_native: false,
+            payload_size: 8,
+        });
+
+        // JObject — two parallel List fields:
+        //   keys:   List[str]
+        //   values: List[JsonValue]
+        // The IR lowerer for `JObject(entries)` calls JsonJObjectNew
+        // which splits the (str, JsonValue) tuples into the two lists.
+        // Two-field design (rather than a side-table handle a la Dict)
+        // gives the GC a free trace through both lists with no special
+        // root-scan code.
+        let jobj_keys_ty = Ty::Generic {
+            base: TypeCtor::List,
+            args: vec![Ty::Primitive(PrimTy::Str)],
+        };
+        let jobj_vals_ty = jlist_items_ty.clone();
+        let jobj_cid = self.fresh_class();
+        let jobj_sid = self.make_symbol(scope, "JObject", SymbolKind::Class,
+                                          Span::DUMMY, Some(Ty::Class(jobj_cid)));
+        self.table.get_mut(jobj_sid).class_id = Some(jobj_cid);
+        self.class_of_symbol.insert(jobj_sid, jobj_cid);
+        self.symbol_of_class.insert(jobj_cid, jobj_sid);
+        self.class_name_to_id.insert("JObject".into(), jobj_cid);
+        self.class_layouts.insert(jobj_cid, ClassLayout {
+            id: jobj_cid, name: "JObject".into(), base: Some(jv_cid),
+            is_open: false, is_sealed: false,
+            fields: vec![
+                FieldInfo { name: "keys".into(),   ty: jobj_keys_ty.clone(), offset: 0 },
+                FieldInfo { name: "values".into(), ty: jobj_vals_ty.clone(), offset: 8 },
+            ],
+            methods: vec![
+                MethodSig { name: "get".into(),
+                              params: vec![Ty::Primitive(PrimTy::Str)],
+                              ret: Ty::Nullable(Box::new(Ty::Class(jv_cid))) },
+                MethodSig { name: "has".into(),
+                              params: vec![Ty::Primitive(PrimTy::Str)],
+                              ret: Ty::Primitive(PrimTy::Bool) },
+                MethodSig { name: "keys".into(),
+                              params: vec![],
+                              ret: jobj_keys_ty.clone() },
+                MethodSig { name: "length".into(),
+                              params: vec![],
+                              ret: Ty::Primitive(PrimTy::I64) },
+            ],
+            generics: vec![], generic_tvars: vec![],
+            // is_native: see JList comment above.
+            is_native: false,
+            payload_size: 16,
+        });
 
         // Convenience: bare booleans `True`/`False` (capitalised variants).
         self.make_symbol(scope, "True", SymbolKind::Const, Span::DUMMY, Some(Ty::Primitive(PrimTy::Bool)));

@@ -1251,6 +1251,24 @@ impl TypeChecker {
                         }
                         return Ok(Ty::Class(cid));
                     }
+                    // M34: JsonValue subclass constructors have no
+                    // user-level `__init__` (their initialisation goes
+                    // through a native handler that allocs + stores the
+                    // single payload field).  Type-check the args
+                    // against the synthesised constructor signatures
+                    // here so users don't see a "class has no __init__"
+                    // false positive.
+                    if let Some(param_tys) = m34_json_ctor_param_tys(&cl.name, ctx) {
+                        if args.len() != param_tys.len() {
+                            return Err(type_err(span, codes::TYPE_ARITY,
+                                format!("constructor of `{}` expects {} args, got {}",
+                                        cl.name, param_tys.len(), args.len())));
+                        }
+                        for (a, pt) in args.iter().zip(param_tys.iter()) {
+                            let _ = self.check_expr(&a.value, pt, env, ctx, r)?;
+                        }
+                        return Ok(Ty::Class(cid));
+                    }
                     // No explicit __init__ — only valid with no args (default ctor).
                     if !args.is_empty() {
                         return Err(type_err(span, codes::TYPE_ARITY,
@@ -1827,6 +1845,42 @@ fn lub(a: &Ty, b: &Ty) -> Option<Ty> {
     if matches!(a, Ty::Primitive(PrimTy::Null)) { return Some(Ty::Nullable(Box::new(b.clone()))); }
     if matches!(b, Ty::Primitive(PrimTy::Null)) { return Some(Ty::Nullable(Box::new(a.clone()))); }
     None
+}
+
+/// M34: parameter types for JsonValue subclass constructors.  These
+/// classes have no user-level `__init__`; the IR special-cases them
+/// (see `m34_json_class_init_native_id` in ir.rs) but the type-checker
+/// needs to know what argument shape to accept.  Returns `None` for
+/// any class outside the JsonValue family — the caller then falls back
+/// to the normal "no __init__" handling.
+///
+/// The list/tuple-typed signatures (JList / JObject) reference the
+/// JsonValue class id; we look it up in the type context's classes
+/// map to construct the right `Ty::Class(cid)`.
+fn m34_json_ctor_param_tys(class_name: &str, ctx: &Ctx<'_>) -> Option<Vec<Ty>> {
+    let jsonvalue_cid = ctx.classes.values()
+        .find(|cl| cl.name == "JsonValue")
+        .map(|cl| cl.id)?;
+    let jv_ty = Ty::Class(jsonvalue_cid);
+    Some(match class_name {
+        "JNull"   => vec![],
+        "JBool"   => vec![Ty::Primitive(PrimTy::Bool)],
+        "JInt"    => vec![Ty::Primitive(PrimTy::I64)],
+        "JFloat"  => vec![Ty::Primitive(PrimTy::F64)],
+        "JString" => vec![Ty::Primitive(PrimTy::Str)],
+        "JList"   => vec![Ty::Generic {
+            base: TypeCtor::List,
+            args: vec![jv_ty.clone()],
+        }],
+        "JObject" => vec![Ty::Generic {
+            base: TypeCtor::List,
+            args: vec![Ty::Tuple(vec![
+                Ty::Primitive(PrimTy::Str),
+                jv_ty,
+            ])],
+        }],
+        _ => return None,
+    })
 }
 
 /// True iff every control path through `b` exits via `return`/`raise`/`break`/`continue`.

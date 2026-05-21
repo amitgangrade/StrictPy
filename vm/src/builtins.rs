@@ -6633,6 +6633,61 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         NativeFn::SocketAsyncRecv => m32_socket_async_recv(interp, args),
         NativeFn::SocketAsyncSend => m32_socket_async_send(interp, args),
 
+        // ── M34: typed JsonValue tree ─────────────────────────────────
+        // Constructor handlers receive `[receiver, user_args...]` — the
+        // receiver is the freshly-Alloc'd object from `lower_call`'s
+        // pre-step.  Our job is to populate its field(s); the return
+        // value is discarded by the IR (which uses the Alloc value
+        // directly).  This shape mirrors the regular `__init__`
+        // protocol for user classes.
+        NativeFn::JsonParse           => m34_json_parse(interp, args),
+        NativeFn::JsonStringify       => m34_json_stringify(interp, args, false, 0),
+        NativeFn::JsonStringifyPretty => {
+            let indent = arg_i64(args, 1) as i32;
+            m34_json_stringify(interp, args, true, indent)
+        }
+        // Class-constructor entry points: receive `[receiver, args...]`
+        // from the IR.  Populate the receiver's payload field; return
+        // value is ignored by the IR.
+        NativeFn::JsonJNullNew        => Ok(arg_u64(args, 0)),
+        NativeFn::JsonJBoolNew        => m34_init_jbool(args),
+        NativeFn::JsonJIntNew         => m34_init_jint(args),
+        NativeFn::JsonJFloatNew       => m34_init_jfloat(args),
+        NativeFn::JsonJStringNew      => m34_init_jstring(args),
+        NativeFn::JsonJListNew        => m34_init_jlist(args),
+        NativeFn::JsonJObjectNew      => m34_init_jobject(interp, args),
+        // Module helpers: receive `[args...]`.  Allocate + populate +
+        // return the new object.
+        NativeFn::JsonHelperJNull     => Ok(m34_alloc_jnull(interp) as u64),
+        NativeFn::JsonHelperJBool     => {
+            let b = arg_u64(args, 0) != 0;
+            Ok(m34_alloc_jbool(interp, b) as u64)
+        }
+        NativeFn::JsonHelperJInt      => Ok(m34_alloc_jint(interp, arg_i64(args, 0)) as u64),
+        NativeFn::JsonHelperJFloat    => {
+            let bits = arg_u64(args, 0);
+            Ok(m34_alloc_jfloat(interp, f64::from_bits(bits)) as u64)
+        }
+        NativeFn::JsonHelperJString   => {
+            let sp = arg_u64(args, 0) as *const crate::object::StringRepr;
+            Ok(m34_alloc_jstring_from_ptr(interp, sp) as u64)
+        }
+        NativeFn::JsonHelperJList     => {
+            let items_ptr = arg_u64(args, 0) as *const crate::object::ListRepr;
+            Ok(m34_alloc_jlist(interp, items_ptr) as u64)
+        }
+        NativeFn::JsonHelperJObject   => {
+            let entries_ptr = arg_u64(args, 0) as *const crate::object::ListRepr;
+            m34_alloc_jobject_from_entries(interp, entries_ptr).map(|p| p as u64)
+        }
+        NativeFn::JsonJListLength     => m34_jlist_length(interp, args),
+        NativeFn::JsonJListGet        => m34_jlist_get(interp, args),
+        NativeFn::JsonJListItems      => m34_jlist_items(interp, args),
+        NativeFn::JsonJObjectGet      => m34_jobject_get(interp, args),
+        NativeFn::JsonJObjectHas      => m34_jobject_has(interp, args),
+        NativeFn::JsonJObjectKeys     => m34_jobject_keys(interp, args),
+        NativeFn::JsonJObjectLength   => m34_jobject_length(interp, args),
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
@@ -9962,6 +10017,679 @@ fn m32_socket_async_send(
         })
         .map_err(|e| VmError::Trap(format!("asyncio: failed to spawn send task: {e}")))?;
     Ok(m32_async_future_handle as u64)
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//  M34: typed JsonValue tree
+// ─────────────────────────────────────────────────────────────────────
+//
+// Seven prelude classes (JsonValue + 6 subclasses) registered in
+// `compiler/src/resolver.rs::seed_prelude`.  This module implements the
+// runtime side: alloc helpers + constructor handlers + method handlers
+// + serde_json bridge.
+//
+// HEAP LAYOUT — every subclass has a 16-byte ObjectHeader (so the GC
+// can read the RuntimeType ptr at offset 0) followed by:
+//   - JNull:    no payload
+//   - JBool:    u64 slot at offset 16 holding the bool (0 / 1)
+//   - JInt:     i64 at offset 16
+//   - JFloat:   f64 bit-pattern at offset 16
+//   - JString:  *const StringRepr at offset 16
+//   - JList:    *const ListRepr at offset 16, elements are *JsonValue ptrs
+//   - JObject:  *const ListRepr (keys: *StringRepr) at 16
+//             + *const ListRepr (values: *JsonValue) at 24
+//
+// GC tracing — every JNull..JObject heap object is allocated as
+// GcKind::Class, so the standard 8-byte-slot scanner in gc.rs picks
+// up the StringRepr / ListRepr pointers automatically.  No bespoke
+// root scan needed.
+
+// Local alias for the object-header size — mirrors `interp::HDR` (private).
+const HDR: usize = OBJECT_HEADER_SIZE;
+
+/// Look up an existing `RuntimeType` Arc by class name from the
+/// interpreter's type table.  Returns `None` if the class isn't in the
+/// table (e.g. dead-code elimination removed it, or the module didn't
+/// include any references to it).  M34 uses this to find the type id
+/// for JNull / JBool / ... at native-handler time without plumbing the
+/// type id through the IR.
+fn m34_find_class_type(
+    interp: &Interpreter,
+    name: &str,
+) -> Option<std::sync::Arc<crate::object::RuntimeType>> {
+    interp.shared.types.types.values()
+        .find(|rt| rt.name == name)
+        .cloned()
+}
+
+/// Helper: allocate a JsonValue subclass heap object with the right
+/// type-id (so isinstance + match patterns work) and the given payload
+/// size.  Used by every constructor below.
+fn m34_alloc_class_obj(
+    interp: &mut Interpreter,
+    name: &str,
+    payload_bytes: usize,
+) -> *mut u8 {
+    let ty_arc = m34_find_class_type(interp, name);
+    let ty_ptr: *const crate::object::RuntimeType = match &ty_arc {
+        Some(rt) => std::sync::Arc::as_ptr(rt),
+        None => std::ptr::null(),
+    };
+    let total = (HDR + payload_bytes).max(HDR);
+    interp
+        .shared
+        .heap
+        .lock()
+        .unwrap()
+        .alloc(total, ty_ptr, crate::object::GcKind::Class)
+}
+
+fn m34_alloc_jnull(interp: &mut Interpreter) -> *mut u8 {
+    m34_alloc_class_obj(interp, "JNull", 0)
+}
+
+fn m34_alloc_jbool(interp: &mut Interpreter, b: bool) -> *mut u8 {
+    let p = m34_alloc_class_obj(interp, "JBool", 8);
+    unsafe {
+        let slot = p.add(HDR) as *mut u64;
+        std::ptr::write_unaligned(slot, if b { 1 } else { 0 });
+    }
+    p
+}
+
+fn m34_alloc_jint(interp: &mut Interpreter, n: i64) -> *mut u8 {
+    let p = m34_alloc_class_obj(interp, "JInt", 8);
+    unsafe {
+        let slot = p.add(HDR) as *mut i64;
+        std::ptr::write_unaligned(slot, n);
+    }
+    p
+}
+
+fn m34_alloc_jfloat(interp: &mut Interpreter, f: f64) -> *mut u8 {
+    let p = m34_alloc_class_obj(interp, "JFloat", 8);
+    unsafe {
+        let slot = p.add(HDR) as *mut u64;
+        std::ptr::write_unaligned(slot, f.to_bits());
+    }
+    p
+}
+
+fn m34_alloc_jstring(interp: &mut Interpreter, s: &str) -> *mut u8 {
+    let sp = interp.alloc_string(s);
+    m34_alloc_jstring_from_ptr(interp, sp)
+}
+
+fn m34_alloc_jstring_from_ptr(
+    interp: &mut Interpreter,
+    sp: *const crate::object::StringRepr,
+) -> *mut u8 {
+    let p = m34_alloc_class_obj(interp, "JString", 8);
+    unsafe {
+        let slot = p.add(HDR) as *mut u64;
+        std::ptr::write_unaligned(slot, sp as u64);
+    }
+    p
+}
+
+/// Allocate a JList wrapping an existing ListRepr.  Used by
+/// `JList(items)` (compiler-side: the user-provided list).  The list's
+/// elements MUST be valid JsonValue heap pointers; the GC follows them
+/// as part of the standard list scan.
+fn m34_alloc_jlist(
+    interp: &mut Interpreter,
+    items_ptr: *const crate::object::ListRepr,
+) -> *mut u8 {
+    let p = m34_alloc_class_obj(interp, "JList", 8);
+    unsafe {
+        let slot = p.add(HDR) as *mut u64;
+        std::ptr::write_unaligned(slot, items_ptr as u64);
+    }
+    p
+}
+
+/// Allocate a JObject from a `List[Tuple[str, JsonValue]]`.  We split
+/// the pairs into two parallel Lists (keys + values) for storage —
+/// keeps the GC trace simple (each list scans its slots, the standard
+/// class scanner traces the two list pointers).
+fn m34_alloc_jobject_from_entries(
+    interp: &mut Interpreter,
+    entries_ptr: *const crate::object::ListRepr,
+) -> Result<*mut u8, VmError> {
+    if entries_ptr.is_null() {
+        return Ok(m34_alloc_jobject(
+            interp,
+            interp_alloc_empty_list(interp),
+            interp_alloc_empty_list(interp),
+        ));
+    }
+    // SAFETY: entries_ptr is a heap ListRepr.
+    let (len, data) = unsafe {
+        ((*entries_ptr).length, (*entries_ptr).data as *const u64)
+    };
+    // Each tuple is a heap object: two u64 slots after the 16-byte
+    // header.  Slot 0 = *const StringRepr (key), slot 1 = *const u8
+    // (JsonValue).
+    let keys_list = interp.alloc_list(len.max(1));
+    let vals_list = interp.alloc_list(len.max(1));
+    for i in 0..len {
+        let tuple_ptr = unsafe { std::ptr::read_unaligned(data.add(i)) } as *const u8;
+        if tuple_ptr.is_null() {
+            return Err(VmError::UncaughtException {
+                type_name: "TypeError".into(),
+                message: format!("j_object: entry {i} is null"),
+            });
+        }
+        let key_slot = unsafe { tuple_ptr.add(HDR) as *const u64 };
+        let val_slot = unsafe { tuple_ptr.add(HDR + 8) as *const u64 };
+        let key_ptr = unsafe { std::ptr::read_unaligned(key_slot) };
+        let val_ptr = unsafe { std::ptr::read_unaligned(val_slot) };
+        // SAFETY: lists were just allocated and we own them.
+        unsafe {
+            interp.list_push(keys_list, key_ptr);
+            interp.list_push(vals_list, val_ptr);
+        }
+    }
+    Ok(m34_alloc_jobject(interp, keys_list, vals_list))
+}
+
+fn interp_alloc_empty_list(interp: &Interpreter) -> *mut crate::object::ListRepr {
+    // Allocate a list via the interpreter's heap directly so we don't
+    // need a `&mut Interpreter` here (which the `m34_alloc_jobject_from_entries`
+    // path needs to keep the borrow checker happy when constructing
+    // both keys + values + the wrapping JObject in one call).
+    let size = std::mem::size_of::<crate::object::ListRepr>();
+    let ty: *const crate::object::RuntimeType =
+        std::sync::Arc::as_ptr(&interp.shared.types.list_ty);
+    let p = interp.shared.heap.lock().unwrap()
+        .alloc(size, ty, crate::object::GcKind::List);
+    let cap = 4;
+    let data = interp.shared.heap.lock().unwrap().alloc_raw(cap * 8, 8);
+    let lp = p as *mut crate::object::ListRepr;
+    unsafe {
+        (*lp).length = 0;
+        (*lp).capacity = cap;
+        (*lp).data = data;
+    }
+    lp
+}
+
+fn m34_alloc_jobject(
+    interp: &mut Interpreter,
+    keys: *mut crate::object::ListRepr,
+    values: *mut crate::object::ListRepr,
+) -> *mut u8 {
+    let p = m34_alloc_class_obj(interp, "JObject", 16);
+    unsafe {
+        let kslot = p.add(HDR) as *mut u64;
+        let vslot = p.add(HDR + 8) as *mut u64;
+        std::ptr::write_unaligned(kslot, keys as u64);
+        std::ptr::write_unaligned(vslot, values as u64);
+    }
+    p
+}
+
+// ── Class-constructor init handlers ───────────────────────────────────
+//
+// Receive `[receiver_ptr, user_value]`.  Write the user value into the
+// receiver's payload slot at offset HDR (the field offset declared in
+// the resolver is 0 — `HDR + 0` from the object base).  Return value
+// is the receiver itself (the IR discards it, but returning the
+// receiver matches the regular Unit-returning `__init__` shape).
+
+fn m34_store_payload_u64(recv_ptr: u64, value: u64, offset_bytes: usize) {
+    let obj = recv_ptr as *mut u8;
+    if obj.is_null() {
+        return;
+    }
+    unsafe {
+        let slot = obj.add(HDR + offset_bytes) as *mut u64;
+        std::ptr::write_unaligned(slot, value);
+    }
+}
+
+fn m34_init_jbool(args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let b = arg_u64(args, 1) != 0;
+    m34_store_payload_u64(recv, if b { 1 } else { 0 }, 0);
+    Ok(recv)
+}
+
+fn m34_init_jint(args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let n = arg_i64(args, 1);
+    m34_store_payload_u64(recv, n as u64, 0);
+    Ok(recv)
+}
+
+fn m34_init_jfloat(args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let bits = arg_u64(args, 1); // f64 already stored as u64 bit pattern
+    m34_store_payload_u64(recv, bits, 0);
+    Ok(recv)
+}
+
+fn m34_init_jstring(args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let sp = arg_u64(args, 1);
+    m34_store_payload_u64(recv, sp, 0);
+    Ok(recv)
+}
+
+fn m34_init_jlist(args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let list_ptr = arg_u64(args, 1);
+    m34_store_payload_u64(recv, list_ptr, 0);
+    Ok(recv)
+}
+
+/// JObject's init splits the user-supplied `List[Tuple[str, JsonValue]]`
+/// into two parallel lists (keys + values) and stores both pointers at
+/// the receiver's keys (offset 0) / values (offset 8) slots.
+fn m34_init_jobject(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let entries_ptr = arg_u64(args, 1) as *const crate::object::ListRepr;
+    if entries_ptr.is_null() {
+        let keys = interp_alloc_empty_list(interp);
+        let vals = interp_alloc_empty_list(interp);
+        m34_store_payload_u64(recv, keys as u64, 0);
+        m34_store_payload_u64(recv, vals as u64, 8);
+        return Ok(recv);
+    }
+    let (len, data) = unsafe {
+        ((*entries_ptr).length, (*entries_ptr).data as *const u64)
+    };
+    let keys = interp.alloc_list(len.max(1));
+    let vals = interp.alloc_list(len.max(1));
+    for i in 0..len {
+        let tuple_ptr = unsafe { std::ptr::read_unaligned(data.add(i)) } as *const u8;
+        if tuple_ptr.is_null() {
+            return Err(VmError::UncaughtException {
+                type_name: "TypeError".into(),
+                message: format!("JObject: entry {i} is null"),
+            });
+        }
+        let key_slot = unsafe { tuple_ptr.add(HDR) as *const u64 };
+        let val_slot = unsafe { tuple_ptr.add(HDR + 8) as *const u64 };
+        let key_ptr = unsafe { std::ptr::read_unaligned(key_slot) };
+        let val_ptr = unsafe { std::ptr::read_unaligned(val_slot) };
+        unsafe {
+            interp.list_push(keys, key_ptr);
+            interp.list_push(vals, val_ptr);
+        }
+    }
+    m34_store_payload_u64(recv, keys as u64, 0);
+    m34_store_payload_u64(recv, vals as u64, 8);
+    Ok(recv)
+}
+
+// ── json.parse ────────────────────────────────────────────────────────
+
+fn m34_json_parse(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let s = arg_str(args, 0);
+    let v: serde_json::Value = serde_json::from_str(&s).map_err(|e| {
+        VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("json.parse: {e}"),
+        }
+    })?;
+    let p = m34_build_from_serde(interp, &v);
+    Ok(p as u64)
+}
+
+fn m34_build_from_serde(
+    interp: &mut Interpreter,
+    v: &serde_json::Value,
+) -> *mut u8 {
+    match v {
+        serde_json::Value::Null => m34_alloc_jnull(interp),
+        serde_json::Value::Bool(b) => m34_alloc_jbool(interp, *b),
+        serde_json::Value::Number(n) => {
+            // JSON numbers are conceptually one type; we route ints
+            // through JInt and the rest through JFloat to give pattern-
+            // matching code two distinct cases.  serde_json::Number
+            // preserves the original integer flavour when the input was
+            // an integer (no fractional component, in i64 range).
+            if let Some(i) = n.as_i64() {
+                m34_alloc_jint(interp, i)
+            } else if let Some(u) = n.as_u64() {
+                // u64 > i64::MAX — clamp to i64::MAX with a JInt; users
+                // wanting full u64 precision should use JFloat (lossy
+                // above 2^53).  v0.4 may add JBigInt.
+                m34_alloc_jint(interp, u.min(i64::MAX as u64) as i64)
+            } else {
+                m34_alloc_jfloat(interp, n.as_f64().unwrap_or(0.0))
+            }
+        }
+        serde_json::Value::String(s) => m34_alloc_jstring(interp, s),
+        serde_json::Value::Array(arr) => {
+            let list = interp.alloc_list(arr.len());
+            for item in arr {
+                let elem = m34_build_from_serde(interp, item) as u64;
+                unsafe { interp.list_push(list, elem) };
+            }
+            m34_alloc_jlist(interp, list)
+        }
+        serde_json::Value::Object(map) => {
+            let keys = interp.alloc_list(map.len());
+            let vals = interp.alloc_list(map.len());
+            for (k, val) in map.iter() {
+                let kp = interp.alloc_string(k) as u64;
+                let vp = m34_build_from_serde(interp, val) as u64;
+                unsafe {
+                    interp.list_push(keys, kp);
+                    interp.list_push(vals, vp);
+                }
+            }
+            m34_alloc_jobject(interp, keys, vals)
+        }
+    }
+}
+
+// ── json.stringify ────────────────────────────────────────────────────
+
+fn m34_json_stringify(
+    interp: &mut Interpreter,
+    args: &[u64],
+    pretty: bool,
+    indent: i32,
+) -> Result<u64, VmError> {
+    let root = arg_u64(args, 0) as *const u8;
+    let mut buf = String::new();
+    let indent = indent.clamp(0, 32) as usize;
+    m34_stringify_into(interp, root, &mut buf, pretty, indent, 0);
+    let p = interp.alloc_string(&buf);
+    Ok(p as u64)
+}
+
+fn m34_stringify_into(
+    interp: &Interpreter,
+    obj: *const u8,
+    out: &mut String,
+    pretty: bool,
+    indent: usize,
+    depth: usize,
+) {
+    if obj.is_null() {
+        out.push_str("null");
+        return;
+    }
+    let hdr = obj as *const crate::object::ObjectHeader;
+    let rt = unsafe { (*hdr).vtable };
+    let name = if rt.is_null() {
+        String::new()
+    } else {
+        unsafe { (*rt).name.clone() }
+    };
+    match name.as_str() {
+        "JNull" => out.push_str("null"),
+        "JBool" => {
+            let b = unsafe {
+                std::ptr::read_unaligned(obj.add(HDR) as *const u64)
+            };
+            out.push_str(if b != 0 { "true" } else { "false" });
+        }
+        "JInt" => {
+            let n = unsafe {
+                std::ptr::read_unaligned(obj.add(HDR) as *const i64)
+            };
+            out.push_str(&n.to_string());
+        }
+        "JFloat" => {
+            let bits = unsafe {
+                std::ptr::read_unaligned(obj.add(HDR) as *const u64)
+            };
+            let f = f64::from_bits(bits);
+            if f.is_finite() {
+                // Render integers without trailing `.0` (matches
+                // serde_json's compact behaviour for f64-stored ints).
+                if f == f.trunc() && f.abs() < 1e16 {
+                    out.push_str(&format!("{}", f as i64));
+                } else {
+                    out.push_str(&f.to_string());
+                }
+            } else {
+                // JSON has no NaN / Infinity — emit `null` to keep the
+                // output structurally valid.  Programs that need the
+                // exact value should not put NaN into a JFloat in the
+                // first place.
+                out.push_str("null");
+            }
+        }
+        "JString" => {
+            let sp = unsafe {
+                std::ptr::read_unaligned(obj.add(HDR) as *const u64)
+            } as *const crate::object::StringRepr;
+            let s = unsafe { read_str(sp) };
+            out.push_str(&serde_json::Value::String(s).to_string());
+        }
+        "JList" => {
+            let list_ptr = unsafe {
+                std::ptr::read_unaligned(obj.add(HDR) as *const u64)
+            } as *const crate::object::ListRepr;
+            if list_ptr.is_null() {
+                out.push_str("[]");
+                return;
+            }
+            let (len, data) = unsafe {
+                ((*list_ptr).length, (*list_ptr).data as *const u64)
+            };
+            if len == 0 {
+                out.push_str("[]");
+                return;
+            }
+            out.push('[');
+            for i in 0..len {
+                if i > 0 {
+                    out.push(',');
+                }
+                if pretty {
+                    out.push('\n');
+                    for _ in 0..(indent * (depth + 1)) { out.push(' '); }
+                }
+                let elem = unsafe { std::ptr::read_unaligned(data.add(i)) } as *const u8;
+                m34_stringify_into(interp, elem, out, pretty, indent, depth + 1);
+            }
+            if pretty {
+                out.push('\n');
+                for _ in 0..(indent * depth) { out.push(' '); }
+            }
+            out.push(']');
+        }
+        "JObject" => {
+            let kptr = unsafe {
+                std::ptr::read_unaligned(obj.add(HDR) as *const u64)
+            } as *const crate::object::ListRepr;
+            let vptr = unsafe {
+                std::ptr::read_unaligned(obj.add(HDR + 8) as *const u64)
+            } as *const crate::object::ListRepr;
+            if kptr.is_null() || vptr.is_null() {
+                out.push_str("{}");
+                return;
+            }
+            let (klen, kdata) = unsafe {
+                ((*kptr).length, (*kptr).data as *const u64)
+            };
+            let (_vlen, vdata) = unsafe {
+                ((*vptr).length, (*vptr).data as *const u64)
+            };
+            if klen == 0 {
+                out.push_str("{}");
+                return;
+            }
+            out.push('{');
+            for i in 0..klen {
+                if i > 0 {
+                    out.push(',');
+                }
+                if pretty {
+                    out.push('\n');
+                    for _ in 0..(indent * (depth + 1)) { out.push(' '); }
+                }
+                let kp = unsafe { std::ptr::read_unaligned(kdata.add(i)) } as *const crate::object::StringRepr;
+                let k = unsafe { read_str(kp) };
+                out.push_str(&serde_json::Value::String(k).to_string());
+                out.push(':');
+                if pretty { out.push(' '); }
+                let vp = unsafe { std::ptr::read_unaligned(vdata.add(i)) } as *const u8;
+                m34_stringify_into(interp, vp, out, pretty, indent, depth + 1);
+            }
+            if pretty {
+                out.push('\n');
+                for _ in 0..(indent * depth) { out.push(' '); }
+            }
+            out.push('}');
+        }
+        _ => {
+            // Unknown class — fall back to null so the output is at
+            // least structurally valid JSON.
+            out.push_str("null");
+        }
+    }
+}
+
+// ── JList methods ─────────────────────────────────────────────────────
+
+fn m34_jlist_get_data(self_ptr: u64) -> *const crate::object::ListRepr {
+    let obj = self_ptr as *const u8;
+    if obj.is_null() {
+        return std::ptr::null();
+    }
+    unsafe {
+        std::ptr::read_unaligned(obj.add(HDR) as *const u64) as *const crate::object::ListRepr
+    }
+}
+
+fn m34_jlist_length(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let data = m34_jlist_get_data(arg_u64(args, 0));
+    let len = if data.is_null() { 0 } else { unsafe { (*data).length } };
+    Ok(len as u64)
+}
+
+fn m34_jlist_get(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let data = m34_jlist_get_data(arg_u64(args, 0));
+    let i = arg_i64(args, 1);
+    if data.is_null() {
+        return Err(VmError::UncaughtException {
+            type_name: "IndexError".into(),
+            message: "JList.get: list is null".into(),
+        });
+    }
+    let len = unsafe { (*data).length } as i64;
+    if i < 0 || i >= len {
+        return Err(VmError::UncaughtException {
+            type_name: "IndexError".into(),
+            message: format!("JList.get: index {i} out of range (len={len})"),
+        });
+    }
+    let p = unsafe {
+        let buf = (*data).data as *const u64;
+        std::ptr::read_unaligned(buf.add(i as usize))
+    };
+    Ok(p)
+}
+
+fn m34_jlist_items(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    // Defensive copy: return a fresh list containing the same element
+    // pointers.  Without this, callers could mutate our internal
+    // storage (once we have a JList.append in v0.4) and break invariants.
+    let data = m34_jlist_get_data(arg_u64(args, 0));
+    if data.is_null() {
+        let lst = interp.alloc_list(0);
+        return Ok(lst as u64);
+    }
+    let len = unsafe { (*data).length };
+    let buf = unsafe { (*data).data as *const u64 };
+    let new_list = interp.alloc_list(len);
+    for i in 0..len {
+        let elem = unsafe { std::ptr::read_unaligned(buf.add(i)) };
+        unsafe { interp.list_push(new_list, elem) };
+    }
+    Ok(new_list as u64)
+}
+
+// ── JObject methods ───────────────────────────────────────────────────
+
+fn m34_jobject_get_lists(
+    self_ptr: u64,
+) -> (*const crate::object::ListRepr, *const crate::object::ListRepr) {
+    let obj = self_ptr as *const u8;
+    if obj.is_null() {
+        return (std::ptr::null(), std::ptr::null());
+    }
+    unsafe {
+        let k = std::ptr::read_unaligned(obj.add(HDR) as *const u64)
+            as *const crate::object::ListRepr;
+        let v = std::ptr::read_unaligned(obj.add(HDR + 8) as *const u64)
+            as *const crate::object::ListRepr;
+        (k, v)
+    }
+}
+
+fn m34_jobject_find_index(
+    keys: *const crate::object::ListRepr,
+    needle: &str,
+) -> Option<usize> {
+    if keys.is_null() {
+        return None;
+    }
+    let (len, data) = unsafe {
+        ((*keys).length, (*keys).data as *const u64)
+    };
+    for i in 0..len {
+        let sp = unsafe { std::ptr::read_unaligned(data.add(i)) } as *const crate::object::StringRepr;
+        let s = unsafe { read_str(sp) };
+        if s == needle {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn m34_jobject_get(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let (keys, vals) = m34_jobject_get_lists(arg_u64(args, 0));
+    let needle = arg_str(args, 1);
+    match m34_jobject_find_index(keys, &needle) {
+        // `none` is the high-bit sentinel that `ConstNone` emits, not
+        // the all-zeros pointer (which would be hard to distinguish
+        // from a legitimate JsonValue heap address).  Match what
+        // DictGet does for absent keys.
+        None => Ok(NONE_SENTINEL),
+        Some(idx) => {
+            let buf = unsafe { (*vals).data as *const u64 };
+            let p = unsafe { std::ptr::read_unaligned(buf.add(idx)) };
+            Ok(p)
+        }
+    }
+}
+
+fn m34_jobject_has(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let (keys, _) = m34_jobject_get_lists(arg_u64(args, 0));
+    let needle = arg_str(args, 1);
+    let ok = m34_jobject_find_index(keys, &needle).is_some();
+    Ok(if ok { 1 } else { 0 })
+}
+
+fn m34_jobject_keys(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let (keys, _) = m34_jobject_get_lists(arg_u64(args, 0));
+    if keys.is_null() {
+        let lst = interp.alloc_list(0);
+        return Ok(lst as u64);
+    }
+    let len = unsafe { (*keys).length };
+    let buf = unsafe { (*keys).data as *const u64 };
+    let new_list = interp.alloc_list(len);
+    for i in 0..len {
+        let elem = unsafe { std::ptr::read_unaligned(buf.add(i)) };
+        unsafe { interp.list_push(new_list, elem) };
+    }
+    Ok(new_list as u64)
+}
+
+fn m34_jobject_length(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let (keys, _) = m34_jobject_get_lists(arg_u64(args, 0));
+    let len = if keys.is_null() { 0 } else { unsafe { (*keys).length } };
+    Ok(len as u64)
 }
 
 #[cfg(test)]

@@ -1572,15 +1572,152 @@ Semantics:
   Useful for hand-building JSON output (escape variables, concatenate
   with the structural parts).
 
-What v0.2 does **not** ship:
+What v0.2 does **not** ship (but v0.3 — see §9.13.1 below — does):
 
-* A typed `JsonValue` tree exposed through the stdlib.  M18's
-  `examples/json_parse_v2.spy` keeps the sealed-class hierarchy
-  approach for programs that want pattern matching over JSON; the
-  built-in `json` module is the ergonomic validate/reserialize subset.
-  Typed-class registration inside stdlib modules is v0.3 work.
+* ~~A typed `JsonValue` tree exposed through the stdlib.~~ Shipped in
+  M34 (v0.3) — see §9.13.1.
 * Streaming / incremental parse.  Pull or SAX-style interfaces are out
-  of scope for v0.2.
+  of scope for v0.3.
+
+#### 9.13.1 Typed `JsonValue` tree (v0.3 — M34)
+
+The flat surface above (`parse_to_string` / `is_valid` / `pretty` /
+`escape` / `minify`) covers programs that want validation and
+canonical reserialization but not structural access.  M34 adds a
+*typed* surface for programs that want to walk a JSON document with
+pattern matching — the same shape `examples/json_parse_v2.spy`
+defines in user code, but now built into the standard library.
+
+```
+sealed class JsonValue: ...
+
+final class JNull(JsonValue): ...
+final class JBool(JsonValue):
+    value: bool
+final class JInt(JsonValue):
+    value: i64
+final class JFloat(JsonValue):
+    value: f64
+final class JString(JsonValue):
+    value: str
+final class JList(JsonValue):
+    # Internal storage: List[JsonValue].  Destructure via
+    # `case JList(items):` to access directly.
+    fn length(self) -> i64
+    fn get(self, i: i64) -> JsonValue       # raises IndexError
+    fn items(self) -> List[JsonValue]       # defensive copy
+final class JObject(JsonValue):
+    # Internal storage: parallel keys + values lists.
+    fn get(self, k: str) -> JsonValue?      # none if absent
+    fn has(self, k: str) -> bool
+    fn keys(self) -> List[str]              # insertion order
+    fn length(self) -> i64
+
+# Top-level functions on the json module:
+fn parse(s: str) -> JsonValue               # raises ValueError on malformed input
+fn stringify(v: JsonValue) -> str           # compact canonical form
+fn stringify_pretty(v: JsonValue, indent: i32) -> str
+
+# Constructor helpers — exactly equivalent to the class constructors,
+# named for symmetry with `j_object`/`j_list` where the class shape
+# isn't as natural a `List[Tuple[...]]` argument:
+fn j_null() -> JsonValue
+fn j_bool(b: bool) -> JsonValue
+fn j_int(n: i64) -> JsonValue
+fn j_float(f: f64) -> JsonValue
+fn j_string(s: str) -> JsonValue
+fn j_list(items: List[JsonValue]) -> JsonValue
+fn j_object(entries: List[Tuple[str, JsonValue]]) -> JsonValue
+```
+
+Canonical use shape:
+
+```python
+import json
+
+let parsed: JsonValue = json.parse('{"name": "alice", "age": 30}')
+match parsed:
+    case JObject(_):
+        if isinstance(parsed, JObject):
+            let name_v: JsonValue? = parsed.get("name")
+            if name_v is not none:
+                match name_v:
+                    case JString(s):
+                        println("name = " + s)
+```
+
+Semantics:
+
+* `parse(s)` recursively builds a `JsonValue` tree.  JSON `null` /
+  `true` / `false` map to `JNull` / `JBool`; numbers map to `JInt`
+  when the input has no fractional part and fits in `i64`, else
+  `JFloat`; strings to `JString`; arrays to `JList`; objects to
+  `JObject` preserving insertion order.  Malformed input raises
+  `ValueError`.
+* `stringify(v)` emits compact canonical JSON.  `JObject` keys appear
+  in insertion order (matching `parse`'s preserved order — *unlike*
+  `parse_to_string` which sorts keys lexicographically via serde_json's
+  `BTreeMap`).  `JFloat` values that have no fractional part are
+  emitted without a trailing `.0` (so an integer round-trips through
+  `JFloat` and back as the integer-shaped JSON form).  `NaN` /
+  `+Inf` / `-Inf` are emitted as `null` because JSON has no encoding
+  for them.
+* `stringify_pretty(v, indent)` is the indented form; `indent` is
+  clamped to `[0, 32]`.
+* `JList.get(self, i)` and `JList.length()` work on the underlying
+  `List[JsonValue]`.  `case JList(items):` lets user code skip the
+  method API and use list operations (`items[i]`, `len(items)`)
+  directly — both shapes are supported.
+* `JObject.get(self, k)` returns `none` if `k` is absent (not
+  `JNull`); use `has` for a presence check.
+
+Construction shapes — both produce the same heap object:
+
+```python
+# Class constructor:
+let v: JsonValue = JString("alice")
+
+# Module helper (equivalent):
+let v: JsonValue = json.j_string("alice")
+```
+
+Implementation notes (informative):
+
+* The 7 classes are registered as ordinary `is_native: false` classes
+  in the prelude (alongside `Channel` / `Thread` / `io.File`) so they
+  participate in M11's vtable / M16's isinstance + match infrastructure
+  without bespoke runtime code.  `from json import JsonValue` is a
+  no-op because the names are already in scope (legacy "prelude wins"
+  fall-through in the import resolver).
+* JList stores its data as a `*const ListRepr` pointer at field offset 0;
+  JObject stores parallel `keys` / `values` list pointers at offsets 0 / 8.
+  The GC's `GcKind::Class` scanner traces those pointers automatically.
+  No bespoke root scan is needed.
+* Constructors with payload (everything except `JNull`) are special-
+  cased in the IR's `lower_call`: the IR emits an `Alloc` op (with the
+  correct runtime type id, so `isinstance` works) followed by a
+  `NativeCall` to a class-specific init handler that stores the payload
+  field.  Module-helper calls (`json.j_string(s)`) instead go through
+  a single `NativeCall` to a parallel `JsonHelper*` handler that
+  allocates + populates + returns.
+
+What v0.3 does **not** ship (deferred to v0.4):
+
+* Mutation methods (`JList.append` / `JList.set` / `JObject.set` /
+  `JObject.remove`).  JsonValue is immutable in v0.3 — the typical
+  parse → walk → re-serialise pattern doesn't need mutation, and
+  keeping immutability lets the parser share JString instances across
+  multiple occurrences of the same key.
+* A dedicated `JBigInt` variant for JSON numbers above `i64::MAX`.
+  v0.3 routes such numbers through `JFloat` (lossy above 2^53); v0.4
+  will add `JBigInt` once the BigInt prelude work catches up.
+* Iteration helpers like `JObject.iter_items() -> List[Tuple[str, JsonValue]]`
+  for paired key/value walks.  v0.3 users compose `keys()` + `get(k)`.
+* Module-scoped class registration.  Per the v0.4 plan, the prelude
+  registration above is an interim — v0.4's stdlib-class infrastructure
+  will let `from json import JsonValue` actually do something (rather
+  than just shadow a no-op), and the JsonValue family will be
+  un-shadowed from the prelude scope.  No source-level API change.
 
 ### 9.14 Module `re` (v0.2 — M20c)
 

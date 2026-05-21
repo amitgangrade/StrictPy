@@ -1,0 +1,159 @@
+"""M34 typed-JsonValue demo — the v0.3 ergonomic upgrade to M20c.
+
+This file shows the four canonical patterns users will reach for when
+working with JSON in StrictPy v0.3+:
+
+  1. Parse a JSON string into a typed `JsonValue` tree.
+  2. Walk that tree with `match v: case JFoo(...):` patterns.
+  3. Build a JsonValue programmatically with the `json.j_*` helpers
+     (and the equivalent class constructors).
+  4. Serialise back with `json.stringify` / `json.stringify_pretty`.
+
+Compare to `examples/json_parse_v2.spy` (M18) — that file defines the
+*same* sealed hierarchy in user code from scratch.  The whole point of
+M34 is that the user no longer has to.
+
+Run it: `cargo run -p strictpy --release -- examples/json_typed_demo.spy`
+"""
+
+import json
+
+# ─────────────────────────────────────────────────────────────────────
+# Pattern 1: parse + walk via match
+# ─────────────────────────────────────────────────────────────────────
+#
+# `describe(v)` recursively walks any JsonValue and emits a one-line
+# rendering. The match arms enumerate all 7 cases of the sealed
+# hierarchy — exhaustive, so the typechecker will not warn about a
+# fall-through.  We keep the final `return ""` only to satisfy the
+# "every path returns" rule for the type system (M16 exhaustiveness is
+# a warning, not an error).
+
+fn describe(v: JsonValue) -> str:
+    match v:
+        case JNull():
+            return "null"
+        case JBool(b):
+            if b:
+                return "true"
+            return "false"
+        case JInt(n):
+            return "int(" + str(n) + ")"
+        case JFloat(f):
+            return "float(" + str(f) + ")"
+        case JString(s):
+            return "str(\"" + s + "\")"
+        case JList(items):
+            # `items` is the destructured `List[JsonValue]` field.
+            n: i64 = i64(len(items))
+            out: str = "list[" + str(n) + "](["
+            i: i64 = 0
+            while i < n:
+                if i > 0:
+                    out = out + ", "
+                out = out + describe(items[i])
+                i = i + 1
+            return out + "])"
+        case JObject(_):
+            # For JObject we use the method API instead of destructuring
+            # — `o.keys()` returns the key list, `o.get(k)` returns the
+            # value (or `none` if absent).  Demonstrates both shapes.
+            if isinstance(v, JObject):
+                ks: List[str] = v.keys()
+                n: i64 = i64(len(ks))
+                out: str = "obj{" + str(v.length()) + "}({"
+                i: i64 = 0
+                while i < n:
+                    if i > 0:
+                        out = out + ", "
+                    k: str = ks[i]
+                    vv: JsonValue? = v.get(k)
+                    if vv is not none:
+                        out = out + "\"" + k + "\": " + describe(vv)
+                    i = i + 1
+                return out + "})"
+    return ""
+
+# ─────────────────────────────────────────────────────────────────────
+# Pattern 2: build a JsonValue programmatically
+# ─────────────────────────────────────────────────────────────────────
+#
+# Two equivalent forms — class constructors (JString("x")) or module
+# helpers (json.j_string("x")).  We use both in this demo to show that
+# they produce the same heap shape.
+
+fn build_user(name: str, age: i64, tags: List[str]) -> JsonValue:
+    # Build the tags list as JsonValue elements.
+    tag_values: List[JsonValue] = []
+    i: i64 = 0
+    n: i64 = i64(len(tags))
+    while i < n:
+        tag_values.append(JString(tags[i]))
+        i = i + 1
+    pairs: List[Tuple[str, JsonValue]] = [
+        ("name", JString(name)),
+        ("age",  JInt(age)),
+        ("tags", json.j_list(tag_values)),
+        ("active", JBool(true)),
+    ]
+    return json.j_object(pairs)
+
+# ─────────────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────────────
+
+fn main() -> i32:
+    # ── (a) Parse a small JSON document ──────────────────────────────
+    src: str = "{\"name\": \"alice\", \"age\": 30, \"tags\": [\"admin\", \"user\"], \"active\": true}"
+    parsed: JsonValue = json.parse(src)
+    println("parsed:    " + describe(parsed))
+
+    # Direct field lookup via `match v: case JObject(_):` + `v.get(k)`.
+    match parsed:
+        case JObject(_):
+            if isinstance(parsed, JObject):
+                name_v: JsonValue? = parsed.get("name")
+                if name_v is not none:
+                    match name_v:
+                        case JString(s):
+                            println("greeted:   hello, " + s)
+
+    # ── (b) Build the same shape programmatically ────────────────────
+    tags: List[str] = ["admin", "user"]
+    built: JsonValue = build_user("alice", 30i64, tags)
+    println("built:     " + describe(built))
+
+    # ── (c) Round-trip the built value through stringify + reparse ───
+    encoded: str = json.stringify(built)
+    println("encoded:   " + encoded)
+    reparsed: JsonValue = json.parse(encoded)
+    println("reparsed:  " + describe(reparsed))
+
+    # ── (d) Pretty-printed JSON ──────────────────────────────────────
+    println("pretty:")
+    println(json.stringify_pretty(built, 2i32))
+
+    # ── (e) Error path: malformed JSON raises ValueError ─────────────
+    try:
+        bad: JsonValue = json.parse("{not json}")
+        println("should not reach")
+    except ValueError as e:
+        println("caught:    " + e.type_name + " (as expected)")
+
+    # ── (f) Element-by-element list walking ──────────────────────────
+    nums: JsonValue = json.parse("[10, 20, 30, 40]")
+    if isinstance(nums, JList):
+        println("list len:  " + str(nums.length()))
+        items: List[JsonValue] = nums.items()
+        total: i64 = 0
+        i: i64 = 0
+        n: i64 = i64(len(items))
+        while i < n:
+            match items[i]:
+                case JInt(v):
+                    total = total + v
+            i = i + 1
+        println("sum:       " + str(total))
+
+    println("done")
+    return 0
