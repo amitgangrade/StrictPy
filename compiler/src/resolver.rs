@@ -4160,6 +4160,374 @@ impl Resolver {
             ],
         };
         self.stdlib_modules.insert("http_client".into(), http_client_mod);
+
+        // ── M37: `tabular` module (DataFrame + sealed Column hierarchy) ─
+        //
+        // First Pandas-shaped data package for v0.3.  First stdlib package
+        // to register its classes module-scoped from the start (no prelude
+        // bloat) via the post-M36 `StdlibItemKind::Class` path.  Class
+        // layouts + class_name_to_id entries are populated here so the
+        // `tabular` module's typed function signatures (returning
+        // `ColumnI64` etc.) can reference the class IDs.  No symbols are
+        // inserted into prelude_scope — users access the class names via
+        // `from tabular import DataFrame, ColumnI64, ...` (the
+        // M36 Class-item import path materialises a fresh class symbol
+        // in module_scope) or via `tabular.col_i64(...)` factory calls.
+        self.m37_register_tabular_classes_and_module();
+    }
+
+    /// M37: Register the 6 tabular classes (Column + 5 subclasses +
+    /// DataFrame) and the `tabular` stdlib module that exposes them.
+    /// See `seed_stdlib_modules` for the broader context.
+    fn m37_register_tabular_classes_and_module(&mut self) {
+        use crate::types::PrimTy;
+        // ── Class IDs (allocated up front so layouts can reference each
+        // other — e.g. DataFrame.columns: List[Column]).
+        let m37_col_cid = self.fresh_class();
+        let m37_col_i64_cid = self.fresh_class();
+        let m37_col_f64_cid = self.fresh_class();
+        let m37_col_str_cid = self.fresh_class();
+        let m37_col_bool_cid = self.fresh_class();
+        let m37_col_dt_cid = self.fresh_class();
+        let m37_df_cid = self.fresh_class();
+
+        self.class_name_to_id.insert("Column".into(), m37_col_cid);
+        self.class_name_to_id.insert("ColumnI64".into(), m37_col_i64_cid);
+        self.class_name_to_id.insert("ColumnF64".into(), m37_col_f64_cid);
+        self.class_name_to_id.insert("ColumnStr".into(), m37_col_str_cid);
+        self.class_name_to_id.insert("ColumnBool".into(), m37_col_bool_cid);
+        self.class_name_to_id.insert("ColumnDateTime".into(), m37_col_dt_cid);
+        self.class_name_to_id.insert("DataFrame".into(), m37_df_cid);
+
+        // ── Type aliases ──
+        let m37_i64 = Ty::Primitive(PrimTy::I64);
+        let m37_f64 = Ty::Primitive(PrimTy::F64);
+        let m37_str = Ty::Primitive(PrimTy::Str);
+        let m37_bool = Ty::Primitive(PrimTy::Bool);
+        let m37_unit = Ty::Primitive(PrimTy::Unit);
+        let m37_list_i64 = Ty::Generic { base: TypeCtor::List, args: vec![m37_i64.clone()] };
+        let m37_list_f64 = Ty::Generic { base: TypeCtor::List, args: vec![m37_f64.clone()] };
+        let m37_list_str = Ty::Generic { base: TypeCtor::List, args: vec![m37_str.clone()] };
+        let m37_list_bool = Ty::Generic { base: TypeCtor::List, args: vec![m37_bool.clone()] };
+        let m37_list_list_str = Ty::Generic {
+            base: TypeCtor::List,
+            args: vec![m37_list_str.clone()],
+        };
+        let m37_col_ty = Ty::Class(m37_col_cid);
+        let m37_col_i64_ty = Ty::Class(m37_col_i64_cid);
+        let m37_col_f64_ty = Ty::Class(m37_col_f64_cid);
+        let m37_col_str_ty = Ty::Class(m37_col_str_cid);
+        let m37_col_bool_ty = Ty::Class(m37_col_bool_cid);
+        let m37_col_dt_ty = Ty::Class(m37_col_dt_cid);
+        let m37_df_ty = Ty::Class(m37_df_cid);
+        let m37_list_col_ty = Ty::Generic { base: TypeCtor::List, args: vec![m37_col_ty.clone()] };
+        let m37_schema_ty = Ty::Generic {
+            base: TypeCtor::List,
+            args: vec![Ty::Tuple(vec![m37_str.clone(), m37_str.clone()])],
+        };
+
+        // ── Helper: per-column method list (length / dtype / is_null /
+        // null_count + typed get).  Each subclass gets its own list with
+        // the typed get's return type bound to its element type.
+        let m37_shared_methods = |get_method: MethodSig| -> Vec<MethodSig> {
+            vec![
+                MethodSig { name: "length".into(),     params: vec![], ret: m37_i64.clone() },
+                MethodSig { name: "dtype".into(),      params: vec![], ret: m37_str.clone() },
+                MethodSig { name: "is_null".into(),    params: vec![m37_i64.clone()], ret: m37_bool.clone() },
+                MethodSig { name: "null_count".into(), params: vec![], ret: m37_i64.clone() },
+                get_method,
+            ]
+        };
+
+        // ── Base sealed Column class (no fields, no methods — subclasses
+        // carry per-type storage; sealed means subclasses can be defined
+        // here but NOT in user code).
+        self.class_layouts.insert(m37_col_cid, ClassLayout {
+            id: m37_col_cid, name: "Column".into(), base: None,
+            is_open: false, is_sealed: true,
+            fields: vec![], methods: vec![],
+            generics: vec![], generic_tvars: vec![],
+            is_native: false, payload_size: 0,
+        });
+
+        // ── ColumnI64 — { values: List[i64], nulls: List[bool], length: i64 }
+        self.class_layouts.insert(m37_col_i64_cid, ClassLayout {
+            id: m37_col_i64_cid, name: "ColumnI64".into(), base: Some(m37_col_cid),
+            is_open: false, is_sealed: false,
+            fields: vec![
+                FieldInfo { name: "values".into(), ty: m37_list_i64.clone(), offset: 0 },
+                FieldInfo { name: "nulls".into(),  ty: m37_list_bool.clone(), offset: 8 },
+                FieldInfo { name: "length".into(), ty: m37_i64.clone(),       offset: 16 },
+            ],
+            methods: {
+                let mut v = m37_shared_methods(MethodSig {
+                    name: "get".into(),
+                    params: vec![m37_i64.clone()],
+                    ret: Ty::Nullable(Box::new(m37_i64.clone())),
+                });
+                v.push(MethodSig {
+                    name: "eq".into(), params: vec![m37_i64.clone()], ret: m37_col_bool_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "gt".into(), params: vec![m37_i64.clone()], ret: m37_col_bool_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "lt".into(), params: vec![m37_i64.clone()], ret: m37_col_bool_ty.clone(),
+                });
+                v
+            },
+            generics: vec![], generic_tvars: vec![],
+            is_native: false, payload_size: 24,
+        });
+
+        // ── ColumnF64 — { values: List[f64], nulls: List[bool], length: i64 }
+        self.class_layouts.insert(m37_col_f64_cid, ClassLayout {
+            id: m37_col_f64_cid, name: "ColumnF64".into(), base: Some(m37_col_cid),
+            is_open: false, is_sealed: false,
+            fields: vec![
+                FieldInfo { name: "values".into(), ty: m37_list_f64.clone(), offset: 0 },
+                FieldInfo { name: "nulls".into(),  ty: m37_list_bool.clone(), offset: 8 },
+                FieldInfo { name: "length".into(), ty: m37_i64.clone(),       offset: 16 },
+            ],
+            methods: {
+                let mut v = m37_shared_methods(MethodSig {
+                    name: "get".into(),
+                    params: vec![m37_i64.clone()],
+                    ret: Ty::Nullable(Box::new(m37_f64.clone())),
+                });
+                v.push(MethodSig {
+                    name: "eq".into(), params: vec![m37_f64.clone()], ret: m37_col_bool_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "gt".into(), params: vec![m37_f64.clone()], ret: m37_col_bool_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "lt".into(), params: vec![m37_f64.clone()], ret: m37_col_bool_ty.clone(),
+                });
+                v
+            },
+            generics: vec![], generic_tvars: vec![],
+            is_native: false, payload_size: 24,
+        });
+
+        // ── ColumnStr — { values: List[str], nulls: List[bool], length: i64 }
+        self.class_layouts.insert(m37_col_str_cid, ClassLayout {
+            id: m37_col_str_cid, name: "ColumnStr".into(), base: Some(m37_col_cid),
+            is_open: false, is_sealed: false,
+            fields: vec![
+                FieldInfo { name: "values".into(), ty: m37_list_str.clone(), offset: 0 },
+                FieldInfo { name: "nulls".into(),  ty: m37_list_bool.clone(), offset: 8 },
+                FieldInfo { name: "length".into(), ty: m37_i64.clone(),       offset: 16 },
+            ],
+            methods: {
+                let mut v = m37_shared_methods(MethodSig {
+                    name: "get".into(),
+                    params: vec![m37_i64.clone()],
+                    ret: Ty::Nullable(Box::new(m37_str.clone())),
+                });
+                v.push(MethodSig {
+                    name: "eq".into(), params: vec![m37_str.clone()], ret: m37_col_bool_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "contains".into(), params: vec![m37_str.clone()], ret: m37_col_bool_ty.clone(),
+                });
+                v
+            },
+            generics: vec![], generic_tvars: vec![],
+            is_native: false, payload_size: 24,
+        });
+
+        // ── ColumnBool — { values: List[bool], nulls: List[bool], length: i64 }
+        self.class_layouts.insert(m37_col_bool_cid, ClassLayout {
+            id: m37_col_bool_cid, name: "ColumnBool".into(), base: Some(m37_col_cid),
+            is_open: false, is_sealed: false,
+            fields: vec![
+                FieldInfo { name: "values".into(), ty: m37_list_bool.clone(), offset: 0 },
+                FieldInfo { name: "nulls".into(),  ty: m37_list_bool.clone(), offset: 8 },
+                FieldInfo { name: "length".into(), ty: m37_i64.clone(),       offset: 16 },
+            ],
+            methods: {
+                let mut v = m37_shared_methods(MethodSig {
+                    name: "get".into(),
+                    params: vec![m37_i64.clone()],
+                    ret: Ty::Nullable(Box::new(m37_bool.clone())),
+                });
+                v.push(MethodSig {
+                    name: "and_".into(), params: vec![m37_col_bool_ty.clone()], ret: m37_col_bool_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "or_".into(), params: vec![m37_col_bool_ty.clone()], ret: m37_col_bool_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "not_".into(), params: vec![], ret: m37_col_bool_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "count_true".into(), params: vec![], ret: m37_i64.clone(),
+                });
+                v
+            },
+            generics: vec![], generic_tvars: vec![],
+            is_native: false, payload_size: 24,
+        });
+
+        // ── ColumnDateTime — values: List[i64] of epoch-ms.
+        self.class_layouts.insert(m37_col_dt_cid, ClassLayout {
+            id: m37_col_dt_cid, name: "ColumnDateTime".into(), base: Some(m37_col_cid),
+            is_open: false, is_sealed: false,
+            fields: vec![
+                FieldInfo { name: "values".into(), ty: m37_list_i64.clone(), offset: 0 },
+                FieldInfo { name: "nulls".into(),  ty: m37_list_bool.clone(), offset: 8 },
+                FieldInfo { name: "length".into(), ty: m37_i64.clone(),       offset: 16 },
+            ],
+            methods: m37_shared_methods(MethodSig {
+                name: "get_ms".into(),
+                params: vec![m37_i64.clone()],
+                ret: Ty::Nullable(Box::new(m37_i64.clone())),
+            }),
+            generics: vec![], generic_tvars: vec![],
+            is_native: false, payload_size: 24,
+        });
+
+        // ── DataFrame — { names: List[str], columns: List[Column], nrows: i64 }
+        self.class_layouts.insert(m37_df_cid, ClassLayout {
+            id: m37_df_cid, name: "DataFrame".into(), base: None,
+            is_open: false, is_sealed: false,
+            fields: vec![
+                FieldInfo { name: "names".into(),   ty: m37_list_str.clone(),     offset: 0 },
+                FieldInfo { name: "columns".into(), ty: m37_list_col_ty.clone(), offset: 8 },
+                FieldInfo { name: "nrows".into(),   ty: m37_i64.clone(),          offset: 16 },
+            ],
+            methods: vec![
+                MethodSig { name: "length".into(),     params: vec![], ret: m37_i64.clone() },
+                MethodSig { name: "ncols".into(),      params: vec![], ret: m37_i64.clone() },
+                MethodSig { name: "columns".into(),    params: vec![], ret: m37_list_str.clone() },
+                MethodSig { name: "dtypes".into(),     params: vec![], ret: m37_list_str.clone() },
+                MethodSig { name: "has_column".into(), params: vec![m37_str.clone()], ret: m37_bool.clone() },
+                MethodSig { name: "show".into(),       params: vec![m37_i64.clone()], ret: m37_str.clone() },
+                MethodSig { name: "filter".into(),     params: vec![m37_col_bool_ty.clone()], ret: m37_df_ty.clone() },
+                MethodSig { name: "select".into(),     params: vec![m37_list_str.clone()],    ret: m37_df_ty.clone() },
+                MethodSig { name: "drop".into(),       params: vec![m37_list_str.clone()],    ret: m37_df_ty.clone() },
+                MethodSig { name: "head".into(),       params: vec![m37_i64.clone()],         ret: m37_df_ty.clone() },
+                MethodSig { name: "tail".into(),       params: vec![m37_i64.clone()],         ret: m37_df_ty.clone() },
+                MethodSig { name: "row".into(),        params: vec![m37_i64.clone()],         ret: m37_list_str.clone() },
+                MethodSig { name: "sort_by".into(),    params: vec![m37_str.clone(), m37_bool.clone()], ret: m37_df_ty.clone() },
+            ],
+            generics: vec![], generic_tvars: vec![],
+            is_native: false, payload_size: 24,
+        });
+
+        // ── Function-type helper closure ──
+        let m37_fn = |params: Vec<Ty>, ret: Ty| Ty::Function { params, ret: Box::new(ret) };
+
+        // ── Build the tabular module ──
+        let mut m37_tabular_mod = StdlibModule {
+            name: "tabular".into(),
+            items: vec![
+                StdlibItem {
+                    name: "col_i64".into(), kind: StdlibItemKind::Function,
+                    ty: m37_fn(vec![m37_list_i64.clone(), m37_list_bool.clone()], m37_col_i64_ty.clone()),
+                    native_id: 830,
+                },
+                StdlibItem {
+                    name: "col_i64_simple".into(), kind: StdlibItemKind::Function,
+                    ty: m37_fn(vec![m37_list_i64.clone()], m37_col_i64_ty.clone()),
+                    native_id: 831,
+                },
+                StdlibItem {
+                    name: "col_f64".into(), kind: StdlibItemKind::Function,
+                    ty: m37_fn(vec![m37_list_f64.clone(), m37_list_bool.clone()], m37_col_f64_ty.clone()),
+                    native_id: 832,
+                },
+                StdlibItem {
+                    name: "col_f64_simple".into(), kind: StdlibItemKind::Function,
+                    ty: m37_fn(vec![m37_list_f64.clone()], m37_col_f64_ty.clone()),
+                    native_id: 833,
+                },
+                StdlibItem {
+                    name: "col_str".into(), kind: StdlibItemKind::Function,
+                    ty: m37_fn(vec![m37_list_str.clone(), m37_list_bool.clone()], m37_col_str_ty.clone()),
+                    native_id: 834,
+                },
+                StdlibItem {
+                    name: "col_str_simple".into(), kind: StdlibItemKind::Function,
+                    ty: m37_fn(vec![m37_list_str.clone()], m37_col_str_ty.clone()),
+                    native_id: 835,
+                },
+                StdlibItem {
+                    name: "col_bool".into(), kind: StdlibItemKind::Function,
+                    ty: m37_fn(vec![m37_list_bool.clone(), m37_list_bool.clone()], m37_col_bool_ty.clone()),
+                    native_id: 836,
+                },
+                StdlibItem {
+                    name: "col_bool_simple".into(), kind: StdlibItemKind::Function,
+                    ty: m37_fn(vec![m37_list_bool.clone()], m37_col_bool_ty.clone()),
+                    native_id: 837,
+                },
+                StdlibItem {
+                    name: "col_datetime".into(), kind: StdlibItemKind::Function,
+                    ty: m37_fn(vec![m37_list_i64.clone(), m37_list_bool.clone()], m37_col_dt_ty.clone()),
+                    native_id: 838,
+                },
+                StdlibItem {
+                    name: "from_columns".into(), kind: StdlibItemKind::Function,
+                    ty: m37_fn(vec![m37_list_str.clone(), m37_list_col_ty.clone()], m37_df_ty.clone()),
+                    native_id: 839,
+                },
+                // ── Phase B: I/O ──
+                StdlibItem {
+                    name: "read_csv".into(), kind: StdlibItemKind::Function,
+                    ty: m37_fn(vec![m37_str.clone(), m37_schema_ty.clone()], m37_df_ty.clone()),
+                    native_id: 855,
+                },
+                StdlibItem {
+                    name: "write_csv".into(), kind: StdlibItemKind::Function,
+                    ty: m37_fn(vec![m37_str.clone(), m37_df_ty.clone()], m37_unit.clone()),
+                    native_id: 856,
+                },
+                StdlibItem {
+                    name: "from_sql".into(), kind: StdlibItemKind::Function,
+                    // Cursor type — looked up from class_name_to_id (set
+                    // up by seed_prelude in the M35 P4-B block above).
+                    // Fallback to Ty::Never if not yet registered.
+                    ty: m37_fn(
+                        vec![
+                            match self.class_name_to_id.get("Cursor") {
+                                Some(cid) => Ty::Class(*cid),
+                                None => Ty::Never,
+                            },
+                            m37_schema_ty.clone(),
+                        ],
+                        m37_df_ty.clone(),
+                    ),
+                    native_id: 857,
+                },
+                StdlibItem {
+                    name: "from_rows".into(), kind: StdlibItemKind::Function,
+                    ty: m37_fn(vec![m37_list_list_str.clone(), m37_schema_ty.clone()], m37_df_ty.clone()),
+                    native_id: 858,
+                },
+            ],
+        };
+        // Publish the 7 classes (5 Column subclasses + Column base +
+        // DataFrame) as StdlibItemKind::Class items so `from tabular import
+        // DataFrame, ColumnI64, ...` binds them in module_scope (M36 path).
+        for (m37_name, m37_cid) in [
+            ("Column",         m37_col_cid),
+            ("ColumnI64",      m37_col_i64_cid),
+            ("ColumnF64",      m37_col_f64_cid),
+            ("ColumnStr",      m37_col_str_cid),
+            ("ColumnBool",     m37_col_bool_cid),
+            ("ColumnDateTime", m37_col_dt_cid),
+            ("DataFrame",      m37_df_cid),
+        ] {
+            m37_tabular_mod.items.push(StdlibItem {
+                name: m37_name.into(),
+                kind: StdlibItemKind::Class { class_id: m37_cid },
+                ty: Ty::Class(m37_cid),
+                native_id: 0,
+            });
+        }
+        self.stdlib_modules.insert("tabular".into(), m37_tabular_mod);
     }
 
 

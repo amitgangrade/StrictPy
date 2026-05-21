@@ -656,6 +656,132 @@ pub enum NativeFn {
     /// to `hashlib.new`: "sha256" / "sha512" / "sha1" / "md5".
     HasherAlgorithm  = 824,
 
+    // ── 830-879: M37 — `tabular` (DataFrame + sealed Column hierarchy) ──
+    //
+    // First Pandas-shaped data package for v0.3.  Native Rust impl (real
+    // pandas can't import — see LANGUAGE_GUIDE.md §11.11).  Uses the
+    // post-M36 `StdlibItemKind::Class` path — classes are registered
+    // module-scoped on the `tabular` stdlib module (NOT in seed_prelude).
+    //
+    // Per-class layout (registered in resolver::seed_stdlib_modules):
+    //   ColumnI64:      { values: List[i64],  nulls: List[bool], length: i64 }
+    //   ColumnF64:      { values: List[f64],  nulls: List[bool], length: i64 }
+    //   ColumnStr:      { values: List[str],  nulls: List[bool], length: i64 }
+    //   ColumnBool:     { values: List[bool], nulls: List[bool], length: i64 }
+    //   ColumnDateTime: { values: List[i64],  nulls: List[bool], length: i64 }
+    //                   (values are epoch ms)
+    //   DataFrame:      { names: List[str], columns: List[Column], nrows: i64 }
+    //
+    // NA semantics: per-column null mask — `nulls[i] == true` means the
+    // i-th cell is NA.  No NaN sentinel, no `T?` per cell.  Comparison
+    // ops propagate null cells by OR-ing the input null masks.
+    //
+    // ── Column construction helpers (module-level) ──
+    /// `tabular.col_i64(values: List[i64], nulls: List[bool]) -> ColumnI64`.
+    M37TabColI64           = 830,
+    /// `tabular.col_i64_simple(values: List[i64]) -> ColumnI64`.
+    M37TabColI64Simple     = 831,
+    /// `tabular.col_f64(values: List[f64], nulls: List[bool]) -> ColumnF64`.
+    M37TabColF64           = 832,
+    /// `tabular.col_f64_simple(values: List[f64]) -> ColumnF64`.
+    M37TabColF64Simple     = 833,
+    /// `tabular.col_str(values: List[str], nulls: List[bool]) -> ColumnStr`.
+    M37TabColStr           = 834,
+    /// `tabular.col_str_simple(values: List[str]) -> ColumnStr`.
+    M37TabColStrSimple     = 835,
+    /// `tabular.col_bool(values: List[bool], nulls: List[bool]) -> ColumnBool`.
+    M37TabColBool          = 836,
+    /// `tabular.col_bool_simple(values: List[bool]) -> ColumnBool`.
+    M37TabColBoolSimple    = 837,
+    /// `tabular.col_datetime(values: List[i64], nulls: List[bool]) -> ColumnDateTime`.
+    M37TabColDateTime      = 838,
+    /// `tabular.from_columns(names: List[str], cols: List[Column]) -> DataFrame`.
+    M37TabFromColumns      = 839,
+    // ── Column shared methods (one slot per (column type, method)) ──
+    //  Per-column inspection (length / dtype / is_null / null_count).
+    /// `Column*.length(self) -> i64` — shared by all column types.
+    M37TabColLength        = 840,
+    /// `Column*.dtype(self) -> str` — "i64"/"f64"/"str"/"bool"/"datetime".
+    M37TabColDtype         = 841,
+    /// `Column*.is_null(self, i: i64) -> bool` — bounds-checked.
+    M37TabColIsNull        = 842,
+    /// `Column*.null_count(self) -> i64` — count of true entries in nulls.
+    M37TabColNullCount     = 843,
+    /// `ColumnI64.get(self, i: i64) -> i64?` — none if null.
+    M37TabColI64Get        = 844,
+    /// `ColumnF64.get(self, i: i64) -> f64?`.
+    M37TabColF64Get        = 845,
+    /// `ColumnStr.get(self, i: i64) -> str?`.
+    M37TabColStrGet        = 846,
+    /// `ColumnBool.get(self, i: i64) -> bool?`.
+    M37TabColBoolGet       = 847,
+    /// `ColumnDateTime.get_ms(self, i: i64) -> i64?`.
+    M37TabColDateTimeGetMs = 848,
+    // ── DataFrame inspection ──
+    /// `DataFrame.length(self) -> i64` — nrows.
+    M37TabDfLength         = 849,
+    /// `DataFrame.ncols(self) -> i64`.
+    M37TabDfNcols          = 850,
+    /// `DataFrame.columns(self) -> List[str]`.
+    M37TabDfColumns        = 851,
+    /// `DataFrame.dtypes(self) -> List[str]`.
+    M37TabDfDtypes         = 852,
+    /// `DataFrame.has_column(self, name: str) -> bool`.
+    M37TabDfHasColumn      = 853,
+    /// `DataFrame.show(self, n: i64) -> str` — ASCII table; n=-1 for all.
+    M37TabDfShow           = 854,
+    // ── Phase B: I/O (read_csv / write_csv / from_sql / from_rows) ──
+    /// `tabular.read_csv(path: str, schema: List[Tuple[str,str]]) -> DataFrame`.
+    M37TabReadCsv          = 855,
+    /// `tabular.write_csv(path: str, df: DataFrame) -> None`.
+    M37TabWriteCsv         = 856,
+    /// `tabular.from_sql(cur: Cursor, schema: List[Tuple[str,str]]) -> DataFrame`.
+    M37TabFromSql          = 857,
+    /// `tabular.from_rows(rows: List[List[str]], schema: List[Tuple[str,str]]) -> DataFrame`.
+    M37TabFromRows         = 858,
+    // ── Phase C: per-Column comparison methods → ColumnBool masks ──
+    /// `ColumnI64.eq(self, x: i64) -> ColumnBool`.
+    M37TabColI64Eq         = 859,
+    /// `ColumnI64.gt(self, x: i64) -> ColumnBool`.
+    M37TabColI64Gt         = 860,
+    /// `ColumnI64.lt(self, x: i64) -> ColumnBool`.
+    M37TabColI64Lt         = 861,
+    /// `ColumnF64.eq(self, x: f64) -> ColumnBool`.
+    M37TabColF64Eq         = 862,
+    /// `ColumnF64.gt(self, x: f64) -> ColumnBool`.
+    M37TabColF64Gt         = 863,
+    /// `ColumnF64.lt(self, x: f64) -> ColumnBool`.
+    M37TabColF64Lt         = 864,
+    /// `ColumnStr.eq(self, x: str) -> ColumnBool`.
+    M37TabColStrEq         = 865,
+    /// `ColumnStr.contains(self, needle: str) -> ColumnBool`.
+    M37TabColStrContains   = 866,
+    /// `ColumnBool.and_(self, other: ColumnBool) -> ColumnBool`.
+    M37TabMaskAnd          = 867,
+    /// `ColumnBool.or_(self, other: ColumnBool) -> ColumnBool`.
+    M37TabMaskOr           = 868,
+    /// `ColumnBool.not_(self) -> ColumnBool`.
+    M37TabMaskNot          = 869,
+    /// `ColumnBool.count_true(self) -> i64`.
+    M37TabMaskCountTrue    = 870,
+    // ── Phase C: DataFrame filter / projection / row ops ──
+    /// `DataFrame.filter(self, mask: ColumnBool) -> DataFrame`.
+    M37TabDfFilter         = 871,
+    /// `DataFrame.select(self, cols: List[str]) -> DataFrame`.
+    M37TabDfSelect         = 872,
+    /// `DataFrame.drop(self, cols: List[str]) -> DataFrame`.
+    M37TabDfDrop           = 873,
+    /// `DataFrame.head(self, n: i64) -> DataFrame`.
+    M37TabDfHead           = 874,
+    /// `DataFrame.tail(self, n: i64) -> DataFrame`.
+    M37TabDfTail           = 875,
+    /// `DataFrame.row(self, i: i64) -> List[str]`.
+    M37TabDfRow            = 876,
+    // ── Phase D: stable sort_by ──
+    /// `DataFrame.sort_by(self, col_name: str, ascending: bool) -> DataFrame`.
+    M37TabDfSortBy         = 877,
+    // 878-879 reserved for v0.4 follow-ups (rename / between / etc.)
+
     // ── 250–289: M22 P2A (argparse + collections + csv) ─────────────────
     // Phase 2 starts here.  P2A's job is to bring three high-ROI stdlib
     // modules online on top of the M19 stdlib-module-table:
@@ -2043,6 +2169,55 @@ impl NativeFn {
             796 => Some(Self::PatternReplaceAll),
             797 => Some(Self::PatternSplit),
             798 => Some(Self::PatternSource),
+            // M37: tabular module (DataFrame + sealed Column hierarchy).
+            830 => Some(Self::M37TabColI64),
+            831 => Some(Self::M37TabColI64Simple),
+            832 => Some(Self::M37TabColF64),
+            833 => Some(Self::M37TabColF64Simple),
+            834 => Some(Self::M37TabColStr),
+            835 => Some(Self::M37TabColStrSimple),
+            836 => Some(Self::M37TabColBool),
+            837 => Some(Self::M37TabColBoolSimple),
+            838 => Some(Self::M37TabColDateTime),
+            839 => Some(Self::M37TabFromColumns),
+            840 => Some(Self::M37TabColLength),
+            841 => Some(Self::M37TabColDtype),
+            842 => Some(Self::M37TabColIsNull),
+            843 => Some(Self::M37TabColNullCount),
+            844 => Some(Self::M37TabColI64Get),
+            845 => Some(Self::M37TabColF64Get),
+            846 => Some(Self::M37TabColStrGet),
+            847 => Some(Self::M37TabColBoolGet),
+            848 => Some(Self::M37TabColDateTimeGetMs),
+            849 => Some(Self::M37TabDfLength),
+            850 => Some(Self::M37TabDfNcols),
+            851 => Some(Self::M37TabDfColumns),
+            852 => Some(Self::M37TabDfDtypes),
+            853 => Some(Self::M37TabDfHasColumn),
+            854 => Some(Self::M37TabDfShow),
+            855 => Some(Self::M37TabReadCsv),
+            856 => Some(Self::M37TabWriteCsv),
+            857 => Some(Self::M37TabFromSql),
+            858 => Some(Self::M37TabFromRows),
+            859 => Some(Self::M37TabColI64Eq),
+            860 => Some(Self::M37TabColI64Gt),
+            861 => Some(Self::M37TabColI64Lt),
+            862 => Some(Self::M37TabColF64Eq),
+            863 => Some(Self::M37TabColF64Gt),
+            864 => Some(Self::M37TabColF64Lt),
+            865 => Some(Self::M37TabColStrEq),
+            866 => Some(Self::M37TabColStrContains),
+            867 => Some(Self::M37TabMaskAnd),
+            868 => Some(Self::M37TabMaskOr),
+            869 => Some(Self::M37TabMaskNot),
+            870 => Some(Self::M37TabMaskCountTrue),
+            871 => Some(Self::M37TabDfFilter),
+            872 => Some(Self::M37TabDfSelect),
+            873 => Some(Self::M37TabDfDrop),
+            874 => Some(Self::M37TabDfHead),
+            875 => Some(Self::M37TabDfTail),
+            876 => Some(Self::M37TabDfRow),
+            877 => Some(Self::M37TabDfSortBy),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

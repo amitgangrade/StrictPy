@@ -4200,6 +4200,23 @@ fn lower_method_call(
                     },
                 );
             }
+            // M37: `tabular` Column / DataFrame method dispatch.  Same
+            // class-name + method-name shape as M34/M35 above.  We
+            // intercept here because methods like `select`/`drop`/`head`/
+            // `tail`/`get`/`length` would otherwise be misdispatched by
+            // the M11 vtable path or by `resolve_native_method`'s
+            // name-only `from_name` lookup.
+            if let Some(nid) = m37_tabular_class_method_native_id_by_name(
+                layout.name.as_str(), method,
+            ) {
+                return fb.push_value(
+                    ret_ty,
+                    ValueKind::Op {
+                        op: IROp::NativeCall { native_id: nid },
+                        args: arg_vs,
+                    },
+                );
+            }
         }
     }
 
@@ -4454,6 +4471,81 @@ fn m35_p4b_sqlite_class_method_native_id_by_name(
         ("Cursor",     "fetchall")           => NativeFn::Sqlite3CursorFetchAll           as u32,
         ("Cursor",     "column_names")       => NativeFn::Sqlite3CursorColumnNames       as u32,
         ("Cursor",     "row_count")          => NativeFn::Sqlite3CursorRowCount          as u32,
+        _ => return None,
+    })
+}
+
+/// M37: dispatch a `tabular` Column / DataFrame method by class name
+/// + method name.  All classes are non-native (real heap layouts) so
+/// the M11 vtable path would normally apply, but their method names
+/// collide with str / list / Dict methods (notably `get`, `length`,
+/// `keys`, `select`, `drop`, `head`, `tail`), so we intercept here
+/// before reaching `resolve_native_method`.  Returns `None` for any
+/// other class so the caller continues through the regular dispatch.
+///
+/// Per the M37 brief, all locals in shared compiler files use the
+/// `m37_` prefix.
+fn m37_tabular_class_method_native_id_by_name(
+    class_name: &str,
+    method: &str,
+) -> Option<u32> {
+    Some(match (class_name, method) {
+        // Shared per-Column inspection (same handler for all 5 subclasses
+        // — the handler reads payload offsets that are identical across
+        // every Column subclass layout).
+        ("ColumnI64",      "length") => NativeFn::M37TabColLength as u32,
+        ("ColumnF64",      "length") => NativeFn::M37TabColLength as u32,
+        ("ColumnStr",      "length") => NativeFn::M37TabColLength as u32,
+        ("ColumnBool",     "length") => NativeFn::M37TabColLength as u32,
+        ("ColumnDateTime", "length") => NativeFn::M37TabColLength as u32,
+        ("ColumnI64",      "dtype")  => NativeFn::M37TabColDtype as u32,
+        ("ColumnF64",      "dtype")  => NativeFn::M37TabColDtype as u32,
+        ("ColumnStr",      "dtype")  => NativeFn::M37TabColDtype as u32,
+        ("ColumnBool",     "dtype")  => NativeFn::M37TabColDtype as u32,
+        ("ColumnDateTime", "dtype")  => NativeFn::M37TabColDtype as u32,
+        ("ColumnI64",      "is_null") => NativeFn::M37TabColIsNull as u32,
+        ("ColumnF64",      "is_null") => NativeFn::M37TabColIsNull as u32,
+        ("ColumnStr",      "is_null") => NativeFn::M37TabColIsNull as u32,
+        ("ColumnBool",     "is_null") => NativeFn::M37TabColIsNull as u32,
+        ("ColumnDateTime", "is_null") => NativeFn::M37TabColIsNull as u32,
+        ("ColumnI64",      "null_count") => NativeFn::M37TabColNullCount as u32,
+        ("ColumnF64",      "null_count") => NativeFn::M37TabColNullCount as u32,
+        ("ColumnStr",      "null_count") => NativeFn::M37TabColNullCount as u32,
+        ("ColumnBool",     "null_count") => NativeFn::M37TabColNullCount as u32,
+        ("ColumnDateTime", "null_count") => NativeFn::M37TabColNullCount as u32,
+        // Per-type typed getters (return T?).
+        ("ColumnI64",      "get") => NativeFn::M37TabColI64Get as u32,
+        ("ColumnF64",      "get") => NativeFn::M37TabColF64Get as u32,
+        ("ColumnStr",      "get") => NativeFn::M37TabColStrGet as u32,
+        ("ColumnBool",     "get") => NativeFn::M37TabColBoolGet as u32,
+        ("ColumnDateTime", "get_ms") => NativeFn::M37TabColDateTimeGetMs as u32,
+        // Phase C: per-column comparison ops → ColumnBool mask.
+        ("ColumnI64",  "eq")       => NativeFn::M37TabColI64Eq as u32,
+        ("ColumnI64",  "gt")       => NativeFn::M37TabColI64Gt as u32,
+        ("ColumnI64",  "lt")       => NativeFn::M37TabColI64Lt as u32,
+        ("ColumnF64",  "eq")       => NativeFn::M37TabColF64Eq as u32,
+        ("ColumnF64",  "gt")       => NativeFn::M37TabColF64Gt as u32,
+        ("ColumnF64",  "lt")       => NativeFn::M37TabColF64Lt as u32,
+        ("ColumnStr",  "eq")       => NativeFn::M37TabColStrEq as u32,
+        ("ColumnStr",  "contains") => NativeFn::M37TabColStrContains as u32,
+        ("ColumnBool", "and_")       => NativeFn::M37TabMaskAnd as u32,
+        ("ColumnBool", "or_")        => NativeFn::M37TabMaskOr as u32,
+        ("ColumnBool", "not_")       => NativeFn::M37TabMaskNot as u32,
+        ("ColumnBool", "count_true") => NativeFn::M37TabMaskCountTrue as u32,
+        // DataFrame methods (handler reads the layout offsets directly).
+        ("DataFrame", "length")     => NativeFn::M37TabDfLength as u32,
+        ("DataFrame", "ncols")      => NativeFn::M37TabDfNcols as u32,
+        ("DataFrame", "columns")    => NativeFn::M37TabDfColumns as u32,
+        ("DataFrame", "dtypes")     => NativeFn::M37TabDfDtypes as u32,
+        ("DataFrame", "has_column") => NativeFn::M37TabDfHasColumn as u32,
+        ("DataFrame", "show")       => NativeFn::M37TabDfShow as u32,
+        ("DataFrame", "filter")     => NativeFn::M37TabDfFilter as u32,
+        ("DataFrame", "select")     => NativeFn::M37TabDfSelect as u32,
+        ("DataFrame", "drop")       => NativeFn::M37TabDfDrop as u32,
+        ("DataFrame", "head")       => NativeFn::M37TabDfHead as u32,
+        ("DataFrame", "tail")       => NativeFn::M37TabDfTail as u32,
+        ("DataFrame", "row")        => NativeFn::M37TabDfRow as u32,
+        ("DataFrame", "sort_by")    => NativeFn::M37TabDfSortBy as u32,
         _ => return None,
     })
 }
