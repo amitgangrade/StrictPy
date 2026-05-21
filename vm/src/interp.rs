@@ -415,6 +415,19 @@ pub struct SharedVm {
     /// sink installed by `run_file_capture` only sees the parent's writes;
     /// producer.spy's `println("got ...")` runs on a worker and bypassed it.
     pub stdout: Arc<Mutex<Box<dyn Stdout>>>,
+    /// M35 P4-A: compiled `re.Pattern` slot table.  Keyed by an i64
+    /// handle minted from `next_pattern_id` (starts at 1; handle 0 is
+    /// reserved as "no compiled regex").  Each entry holds the
+    /// `regex::Regex` whose lifetime is tied to the process (no
+    /// reference counting; the slot is leaked at program end).  The
+    /// table is append-only — recompiling the same pattern allocates
+    /// a fresh slot, which is fine for v0.3 (the compile-once-reuse
+    /// pattern keeps allocations bounded in practice).
+    pub p4a_compiled_regexes: std::sync::Mutex<HashMap<i64, regex::Regex>>,
+    /// M35 P4-A: monotonic allocator for `p4a_compiled_regexes` keys.
+    /// Starts at 1 so a handle value of 0 unambiguously means
+    /// "uninitialised Pattern instance".
+    pub p4a_next_pattern_id: std::sync::atomic::AtomicI64,
     /// AOT-at-load Cranelift JIT cache. `Some` when the `jit` feature is
     /// compiled in and the module loaded. Read-only after construction.
     #[cfg(feature = "jit")]
@@ -486,6 +499,10 @@ impl SharedVm {
             next_tls_server_id: std::sync::atomic::AtomicI64::new(1_000_000),
             tls_server_configs: std::sync::Mutex::new(vec![None]),
             stdout: Arc::new(Mutex::new(Box::new(RealStdout))),
+            // M35 P4-A: empty compiled-regex slot table; first
+            // `re.compile()` will mint handle 1.
+            p4a_compiled_regexes: std::sync::Mutex::new(HashMap::new()),
+            p4a_next_pattern_id: std::sync::atomic::AtomicI64::new(1),
             #[cfg(feature = "jit")]
             jit: None,
         })
@@ -553,6 +570,9 @@ impl SharedVm {
             next_tls_server_id: std::sync::atomic::AtomicI64::new(1_000_000),
             tls_server_configs: std::sync::Mutex::new(vec![None]),
             stdout: Arc::new(Mutex::new(Box::new(RealStdout))),
+            // M35 P4-A: see comment on the non-JIT constructor.
+            p4a_compiled_regexes: std::sync::Mutex::new(HashMap::new()),
+            p4a_next_pattern_id: std::sync::atomic::AtomicI64::new(1),
             jit: Some(jit_cell),
         })
     }

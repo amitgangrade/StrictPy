@@ -1,0 +1,82 @@
+# M35 P4-A demo: the compiled `re.Pattern` class.
+#
+# `re.compile(s) -> Pattern` lets you compile a regex once and reuse
+# the handle in hot loops, avoiding the per-call recompile cost of
+# the flat `re.find_all` / `re.search` / `re.replace` surface.
+#
+# Methods exposed on Pattern:
+#   matches(s)         -> bool          full-string match
+#   find(s)            -> str?          first match or none
+#   find_all(s)        -> List[str]     every non-overlapping match
+#   replace(s, repl)   -> str           replace first match only
+#   replace_all(s, repl) -> str         replace every match
+#   split(s)           -> List[str]     split on every match
+#   source()           -> str           original pattern string
+
+import re
+
+fn main() -> i32:
+    # 1. Compile once, match many.  This is the perf-motivating use case:
+    #    in a tight loop the flat `re.fullmatch(...)` would recompile
+    #    the pattern on every call; Pattern.matches uses a cached
+    #    `regex::Regex` from the slot table.
+    email_re: Pattern = re.compile("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]+")
+    candidates: List[str] = [
+        "alice@example.com",
+        "not-an-email",
+        "bob@strictpy.dev",
+        "@oops.io",
+    ]
+    println("=== matches ===")
+    for c: str in candidates:
+        if email_re.matches(c):
+            println("valid: " + c)
+        else:
+            println("invalid: " + c)
+
+    # 2. find_all over a few inputs.  Compile-once-reuse-many is
+    #    natural here too.
+    println("=== find_all ===")
+    num_re: Pattern = re.compile("\\d+")
+    lines: List[str] = [
+        "uptime 42 minutes",
+        "score 17 / 100",
+        "no digits here",
+        "build 4567 of release 0.3",
+    ]
+    for line: str in lines:
+        hits: List[str] = num_re.find_all(line)
+        println(line + " -> " + str(len(hits)) + " hit(s)")
+        for h: str in hits:
+            println("  " + h)
+
+    # 3. find returns an Optional[str].  Use the standard `is none` /
+    #    `is not none` pattern to discriminate.
+    println("=== find ===")
+    word_re: Pattern = re.compile("[A-Z][a-z]+")
+    needle: str? = word_re.find("the Quick brown Fox")
+    if needle is not none:
+        println("first capword: " + needle)
+    else:
+        println("no capword found")
+
+    # 4. replace / replace_all.
+    println("=== replace ===")
+    digit_re: Pattern = re.compile("[0-9]")
+    println(digit_re.replace("abc123", "*"))       # first match only -> "abc*23"
+    println(digit_re.replace_all("abc123", "*"))   # every match -> "abc***"
+
+    # 5. split on whitespace.
+    println("=== split ===")
+    ws_re: Pattern = re.compile("\\s+")
+    words: List[str] = ws_re.split("the   quick brown  fox")
+    println("count=" + str(len(words)))
+    for w: str in words:
+        println(w)
+
+    # 6. source — round-trip the original pattern string.
+    println("=== source ===")
+    println(email_re.source())
+    println(num_re.source())
+
+    return 0

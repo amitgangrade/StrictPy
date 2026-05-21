@@ -4150,6 +4150,12 @@ fn lower_method_call(
     // We dispatch by *class name* via the receiver's class layout to
     // avoid clashing with the M11/M16 vtable path for user classes
     // that happen to share method names like "get" / "length".
+    //
+    // M35 P4-A: re.Pattern method dispatch piggybacks on the same
+    // hook — Pattern is is_native (handle-backed) so the vtable path
+    // would skip it, and the method names ("split" / "find" / etc.)
+    // collide with str-method NativeFn entries, so name-only dispatch
+    // via `from_name` would misfire.
     if let Ty::Class(cid) = &recv_ty {
         if let Some(layout) = ctx.class_layouts.get(cid) {
             if let Some(nid) = m34_json_class_method_native_id_by_name(
@@ -4172,6 +4178,18 @@ fn lower_method_call(
             // lookup (which would collide on method names like
             // `close` and dispatch the FileClose handler).
             if let Some(nid) = m35_p4b_sqlite_class_method_native_id_by_name(
+                layout.name.as_str(), method,
+            ) {
+                return fb.push_value(
+                    ret_ty,
+                    ValueKind::Op {
+                        op: IROp::NativeCall { native_id: nid },
+                        args: arg_vs,
+                    },
+                );
+            }
+            // M35 P4-A: re.Pattern method dispatch (same shape as P4-B).
+            if let Some(nid) = m35_re_pattern_method_native_id_by_name(
                 layout.name.as_str(), method,
             ) {
                 return fb.push_value(
@@ -4303,7 +4321,11 @@ fn sort_type_tag_for(ty: &Ty) -> u8 {
 
 /// Pick the right `NativeFn` for `receiver.method(...)` given the static
 /// receiver type. Falls back to `NativeFn::from_name` when the method name
-/// is unambiguous across runtime classes.
+/// is unambiguous across runtime classes.  (Pattern + JList + JObject
+/// method dispatch is handled by class-name-based shortcircuits in
+/// `lower_method_call` upstream of this function — see
+/// `m35_re_pattern_method_native_id_by_name` and
+/// `m34_json_class_method_native_id_by_name`.)
 fn resolve_native_method(recv_ty: &Ty, method: &str) -> u32 {
     // Channel-specific overrides (recv_ty is `Generic { Channel, [..] }`).
     if let Ty::Generic { base: TypeCtor::Channel, .. } = recv_ty {
@@ -4432,6 +4454,28 @@ fn m35_p4b_sqlite_class_method_native_id_by_name(
         ("Cursor",     "fetchall")           => NativeFn::Sqlite3CursorFetchAll           as u32,
         ("Cursor",     "column_names")       => NativeFn::Sqlite3CursorColumnNames       as u32,
         ("Cursor",     "row_count")          => NativeFn::Sqlite3CursorRowCount          as u32,
+        _ => return None,
+    })
+}
+
+/// M35 P4-A: dispatch a `re.Pattern` method by class name + method
+/// name.  Pattern is `is_native: true` (slot-backed) and its method
+/// names collide with str-methods registered in `NativeFn::from_name`
+/// (notably `split`), so we resolve by exact (class, method) pairing
+/// before reaching the name-only fallback.  Returns `None` for any
+/// other class so the caller continues through the regular dispatch.
+fn m35_re_pattern_method_native_id_by_name(
+    class_name: &str,
+    method: &str,
+) -> Option<u32> {
+    Some(match (class_name, method) {
+        ("Pattern", "matches")     => NativeFn::PatternMatches    as u32,
+        ("Pattern", "find")        => NativeFn::PatternFind       as u32,
+        ("Pattern", "find_all")    => NativeFn::PatternFindAll    as u32,
+        ("Pattern", "replace")     => NativeFn::PatternReplace    as u32,
+        ("Pattern", "replace_all") => NativeFn::PatternReplaceAll as u32,
+        ("Pattern", "split")       => NativeFn::PatternSplit      as u32,
+        ("Pattern", "source")      => NativeFn::PatternSource     as u32,
         _ => return None,
     })
 }

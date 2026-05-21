@@ -1499,6 +1499,49 @@ pub enum NativeFn {
     Sqlite3CursorRowCount       = 815,
     // 816-819 reserved for v0.4 (Cursor iteration support /
     // Connection.commit / Connection.rollback).
+    // ── 790-799: M35 P4-A — compiled `re.Pattern` class ─────────────────
+    // First stdlib class to use the *opaque-handle* shape (the JsonValue
+    // family at 750-789 uses real heap-field layouts so pattern matching
+    // works).  A `Pattern` instance carries one i64 field at offset 0
+    // that indexes into `SharedVm.compiled_regexes`; the actual
+    // `regex::Regex` lives in that slot table.  Construction is gated:
+    // `re.compile(s)` is the only way to mint a slot, and the Pattern
+    // class's NativeFn-init handler just plumbs the freshly-allocated
+    // slot id into the new instance.
+    //
+    // Methods (`matches` / `find` / `find_all` / `replace` /
+    // `replace_all` / `split` / `source`) all share the same shape:
+    // read the i64 handle off the receiver, look up the Regex, dispatch
+    // to the matching `regex::Regex` API (identical to the existing
+    // `Re*` handlers at 220-226 but skipping the re-compile step).
+    //
+    /// `Pattern.__init__(handle: i64)` — receiver-style.  Stores the
+    /// compiled-regex slot handle into the receiver's only field.
+    /// Users don't call this directly; `re.compile` allocates the
+    /// slot then invokes the constructor.
+    PatternCtor        = 790,
+    /// `re.compile(pattern: str) -> Pattern` — compile + intern.
+    /// Raises `ValueError` on bad regex syntax.
+    RePatternCompile   = 791,
+    /// `Pattern.matches(self, s: str) -> bool` — full-string match
+    /// (mirrors `re.fullmatch` semantics).
+    PatternMatches     = 792,
+    /// `Pattern.find(self, s: str) -> str?` — first match's text, or
+    /// none.  Differs from the flat `re.find` which returns
+    /// `(i32, i32)` indices.
+    PatternFind        = 793,
+    /// `Pattern.find_all(self, s: str) -> List[str]`.
+    PatternFindAll     = 794,
+    /// `Pattern.replace(self, s: str, repl: str) -> str` — first
+    /// match only (one-shot replacement).
+    PatternReplace     = 795,
+    /// `Pattern.replace_all(self, s: str, repl: str) -> str`.
+    PatternReplaceAll  = 796,
+    /// `Pattern.split(self, s: str) -> List[str]`.
+    PatternSplit       = 797,
+    /// `Pattern.source(self) -> str` — original pattern string.
+    PatternSource      = 798,
+    // 799 reserved for v0.4 PatternIterFinds (lazy iterator).
 
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
@@ -1990,6 +2033,16 @@ impl NativeFn {
             813 => Some(Self::Sqlite3CursorFetchAll),
             814 => Some(Self::Sqlite3CursorColumnNames),
             815 => Some(Self::Sqlite3CursorRowCount),
+            // M35 P4-A: compiled re.Pattern class.
+            790 => Some(Self::PatternCtor),
+            791 => Some(Self::RePatternCompile),
+            792 => Some(Self::PatternMatches),
+            793 => Some(Self::PatternFind),
+            794 => Some(Self::PatternFindAll),
+            795 => Some(Self::PatternReplace),
+            796 => Some(Self::PatternReplaceAll),
+            797 => Some(Self::PatternSplit),
+            798 => Some(Self::PatternSource),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }
@@ -2020,6 +2073,13 @@ impl NativeFn {
             "read"        => Some(Self::FileRead),
             "write"       => Some(Self::FileWrite),
             "close"       => Some(Self::FileClose),
+
+            // M35 P4-A: `Pattern(handle)` constructor.  Users go
+            // through `re.compile()` which is the canonical entry
+            // point, but in case anything wires the bare class name
+            // through `from_name` (the IR's is_native constructor
+            // path does), route it to the PatternCtor handler.
+            "Pattern"     => Some(Self::PatternCtor),
 
             // Channel methods (also covers method calls on Channel[T])
             "send"        => Some(Self::ChannelSend),

@@ -1147,8 +1147,20 @@ impl Resolver {
         const RE_REPLACE: u32   = 224;
         const RE_SPLIT: u32     = 225;
         const RE_IS_VALID: u32  = 226;
+        // M35 P4-A: `re.compile(s) -> Pattern` — the only entry point
+        // to the compiled-pattern class.  See shared/src/native.rs
+        // §790-799.
+        const RE_PATTERN_COMPILE: u32 = 791;
 
         let tuple_i32_i32_ty = Ty::Tuple(vec![i32_ty.clone(), i32_ty.clone()]);
+
+        // M35 P4-A: pull the Pattern class id from the prelude (which
+        // ran first in `resolve()`).  Defensive fallback to Ty::Never
+        // mirrors the M34 JsonValue lookup pattern.
+        let p4a_pattern_ty = match self.class_name_to_id.get("Pattern") {
+            Some(cid) => Ty::Class(*cid),
+            None => Ty::Never,
+        };
 
         let re_mod = StdlibModule {
             name: "re".into(),
@@ -1211,6 +1223,15 @@ impl Resolver {
                     kind: StdlibItemKind::Function,
                     ty: fn_ty(vec![str_ty.clone()], bool_ty.clone()),
                     native_id: RE_IS_VALID,
+                },
+                // M35 P4-A: `re.compile(s: str) -> Pattern` — compile
+                // once, reuse cheaply in hot loops.  Bad regex →
+                // ValueError (same shape as the flat surface).
+                StdlibItem {
+                    name: "compile".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], p4a_pattern_ty.clone()),
+                    native_id: RE_PATTERN_COMPILE,
                 },
             ],
         };
@@ -4666,6 +4687,86 @@ impl Resolver {
                 MethodSig { name: "row_count".into(),
                               params: vec![],
                               ret: Ty::Primitive(PrimTy::I64) },
+            ],
+            generics: vec![], generic_tvars: vec![],
+            is_native: true,
+            payload_size: 8,
+        });
+
+        // ── M35 P4-A: compiled `re.Pattern` class ─────────────────────
+        //
+        // Registered in the prelude alongside JsonValue + Channel +
+        // Thread + io.File / Connection / Cursor / Hasher, following the
+        // M34 "prelude wins" pattern.  Layout: one i64 field at offset
+        // 0 — the slot handle into `SharedVm.p4a_compiled_regexes`.
+        // Marking `is_native: true` routes the constructor and every
+        // method call through NativeFn / the M35 dispatch table in
+        // ir.rs.  Users never call `Pattern(handle)` directly; the only
+        // entry point is `re.compile(...)`.
+        let p4a_pattern_cid = self.fresh_class();
+        let p4a_pattern_sid = self.make_symbol(scope, "Pattern", SymbolKind::Class,
+                                                Span::DUMMY, Some(Ty::Class(p4a_pattern_cid)));
+        self.table.get_mut(p4a_pattern_sid).class_id = Some(p4a_pattern_cid);
+        self.class_of_symbol.insert(p4a_pattern_sid, p4a_pattern_cid);
+        self.symbol_of_class.insert(p4a_pattern_cid, p4a_pattern_sid);
+        self.class_name_to_id.insert("Pattern".into(), p4a_pattern_cid);
+        self.class_layouts.insert(p4a_pattern_cid, ClassLayout {
+            id: p4a_pattern_cid, name: "Pattern".into(), base: None,
+            is_open: false, is_sealed: false,
+            fields: vec![
+                FieldInfo {
+                    name: "handle".into(),
+                    ty: Ty::Primitive(PrimTy::I64),
+                    offset: 0,
+                },
+            ],
+            methods: vec![
+                MethodSig {
+                    name: "matches".into(),
+                    params: vec![Ty::Primitive(PrimTy::Str)],
+                    ret: Ty::Primitive(PrimTy::Bool),
+                },
+                MethodSig {
+                    name: "find".into(),
+                    params: vec![Ty::Primitive(PrimTy::Str)],
+                    ret: Ty::Nullable(Box::new(Ty::Primitive(PrimTy::Str))),
+                },
+                MethodSig {
+                    name: "find_all".into(),
+                    params: vec![Ty::Primitive(PrimTy::Str)],
+                    ret: Ty::Generic {
+                        base: TypeCtor::List,
+                        args: vec![Ty::Primitive(PrimTy::Str)],
+                    },
+                },
+                MethodSig {
+                    name: "replace".into(),
+                    params: vec![Ty::Primitive(PrimTy::Str), Ty::Primitive(PrimTy::Str)],
+                    ret: Ty::Primitive(PrimTy::Str),
+                },
+                MethodSig {
+                    name: "replace_all".into(),
+                    params: vec![Ty::Primitive(PrimTy::Str), Ty::Primitive(PrimTy::Str)],
+                    ret: Ty::Primitive(PrimTy::Str),
+                },
+                MethodSig {
+                    name: "split".into(),
+                    params: vec![Ty::Primitive(PrimTy::Str)],
+                    ret: Ty::Generic {
+                        base: TypeCtor::List,
+                        args: vec![Ty::Primitive(PrimTy::Str)],
+                    },
+                },
+                MethodSig {
+                    name: "source".into(),
+                    params: vec![],
+                    ret: Ty::Primitive(PrimTy::Str),
+                },
+                MethodSig {
+                    name: "__init__".into(),
+                    params: vec![Ty::Primitive(PrimTy::I64)],
+                    ret: Ty::Class(p4a_pattern_cid),
+                },
             ],
             generics: vec![], generic_tvars: vec![],
             is_native: true,

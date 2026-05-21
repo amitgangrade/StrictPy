@@ -1765,18 +1765,70 @@ All other functions raise `ValueError` on an invalid pattern (compile
 error), with the message `"re: invalid pattern \"...\": <regex-crate
 error>"`.
 
-What v0.2 does **not** ship:
+#### 9.14.1 Compiled `Pattern` class (v0.3 — M35 P4-A)
 
-* A cached `Pattern` handle.  Every call to a `re.*` function
-  recompiles the pattern.  For tight loops over a fixed pattern this
-  is wasteful; v0.3 will add `re.compile(pattern) -> Pattern` plus
-  `Pattern.match`/`Pattern.search`/etc. method dispatch.
-* Capture groups.  `find` returns positions, `find_all` returns whole
-  matches.  Named captures and group extraction wait for v0.3 (they'd
-  need an iterator-of-Match type that v0.2 can't naturally express).
-* Python-specific syntax that `regex` doesn't support: lookbehind with
-  variable width, `(?P<name>...)` (use `(?<name>...)` instead), and
-  the look-around assertions Python's `re` carries for backwards
+For hot-loop regex use, `re.compile(s) -> Pattern` returns a cached
+handle that skips the per-call recompile cost paid by the flat
+surface above.  The slot table backing each `Pattern` instance holds
+the parsed `regex::Regex`; method dispatch on the instance reuses it
+without re-parsing the pattern string.
+
+```
+fn compile(pattern: str) -> Pattern
+
+final class Pattern:
+    fn matches(self, s: str) -> bool          # full-string match
+    fn find(self, s: str) -> str?             # first match or none
+    fn find_all(self, s: str) -> List[str]
+    fn replace(self, s: str, repl: str) -> str         # first match only
+    fn replace_all(self, s: str, repl: str) -> str     # every match
+    fn split(self, s: str) -> List[str]
+    fn source(self) -> str                    # original pattern string
+```
+
+Semantics:
+
+* `re.compile(s)` parses `s` and returns a `Pattern` whose handle is
+  valid for the lifetime of the program.  Raises `ValueError` on a
+  syntax error with the message
+  `"re.compile: invalid pattern \"...\": <regex-crate error>"` —
+  same shape as the flat surface, different prefix.
+* `Pattern.matches(s)` mirrors the flat `fullmatch` semantic — the
+  pattern must match the entire string.  (`fullmatch` was the chosen
+  name on the flat surface to dodge the `match` keyword; the method
+  on a `Pattern` instance can safely be called `matches` since
+  method names are not keywords.)
+* `Pattern.find(s)` differs from the flat `re.find` (which returns
+  `(start, end)` indices): the method returns the **matched text** as
+  `str?`, or `none` if there is no match.  Indices were the more
+  useful shape on the flat surface (where callers don't have a
+  Pattern instance to attach helpers to); the matched text is the
+  more common need in code that's already paying the cost of holding
+  a Pattern.
+* `Pattern.find_all` / `Pattern.replace_all` / `Pattern.split` are
+  identical to their flat counterparts in semantics; they just avoid
+  the recompile.  `Pattern.replace` adds a one-shot replacement
+  variant (Python `re.sub(..., count=1)` shape) that the flat
+  surface didn't expose.
+* `Pattern.source(self)` returns the original pattern string as
+  passed to `re.compile`.  Useful for diagnostics and for
+  serialising patterns through a build pipeline.
+
+The flat functions (`re.fullmatch` / `re.search` / `re.find` /
+`re.find_all` / `re.replace` / `re.split` / `re.is_valid`) remain
+on the module — they pay the recompile cost but are still useful for
+one-shot use.
+
+What v0.3 does **not** yet ship:
+
+* Capture groups.  `find` returns the whole match; named-capture
+  extraction is v0.4 work (needs an `iter_captures` shape with a
+  Match-row type for which the prelude infrastructure isn't ready).
+* A lazy `iter_finds()` on `Pattern` — NativeFn id 799 is reserved
+  for it.  `find_all` materialises the result eagerly.
+* Python-specific syntax that `regex` doesn't support: lookbehind
+  with variable width, `(?P<name>...)` (use `(?<name>...)` instead),
+  and the look-around assertions Python's `re` carries for backwards
   compat.  The `regex` crate's syntax is documented at
   `https://docs.rs/regex/latest/regex/#syntax` — by and large it's a
   superset of `re` minus catastrophic-backtracking constructs.

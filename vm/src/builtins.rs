@@ -6864,6 +6864,16 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         NativeFn::Sqlite3CursorFetchAll       => p4b_cur_fetchall(interp, args),
         NativeFn::Sqlite3CursorColumnNames    => p4b_cur_column_names(interp, args),
         NativeFn::Sqlite3CursorRowCount       => p4b_cur_row_count(interp, args),
+        // ── M35 P4-A: compiled re.Pattern class ────────────────────────
+        NativeFn::PatternCtor          => p4a_pattern_ctor(args),
+        NativeFn::RePatternCompile     => p4a_re_pattern_compile(interp, args),
+        NativeFn::PatternMatches       => p4a_pattern_matches(interp, args),
+        NativeFn::PatternFind          => p4a_pattern_find(interp, args),
+        NativeFn::PatternFindAll       => p4a_pattern_find_all(interp, args),
+        NativeFn::PatternReplace       => p4a_pattern_replace(interp, args),
+        NativeFn::PatternReplaceAll    => p4a_pattern_replace_all(interp, args),
+        NativeFn::PatternSplit         => p4a_pattern_split(interp, args),
+        NativeFn::PatternSource        => p4a_pattern_source(interp, args),
 
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
@@ -10910,6 +10920,43 @@ fn p4b_read_handle(recv_ptr: u64) -> i64 {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// M35 P4-A: compiled `re.Pattern` class
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Storage model: a single `regex::Regex` per slot in the
+// `SharedVm.p4a_compiled_regexes` HashMap.  Each `Pattern` instance
+// carries one i64 handle field at offset 0 (HDR + 0 from the object
+// base) — that handle is the map key.  Construction:
+//
+//   re.compile(s)
+//     ↓ compiles + interns the regex, mints a fresh i64 handle
+//     ↓ allocates a Pattern heap object with the right type id
+//     ↓ stores handle at offset 0
+//     ↓ returns the heap object pointer
+//
+// All seven methods follow the same shape: read the handle off the
+// receiver, look up the Regex in the slot table, dispatch to the
+// matching `regex::Regex` API.  Method handlers receive
+// `[receiver_ptr, user_args...]` (the M11 vtable-style calling
+// convention — the first arg is always `self`).
+
+/// Read the i64 handle field from a Pattern instance pointer.  Returns
+/// 0 if the pointer is null (caller maps that to a ValueError).
+fn p4a_pattern_handle_of(recv_ptr: u64) -> i64 {
+    let obj = recv_ptr as *const u8;
+    if obj.is_null() {
+        return 0;
+    }
+    // SAFETY: caller guarantees the pointer is a Pattern instance
+    // allocated by `p4a_alloc_pattern`.  Layout: HDR (16 bytes) +
+    // i64 handle at offset 0 of the payload area.
+    unsafe {
+        let slot = obj.add(HDR) as *const i64;
+        std::ptr::read_unaligned(slot)
+    }
+}
+
 /// Allocate a fresh `Connection` heap object with the given handle in
 /// its `handle: i64` field.  Returns the object pointer.
 fn p4b_alloc_connection(interp: &mut Interpreter, handle: i64) -> *mut u8 {
@@ -10924,6 +10971,44 @@ fn p4b_alloc_connection(interp: &mut Interpreter, handle: i64) -> *mut u8 {
 /// Allocate a fresh `Cursor` heap object with the given handle.
 fn p4b_alloc_cursor(interp: &mut Interpreter, handle: i64) -> *mut u8 {
     let p = m34_alloc_class_obj(interp, "Cursor", 8);
+    unsafe {
+        let slot = p.add(HDR) as *mut i64;
+        std::ptr::write_unaligned(slot, handle);
+    }
+    p
+}
+
+/// Look up the compiled `Regex` for a given handle.  Returns an error
+/// if the handle is missing (the Pattern was constructed outside
+/// `re.compile` or the slot was somehow cleared — neither should
+/// happen in v0.3).
+fn p4a_regex_for_handle(
+    interp: &Interpreter,
+    handle: i64,
+    who: &str,
+) -> Result<regex::Regex, VmError> {
+    let table = interp.shared.p4a_compiled_regexes.lock().unwrap();
+    table.get(&handle).cloned().ok_or_else(|| VmError::UncaughtException {
+        type_name: "ValueError".into(),
+        message: format!("{}: invalid Pattern handle {}", who, handle),
+    })
+}
+
+/// Allocate a fresh Pattern heap object with the given handle stored
+/// at offset 0 of the payload.  Sets the type id by name lookup
+/// (mirrors the M34 `m34_alloc_class_obj` pattern).
+fn p4a_alloc_pattern(interp: &mut Interpreter, handle: i64) -> *mut u8 {
+    let ty_arc = m34_find_class_type(interp, "Pattern");
+    let ty_ptr: *const crate::object::RuntimeType = match &ty_arc {
+        Some(rt) => std::sync::Arc::as_ptr(rt),
+        None => std::ptr::null(),
+    };
+    let p = interp
+        .shared
+        .heap
+        .lock()
+        .unwrap()
+        .alloc(HDR + 8, ty_ptr, crate::object::GcKind::Class);
     unsafe {
         let slot = p.add(HDR) as *mut i64;
         std::ptr::write_unaligned(slot, handle);
@@ -11231,6 +11316,114 @@ fn p4b_cur_column_names(interp: &mut Interpreter, args: &[u64]) -> Result<u64, V
     Ok(lst as u64)
 }
 
+/// `re.compile(pattern: str) -> Pattern` — compile + intern + wrap.
+fn p4a_re_pattern_compile(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let pattern = arg_str(args, 0);
+    let regex = regex::Regex::new(&pattern).map_err(|e| VmError::UncaughtException {
+        type_name: "ValueError".into(),
+        message: format!("re.compile: invalid pattern {:?}: {}", pattern, e),
+    })?;
+    let handle = interp
+        .shared
+        .p4a_next_pattern_id
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    interp.shared.p4a_compiled_regexes.lock().unwrap().insert(handle, regex);
+    let p = p4a_alloc_pattern(interp, handle);
+    Ok(p as u64)
+}
+
+/// `Pattern(handle)` constructor — receiver-style.  Stores the handle
+/// (arg 1) into the receiver's payload.  Users don't normally call
+/// this directly; `re.compile()` is the canonical entry point.
+fn p4a_pattern_ctor(args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let handle = arg_i64(args, 1);
+    let obj = recv as *mut u8;
+    if !obj.is_null() {
+        unsafe {
+            let slot = obj.add(HDR) as *mut i64;
+            std::ptr::write_unaligned(slot, handle);
+        }
+    }
+    Ok(recv)
+}
+
+/// `Pattern.matches(self, s: str) -> bool` — full-string match.
+fn p4a_pattern_matches(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let handle = p4a_pattern_handle_of(arg_u64(args, 0));
+    let re = p4a_regex_for_handle(interp, handle, "Pattern.matches")?;
+    let s = arg_str(args, 1);
+    let m = re.find(&s);
+    let full = matches!(m, Some(m) if m.start() == 0 && m.end() == s.len());
+    Ok(if full { 1 } else { 0 })
+}
+
+/// `Pattern.find(self, s: str) -> str?` — first match's text, or none.
+fn p4a_pattern_find(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let handle = p4a_pattern_handle_of(arg_u64(args, 0));
+    let re = p4a_regex_for_handle(interp, handle, "Pattern.find")?;
+    let s = arg_str(args, 1);
+    match re.find(&s) {
+        Some(m) => {
+            let sp = interp.alloc_string(m.as_str());
+            Ok(sp as u64)
+        }
+        None => Ok(NONE_SENTINEL),
+    }
+}
+
+/// `Pattern.find_all(self, s: str) -> List[str]`.
+fn p4a_pattern_find_all(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let handle = p4a_pattern_handle_of(arg_u64(args, 0));
+    let re = p4a_regex_for_handle(interp, handle, "Pattern.find_all")?;
+    let s = arg_str(args, 1);
+    let matches: Vec<String> = re.find_iter(&s).map(|m| m.as_str().to_owned()).collect();
+    let lst = interp.alloc_list(matches.len());
+    for m in &matches {
+        let sp = interp.alloc_string(m) as u64;
+        // SAFETY: lst freshly allocated and owned by us.
+        unsafe { interp.list_push(lst, sp) };
+    }
+    Ok(lst as u64)
+}
+
+/// `Pattern.replace(self, s: str, repl: str) -> str` — replace first
+/// match only.
+fn p4a_pattern_replace(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let handle = p4a_pattern_handle_of(arg_u64(args, 0));
+    let re = p4a_regex_for_handle(interp, handle, "Pattern.replace")?;
+    let s = arg_str(args, 1);
+    let repl = arg_str(args, 2);
+    let out = re.replacen(&s, 1, repl.as_str()).into_owned();
+    let p = interp.alloc_string(&out);
+    Ok(p as u64)
+}
+
+/// `Pattern.replace_all(self, s: str, repl: str) -> str`.
+fn p4a_pattern_replace_all(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let handle = p4a_pattern_handle_of(arg_u64(args, 0));
+    let re = p4a_regex_for_handle(interp, handle, "Pattern.replace_all")?;
+    let s = arg_str(args, 1);
+    let repl = arg_str(args, 2);
+    let out = re.replace_all(&s, repl.as_str()).into_owned();
+    let p = interp.alloc_string(&out);
+    Ok(p as u64)
+}
+
+/// `Pattern.split(self, s: str) -> List[str]`.
+fn p4a_pattern_split(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let handle = p4a_pattern_handle_of(arg_u64(args, 0));
+    let re = p4a_regex_for_handle(interp, handle, "Pattern.split")?;
+    let s = arg_str(args, 1);
+    let parts: Vec<String> = re.split(&s).map(|p| p.to_owned()).collect();
+    let lst = interp.alloc_list(parts.len());
+    for p in &parts {
+        let sp = interp.alloc_string(p) as u64;
+        unsafe { interp.list_push(lst, sp) };
+    }
+    Ok(lst as u64)
+}
+
 /// `Cursor.row_count(self) -> i64` — total rows the underlying query
 /// produced.  Independent of the iteration cursor.
 fn p4b_cur_row_count(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
@@ -11249,6 +11442,15 @@ fn p4b_cur_row_count(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmEr
         }),
         Some(state) => Ok(state.rows.len() as u64),
     }
+}
+
+/// `Pattern.source(self) -> str` — original pattern string.
+fn p4a_pattern_source(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let handle = p4a_pattern_handle_of(arg_u64(args, 0));
+    let re = p4a_regex_for_handle(interp, handle, "Pattern.source")?;
+    let src = re.as_str().to_owned();
+    let p = interp.alloc_string(&src);
+    Ok(p as u64)
 }
 
 #[cfg(test)]
