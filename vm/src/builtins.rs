@@ -6925,6 +6925,69 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         NativeFn::M37TabDfRow            => m37_df_row(interp, args),
         NativeFn::M37TabDfSortBy         => m37_df_sort_by(interp, args),
 
+        // ── M38 Phase A: typed accessors + restored comparison ops + rename ──
+        NativeFn::M38TabDfGetColumnI64      => m38_df_get_column_typed(interp, args, "i64"),
+        NativeFn::M38TabDfGetColumnF64      => m38_df_get_column_typed(interp, args, "f64"),
+        NativeFn::M38TabDfGetColumnStr      => m38_df_get_column_typed(interp, args, "str"),
+        NativeFn::M38TabDfGetColumnBool     => m38_df_get_column_typed(interp, args, "bool"),
+        NativeFn::M38TabDfGetColumnDateTime => m38_df_get_column_typed(interp, args, "datetime"),
+        NativeFn::M38TabColI64Ne      => m38_col_i64_cmp(interp, args, 0),
+        NativeFn::M38TabColI64Ge      => m38_col_i64_cmp(interp, args, 1),
+        NativeFn::M38TabColI64Le      => m38_col_i64_cmp(interp, args, 2),
+        NativeFn::M38TabColI64Between => m38_col_i64_between(interp, args),
+        NativeFn::M38TabColF64Ne      => m38_col_f64_cmp(interp, args, 0),
+        NativeFn::M38TabColF64Ge      => m38_col_f64_cmp(interp, args, 1),
+        NativeFn::M38TabColF64Le      => m38_col_f64_cmp(interp, args, 2),
+        NativeFn::M38TabColF64Between => m38_col_f64_between(interp, args),
+        NativeFn::M38TabColStrStartsWith => m38_col_str_affix(interp, args, 0),
+        NativeFn::M38TabColStrEndsWith   => m38_col_str_affix(interp, args, 1),
+        NativeFn::M38TabDfRename      => m38_df_rename(interp, args),
+
+        // ── M38 Phase B: per-column aggregations ──
+        NativeFn::M38TabColI64Sum     => m38_col_i64_agg(args, 0),
+        NativeFn::M38TabColI64Mean    => m38_col_i64_agg(args, 1),
+        NativeFn::M38TabColI64Min     => m38_col_i64_agg(args, 2),
+        NativeFn::M38TabColI64Max     => m38_col_i64_agg(args, 3),
+        NativeFn::M38TabColI64Count   => m38_col_i64_agg(args, 4),
+        NativeFn::M38TabColI64Std     => m38_col_i64_agg(args, 5),
+        NativeFn::M38TabColI64Var     => m38_col_i64_agg(args, 6),
+        NativeFn::M38TabColI64Median  => m38_col_i64_agg(args, 7),
+        NativeFn::M38TabColF64Sum     => m38_col_f64_agg(args, 0),
+        NativeFn::M38TabColF64Mean    => m38_col_f64_agg(args, 1),
+        NativeFn::M38TabColF64Min     => m38_col_f64_agg(args, 2),
+        NativeFn::M38TabColF64Max     => m38_col_f64_agg(args, 3),
+        NativeFn::M38TabColF64Count   => m38_col_f64_agg(args, 4),
+        NativeFn::M38TabColF64Std     => m38_col_f64_agg(args, 5),
+        NativeFn::M38TabColF64Var     => m38_col_f64_agg(args, 6),
+        NativeFn::M38TabColF64Median  => m38_col_f64_agg(args, 7),
+        NativeFn::M38TabColStrCount   => m38_col_str_count(args),
+        NativeFn::M38TabColStrMin     => m38_col_str_minmax(interp, args, false),
+        NativeFn::M38TabColStrMax     => m38_col_str_minmax(interp, args, true),
+        NativeFn::M38TabColBoolCount  => m38_col_str_count(args),
+        NativeFn::M38TabColDtCount    => m38_col_str_count(args),
+        NativeFn::M38TabColDtMin      => m38_col_dt_minmax(args, false),
+        NativeFn::M38TabColDtMax      => m38_col_dt_minmax(args, true),
+
+        // ── M38 Phase C: describe + fill_null + from_dict ──
+        NativeFn::M38TabDfDescribe    => m38_df_describe(interp, args),
+        NativeFn::M38TabColI64FillNull  => m38_col_i64_fill_null(interp, args),
+        NativeFn::M38TabColF64FillNull  => m38_col_f64_fill_null(interp, args),
+        NativeFn::M38TabColStrFillNull  => m38_col_str_fill_null(interp, args),
+        NativeFn::M38TabColBoolFillNull => m38_col_bool_fill_null(interp, args),
+        NativeFn::M38TabColDtFillNull   => m38_col_dt_fill_null(interp, args),
+        NativeFn::M38TabFromDict        => m38_from_dict(interp, args),
+
+        // ── M38 Phase D: group_by + GroupedDataFrame methods ──
+        NativeFn::M38TabDfGroupBy     => m38_df_group_by(interp, args),
+        NativeFn::M38TabGdfSize       => m38_gdf_size(interp, args),
+        NativeFn::M38TabGdfKeys       => m38_gdf_keys(interp, args),
+        NativeFn::M38TabGdfSum        => m38_gdf_agg_shortcut(interp, args, "sum"),
+        NativeFn::M38TabGdfMean       => m38_gdf_agg_shortcut(interp, args, "mean"),
+        NativeFn::M38TabGdfMin        => m38_gdf_agg_shortcut(interp, args, "min"),
+        NativeFn::M38TabGdfMax        => m38_gdf_agg_shortcut(interp, args, "max"),
+        NativeFn::M38TabGdfCount      => m38_gdf_agg_shortcut(interp, args, "count"),
+        NativeFn::M38TabGdfAgg        => m38_gdf_agg(interp, args),
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
@@ -12895,6 +12958,1189 @@ fn m37_df_sort_by(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError
     perm.extend(null_indices);
     let new_cols: Vec<u64> = col_ptrs.iter().map(|cp| m37_column_take(interp, *cp, &perm)).collect();
     Ok(m37_build_df(interp, &names, &new_cols, nrows))
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// M38: tabular round-out — typed accessors, restored comparison ops,
+// per-column aggregations, describe, fill_null, from_dict, and hash-
+// based group-by (`DataFrame.group_by` + new `GroupedDataFrame` class).
+//
+// Per the M38 brief, every helper / handler in this section uses the
+// `m38_` prefix.  Layout reads piggyback on the M37 `m37_col_fields` /
+// `m37_df_fields` helpers — Column objects are 24-byte payloads of
+// (values, nulls, length); DataFrame is (names, columns, nrows).
+//
+// Design call: aggregations over f64 columns do NOT skip NaN cells —
+// NaN propagates per IEEE-754 (a sum containing NaN is NaN; mean of a
+// NaN-bearing column is NaN).  See LANGUAGE_GUIDE.md §11 for the user-
+// facing note.  Null cells (the separate nulls mask) are always
+// skipped regardless of dtype.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Read the class name out of a Column receiver header.  Returns
+/// "unknown" for null pointers / unknown vtables; callers should
+/// already only invoke this on a valid Column*.
+fn m38_col_class_name(col_ptr: u64) -> String {
+    let obj = col_ptr as *const u8;
+    if obj.is_null() {
+        return "unknown".to_string();
+    }
+    unsafe {
+        let hdr = obj as *const crate::object::ObjectHeader;
+        let ty = (*hdr).vtable;
+        if ty.is_null() { "unknown".to_string() } else { (*ty).name.clone() }
+    }
+}
+
+/// `DataFrame.get_column_<T>(self, name: str) -> Column<T>?`.  Returns
+/// `none` (NONE_SENTINEL) when the column doesn't exist OR has the
+/// wrong dtype.  The per-dtype suffix is supplied by the dispatch
+/// table; the handler reuses the M37 dtype names.
+fn m38_df_get_column_typed(
+    _interp: &mut Interpreter,
+    args: &[u64],
+    want_dtype: &str,
+) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let name = arg_str(args, 1);
+    let (names_lst, _, _) = m37_df_fields(recv);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_ptrs = m37_df_col_ptrs(recv);
+    let idx = match names.iter().position(|n| n == &name) {
+        None => return Ok(NONE_SENTINEL),
+        Some(i) => i,
+    };
+    let col = col_ptrs.get(idx).copied().unwrap_or(0);
+    if col == 0 {
+        return Ok(NONE_SENTINEL);
+    }
+    let cls = m38_col_class_name(col);
+    // Map class name → dtype string used by the M37 dtype table.
+    let actual = match cls.as_str() {
+        "ColumnI64" => "i64",
+        "ColumnF64" => "f64",
+        "ColumnStr" => "str",
+        "ColumnBool" => "bool",
+        "ColumnDateTime" => "datetime",
+        _ => return Ok(NONE_SENTINEL),
+    };
+    if actual != want_dtype {
+        return Ok(NONE_SENTINEL);
+    }
+    Ok(col)
+}
+
+// ── Phase A: restored comparison ops (ne / ge / le / between) ─────────
+//
+// `op_code` discriminates 0 = ne, 1 = ge, 2 = le.  `between` has its
+// own handler since it takes two args.
+fn m38_col_i64_cmp(interp: &mut Interpreter, args: &[u64], op_code: u32) -> Result<u64, VmError> {
+    let (vals, nulls, length) = m37_col_fields(arg_u64(args, 0));
+    let x = arg_i64(args, 1);
+    let vs = m37_read_list_i64(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut out_vals: Vec<bool> = Vec::with_capacity(length as usize);
+    let mut out_nulls: Vec<bool> = Vec::with_capacity(length as usize);
+    for i in 0..length as usize {
+        let is_null = ns.get(i).copied().unwrap_or(false);
+        out_nulls.push(is_null);
+        let v = vs.get(i).copied().unwrap_or(0);
+        let res = match op_code {
+            0 => v != x,
+            1 => v >= x,
+            2 => v <= x,
+            _ => false,
+        };
+        out_vals.push(if is_null { false } else { res });
+    }
+    let v_lst = m37_alloc_list_bool(interp, &out_vals);
+    let n_lst = m37_alloc_list_bool(interp, &out_nulls);
+    Ok(m37_alloc_column(interp, "ColumnBool", v_lst, n_lst, length) as u64)
+}
+
+fn m38_col_f64_cmp(interp: &mut Interpreter, args: &[u64], op_code: u32) -> Result<u64, VmError> {
+    let (vals, nulls, length) = m37_col_fields(arg_u64(args, 0));
+    let x = arg_f64(args, 1);
+    let vs = m37_read_list_f64(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut out_vals: Vec<bool> = Vec::with_capacity(length as usize);
+    let mut out_nulls: Vec<bool> = Vec::with_capacity(length as usize);
+    for i in 0..length as usize {
+        let is_null = ns.get(i).copied().unwrap_or(false);
+        out_nulls.push(is_null);
+        let v = vs.get(i).copied().unwrap_or(0.0);
+        let res = match op_code {
+            0 => v != x,
+            1 => v >= x,
+            2 => v <= x,
+            _ => false,
+        };
+        out_vals.push(if is_null { false } else { res });
+    }
+    let v_lst = m37_alloc_list_bool(interp, &out_vals);
+    let n_lst = m37_alloc_list_bool(interp, &out_nulls);
+    Ok(m37_alloc_column(interp, "ColumnBool", v_lst, n_lst, length) as u64)
+}
+
+fn m38_col_i64_between(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let (vals, nulls, length) = m37_col_fields(arg_u64(args, 0));
+    let lo = arg_i64(args, 1);
+    let hi = arg_i64(args, 2);
+    let vs = m37_read_list_i64(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut out_vals: Vec<bool> = Vec::with_capacity(length as usize);
+    let mut out_nulls: Vec<bool> = Vec::with_capacity(length as usize);
+    for i in 0..length as usize {
+        let is_null = ns.get(i).copied().unwrap_or(false);
+        out_nulls.push(is_null);
+        let v = vs.get(i).copied().unwrap_or(0);
+        out_vals.push(if is_null { false } else { v >= lo && v <= hi });
+    }
+    let v_lst = m37_alloc_list_bool(interp, &out_vals);
+    let n_lst = m37_alloc_list_bool(interp, &out_nulls);
+    Ok(m37_alloc_column(interp, "ColumnBool", v_lst, n_lst, length) as u64)
+}
+
+fn m38_col_f64_between(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let (vals, nulls, length) = m37_col_fields(arg_u64(args, 0));
+    let lo = arg_f64(args, 1);
+    let hi = arg_f64(args, 2);
+    let vs = m37_read_list_f64(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut out_vals: Vec<bool> = Vec::with_capacity(length as usize);
+    let mut out_nulls: Vec<bool> = Vec::with_capacity(length as usize);
+    for i in 0..length as usize {
+        let is_null = ns.get(i).copied().unwrap_or(false);
+        out_nulls.push(is_null);
+        let v = vs.get(i).copied().unwrap_or(0.0);
+        out_vals.push(if is_null { false } else { v >= lo && v <= hi });
+    }
+    let v_lst = m37_alloc_list_bool(interp, &out_vals);
+    let n_lst = m37_alloc_list_bool(interp, &out_nulls);
+    Ok(m37_alloc_column(interp, "ColumnBool", v_lst, n_lst, length) as u64)
+}
+
+/// `ColumnStr.starts_with(prefix)` / `ColumnStr.ends_with(suffix)`.
+/// op_code = 0 for starts_with, 1 for ends_with.
+fn m38_col_str_affix(interp: &mut Interpreter, args: &[u64], op_code: u32) -> Result<u64, VmError> {
+    let (vals, nulls, length) = m37_col_fields(arg_u64(args, 0));
+    let x = arg_str(args, 1);
+    let vs = m37_read_list_str_lst(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut out_vals: Vec<bool> = Vec::with_capacity(length as usize);
+    let mut out_nulls: Vec<bool> = Vec::with_capacity(length as usize);
+    for i in 0..length as usize {
+        let is_null = ns.get(i).copied().unwrap_or(false);
+        out_nulls.push(is_null);
+        let v = vs.get(i).cloned().unwrap_or_default();
+        let res = match op_code {
+            0 => v.starts_with(&x),
+            1 => v.ends_with(&x),
+            _ => false,
+        };
+        out_vals.push(if is_null { false } else { res });
+    }
+    let v_lst = m37_alloc_list_bool(interp, &out_vals);
+    let n_lst = m37_alloc_list_bool(interp, &out_nulls);
+    Ok(m37_alloc_column(interp, "ColumnBool", v_lst, n_lst, length) as u64)
+}
+
+/// `DataFrame.rename(renames: List[Tuple[str, str]]) -> DataFrame`.
+/// Each pair `(old, new)` rewrites the column name list entry.  Old
+/// names that don't exist are silently ignored (matches pandas'
+/// default — pandas raises only with `errors="raise"`).  Duplicate new
+/// names are NOT validated; this mirrors the M37 surface's "trust
+/// the user" stance, with downstream `select`/`drop` doing the
+/// validation if needed.
+fn m38_df_rename(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let renames_ptr = arg_u64(args, 1) as *const crate::object::ListRepr;
+    let (names_lst, _, nrows) = m37_df_fields(recv);
+    let mut names = m37_read_list_str_lst(names_lst);
+    let col_ptrs = m37_df_col_ptrs(recv);
+    // Read List[Tuple[str, str]] — each tuple is a 16-byte heap object
+    // with two pointer slots.  Spec §9.3 lays out tuple memory layout
+    // identically to a 2-element list of u64.
+    if !renames_ptr.is_null() {
+        unsafe {
+            let len = (*renames_ptr).length;
+            let data = (*renames_ptr).data as *const u64;
+            for j in 0..len {
+                let tup_ptr = std::ptr::read_unaligned(data.add(j)) as *const u8;
+                if tup_ptr.is_null() {
+                    continue;
+                }
+                let a = std::ptr::read_unaligned(tup_ptr.add(HDR) as *const u64) as *const StringRepr;
+                let b = std::ptr::read_unaligned(tup_ptr.add(HDR + 8) as *const u64) as *const StringRepr;
+                let old_name = read_str(a);
+                let new_name = read_str(b);
+                if let Some(i) = names.iter().position(|n| n == &old_name) {
+                    names[i] = new_name;
+                }
+            }
+        }
+    }
+    Ok(m37_build_df(interp, &names, &col_ptrs, nrows))
+}
+
+// ── Phase B: per-column aggregations ──────────────────────────────────
+//
+// Common helpers: collect non-null values into a Vec<T>, run the agg,
+// box as `T?` (or i64 for count which is always concrete).
+
+/// Return the non-null i64 values in column order.
+fn m38_col_i64_non_null_values(col: u64) -> Vec<i64> {
+    let (vals, nulls, length) = m37_col_fields(col);
+    let vs = m37_read_list_i64(vals);
+    let ns = m37_read_list_bool(nulls);
+    (0..length as usize)
+        .filter(|i| !ns.get(*i).copied().unwrap_or(false))
+        .map(|i| vs.get(i).copied().unwrap_or(0))
+        .collect()
+}
+
+fn m38_col_f64_non_null_values(col: u64) -> Vec<f64> {
+    let (vals, nulls, length) = m37_col_fields(col);
+    let vs = m37_read_list_f64(vals);
+    let ns = m37_read_list_bool(nulls);
+    (0..length as usize)
+        .filter(|i| !ns.get(*i).copied().unwrap_or(false))
+        .map(|i| vs.get(i).copied().unwrap_or(0.0))
+        .collect()
+}
+
+/// Sample stdev via two-pass (mean then sum-of-squared-diffs).  Returns
+/// `None` for fewer than 2 non-null cells.
+fn m38_sample_variance(vs: &[f64]) -> Option<f64> {
+    if vs.len() < 2 {
+        return None;
+    }
+    let n = vs.len() as f64;
+    let mean: f64 = vs.iter().sum::<f64>() / n;
+    let ss: f64 = vs.iter().map(|x| (x - mean).powi(2)).sum();
+    Some(ss / (n - 1.0))
+}
+
+/// Linear-interpolated quantile.  `q` must be in [0, 1].  Returns
+/// `None` for an empty slice.  Caller passes a *sorted* slice.
+fn m38_quantile_sorted(sorted: &[f64], q: f64) -> Option<f64> {
+    if sorted.is_empty() {
+        return None;
+    }
+    let n = sorted.len();
+    if n == 1 {
+        return Some(sorted[0]);
+    }
+    let pos = (n as f64 - 1.0) * q;
+    let lo = pos.floor() as usize;
+    let hi = pos.ceil() as usize;
+    if lo == hi {
+        return Some(sorted[lo]);
+    }
+    let frac = pos - lo as f64;
+    Some(sorted[lo] + frac * (sorted[hi] - sorted[lo]))
+}
+
+/// op_code: 0=sum 1=mean 2=min 3=max 4=count 5=std 6=var 7=median.
+fn m38_col_i64_agg(args: &[u64], op_code: u32) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let vs = m38_col_i64_non_null_values(recv);
+    if op_code == 4 {
+        // count: always concrete i64, no Nullable wrapping.
+        return Ok(vs.len() as u64);
+    }
+    if vs.is_empty() {
+        return Ok(NONE_SENTINEL);
+    }
+    match op_code {
+        0 => Ok(vs.iter().sum::<i64>() as u64),
+        1 => {
+            let sum: i64 = vs.iter().sum();
+            Ok((sum as f64 / vs.len() as f64).to_bits())
+        }
+        2 => Ok(*vs.iter().min().unwrap() as u64),
+        3 => Ok(*vs.iter().max().unwrap() as u64),
+        5 | 6 => {
+            let vsf: Vec<f64> = vs.iter().map(|x| *x as f64).collect();
+            match m38_sample_variance(&vsf) {
+                None => Ok(NONE_SENTINEL),
+                Some(var) => {
+                    let out = if op_code == 5 { var.sqrt() } else { var };
+                    Ok(out.to_bits())
+                }
+            }
+        }
+        7 => {
+            let mut vsf: Vec<f64> = vs.iter().map(|x| *x as f64).collect();
+            vsf.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            match m38_quantile_sorted(&vsf, 0.5) {
+                None => Ok(NONE_SENTINEL),
+                Some(m) => Ok(m.to_bits()),
+            }
+        }
+        _ => Err(VmError::Trap(format!("m38_col_i64_agg: unknown op_code {op_code}"))),
+    }
+}
+
+fn m38_col_f64_agg(args: &[u64], op_code: u32) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let vs = m38_col_f64_non_null_values(recv);
+    if op_code == 4 {
+        return Ok(vs.len() as u64);
+    }
+    if vs.is_empty() {
+        return Ok(NONE_SENTINEL);
+    }
+    match op_code {
+        0 => Ok(vs.iter().sum::<f64>().to_bits()),
+        1 => {
+            let sum: f64 = vs.iter().sum();
+            Ok((sum / vs.len() as f64).to_bits())
+        }
+        2 => {
+            // partial_cmp-aware min: NaN propagates per the M38 design
+            // call.  If any element is NaN, return NaN.
+            let m = vs.iter().fold(f64::INFINITY, |acc, x| {
+                if x.is_nan() || acc.is_nan() { f64::NAN }
+                else if *x < acc { *x } else { acc }
+            });
+            Ok(m.to_bits())
+        }
+        3 => {
+            let m = vs.iter().fold(f64::NEG_INFINITY, |acc, x| {
+                if x.is_nan() || acc.is_nan() { f64::NAN }
+                else if *x > acc { *x } else { acc }
+            });
+            Ok(m.to_bits())
+        }
+        5 | 6 => {
+            match m38_sample_variance(&vs) {
+                None => Ok(NONE_SENTINEL),
+                Some(var) => {
+                    let out = if op_code == 5 { var.sqrt() } else { var };
+                    Ok(out.to_bits())
+                }
+            }
+        }
+        7 => {
+            let mut sorted: Vec<f64> = vs.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            match m38_quantile_sorted(&sorted, 0.5) {
+                None => Ok(NONE_SENTINEL),
+                Some(m) => Ok(m.to_bits()),
+            }
+        }
+        _ => Err(VmError::Trap(format!("m38_col_f64_agg: unknown op_code {op_code}"))),
+    }
+}
+
+/// `ColumnStr.count() / ColumnBool.count() / ColumnDateTime.count()`.
+/// Shared since they all just count non-null cells.
+fn m38_col_str_count(args: &[u64]) -> Result<u64, VmError> {
+    let (_, nulls, length) = m37_col_fields(arg_u64(args, 0));
+    let ns = m37_read_list_bool(nulls);
+    let mut count: u64 = 0;
+    for i in 0..length as usize {
+        if !ns.get(i).copied().unwrap_or(false) {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn m38_col_str_minmax(interp: &mut Interpreter, args: &[u64], want_max: bool) -> Result<u64, VmError> {
+    let (vals, nulls, length) = m37_col_fields(arg_u64(args, 0));
+    let vs = m37_read_list_str_lst(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut best: Option<&String> = None;
+    for i in 0..length as usize {
+        if ns.get(i).copied().unwrap_or(false) {
+            continue;
+        }
+        let v = match vs.get(i) { Some(v) => v, None => continue };
+        best = Some(match best {
+            None => v,
+            Some(b) => {
+                if want_max { if v > b { v } else { b } }
+                else        { if v < b { v } else { b } }
+            }
+        });
+    }
+    match best {
+        None => Ok(NONE_SENTINEL),
+        Some(s) => Ok(interp.alloc_string(s) as u64),
+    }
+}
+
+fn m38_col_dt_minmax(args: &[u64], want_max: bool) -> Result<u64, VmError> {
+    let (vals, nulls, length) = m37_col_fields(arg_u64(args, 0));
+    let vs = m37_read_list_i64(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut best: Option<i64> = None;
+    for i in 0..length as usize {
+        if ns.get(i).copied().unwrap_or(false) {
+            continue;
+        }
+        let v = vs.get(i).copied().unwrap_or(0);
+        best = Some(match best {
+            None => v,
+            Some(b) => if want_max { v.max(b) } else { v.min(b) },
+        });
+    }
+    match best {
+        None => Ok(NONE_SENTINEL),
+        Some(v) => Ok(v as u64),
+    }
+}
+
+// ── Phase C: describe + fill_null + from_dict ─────────────────────────
+
+/// `DataFrame.describe(self) -> DataFrame`.  Returns a 5-row × N-col
+/// frame indexed (count / mean / std / min / max).  Every output cell
+/// is a `str` so the result frame can be shown directly.  For non-
+/// numeric columns (str / bool / datetime) only "count" is populated;
+/// the other rows are "".
+fn m38_df_describe(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let (names_lst, _, _) = m37_df_fields(recv);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_ptrs = m37_df_col_ptrs(recv);
+    let row_names = ["count", "mean", "std", "min", "max"];
+
+    // Build a 5-row × ncols frame.  We construct N+1 columns where the
+    // first column is the row-name index ("count" / "mean" / etc.) and
+    // each remaining column holds the per-stat string for that input
+    // column.
+    let mut out_names: Vec<String> = Vec::with_capacity(names.len() + 1);
+    out_names.push("statistic".into());
+    out_names.extend(names.iter().cloned());
+
+    let mut out_cols: Vec<u64> = Vec::with_capacity(names.len() + 1);
+    // Statistic column: ["count", "mean", "std", "min", "max"].
+    let stat_strs: Vec<String> = row_names.iter().map(|s| s.to_string()).collect();
+    let stat_vals = m37_alloc_list_str(interp, &stat_strs);
+    let stat_nulls = m37_alloc_list_bool(interp, &vec![false; 5]);
+    out_cols.push(m37_alloc_column(interp, "ColumnStr", stat_vals, stat_nulls, 5) as u64);
+
+    for cp in &col_ptrs {
+        let cls = m38_col_class_name(*cp);
+        let mut rows: Vec<String> = vec![String::new(); 5];
+        // count is always concrete.
+        let (_, nulls, length) = m37_col_fields(*cp);
+        let ns = m37_read_list_bool(nulls);
+        let cnt = (0..length as usize).filter(|i| !ns.get(*i).copied().unwrap_or(false)).count();
+        rows[0] = cnt.to_string();
+        match cls.as_str() {
+            "ColumnI64" => {
+                let vs = m38_col_i64_non_null_values(*cp);
+                if !vs.is_empty() {
+                    let sum: i64 = vs.iter().sum();
+                    let mean = sum as f64 / vs.len() as f64;
+                    rows[1] = m38_fmt_f64(mean);
+                    rows[3] = vs.iter().min().unwrap().to_string();
+                    rows[4] = vs.iter().max().unwrap().to_string();
+                }
+                let vsf: Vec<f64> = vs.iter().map(|x| *x as f64).collect();
+                if let Some(var) = m38_sample_variance(&vsf) {
+                    rows[2] = m38_fmt_f64(var.sqrt());
+                }
+            }
+            "ColumnF64" => {
+                let vs = m38_col_f64_non_null_values(*cp);
+                if !vs.is_empty() {
+                    let sum: f64 = vs.iter().sum();
+                    let mean = sum / vs.len() as f64;
+                    rows[1] = m38_fmt_f64(mean);
+                    let lo = vs.iter().fold(f64::INFINITY, |a, b| {
+                        if a.is_nan() || b.is_nan() { f64::NAN } else if *b < a { *b } else { a }
+                    });
+                    let hi = vs.iter().fold(f64::NEG_INFINITY, |a, b| {
+                        if a.is_nan() || b.is_nan() { f64::NAN } else if *b > a { *b } else { a }
+                    });
+                    rows[3] = m38_fmt_f64(lo);
+                    rows[4] = m38_fmt_f64(hi);
+                }
+                if let Some(var) = m38_sample_variance(&vs) {
+                    rows[2] = m38_fmt_f64(var.sqrt());
+                }
+            }
+            _ => {
+                // Non-numeric: leave mean / std / min / max blank.
+            }
+        }
+        let v_lst = m37_alloc_list_str(interp, &rows);
+        let n_lst = m37_alloc_list_bool(interp, &vec![false; 5]);
+        out_cols.push(m37_alloc_column(interp, "ColumnStr", v_lst, n_lst, 5) as u64);
+    }
+    Ok(m37_build_df(interp, &out_names, &out_cols, 5))
+}
+
+/// Format an f64 with up to 6 significant digits, trimming trailing
+/// zeros and the trailing dot if produced.  Mirrors the M37 ASCII-
+/// table formatter's f64 path so describe() output looks consistent.
+fn m38_fmt_f64(x: f64) -> String {
+    if x.is_nan() { return "nan".into(); }
+    if x.is_infinite() { return (if x > 0.0 { "inf" } else { "-inf" }).into(); }
+    if x == 0.0 { return "0".into(); }
+    let s = format!("{:.6}", x);
+    if s.contains('.') {
+        let trimmed = s.trim_end_matches('0').trim_end_matches('.').to_string();
+        if trimmed.is_empty() || trimmed == "-" { "0".into() } else { trimmed }
+    } else {
+        s
+    }
+}
+
+fn m38_col_i64_fill_null(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let v_fill = arg_i64(args, 1);
+    let (vals, nulls, length) = m37_col_fields(recv);
+    let vs = m37_read_list_i64(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut new_vs: Vec<i64> = Vec::with_capacity(length as usize);
+    for i in 0..length as usize {
+        let n = ns.get(i).copied().unwrap_or(false);
+        new_vs.push(if n { v_fill } else { vs.get(i).copied().unwrap_or(0) });
+    }
+    let v_lst = m37_alloc_list_i64(interp, &new_vs);
+    let n_lst = m37_alloc_list_bool(interp, &vec![false; length as usize]);
+    Ok(m37_alloc_column(interp, "ColumnI64", v_lst, n_lst, length) as u64)
+}
+
+fn m38_col_f64_fill_null(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let v_fill = arg_f64(args, 1);
+    let (vals, nulls, length) = m37_col_fields(recv);
+    let vs = m37_read_list_f64(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut new_vs: Vec<f64> = Vec::with_capacity(length as usize);
+    for i in 0..length as usize {
+        let n = ns.get(i).copied().unwrap_or(false);
+        new_vs.push(if n { v_fill } else { vs.get(i).copied().unwrap_or(0.0) });
+    }
+    let v_lst = m37_alloc_list_f64(interp, &new_vs);
+    let n_lst = m37_alloc_list_bool(interp, &vec![false; length as usize]);
+    Ok(m37_alloc_column(interp, "ColumnF64", v_lst, n_lst, length) as u64)
+}
+
+fn m38_col_str_fill_null(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let v_fill = arg_str(args, 1);
+    let (vals, nulls, length) = m37_col_fields(recv);
+    let vs = m37_read_list_str_lst(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut new_vs: Vec<String> = Vec::with_capacity(length as usize);
+    for i in 0..length as usize {
+        let n = ns.get(i).copied().unwrap_or(false);
+        new_vs.push(if n { v_fill.clone() } else { vs.get(i).cloned().unwrap_or_default() });
+    }
+    let v_lst = m37_alloc_list_str(interp, &new_vs);
+    let n_lst = m37_alloc_list_bool(interp, &vec![false; length as usize]);
+    Ok(m37_alloc_column(interp, "ColumnStr", v_lst, n_lst, length) as u64)
+}
+
+fn m38_col_bool_fill_null(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let v_fill = arg_u64(args, 1) != 0;
+    let (vals, nulls, length) = m37_col_fields(recv);
+    let vs = m37_read_list_bool(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut new_vs: Vec<bool> = Vec::with_capacity(length as usize);
+    for i in 0..length as usize {
+        let n = ns.get(i).copied().unwrap_or(false);
+        new_vs.push(if n { v_fill } else { vs.get(i).copied().unwrap_or(false) });
+    }
+    let v_lst = m37_alloc_list_bool(interp, &new_vs);
+    let n_lst = m37_alloc_list_bool(interp, &vec![false; length as usize]);
+    Ok(m37_alloc_column(interp, "ColumnBool", v_lst, n_lst, length) as u64)
+}
+
+fn m38_col_dt_fill_null(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let v_fill = arg_i64(args, 1);
+    let (vals, nulls, length) = m37_col_fields(recv);
+    let vs = m37_read_list_i64(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut new_vs: Vec<i64> = Vec::with_capacity(length as usize);
+    for i in 0..length as usize {
+        let n = ns.get(i).copied().unwrap_or(false);
+        new_vs.push(if n { v_fill } else { vs.get(i).copied().unwrap_or(0) });
+    }
+    let v_lst = m37_alloc_list_i64(interp, &new_vs);
+    let n_lst = m37_alloc_list_bool(interp, &vec![false; length as usize]);
+    Ok(m37_alloc_column(interp, "ColumnDateTime", v_lst, n_lst, length) as u64)
+}
+
+/// `tabular.from_dict(d: Dict[str, Column]) -> DataFrame`.  Iterates
+/// the Dict in insertion order via the M5 dict-slot table.  All
+/// columns must have equal length (matches the M37 `from_columns`
+/// invariant) — `ValueError` otherwise.
+fn m38_from_dict(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let dict_handle = arg_i64(args, 0);
+    // Use the existing dict iteration helper: keys + values lists are
+    // both maintained in insertion order.
+    let (keys, vals) = m38_dict_entries(interp, dict_handle)?;
+    if keys.len() != vals.len() {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "tabular.from_dict: dict keys/values length mismatch".into(),
+        });
+    }
+    // Validate matching column lengths.
+    let mut nrows: i64 = -1;
+    for (i, cp) in vals.iter().enumerate() {
+        let (_, _, this_len) = m37_col_fields(*cp);
+        if nrows < 0 {
+            nrows = this_len;
+        } else if nrows != this_len {
+            return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!(
+                    "tabular.from_dict: column {:?} has length {} but expected {}",
+                    keys.get(i).cloned().unwrap_or_default(),
+                    this_len, nrows,
+                ),
+            });
+        }
+    }
+    if nrows < 0 { nrows = 0; }
+    Ok(m37_build_df(interp, &keys, &vals, nrows))
+}
+
+/// Pull (keys, values) out of the M5 dict at `handle`.  Returns empty
+/// Vecs for an invalid handle.  Values are pointer-shaped u64 (the
+/// column pointer in our case).
+///
+/// Design call: the M5 Dict storage is a plain `HashMap<String, u64>`
+/// which does NOT preserve insertion order.  Rather than block on M39
+/// migrating to IndexMap, we sort keys lexicographically here so the
+/// resulting DataFrame has a deterministic column order.  Documented
+/// in LANGUAGE_GUIDE.md §11.
+fn m38_dict_entries(interp: &mut Interpreter, handle: i64) -> Result<(Vec<String>, Vec<u64>), VmError> {
+    // The Dict is passed by-pointer; the arg is a DictRepr* so we have
+    // to read .handle out before dereferencing the slot table.
+    let dp = handle as *const DictRepr;
+    if dp.is_null() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let dict_handle = unsafe { (*dp).handle } as usize;
+    let entries: Vec<(String, u64)> = with_dict_slot(interp, dict_handle, |slot| {
+        let mut v: Vec<(String, u64)> = slot.data.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    })?;
+    Ok((
+        entries.iter().map(|(k, _)| k.clone()).collect(),
+        entries.iter().map(|(_, v)| *v).collect(),
+    ))
+}
+
+// ── Phase D: group_by + GroupedDataFrame methods ──────────────────────
+
+const M38_GROUP_KEY_SEP: char = '\x01';
+
+/// Serialize a row's group-key columns to a single string for hash
+/// keying.  Null cells are encoded as the literal "\x02null" — chosen
+/// so it cannot collide with any string value (printable ASCII + the
+/// separator), and so a `null` row ends up in its own group rather than
+/// merging with a row whose value happens to be the string "null".
+fn m38_row_key(col_ptrs: &[u64], col_class: &[String], row: usize) -> String {
+    let mut out = String::new();
+    for (i, cp) in col_ptrs.iter().enumerate() {
+        if i > 0 {
+            out.push(M38_GROUP_KEY_SEP);
+        }
+        let (vals, nulls, _length) = m37_col_fields(*cp);
+        let ns = m37_read_list_bool(nulls);
+        if ns.get(row).copied().unwrap_or(false) {
+            out.push_str("\x02null");
+            continue;
+        }
+        match col_class[i].as_str() {
+            "ColumnI64" | "ColumnDateTime" => {
+                let v = m37_read_list_i64(vals).get(row).copied().unwrap_or(0);
+                out.push_str(&v.to_string());
+            }
+            "ColumnF64" => {
+                let v = m37_read_list_f64(vals).get(row).copied().unwrap_or(0.0);
+                out.push_str(&v.to_bits().to_string());
+            }
+            "ColumnStr" => {
+                let v = m37_read_list_str_lst(vals).get(row).cloned().unwrap_or_default();
+                out.push_str(&v);
+            }
+            "ColumnBool" => {
+                let v = m37_read_list_bool(vals).get(row).copied().unwrap_or(false);
+                out.push_str(if v { "1" } else { "0" });
+            }
+            _ => out.push_str("?"),
+        }
+    }
+    out
+}
+
+/// Build the group-index map: a `Vec<(serialized_key, row_indices)>`
+/// preserving insertion order.  Linear-scan lookup is fine for the
+/// row counts a typical v1 DataFrame holds (<1M); upgrades to a real
+/// IndexMap can come later.
+fn m38_build_group_index(
+    df: u64,
+    key_col_indices: &[usize],
+) -> Result<Vec<(String, Vec<usize>)>, VmError> {
+    let (_, _, nrows) = m37_df_fields(df);
+    let col_ptrs = m37_df_col_ptrs(df);
+    let key_col_ptrs: Vec<u64> = key_col_indices.iter().map(|i| col_ptrs[*i]).collect();
+    let key_col_class: Vec<String> = key_col_ptrs.iter().map(|cp| m38_col_class_name(*cp)).collect();
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    let mut lookup: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for r in 0..nrows as usize {
+        let k = m38_row_key(&key_col_ptrs, &key_col_class, r);
+        match lookup.get(&k).copied() {
+            Some(idx) => groups[idx].1.push(r),
+            None => {
+                lookup.insert(k.clone(), groups.len());
+                groups.push((k, vec![r]));
+            }
+        }
+    }
+    Ok(groups)
+}
+
+/// `DataFrame.group_by(cols: List[str]) -> GroupedDataFrame`.
+fn m38_df_group_by(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let want = read_list_str(args, 1);
+    if want.is_empty() {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "DataFrame.group_by: at least one column required".into(),
+        });
+    }
+    let (names_lst, _, _) = m37_df_fields(recv);
+    let names = m37_read_list_str_lst(names_lst);
+    let mut key_col_indices: Vec<usize> = Vec::with_capacity(want.len());
+    for w in &want {
+        match names.iter().position(|n| n == w) {
+            None => return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!("DataFrame.group_by: column {:?} not found", w),
+            }),
+            Some(i) => key_col_indices.push(i),
+        }
+    }
+    let groups = m38_build_group_index(recv, &key_col_indices)?;
+    let group_count = groups.len() as i64;
+    // Stash the groups in a SharedVm slot.
+    let slot = interp.shared.m38_next_group_index_id
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    interp.shared.m38_group_index_maps.lock().unwrap().insert(slot, groups);
+    // Allocate the GroupedDataFrame instance.
+    let p = m34_alloc_class_obj(interp, "GroupedDataFrame", 32);
+    let group_keys_lst = m37_alloc_list_str(interp, &want);
+    unsafe {
+        let parent_slot = p.add(HDR) as *mut u64;
+        let keys_slot   = p.add(HDR + 8) as *mut u64;
+        let slot_slot   = p.add(HDR + 16) as *mut i64;
+        let count_slot  = p.add(HDR + 24) as *mut i64;
+        std::ptr::write_unaligned(parent_slot, recv);
+        std::ptr::write_unaligned(keys_slot, group_keys_lst as u64);
+        std::ptr::write_unaligned(slot_slot, slot);
+        std::ptr::write_unaligned(count_slot, group_count);
+    }
+    Ok(p as u64)
+}
+
+/// Read the GroupedDataFrame payload — (parent_df, group_keys_lst, slot, group_count).
+fn m38_gdf_fields(recv: u64) -> (u64, *const crate::object::ListRepr, i64, i64) {
+    let obj = recv as *const u8;
+    if obj.is_null() {
+        return (0, std::ptr::null(), 0, 0);
+    }
+    unsafe {
+        let parent = std::ptr::read_unaligned(obj.add(HDR) as *const u64);
+        let keys = std::ptr::read_unaligned(obj.add(HDR + 8) as *const u64)
+            as *const crate::object::ListRepr;
+        let slot = std::ptr::read_unaligned(obj.add(HDR + 16) as *const i64);
+        let count = std::ptr::read_unaligned(obj.add(HDR + 24) as *const i64);
+        (parent, keys, slot, count)
+    }
+}
+
+/// Pull the stored groups out of the SharedVm slot table.  Returns
+/// empty for a stale/invalid handle.
+fn m38_load_groups(interp: &Interpreter, slot: i64) -> Vec<(String, Vec<usize>)> {
+    let maps = interp.shared.m38_group_index_maps.lock().unwrap();
+    maps.get(&slot).cloned().unwrap_or_default()
+}
+
+/// Per-group-key columns: split a stored serialized key back into the
+/// original column dtypes by sampling the first row of each group.
+/// We chose "use sample row" (the simpler of the two approaches the
+/// brief suggests) — splitting and reparsing requires knowing the
+/// dtype map and is brittle for f64 (we stored u64 bit patterns).
+fn m38_build_key_columns(
+    interp: &mut Interpreter,
+    parent_df: u64,
+    key_col_indices: &[usize],
+    groups: &[(String, Vec<usize>)],
+) -> Vec<u64> {
+    let parent_col_ptrs = m37_df_col_ptrs(parent_df);
+    let mut out: Vec<u64> = Vec::with_capacity(key_col_indices.len());
+    for (j, src_idx) in key_col_indices.iter().enumerate() {
+        let src = parent_col_ptrs[*src_idx];
+        // Sample one row from each group (the first row by definition).
+        let sample_rows: Vec<usize> = groups.iter().map(|(_, rs)| rs[0]).collect();
+        let _ = j;
+        out.push(m37_column_take(interp, src, &sample_rows));
+    }
+    out
+}
+
+/// `GroupedDataFrame.size(self) -> DataFrame`.  Group-key columns +
+/// a "size" i64 column.
+fn m38_gdf_size(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let (parent, _keys, slot, _count) = m38_gdf_fields(recv);
+    let groups = m38_load_groups(interp, slot);
+    let want = m38_gdf_key_col_names(recv);
+    let (names_lst, _, _) = m37_df_fields(parent);
+    let names = m37_read_list_str_lst(names_lst);
+    let key_col_indices = m38_resolve_col_indices(&names, &want, "GroupedDataFrame.size")?;
+    let mut out_names = want.clone();
+    out_names.push("size".into());
+    let mut out_cols = m38_build_key_columns(interp, parent, &key_col_indices, &groups);
+    let sizes: Vec<i64> = groups.iter().map(|(_, rs)| rs.len() as i64).collect();
+    let v_lst = m37_alloc_list_i64(interp, &sizes);
+    let n_lst = m37_alloc_list_bool(interp, &vec![false; sizes.len()]);
+    out_cols.push(m37_alloc_column(interp, "ColumnI64", v_lst, n_lst, sizes.len() as i64) as u64);
+    Ok(m37_build_df(interp, &out_names, &out_cols, sizes.len() as i64))
+}
+
+/// Read the group_keys list back out of the GroupedDataFrame payload.
+fn m38_gdf_key_col_names(recv: u64) -> Vec<String> {
+    let (_, keys, _, _) = m38_gdf_fields(recv);
+    m37_read_list_str_lst(keys)
+}
+
+/// Resolve a list of column names to indices into the parent's column
+/// list.  Errors if any name is missing.
+fn m38_resolve_col_indices(
+    names: &[String],
+    want: &[String],
+    where_: &str,
+) -> Result<Vec<usize>, VmError> {
+    let mut out: Vec<usize> = Vec::with_capacity(want.len());
+    for w in want {
+        match names.iter().position(|n| n == w) {
+            None => return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!("{}: column {:?} not found", where_, w),
+            }),
+            Some(i) => out.push(i),
+        }
+    }
+    Ok(out)
+}
+
+/// `GroupedDataFrame.keys(self) -> DataFrame`.  Just the group-key
+/// columns, one row per group.
+fn m38_gdf_keys(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let (parent, _keys, slot, _count) = m38_gdf_fields(recv);
+    let groups = m38_load_groups(interp, slot);
+    let want = m38_gdf_key_col_names(recv);
+    let (names_lst, _, _) = m37_df_fields(parent);
+    let names = m37_read_list_str_lst(names_lst);
+    let key_col_indices = m38_resolve_col_indices(&names, &want, "GroupedDataFrame.keys")?;
+    let out_cols = m38_build_key_columns(interp, parent, &key_col_indices, &groups);
+    Ok(m37_build_df(interp, &want, &out_cols, groups.len() as i64))
+}
+
+/// Apply an aggregation by name to a column subset of the source
+/// DataFrame on the given row indices.  Returns the output column.
+/// `agg_name` is one of "sum"/"mean"/"min"/"max"/"count"/"std"/"var"/"median".
+fn m38_aggregate_subset(
+    interp: &mut Interpreter,
+    col: u64,
+    rows: &[usize],
+    agg_name: &str,
+) -> Result<u64, VmError> {
+    let cls = m38_col_class_name(col);
+    let (vals, nulls, _) = m37_col_fields(col);
+    let ns = m37_read_list_bool(nulls);
+    // count is dtype-agnostic.
+    if agg_name == "count" {
+        let cnt: i64 = rows.iter().filter(|r| !ns.get(**r).copied().unwrap_or(false)).count() as i64;
+        return Ok(cnt as u64);
+    }
+    match cls.as_str() {
+        "ColumnI64" | "ColumnDateTime" => {
+            let vs_all = m37_read_list_i64(vals);
+            let non_null: Vec<i64> = rows.iter()
+                .filter(|r| !ns.get(**r).copied().unwrap_or(false))
+                .map(|r| vs_all.get(*r).copied().unwrap_or(0))
+                .collect();
+            m38_apply_agg_i64(non_null, agg_name)
+        }
+        "ColumnF64" => {
+            let vs_all = m37_read_list_f64(vals);
+            let non_null: Vec<f64> = rows.iter()
+                .filter(|r| !ns.get(**r).copied().unwrap_or(false))
+                .map(|r| vs_all.get(*r).copied().unwrap_or(0.0))
+                .collect();
+            m38_apply_agg_f64(non_null, agg_name)
+        }
+        _ => {
+            // For non-numeric columns, sum/mean/etc. don't apply; we
+            // return a literal "" string allocation so the caller can
+            // still produce a DataFrame.  (Most callers should only
+            // pick numeric columns for aggregation.)
+            let _ = interp;
+            Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!("Aggregation {:?} not supported on column dtype {}", agg_name, cls),
+            })
+        }
+    }
+}
+
+fn m38_apply_agg_i64(vs: Vec<i64>, agg_name: &str) -> Result<u64, VmError> {
+    if vs.is_empty() {
+        return Ok(NONE_SENTINEL);
+    }
+    match agg_name {
+        "sum"  => Ok(vs.iter().sum::<i64>() as u64),
+        "min"  => Ok(*vs.iter().min().unwrap() as u64),
+        "max"  => Ok(*vs.iter().max().unwrap() as u64),
+        "mean" => {
+            let sum: i64 = vs.iter().sum();
+            Ok((sum as f64 / vs.len() as f64).to_bits())
+        }
+        "std" | "var" => {
+            let vsf: Vec<f64> = vs.iter().map(|x| *x as f64).collect();
+            match m38_sample_variance(&vsf) {
+                None => Ok(NONE_SENTINEL),
+                Some(var) => Ok(if agg_name == "std" { var.sqrt().to_bits() } else { var.to_bits() }),
+            }
+        }
+        "median" => {
+            let mut vsf: Vec<f64> = vs.iter().map(|x| *x as f64).collect();
+            vsf.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            match m38_quantile_sorted(&vsf, 0.5) {
+                None => Ok(NONE_SENTINEL),
+                Some(m) => Ok(m.to_bits()),
+            }
+        }
+        _ => Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("Unknown aggregation: {:?}", agg_name),
+        }),
+    }
+}
+
+fn m38_apply_agg_f64(vs: Vec<f64>, agg_name: &str) -> Result<u64, VmError> {
+    if vs.is_empty() {
+        return Ok(NONE_SENTINEL);
+    }
+    match agg_name {
+        "sum"  => Ok(vs.iter().sum::<f64>().to_bits()),
+        "mean" => Ok((vs.iter().sum::<f64>() / vs.len() as f64).to_bits()),
+        "min"  => {
+            let m = vs.iter().fold(f64::INFINITY, |acc, x| {
+                if x.is_nan() || acc.is_nan() { f64::NAN }
+                else if *x < acc { *x } else { acc }
+            });
+            Ok(m.to_bits())
+        }
+        "max"  => {
+            let m = vs.iter().fold(f64::NEG_INFINITY, |acc, x| {
+                if x.is_nan() || acc.is_nan() { f64::NAN }
+                else if *x > acc { *x } else { acc }
+            });
+            Ok(m.to_bits())
+        }
+        "std" | "var" => {
+            match m38_sample_variance(&vs) {
+                None => Ok(NONE_SENTINEL),
+                Some(var) => Ok(if agg_name == "std" { var.sqrt().to_bits() } else { var.to_bits() }),
+            }
+        }
+        "median" => {
+            let mut sorted = vs.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            match m38_quantile_sorted(&sorted, 0.5) {
+                None => Ok(NONE_SENTINEL),
+                Some(m) => Ok(m.to_bits()),
+            }
+        }
+        _ => Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("Unknown aggregation: {:?}", agg_name),
+        }),
+    }
+}
+
+/// `GroupedDataFrame.{sum,mean,min,max,count}() -> DataFrame`.  Apply
+/// the agg to every numeric (or for count, every) non-key column.
+fn m38_gdf_agg_shortcut(
+    interp: &mut Interpreter,
+    args: &[u64],
+    agg_name: &str,
+) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let (parent, _keys, slot, _count) = m38_gdf_fields(recv);
+    let groups = m38_load_groups(interp, slot);
+    let key_names = m38_gdf_key_col_names(recv);
+    let (names_lst, _, _) = m37_df_fields(parent);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_ptrs = m37_df_col_ptrs(parent);
+    let key_col_indices = m38_resolve_col_indices(&names, &key_names, "GroupedDataFrame.agg")?;
+    let mut key_set = std::collections::HashSet::new();
+    for i in &key_col_indices { key_set.insert(*i); }
+    // Determine which columns we aggregate over.  For count: every non-
+    // key column.  For sum/mean/min/max: only numeric ones (i64, f64,
+    // and datetime for min/max).
+    let mut agg_indices: Vec<usize> = Vec::new();
+    for (i, cp) in col_ptrs.iter().enumerate() {
+        if key_set.contains(&i) { continue; }
+        let cls = m38_col_class_name(*cp);
+        let numeric = matches!(cls.as_str(), "ColumnI64" | "ColumnF64");
+        let dt = cls == "ColumnDateTime";
+        let include = match agg_name {
+            "count" => true,
+            "sum" | "mean" => numeric,
+            "min" | "max"  => numeric || dt,
+            _ => numeric,
+        };
+        if include {
+            agg_indices.push(i);
+        }
+    }
+    // Build output frame: group_key columns + agg columns.
+    let mut out_names = key_names.clone();
+    let mut out_cols = m38_build_key_columns(interp, parent, &key_col_indices, &groups);
+    for ai in &agg_indices {
+        out_names.push(names[*ai].clone());
+        let src = col_ptrs[*ai];
+        let src_cls = m38_col_class_name(src);
+        // Aggregate within each group, producing one cell per group.
+        // The output column dtype follows the agg: count → i64; mean → f64;
+        // sum/min/max → same dtype as input (i64 stays i64, f64 stays f64);
+        // for datetime min/max → i64 epoch-ms.
+        let mut out_i64: Vec<i64> = Vec::new();
+        let mut out_f64: Vec<f64> = Vec::new();
+        let mut out_nulls: Vec<bool> = Vec::new();
+        let pick_f64 = matches!(agg_name, "mean") || src_cls == "ColumnF64";
+        for (_, rows) in groups.iter() {
+            let cell = m38_aggregate_subset(interp, src, rows, agg_name)?;
+            if cell == NONE_SENTINEL {
+                out_nulls.push(true);
+                if pick_f64 { out_f64.push(0.0); } else { out_i64.push(0); }
+            } else {
+                out_nulls.push(false);
+                if agg_name == "count" {
+                    out_i64.push(cell as i64);
+                } else if pick_f64 {
+                    out_f64.push(f64::from_bits(cell));
+                } else {
+                    out_i64.push(cell as i64);
+                }
+            }
+        }
+        let n = out_nulls.len() as i64;
+        let n_lst = m37_alloc_list_bool(interp, &out_nulls);
+        let (cls_name, v_lst) = if agg_name == "count" {
+            ("ColumnI64", m37_alloc_list_i64(interp, &out_i64))
+        } else if pick_f64 {
+            ("ColumnF64", m37_alloc_list_f64(interp, &out_f64))
+        } else if src_cls == "ColumnDateTime" {
+            ("ColumnDateTime", m37_alloc_list_i64(interp, &out_i64))
+        } else {
+            ("ColumnI64", m37_alloc_list_i64(interp, &out_i64))
+        };
+        out_cols.push(m37_alloc_column(interp, cls_name, v_lst, n_lst, n) as u64);
+    }
+    Ok(m37_build_df(interp, &out_names, &out_cols, groups.len() as i64))
+}
+
+/// `GroupedDataFrame.agg(specs: List[Tuple[str, str]]) -> DataFrame`.
+/// Each spec `(col_name, agg_name)` produces an output column.
+fn m38_gdf_agg(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let (parent, _keys, slot, _count) = m38_gdf_fields(recv);
+    let groups = m38_load_groups(interp, slot);
+    let key_names = m38_gdf_key_col_names(recv);
+    let (names_lst, _, _) = m37_df_fields(parent);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_ptrs = m37_df_col_ptrs(parent);
+    let key_col_indices = m38_resolve_col_indices(&names, &key_names, "GroupedDataFrame.agg")?;
+    // Decode the spec list.  Each tuple is a 16-byte payload of two
+    // str* pointers (see m38_df_rename for the same layout).
+    let specs_ptr = arg_u64(args, 1) as *const crate::object::ListRepr;
+    let mut specs: Vec<(String, String)> = Vec::new();
+    if !specs_ptr.is_null() {
+        unsafe {
+            let len = (*specs_ptr).length;
+            let data = (*specs_ptr).data as *const u64;
+            for j in 0..len {
+                let tup = std::ptr::read_unaligned(data.add(j)) as *const u8;
+                if tup.is_null() { continue; }
+                let a = std::ptr::read_unaligned(tup.add(HDR) as *const u64) as *const StringRepr;
+                let b = std::ptr::read_unaligned(tup.add(HDR + 8) as *const u64) as *const StringRepr;
+                specs.push((read_str(a), read_str(b)));
+            }
+        }
+    }
+    let mut out_names = key_names.clone();
+    let mut out_cols = m38_build_key_columns(interp, parent, &key_col_indices, &groups);
+    for (col_name, agg_name) in &specs {
+        let idx = match names.iter().position(|n| n == col_name) {
+            None => return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!("GroupedDataFrame.agg: column {:?} not found", col_name),
+            }),
+            Some(i) => i,
+        };
+        // Output column name: "{col}_{agg}" (mirrors pandas's
+        // tuple-key convention when stringified).
+        out_names.push(format!("{}_{}", col_name, agg_name));
+        let src = col_ptrs[idx];
+        let src_cls = m38_col_class_name(src);
+        let pick_f64 = matches!(agg_name.as_str(), "mean" | "std" | "var" | "median")
+            || src_cls == "ColumnF64";
+        let mut out_i64: Vec<i64> = Vec::new();
+        let mut out_f64: Vec<f64> = Vec::new();
+        let mut out_nulls: Vec<bool> = Vec::new();
+        for (_, rows) in groups.iter() {
+            let cell = m38_aggregate_subset(interp, src, rows, agg_name)?;
+            if cell == NONE_SENTINEL {
+                out_nulls.push(true);
+                if pick_f64 { out_f64.push(0.0); } else { out_i64.push(0); }
+            } else {
+                out_nulls.push(false);
+                if agg_name == "count" {
+                    out_i64.push(cell as i64);
+                } else if pick_f64 {
+                    out_f64.push(f64::from_bits(cell));
+                } else {
+                    out_i64.push(cell as i64);
+                }
+            }
+        }
+        let n = out_nulls.len() as i64;
+        let n_lst = m37_alloc_list_bool(interp, &out_nulls);
+        let (cls_name, v_lst) = if agg_name == "count" {
+            ("ColumnI64", m37_alloc_list_i64(interp, &out_i64))
+        } else if pick_f64 {
+            ("ColumnF64", m37_alloc_list_f64(interp, &out_f64))
+        } else if src_cls == "ColumnDateTime" {
+            ("ColumnDateTime", m37_alloc_list_i64(interp, &out_i64))
+        } else {
+            ("ColumnI64", m37_alloc_list_i64(interp, &out_i64))
+        };
+        out_cols.push(m37_alloc_column(interp, cls_name, v_lst, n_lst, n) as u64);
+    }
+    Ok(m37_build_df(interp, &out_names, &out_cols, groups.len() as i64))
 }
 
 #[cfg(test)]

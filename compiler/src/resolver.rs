@@ -4274,6 +4274,58 @@ impl Resolver {
                 v.push(MethodSig {
                     name: "lt".into(), params: vec![m37_i64.clone()], ret: m37_col_bool_ty.clone(),
                 });
+                // ── M38 Phase A: restored Phase C comparison ops ──
+                v.push(MethodSig {
+                    name: "ne".into(), params: vec![m37_i64.clone()], ret: m37_col_bool_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "ge".into(), params: vec![m37_i64.clone()], ret: m37_col_bool_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "le".into(), params: vec![m37_i64.clone()], ret: m37_col_bool_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "between".into(),
+                    params: vec![m37_i64.clone(), m37_i64.clone()],
+                    ret: m37_col_bool_ty.clone(),
+                });
+                // ── M38 Phase B: aggregations ──
+                v.push(MethodSig {
+                    name: "sum".into(), params: vec![],
+                    ret: Ty::Nullable(Box::new(m37_i64.clone())),
+                });
+                v.push(MethodSig {
+                    name: "mean".into(), params: vec![],
+                    ret: Ty::Nullable(Box::new(m37_f64.clone())),
+                });
+                v.push(MethodSig {
+                    name: "min".into(), params: vec![],
+                    ret: Ty::Nullable(Box::new(m37_i64.clone())),
+                });
+                v.push(MethodSig {
+                    name: "max".into(), params: vec![],
+                    ret: Ty::Nullable(Box::new(m37_i64.clone())),
+                });
+                v.push(MethodSig {
+                    name: "count".into(), params: vec![], ret: m37_i64.clone(),
+                });
+                v.push(MethodSig {
+                    name: "std".into(), params: vec![],
+                    ret: Ty::Nullable(Box::new(m37_f64.clone())),
+                });
+                v.push(MethodSig {
+                    name: "var".into(), params: vec![],
+                    ret: Ty::Nullable(Box::new(m37_f64.clone())),
+                });
+                v.push(MethodSig {
+                    name: "median".into(), params: vec![],
+                    ret: Ty::Nullable(Box::new(m37_f64.clone())),
+                });
+                // ── M38 Phase C: fill_null ──
+                v.push(MethodSig {
+                    name: "fill_null".into(), params: vec![m37_i64.clone()],
+                    ret: m37_col_i64_ty.clone(),
+                });
                 v
             },
             generics: vec![], generic_tvars: vec![],
@@ -4304,6 +4356,58 @@ impl Resolver {
                 v.push(MethodSig {
                     name: "lt".into(), params: vec![m37_f64.clone()], ret: m37_col_bool_ty.clone(),
                 });
+                // ── M38 Phase A ──
+                v.push(MethodSig {
+                    name: "ne".into(), params: vec![m37_f64.clone()], ret: m37_col_bool_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "ge".into(), params: vec![m37_f64.clone()], ret: m37_col_bool_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "le".into(), params: vec![m37_f64.clone()], ret: m37_col_bool_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "between".into(),
+                    params: vec![m37_f64.clone(), m37_f64.clone()],
+                    ret: m37_col_bool_ty.clone(),
+                });
+                // ── M38 Phase B ──
+                v.push(MethodSig {
+                    name: "sum".into(), params: vec![],
+                    ret: Ty::Nullable(Box::new(m37_f64.clone())),
+                });
+                v.push(MethodSig {
+                    name: "mean".into(), params: vec![],
+                    ret: Ty::Nullable(Box::new(m37_f64.clone())),
+                });
+                v.push(MethodSig {
+                    name: "min".into(), params: vec![],
+                    ret: Ty::Nullable(Box::new(m37_f64.clone())),
+                });
+                v.push(MethodSig {
+                    name: "max".into(), params: vec![],
+                    ret: Ty::Nullable(Box::new(m37_f64.clone())),
+                });
+                v.push(MethodSig {
+                    name: "count".into(), params: vec![], ret: m37_i64.clone(),
+                });
+                v.push(MethodSig {
+                    name: "std".into(), params: vec![],
+                    ret: Ty::Nullable(Box::new(m37_f64.clone())),
+                });
+                v.push(MethodSig {
+                    name: "var".into(), params: vec![],
+                    ret: Ty::Nullable(Box::new(m37_f64.clone())),
+                });
+                v.push(MethodSig {
+                    name: "median".into(), params: vec![],
+                    ret: Ty::Nullable(Box::new(m37_f64.clone())),
+                });
+                // ── M38 Phase C: fill_null ──
+                v.push(MethodSig {
+                    name: "fill_null".into(), params: vec![m37_f64.clone()],
+                    ret: m37_col_f64_ty.clone(),
+                });
                 v
             },
             generics: vec![], generic_tvars: vec![],
@@ -4330,6 +4434,32 @@ impl Resolver {
                 });
                 v.push(MethodSig {
                     name: "contains".into(), params: vec![m37_str.clone()], ret: m37_col_bool_ty.clone(),
+                });
+                // ── M38 Phase A ──
+                v.push(MethodSig {
+                    name: "starts_with".into(), params: vec![m37_str.clone()],
+                    ret: m37_col_bool_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "ends_with".into(), params: vec![m37_str.clone()],
+                    ret: m37_col_bool_ty.clone(),
+                });
+                // ── M38 Phase B ──
+                v.push(MethodSig {
+                    name: "count".into(), params: vec![], ret: m37_i64.clone(),
+                });
+                v.push(MethodSig {
+                    name: "min".into(), params: vec![],
+                    ret: Ty::Nullable(Box::new(m37_str.clone())),
+                });
+                v.push(MethodSig {
+                    name: "max".into(), params: vec![],
+                    ret: Ty::Nullable(Box::new(m37_str.clone())),
+                });
+                // ── M38 Phase C: fill_null ──
+                v.push(MethodSig {
+                    name: "fill_null".into(), params: vec![m37_str.clone()],
+                    ret: m37_col_str_ty.clone(),
                 });
                 v
             },
@@ -4364,6 +4494,15 @@ impl Resolver {
                 v.push(MethodSig {
                     name: "count_true".into(), params: vec![], ret: m37_i64.clone(),
                 });
+                // ── M38 Phase B: count() (non-null cell count) ──
+                v.push(MethodSig {
+                    name: "count".into(), params: vec![], ret: m37_i64.clone(),
+                });
+                // ── M38 Phase C: fill_null ──
+                v.push(MethodSig {
+                    name: "fill_null".into(), params: vec![m37_bool.clone()],
+                    ret: m37_col_bool_ty.clone(),
+                });
                 v
             },
             generics: vec![], generic_tvars: vec![],
@@ -4379,14 +4518,46 @@ impl Resolver {
                 FieldInfo { name: "nulls".into(),  ty: m37_list_bool.clone(), offset: 8 },
                 FieldInfo { name: "length".into(), ty: m37_i64.clone(),       offset: 16 },
             ],
-            methods: m37_shared_methods(MethodSig {
-                name: "get_ms".into(),
-                params: vec![m37_i64.clone()],
-                ret: Ty::Nullable(Box::new(m37_i64.clone())),
-            }),
+            methods: {
+                let mut v = m37_shared_methods(MethodSig {
+                    name: "get_ms".into(),
+                    params: vec![m37_i64.clone()],
+                    ret: Ty::Nullable(Box::new(m37_i64.clone())),
+                });
+                // ── M38 Phase B ──
+                v.push(MethodSig {
+                    name: "count".into(), params: vec![], ret: m37_i64.clone(),
+                });
+                v.push(MethodSig {
+                    name: "min".into(), params: vec![],
+                    ret: Ty::Nullable(Box::new(m37_i64.clone())),
+                });
+                v.push(MethodSig {
+                    name: "max".into(), params: vec![],
+                    ret: Ty::Nullable(Box::new(m37_i64.clone())),
+                });
+                // ── M38 Phase C: fill_null (v_ms: i64) ──
+                v.push(MethodSig {
+                    name: "fill_null".into(), params: vec![m37_i64.clone()],
+                    ret: m37_col_dt_ty.clone(),
+                });
+                v
+            },
             generics: vec![], generic_tvars: vec![],
             is_native: false, payload_size: 24,
         });
+
+        // ── M38: GroupedDataFrame class id (allocated before DataFrame
+        // layout so DataFrame.group_by can reference it as its return
+        // type).
+        let m38_gdf_cid = self.fresh_class();
+        self.class_name_to_id.insert("GroupedDataFrame".into(), m38_gdf_cid);
+        let m38_gdf_ty = Ty::Class(m38_gdf_cid);
+        // ── M38: tuple (str, str) for rename / agg-spec params.
+        let m38_str_pair_list = Ty::Generic {
+            base: TypeCtor::List,
+            args: vec![Ty::Tuple(vec![m37_str.clone(), m37_str.clone()])],
+        };
 
         // ── DataFrame — { names: List[str], columns: List[Column], nrows: i64 }
         self.class_layouts.insert(m37_df_cid, ClassLayout {
@@ -4411,9 +4582,82 @@ impl Resolver {
                 MethodSig { name: "tail".into(),       params: vec![m37_i64.clone()],         ret: m37_df_ty.clone() },
                 MethodSig { name: "row".into(),        params: vec![m37_i64.clone()],         ret: m37_list_str.clone() },
                 MethodSig { name: "sort_by".into(),    params: vec![m37_str.clone(), m37_bool.clone()], ret: m37_df_ty.clone() },
+                // ── M38 Phase A: typed accessors ──
+                MethodSig {
+                    name: "get_column_i64".into(),
+                    params: vec![m37_str.clone()],
+                    ret: Ty::Nullable(Box::new(m37_col_i64_ty.clone())),
+                },
+                MethodSig {
+                    name: "get_column_f64".into(),
+                    params: vec![m37_str.clone()],
+                    ret: Ty::Nullable(Box::new(m37_col_f64_ty.clone())),
+                },
+                MethodSig {
+                    name: "get_column_str".into(),
+                    params: vec![m37_str.clone()],
+                    ret: Ty::Nullable(Box::new(m37_col_str_ty.clone())),
+                },
+                MethodSig {
+                    name: "get_column_bool".into(),
+                    params: vec![m37_str.clone()],
+                    ret: Ty::Nullable(Box::new(m37_col_bool_ty.clone())),
+                },
+                MethodSig {
+                    name: "get_column_datetime".into(),
+                    params: vec![m37_str.clone()],
+                    ret: Ty::Nullable(Box::new(m37_col_dt_ty.clone())),
+                },
+                // ── M38 Phase A: rename ──
+                MethodSig {
+                    name: "rename".into(),
+                    params: vec![m38_str_pair_list.clone()],
+                    ret: m37_df_ty.clone(),
+                },
+                // ── M38 Phase C: describe ──
+                MethodSig {
+                    name: "describe".into(), params: vec![], ret: m37_df_ty.clone(),
+                },
+                // ── M38 Phase D: group_by ──
+                MethodSig {
+                    name: "group_by".into(),
+                    params: vec![m37_list_str.clone()],
+                    ret: m38_gdf_ty.clone(),
+                },
             ],
             generics: vec![], generic_tvars: vec![],
             is_native: false, payload_size: 24,
+        });
+
+        // ── GroupedDataFrame layout — payload carries (parent, group_keys, slot, group_count).
+        // parent is i64 pointer, group_keys is List[str] pointer, slot is
+        // an i64 handle into SharedVm.m38_group_index_maps, group_count
+        // is i64.  Total 32 bytes.
+        self.class_layouts.insert(m38_gdf_cid, ClassLayout {
+            id: m38_gdf_cid, name: "GroupedDataFrame".into(), base: None,
+            is_open: false, is_sealed: false,
+            fields: vec![
+                FieldInfo { name: "parent".into(),      ty: m37_df_ty.clone(),       offset: 0 },
+                FieldInfo { name: "group_keys".into(),  ty: m37_list_str.clone(),    offset: 8 },
+                FieldInfo { name: "slot".into(),        ty: m37_i64.clone(),         offset: 16 },
+                FieldInfo { name: "group_count".into(), ty: m37_i64.clone(),         offset: 24 },
+            ],
+            methods: vec![
+                MethodSig { name: "size".into(),  params: vec![], ret: m37_df_ty.clone() },
+                MethodSig { name: "keys".into(),  params: vec![], ret: m37_df_ty.clone() },
+                MethodSig { name: "sum".into(),   params: vec![], ret: m37_df_ty.clone() },
+                MethodSig { name: "mean".into(),  params: vec![], ret: m37_df_ty.clone() },
+                MethodSig { name: "min".into(),   params: vec![], ret: m37_df_ty.clone() },
+                MethodSig { name: "max".into(),   params: vec![], ret: m37_df_ty.clone() },
+                MethodSig { name: "count".into(), params: vec![], ret: m37_df_ty.clone() },
+                MethodSig {
+                    name: "agg".into(),
+                    params: vec![m38_str_pair_list.clone()],
+                    ret: m37_df_ty.clone(),
+                },
+            ],
+            generics: vec![], generic_tvars: vec![],
+            is_native: false, payload_size: 32,
         });
 
         // ── Function-type helper closure ──
@@ -4506,6 +4750,18 @@ impl Resolver {
                     ty: m37_fn(vec![m37_list_list_str.clone(), m37_schema_ty.clone()], m37_df_ty.clone()),
                     native_id: 858,
                 },
+                // ── M38 Phase C: from_dict(Dict[str, Column]) -> DataFrame ──
+                StdlibItem {
+                    name: "from_dict".into(), kind: StdlibItemKind::Function,
+                    ty: m37_fn(
+                        vec![Ty::Generic {
+                            base: TypeCtor::Dict,
+                            args: vec![m37_str.clone(), m37_col_ty.clone()],
+                        }],
+                        m37_df_ty.clone(),
+                    ),
+                    native_id: 925,
+                },
             ],
         };
         // Publish the 7 classes (5 Column subclasses + Column base +
@@ -4519,6 +4775,11 @@ impl Resolver {
             ("ColumnBool",     m37_col_bool_cid),
             ("ColumnDateTime", m37_col_dt_cid),
             ("DataFrame",      m37_df_cid),
+            // ── M38 Phase D: GroupedDataFrame — published on the
+            // tabular module so `from tabular import GroupedDataFrame`
+            // works.  Users never construct it directly; `df.group_by`
+            // is the only entry point.
+            ("GroupedDataFrame", m38_gdf_cid),
         ] {
             m37_tabular_mod.items.push(StdlibItem {
                 name: m37_name.into(),

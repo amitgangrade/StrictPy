@@ -782,6 +782,135 @@ pub enum NativeFn {
     M37TabDfSortBy         = 877,
     // 878-879 reserved for v0.4 follow-ups (rename / between / etc.)
 
+    // ── 880-934: M38 tabular round-out ──────────────────────────────────
+    //
+    // Adds the M37 STOP-CRITERIA debt (typed accessors + the
+    // between/ne/ge/le + starts_with/ends_with + rename surface), per-
+    // column aggregations (sum/mean/min/max/count/std/var/median),
+    // `df.describe`, `Column.fill_null` per subclass, `tabular.from_dict`,
+    // and hash-based group-by (`df.group_by` + new `GroupedDataFrame`
+    // class).  No new IR opcodes — every entry is name-dispatched from
+    // ir.rs's `m38_tabular_class_method_native_id_by_name` (class methods)
+    // or from the `tabular` StdlibModule items (module-level functions).
+    /// `DataFrame.get_column_i64(self, name: str) -> ColumnI64?`.  `none`
+    /// when the column is absent or has the wrong dtype.
+    M38TabDfGetColumnI64       = 880,
+    /// `DataFrame.get_column_f64(self, name: str) -> ColumnF64?`.
+    M38TabDfGetColumnF64       = 881,
+    /// `DataFrame.get_column_str(self, name: str) -> ColumnStr?`.
+    M38TabDfGetColumnStr       = 882,
+    /// `DataFrame.get_column_bool(self, name: str) -> ColumnBool?`.
+    M38TabDfGetColumnBool      = 883,
+    /// `DataFrame.get_column_datetime(self, name: str) -> ColumnDateTime?`.
+    M38TabDfGetColumnDateTime  = 884,
+    /// `ColumnI64.ne(self, x: i64) -> ColumnBool`.  Same null-propagation
+    /// shape as M37's eq/gt/lt.
+    M38TabColI64Ne             = 885,
+    /// `ColumnI64.ge(self, x: i64) -> ColumnBool`.
+    M38TabColI64Ge             = 886,
+    /// `ColumnI64.le(self, x: i64) -> ColumnBool`.
+    M38TabColI64Le             = 887,
+    /// `ColumnI64.between(self, lo: i64, hi: i64) -> ColumnBool`.  Inclusive
+    /// on both ends.
+    M38TabColI64Between        = 888,
+    /// `ColumnF64.ne(self, x: f64) -> ColumnBool`.
+    M38TabColF64Ne             = 889,
+    /// `ColumnF64.ge(self, x: f64) -> ColumnBool`.
+    M38TabColF64Ge             = 890,
+    /// `ColumnF64.le(self, x: f64) -> ColumnBool`.
+    M38TabColF64Le             = 891,
+    /// `ColumnF64.between(self, lo: f64, hi: f64) -> ColumnBool`.
+    M38TabColF64Between        = 892,
+    /// `ColumnStr.starts_with(self, prefix: str) -> ColumnBool`.
+    M38TabColStrStartsWith     = 893,
+    /// `ColumnStr.ends_with(self, suffix: str) -> ColumnBool`.
+    M38TabColStrEndsWith       = 894,
+    /// `DataFrame.rename(self, renames: List[Tuple[str, str]]) -> DataFrame`.
+    /// Returns a fresh frame with each `(old, new)` pair applied.
+    M38TabDfRename             = 895,
+    // ── Per-column aggregations (Phase B) ─────────────────────────────
+    /// `ColumnI64.sum(self) -> i64?`.  `none` if every cell is null.
+    M38TabColI64Sum            = 896,
+    /// `ColumnI64.mean(self) -> f64?`.  f64 even on i64.
+    M38TabColI64Mean           = 897,
+    /// `ColumnI64.min(self) -> i64?`.
+    M38TabColI64Min            = 898,
+    /// `ColumnI64.max(self) -> i64?`.
+    M38TabColI64Max            = 899,
+    /// `ColumnI64.count(self) -> i64`.  Non-null cell count.
+    M38TabColI64Count          = 900,
+    /// `ColumnI64.std(self) -> f64?`.  Sample stdev; `none` if <2 non-null.
+    M38TabColI64Std            = 901,
+    /// `ColumnI64.var(self) -> f64?`.  Sample variance.
+    M38TabColI64Var            = 902,
+    /// `ColumnI64.median(self) -> f64?`.
+    M38TabColI64Median         = 903,
+    /// `ColumnF64.sum(self) -> f64?`.  NaN propagates (never skipped).
+    M38TabColF64Sum            = 904,
+    /// `ColumnF64.mean(self) -> f64?`.
+    M38TabColF64Mean           = 905,
+    /// `ColumnF64.min(self) -> f64?`.
+    M38TabColF64Min            = 906,
+    /// `ColumnF64.max(self) -> f64?`.
+    M38TabColF64Max            = 907,
+    /// `ColumnF64.count(self) -> i64`.
+    M38TabColF64Count          = 908,
+    /// `ColumnF64.std(self) -> f64?`.
+    M38TabColF64Std            = 909,
+    /// `ColumnF64.var(self) -> f64?`.
+    M38TabColF64Var            = 910,
+    /// `ColumnF64.median(self) -> f64?`.
+    M38TabColF64Median         = 911,
+    /// `ColumnStr.count(self) -> i64`.
+    M38TabColStrCount          = 912,
+    /// `ColumnStr.min(self) -> str?` — lexicographic min.
+    M38TabColStrMin            = 913,
+    /// `ColumnStr.max(self) -> str?` — lexicographic max.
+    M38TabColStrMax            = 914,
+    /// `ColumnBool.count(self) -> i64`.  Non-null cell count.
+    M38TabColBoolCount         = 915,
+    /// `ColumnDateTime.count(self) -> i64`.
+    M38TabColDtCount           = 916,
+    /// `ColumnDateTime.min(self) -> i64?` — min epoch-ms.
+    M38TabColDtMin             = 917,
+    /// `ColumnDateTime.max(self) -> i64?`.
+    M38TabColDtMax             = 918,
+    /// `DataFrame.describe(self) -> DataFrame`.  count/mean/std/min/max
+    /// row index; all cells stringified to str.
+    M38TabDfDescribe           = 919,
+    /// `ColumnI64.fill_null(self, v: i64) -> ColumnI64`.
+    M38TabColI64FillNull       = 920,
+    /// `ColumnF64.fill_null(self, v: f64) -> ColumnF64`.
+    M38TabColF64FillNull       = 921,
+    /// `ColumnStr.fill_null(self, v: str) -> ColumnStr`.
+    M38TabColStrFillNull       = 922,
+    /// `ColumnBool.fill_null(self, v: bool) -> ColumnBool`.
+    M38TabColBoolFillNull      = 923,
+    /// `ColumnDateTime.fill_null(self, v_ms: i64) -> ColumnDateTime`.
+    M38TabColDtFillNull        = 924,
+    /// `tabular.from_dict(d: Dict[str, Column]) -> DataFrame`.  Column
+    /// order follows Dict insertion order.
+    M38TabFromDict             = 925,
+    /// `DataFrame.group_by(self, cols: List[str]) -> GroupedDataFrame`.
+    /// Builds a hash-keyed grouping over the named columns.
+    M38TabDfGroupBy            = 926,
+    /// `GroupedDataFrame.size(self) -> DataFrame`.
+    M38TabGdfSize              = 927,
+    /// `GroupedDataFrame.keys(self) -> DataFrame`.
+    M38TabGdfKeys              = 928,
+    /// `GroupedDataFrame.agg(self, specs: List[Tuple[str, str]]) -> DataFrame`.
+    M38TabGdfAgg               = 929,
+    /// `GroupedDataFrame.sum(self) -> DataFrame`.
+    M38TabGdfSum               = 930,
+    /// `GroupedDataFrame.mean(self) -> DataFrame`.
+    M38TabGdfMean              = 931,
+    /// `GroupedDataFrame.min(self) -> DataFrame`.
+    M38TabGdfMin               = 932,
+    /// `GroupedDataFrame.max(self) -> DataFrame`.
+    M38TabGdfMax               = 933,
+    /// `GroupedDataFrame.count(self) -> DataFrame`.
+    M38TabGdfCount             = 934,
+
     // ── 250–289: M22 P2A (argparse + collections + csv) ─────────────────
     // Phase 2 starts here.  P2A's job is to bring three high-ROI stdlib
     // modules online on top of the M19 stdlib-module-table:
@@ -2218,6 +2347,61 @@ impl NativeFn {
             875 => Some(Self::M37TabDfTail),
             876 => Some(Self::M37TabDfRow),
             877 => Some(Self::M37TabDfSortBy),
+            880 => Some(Self::M38TabDfGetColumnI64),
+            881 => Some(Self::M38TabDfGetColumnF64),
+            882 => Some(Self::M38TabDfGetColumnStr),
+            883 => Some(Self::M38TabDfGetColumnBool),
+            884 => Some(Self::M38TabDfGetColumnDateTime),
+            885 => Some(Self::M38TabColI64Ne),
+            886 => Some(Self::M38TabColI64Ge),
+            887 => Some(Self::M38TabColI64Le),
+            888 => Some(Self::M38TabColI64Between),
+            889 => Some(Self::M38TabColF64Ne),
+            890 => Some(Self::M38TabColF64Ge),
+            891 => Some(Self::M38TabColF64Le),
+            892 => Some(Self::M38TabColF64Between),
+            893 => Some(Self::M38TabColStrStartsWith),
+            894 => Some(Self::M38TabColStrEndsWith),
+            895 => Some(Self::M38TabDfRename),
+            896 => Some(Self::M38TabColI64Sum),
+            897 => Some(Self::M38TabColI64Mean),
+            898 => Some(Self::M38TabColI64Min),
+            899 => Some(Self::M38TabColI64Max),
+            900 => Some(Self::M38TabColI64Count),
+            901 => Some(Self::M38TabColI64Std),
+            902 => Some(Self::M38TabColI64Var),
+            903 => Some(Self::M38TabColI64Median),
+            904 => Some(Self::M38TabColF64Sum),
+            905 => Some(Self::M38TabColF64Mean),
+            906 => Some(Self::M38TabColF64Min),
+            907 => Some(Self::M38TabColF64Max),
+            908 => Some(Self::M38TabColF64Count),
+            909 => Some(Self::M38TabColF64Std),
+            910 => Some(Self::M38TabColF64Var),
+            911 => Some(Self::M38TabColF64Median),
+            912 => Some(Self::M38TabColStrCount),
+            913 => Some(Self::M38TabColStrMin),
+            914 => Some(Self::M38TabColStrMax),
+            915 => Some(Self::M38TabColBoolCount),
+            916 => Some(Self::M38TabColDtCount),
+            917 => Some(Self::M38TabColDtMin),
+            918 => Some(Self::M38TabColDtMax),
+            919 => Some(Self::M38TabDfDescribe),
+            920 => Some(Self::M38TabColI64FillNull),
+            921 => Some(Self::M38TabColF64FillNull),
+            922 => Some(Self::M38TabColStrFillNull),
+            923 => Some(Self::M38TabColBoolFillNull),
+            924 => Some(Self::M38TabColDtFillNull),
+            925 => Some(Self::M38TabFromDict),
+            926 => Some(Self::M38TabDfGroupBy),
+            927 => Some(Self::M38TabGdfSize),
+            928 => Some(Self::M38TabGdfKeys),
+            929 => Some(Self::M38TabGdfAgg),
+            930 => Some(Self::M38TabGdfSum),
+            931 => Some(Self::M38TabGdfMean),
+            932 => Some(Self::M38TabGdfMin),
+            933 => Some(Self::M38TabGdfMax),
+            934 => Some(Self::M38TabGdfCount),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

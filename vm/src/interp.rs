@@ -428,6 +428,15 @@ pub struct SharedVm {
     /// Starts at 1 so a handle value of 0 unambiguously means
     /// "uninitialised Pattern instance".
     pub p4a_next_pattern_id: std::sync::atomic::AtomicI64,
+    /// M38: per-`GroupedDataFrame` group-index map.  Each entry is a
+    /// Vec of (key_serial, row_indices) preserving insertion order;
+    /// look-up is O(n) on the small set typical for v1 group-by, but
+    /// trivially upgradable to a real index-map later.  Slot 0 is
+    /// reserved so a handle of 0 means "no map attached".
+    pub m38_group_index_maps:
+        std::sync::Mutex<HashMap<i64, Vec<(String, Vec<usize>)>>>,
+    /// M38: monotonic allocator for `m38_group_index_maps` keys.
+    pub m38_next_group_index_id: std::sync::atomic::AtomicI64,
     /// AOT-at-load Cranelift JIT cache. `Some` when the `jit` feature is
     /// compiled in and the module loaded. Read-only after construction.
     #[cfg(feature = "jit")]
@@ -503,6 +512,10 @@ impl SharedVm {
             // `re.compile()` will mint handle 1.
             p4a_compiled_regexes: std::sync::Mutex::new(HashMap::new()),
             p4a_next_pattern_id: std::sync::atomic::AtomicI64::new(1),
+            // M38: empty group-index map.  First `df.group_by(...)` will
+            // allocate slot 1 (slot 0 reserved as "no map attached").
+            m38_group_index_maps: std::sync::Mutex::new(HashMap::new()),
+            m38_next_group_index_id: std::sync::atomic::AtomicI64::new(1),
             #[cfg(feature = "jit")]
             jit: None,
         })
@@ -573,6 +586,9 @@ impl SharedVm {
             // M35 P4-A: see comment on the non-JIT constructor.
             p4a_compiled_regexes: std::sync::Mutex::new(HashMap::new()),
             p4a_next_pattern_id: std::sync::atomic::AtomicI64::new(1),
+            // M38: see comment on the non-JIT constructor.
+            m38_group_index_maps: std::sync::Mutex::new(HashMap::new()),
+            m38_next_group_index_id: std::sync::atomic::AtomicI64::new(1),
             jit: Some(jit_cell),
         })
     }

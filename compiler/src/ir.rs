@@ -4217,6 +4217,21 @@ fn lower_method_call(
                     },
                 );
             }
+            // M38: `tabular` round-out method dispatch — typed
+            // accessors, restored comparison ops, per-column aggs,
+            // describe / fill_null, group_by, and GroupedDataFrame
+            // methods.  Same class-name + method-name shape as M37.
+            if let Some(nid) = m38_tabular_class_method_native_id_by_name(
+                layout.name.as_str(), method,
+            ) {
+                return fb.push_value(
+                    ret_ty,
+                    ValueKind::Op {
+                        op: IROp::NativeCall { native_id: nid },
+                        args: arg_vs,
+                    },
+                );
+            }
         }
     }
 
@@ -4546,6 +4561,85 @@ fn m37_tabular_class_method_native_id_by_name(
         ("DataFrame", "tail")       => NativeFn::M37TabDfTail as u32,
         ("DataFrame", "row")        => NativeFn::M37TabDfRow as u32,
         ("DataFrame", "sort_by")    => NativeFn::M37TabDfSortBy as u32,
+        _ => return None,
+    })
+}
+
+/// M38: dispatch a `tabular` Column / DataFrame / GroupedDataFrame
+/// method *added by M38* by class name + method name.  Mirrors
+/// `m37_tabular_class_method_native_id_by_name` — every method here
+/// is either a typed accessor (Phase A), a restored comparison op
+/// (Phase A), a per-column aggregation (Phase B), `df.describe`
+/// (Phase C), `Column.fill_null` (Phase C), `df.group_by` /
+/// `GroupedDataFrame.*` (Phase D).
+///
+/// Per the M38 brief, all locals in shared compiler files use the
+/// `m38_` prefix.
+fn m38_tabular_class_method_native_id_by_name(
+    class_name: &str,
+    method: &str,
+) -> Option<u32> {
+    Some(match (class_name, method) {
+        // ── Phase A: typed DataFrame accessors ──
+        ("DataFrame", "get_column_i64")      => NativeFn::M38TabDfGetColumnI64 as u32,
+        ("DataFrame", "get_column_f64")      => NativeFn::M38TabDfGetColumnF64 as u32,
+        ("DataFrame", "get_column_str")      => NativeFn::M38TabDfGetColumnStr as u32,
+        ("DataFrame", "get_column_bool")     => NativeFn::M38TabDfGetColumnBool as u32,
+        ("DataFrame", "get_column_datetime") => NativeFn::M38TabDfGetColumnDateTime as u32,
+        // ── Phase A: restored Phase C comparison ops ──
+        ("ColumnI64", "ne")      => NativeFn::M38TabColI64Ne as u32,
+        ("ColumnI64", "ge")      => NativeFn::M38TabColI64Ge as u32,
+        ("ColumnI64", "le")      => NativeFn::M38TabColI64Le as u32,
+        ("ColumnI64", "between") => NativeFn::M38TabColI64Between as u32,
+        ("ColumnF64", "ne")      => NativeFn::M38TabColF64Ne as u32,
+        ("ColumnF64", "ge")      => NativeFn::M38TabColF64Ge as u32,
+        ("ColumnF64", "le")      => NativeFn::M38TabColF64Le as u32,
+        ("ColumnF64", "between") => NativeFn::M38TabColF64Between as u32,
+        ("ColumnStr", "starts_with") => NativeFn::M38TabColStrStartsWith as u32,
+        ("ColumnStr", "ends_with")   => NativeFn::M38TabColStrEndsWith as u32,
+        // ── Phase A: rename ──
+        ("DataFrame", "rename") => NativeFn::M38TabDfRename as u32,
+        // ── Phase B: per-column aggregations ──
+        ("ColumnI64", "sum")    => NativeFn::M38TabColI64Sum as u32,
+        ("ColumnI64", "mean")   => NativeFn::M38TabColI64Mean as u32,
+        ("ColumnI64", "min")    => NativeFn::M38TabColI64Min as u32,
+        ("ColumnI64", "max")    => NativeFn::M38TabColI64Max as u32,
+        ("ColumnI64", "count")  => NativeFn::M38TabColI64Count as u32,
+        ("ColumnI64", "std")    => NativeFn::M38TabColI64Std as u32,
+        ("ColumnI64", "var")    => NativeFn::M38TabColI64Var as u32,
+        ("ColumnI64", "median") => NativeFn::M38TabColI64Median as u32,
+        ("ColumnF64", "sum")    => NativeFn::M38TabColF64Sum as u32,
+        ("ColumnF64", "mean")   => NativeFn::M38TabColF64Mean as u32,
+        ("ColumnF64", "min")    => NativeFn::M38TabColF64Min as u32,
+        ("ColumnF64", "max")    => NativeFn::M38TabColF64Max as u32,
+        ("ColumnF64", "count")  => NativeFn::M38TabColF64Count as u32,
+        ("ColumnF64", "std")    => NativeFn::M38TabColF64Std as u32,
+        ("ColumnF64", "var")    => NativeFn::M38TabColF64Var as u32,
+        ("ColumnF64", "median") => NativeFn::M38TabColF64Median as u32,
+        ("ColumnStr", "count")  => NativeFn::M38TabColStrCount as u32,
+        ("ColumnStr", "min")    => NativeFn::M38TabColStrMin as u32,
+        ("ColumnStr", "max")    => NativeFn::M38TabColStrMax as u32,
+        ("ColumnBool", "count") => NativeFn::M38TabColBoolCount as u32,
+        ("ColumnDateTime", "count") => NativeFn::M38TabColDtCount as u32,
+        ("ColumnDateTime", "min")   => NativeFn::M38TabColDtMin as u32,
+        ("ColumnDateTime", "max")   => NativeFn::M38TabColDtMax as u32,
+        // ── Phase C ──
+        ("DataFrame", "describe") => NativeFn::M38TabDfDescribe as u32,
+        ("ColumnI64", "fill_null")      => NativeFn::M38TabColI64FillNull as u32,
+        ("ColumnF64", "fill_null")      => NativeFn::M38TabColF64FillNull as u32,
+        ("ColumnStr", "fill_null")      => NativeFn::M38TabColStrFillNull as u32,
+        ("ColumnBool", "fill_null")     => NativeFn::M38TabColBoolFillNull as u32,
+        ("ColumnDateTime", "fill_null") => NativeFn::M38TabColDtFillNull as u32,
+        // ── Phase D: group-by ──
+        ("DataFrame", "group_by")     => NativeFn::M38TabDfGroupBy as u32,
+        ("GroupedDataFrame", "size")  => NativeFn::M38TabGdfSize as u32,
+        ("GroupedDataFrame", "keys")  => NativeFn::M38TabGdfKeys as u32,
+        ("GroupedDataFrame", "sum")   => NativeFn::M38TabGdfSum as u32,
+        ("GroupedDataFrame", "mean")  => NativeFn::M38TabGdfMean as u32,
+        ("GroupedDataFrame", "min")   => NativeFn::M38TabGdfMin as u32,
+        ("GroupedDataFrame", "max")   => NativeFn::M38TabGdfMax as u32,
+        ("GroupedDataFrame", "count") => NativeFn::M38TabGdfCount as u32,
+        ("GroupedDataFrame", "agg")   => NativeFn::M38TabGdfAgg as u32,
         _ => return None,
     })
 }
