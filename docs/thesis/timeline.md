@@ -1117,6 +1117,93 @@ No language/compiler changes; new pure-bench infrastructure only.
 
 ---
 
+## M35 — Four more stdlib classes (parallel round) (2026-05-21)
+
+Follow-up to M34. Three parallel worktree agents shipped four new
+prelude-registered stdlib classes — extending the M34 pattern
+without coordinating on infrastructure. Cleanest M27-style parallel
+round to date: distinctive variable prefixes prevented the
+closing-brace alignment hazard, and all three agents committed
+cleanly to their worktree branches (Lesson 1 streak: 17).
+
+### Surface
+
+| Agent | Class | NativeFn IDs | Var prefix | New methods |
+|---|---|---:|---|---|
+| P4-A | `re.Pattern` (compiled regex) | 790-799 | `p4a_` | matches / find / find_all / replace / replace_all / split / source |
+| P4-B | `sqlite3.Connection` + `Cursor` | 800-819 | `p4b_` | Connection: execute / query / last_insert_rowid / changes / close. Cursor: fetchone / fetchall / column_names / row_count. |
+| P4-C | `hashlib.Hasher` (streaming) | 820-829 | `p4c_` | update / hexdigest / digest / copy / reset / name |
+
+All three are **prelude-registered** (alongside Channel / Thread /
+io.File / JsonValue). The flat surfaces remain — `re.find(p, s)`,
+`sqlite3.connect(path)`, `hashlib.sha256(data)` all work unchanged.
+The new shape adds: `re.compile(s) -> Pattern`, `sqlite3.open(path)
+-> Connection`, `hashlib.new("sha256") -> Hasher`.
+
+### Why three at once worked cleanly
+
+Per the M34 archive: the prelude-registration pattern unblocked a
+parallel round of class-adders that doesn't coordinate on
+infrastructure. Each agent owned a disjoint NativeFn range
+(790-799, 800-819, 820-829), a disjoint slot table on `SharedVm`,
+and a distinctive `p4a_` / `p4b_` / `p4c_` variable prefix in
+shared files (resolver.rs, builtins.rs, ir.rs). Integration via
+`git apply --3way` against the pre-M35 base (`475ab47`):
+
+- P4-C applied cleanly (smallest diff first).
+- P4-B applied cleanly after P4-C.
+- P4-A required two manual fixes at the keep-both block
+  boundaries (the closing-brace pattern, now standard since M27)
+  but the additive diff itself was 1144 lines clean.
+
+**Three commits, three Lesson-1-compliant agents, one integration
+session**. The M27 disasters (1806-line reverse-deletion, double-
+brace impl/mod boundary) did not recur — pre-round-base diffing
+plus distinctive prefixes are now battle-tested across two parallel
+v0.3 rounds (M32+M33 and M35).
+
+### Tests + size
+
+- Tests: 690 → 723 (+33: 10 in vm/tests/m35_re_pattern.rs + 2 in
+  re_pattern_demo_runs.rs, 11 in m35_sqlite_class + 2 in
+  sqlite_class_demo_runs, 6 in m35_hashlib_streaming + 2 in
+  hashlib_streaming_demo_runs).
+- Examples: 97 → 100 (+3: examples/re_pattern_demo.spy,
+  examples/sqlite_class_demo.spy, examples/hashlib_streaming_demo.spy).
+- Stdlib modules: unchanged at 37 (re / sqlite3 / hashlib all
+  pre-existed; the new shape extends them).
+- Prelude classes: +4 (Pattern, Connection, Cursor, Hasher) for a
+  cumulative 11 v0.3 stdlib classes in the prelude on top of the
+  6 base classes (Channel, Thread, io.File, Dict, Set, List).
+
+### The prelude is now crowded
+
+The `StdlibItemKind::Class` refactor M34 deferred is now urgent.
+17 stdlib classes in the prelude (6 base + 11 v0.3) is more than
+the legacy "prelude wins" branch in the import resolver was
+designed for. Probably "before M40" rather than "before M50".
+Estimated 200-400 LOC in resolver.rs + typecheck.rs; pure refactor,
+no public API change.
+
+### Lesson 1 streak: 17 consecutive clean agents
+
+(M28 + M28.5 + M29 + M29.5 + M30×2 + M31 + M32 + M33 + M34 + M35×3).
+First commit per agent: P4-A ~45%, P4-B ~50%, P4-C ~40% of budget.
+The strengthened brief language has now produced 17 clean commits
+across 5 calendar days.
+
+### Methodology contribution
+
+M35 is the cleanest **scale-out replica** of a v0.3 stdlib pattern
+in project history: M34 invented prelude-registration for one
+class family (JsonValue + 6 subclasses); M35 applied it three more
+times in parallel with no infrastructure change. This is the shape
+of how the v0.3 stdlib will likely grow until `StdlibItemKind::Class`
+lands — small focused class adders, each using the previous
+agent's archive as the template.
+
+---
+
 ## M34 — Typed JsonValue tree (first stdlib classes) (2026-05-21)
 
 The first stdlib classes shipped in v0.3. Closes the #1 ergonomics

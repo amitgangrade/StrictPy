@@ -1,166 +1,115 @@
-# Session handoff — 2026-05-21
+# Session handoff — 2026-05-21 (post-M35)
 
 ## Read this FIRST in the next session
 
 Everything you need to resume is in:
 
 1. **This file** — current state + pending work + integration recipes
-2. **`docs/thesis/timeline.md`** — milestone-by-milestone narrative through M34
+2. **`docs/thesis/timeline.md`** — milestone-by-milestone narrative through M35
 3. **`docs/thesis/stats/per_milestone.csv`** — quantitative ground truth
-4. **`THESIS.md`** + **`BLOG_POST.md`** — synthesis documents through M34
+4. **`THESIS.md`** + **`BLOG_POST.md`** — synthesis documents (frozen at M34;
+   needs an M35 refresh pass — see "What comes after M35" below)
 5. **`RELEASE_NOTES_v0.2.md`** — v0.2.0 freeze-point summary
-6. **Memory file**: `C:\Users\AG\.claude\projects\C--Users-AG-CascadeProjects-PythonCompiler\memory\project_strictpy.md`
+6. **`LANGUAGE_GUIDE.md`** — single source of truth for AI tools writing
+   StrictPy programs (refreshed post-M35)
+7. **Memory file**: `C:\Users\AG\.claude\projects\C--Users-AG-CascadeProjects-PythonCompiler\memory\project_strictpy.md`
 
 ## Current head
 
 - Branch: `main`
-- Latest commit: see `git log -1 --oneline`
+- Latest commit: `dd80ce2` (M35 P4-A: compiled re.Pattern class)
 - Tag: `v0.2.0` (commit `121483f`, pushed)
-- Tests passing on main: **690** (post-M34); will jump to ~720+ once M35 lands
+- Tests passing on main: **723** (post-M35, +33 over M34)
 
 ## Status snapshot
 
 | Metric | Value |
 |---|---:|
-| Milestones complete on main | M0–M34 |
+| Milestones complete on main | M0–M35 |
 | **v0.2.0 release** | **Tagged at M30 (commit 121483f)** |
-| Tests | 690 / 0 fail / 1 ignored |
+| Tests | 723 / 0 fail / 1 ignored |
 | Bugs | 35 / 35 / **0 deferred** |
 | Stdlib modules | 37 |
-| Prelude classes | (Channel, Thread, File, Dict, Set, List) + 7 JsonValue tree (M34) |
-| Example programs | 97 |
-| Lesson 1 streak | 14 consecutive clean-commit agents (M28 → M34) |
+| Prelude classes | 6 base (Channel, Thread, File, Dict, Set, List) + 7 JsonValue (M34) + 4 M35 (Pattern, Connection, Cursor, Hasher) = **17 stdlib classes in the prelude** |
+| Example programs | 100 (+3 in M35: re_pattern_demo, sqlite_class_demo, hashlib_streaming_demo) |
+| Lesson 1 streak | **17 consecutive clean-commit agents** (M28 → M35 — 3 M35 agents all committed clean) |
 
-## M35 — in flight when session ended
+## M35 — completed (3 parallel agents, all integrated)
 
-Three parallel worktree agents launched. They may have completed (check
-notifications) or may still be running. Each worktree branch will be at
-`.claude/worktrees/agent-<id>` with a separate git branch.
-
-| Agent | Class | NativeFn IDs | Var prefix | Worktree agent ID |
+| Agent | Class | NativeFn IDs | Var prefix | Commit |
 |---|---|---|---|---|
-| **P4-A** | `re.Pattern` (compiled regex) | 790-799 | `p4a_` | `aa88985588d8b7d0d` |
-| **P4-B** | `sqlite3.Connection` + `Cursor` | 800-819 | `p4b_` | `af837e920c0c9dc30` |
-| **P4-C** | `hashlib.Hasher` (streaming) | 820-829 | `p4c_` | `af3a46754248b7bbe` |
+| **P4-A** | `re.Pattern` (compiled regex) | 790-799 | `p4a_` | `dd80ce2` |
+| **P4-B** | `sqlite3.Connection` + `Cursor` | 800-819 | `p4b_` | `ad1200c` |
+| **P4-C** | `hashlib.Hasher` (streaming) | 820-829 | `p4c_` | `e2d69bd` |
 
-All three use the **M34 prelude-registration pattern** (no
+All three used the **M34 prelude-registration pattern** (no
 `StdlibItemKind::Class` infrastructure — classes go in
-`compiler/src/resolver.rs::seed_prelude` alongside Channel/Thread).
-Each ships ≥6 tests + a demo + a spec subsection in the existing
-module's section.
+`compiler/src/resolver.rs::seed_prelude` alongside Channel/Thread/
+JsonValue). Each shipped tests + a demo + a spec subsection in the
+existing module's section.
 
-### Checking M35 agent status
+**Integration shape that worked**: 3 worktree branches diffed against
+the pre-M35 base (`475ab47`), applied additively with `git apply --3way`,
+manual conflict resolution at adjacent prelude/match-arm sites
+(matches the M27+ pattern). The distinctive `p4a_` / `p4b_` / `p4c_`
+prefixes prevented the M27 alignment hazard cleanly.
 
-```bash
-# Worktree branches:
-git branch -a | grep worktree-agent-
-
-# Last commit on each worktree branch:
-git log --oneline worktree-agent-aa88985588d8b7d0d -1   # P4-A re.Pattern
-git log --oneline worktree-agent-af837e920c0c9dc30 -1   # P4-B sqlite3
-git log --oneline worktree-agent-af3a46754248b7bbe -1   # P4-C Hasher
-
-# Check uncommitted state in each:
-cd .claude/worktrees/agent-<id> && git status --short
-```
-
-If any agent didn't commit (Lesson 1 streak break — first time in 14 agents!),
-the orchestrator-side commit-on-behalf pattern is well-documented in past
-commits. See e.g. `git show 595c2e6` (M27 P3c-A orchestrator commit-on-behalf)
-or `git show 0c6c004` (M27 P3c-A worktree-side recovery).
-
-### M35 integration recipe
-
-The proven additive-diff pattern (works because M35 agents have disjoint
-NativeFn ranges + distinct variable prefixes):
-
-```bash
-# Pre-M35 base (the M34 archive commit):
-PRE_M35=475ab47
-
-# For each agent, in order P4-C (smallest) → P4-A → P4-B:
-for agent_id in af3a46754248b7bbe aa88985588d8b7d0d af837e920c0c9dc30; do
-  echo "=== Integrating $agent_id ==="
-  git diff $PRE_M35..worktree-agent-$agent_id > /tmp/p4.patch
-  git apply --3way --whitespace=nowarn /tmp/p4.patch
-
-  # If there are conflicts (likely keep-both pattern), Python auto-resolve:
-  # python -c "..."  # the keep-both script from M27/M28 integrations
-
-  # Build + test the agent's specific tests:
-  cargo build --workspace --release
-  # cargo test --release -p strictpy-vm --test m35_<name>
-
-  # Commit
-  git add -A
-  git commit -m "M35 P4-<X>: ..."
-done
-
-git push origin main
-```
-
-**Expected M35 conflict shape**: each agent adds new prelude class
-registrations near M34's JsonValue block in `compiler/src/resolver.rs`,
-new NativeFn variants near M34's range (750-789 → P4-A 790-799 →
-P4-B 800-819 → P4-C 820-829) in `shared/src/native.rs`, and new
-match arms in `vm/src/builtins.rs`. Probably 0-2 manual brace fixes
-between adjacent agents' match arms — the standard M27+ closing-brace
-pattern. The distinctive `p4a_` / `p4b_` / `p4c_` prefixes should
-prevent the M27 alignment hazard.
-
-### M35 catalog update + thesis archive
-
-After M35 lands, update:
-- `docs/thesis/timeline.md` — add M35 section
-- `docs/thesis/stats/per_milestone.md` + `.csv` — add M35 row
-- `docs/thesis/agent_reports/README.md` — add m35_p4a/b/c entries
-- Memory file's "Status as of end of M..." block
-
-The pattern is established; mirror the M34 archive commit (`475ab47`).
+**Three unpushed commits on local main** (P4-C, P4-B, P4-A) — the
+M35 round did not push. `git push origin main` to publish.
 
 ## What comes after M35
 
-Per the THESIS §8.4 next-pass priority list (and the M34 deferred
-items + general v0.4 backlog):
+Per the THESIS §8.4 next-pass priority list + M34/M35 deferred items:
 
 ### Highest leverage (in order)
 
-1. **`StdlibItemKind::Class` infrastructure**: move M34 (JsonValue)
+1. **THESIS + BLOG_POST refresh to M35** (small writing task, ~30-60 min).
+   Both are frozen at M34. The M35 chapter has a natural shape:
+   "after JsonValue, three more class adders shipped in parallel; the
+   prelude now hosts 11 stdlib classes; the `StdlibItemKind::Class`
+   refactor becomes urgent before M40". Concrete numbers:
+   - Tests: 690 → 723 (+33)
+   - Prelude classes: 7 → 11
+   - Demo programs: 97 → 100
+   - Lesson 1 streak: 14 → 17
+
+2. **`StdlibItemKind::Class` infrastructure**: move M34 (JsonValue)
    + M35 (Pattern, Connection, Cursor, Hasher) class registrations
    from the prelude to module-scoped. Pure refactor — no API
    change. The "right thing" the M34/M35 agents deferred. Probably
-   200-400 LOC in resolver.rs + typecheck.rs.
+   200-400 LOC in resolver.rs + typecheck.rs. **Becomes urgent
+   before M40** — 11 stdlib classes already in the prelude.
 
-2. **Real Cranelift safepoints** (replaces M33 shadow stack):
+3. **Real Cranelift safepoints** (replaces M33 shadow stack):
    `cranelift-jit 0.115` doesn't stably expose PC ranges; check if
    a newer cranelift-jit (0.116+ or trunk) exposes
    `MachBufferFinalized::pc_range_for_inst` or similar. If yes,
    this is a focused agent. If not, the shadow-stack approach is
    fine for now.
 
-3. **Real `mio` event loop** (replaces M32 thread façade): swap
+4. **Real `mio` event loop** (replaces M32 thread façade): swap
    `asyncio.spawn`'s thread-per-task implementation for a single-
    threaded event loop with state-machine coroutines or
    thread-coordinated tasks. Public surface unchanged.
 
-4. **Rewrite the M29 framework using JsonValue + Pattern +
-   Connection**: clean LOC measurement of how much v0.3 stdlib
-   classes shrink user code. The M29 framework was ~2,400 LOC;
+5. **Rewrite the M29 framework using JsonValue + Pattern +
+   Connection + Hasher**: clean LOC measurement of how much v0.3
+   stdlib classes shrink user code. The M29 framework was ~2,400 LOC;
    estimated ~1,500-1,700 LOC post-rewrite (30-35% reduction). One
    focused agent.
 
-5. **Phase 3d stdlib**: `traceback`, `enum`, `functools`, `uuid`,
+6. **Phase 3d stdlib**: `traceback`, `enum`, `functools`, `uuid`,
    `secrets`. Smaller modules; the M27 parallel-worktree pattern
    handles them cleanly. 4-5 parallel agents.
 
-6. **Bounded generics + variance + explicit type-arg syntax**:
+7. **Bounded generics + variance + explicit type-arg syntax**:
    extends M31. The `Box[i64]()` explicit-arg form would let
    `asyncio.spawn[T]` work generically.
 
-7. **User-defined exception subclasses**: parser already accepts
+8. **User-defined exception subclasses**: parser already accepts
    `class MyError(Exception):`; resolver currently rejects. Small fix.
 
-8. **HTTP/2** + **WebSockets**: separate v0.4 stdlib modules.
+9. **HTTP/2** + **WebSockets**: separate v0.4 stdlib modules.
 
 ### Lower priority
 
@@ -169,13 +118,13 @@ items + general v0.4 backlog):
 - Generic methods on non-generic classes (currently scoped-out per
   M17)
 - Recursive generic classes (currently scoped-out per M31)
-- M34 scope-down cleanup (the helper-vs-constructor double-NativeFn-ID
+- M34/M35 scope-down cleanup (the helper-vs-constructor double-NativeFn-ID
   thing is mildly ugly; could unify via a constructor-flavour flag
   on `StdlibItemKind::Function`)
 
 ## CRITICAL: keep `LANGUAGE_GUIDE.md` up to date
 
-`LANGUAGE_GUIDE.md` (project root, ~2,300 lines as of M34) is the
+`LANGUAGE_GUIDE.md` (project root, refreshed post-M35) is the
 **single source of truth** for AI coding tools writing StrictPy
 programs. Every agent brief that touches **language syntax**,
 **type system**, or **stdlib** MUST include:
@@ -191,7 +140,7 @@ if not, write the update yourself before pushing. The doc is what
 makes StrictPy usable by other AI tools — losing freshness here
 costs more than the integration time saves.
 
-After M35 (and any v0.4 language/stdlib work), update:
+After v0.4 language/stdlib work, update:
 - Version banner at the top ("Last refresh: post-M..")
 - The relevant §3 / §4 / §5 / §10 sub-section
 - A §11 entry if there's a gotcha worth flagging
@@ -202,20 +151,22 @@ After M35 (and any v0.4 language/stdlib work), update:
 Document these in any new agent brief:
 
 1. **"FIRST commit before 60% of your time budget"** with explicit
-   20%/40%/60%/80% checkpoint discipline. **14 consecutive clean
-   agents** (M28 → M34) — the streak is the strongest empirical
+   20%/40%/60%/80% checkpoint discipline. **17 consecutive clean
+   agents** (M28 → M35) — the streak is the strongest empirical
    data point in the project. Don't soften this language.
 
 2. **Distinctive variable prefixes per agent** in shared files
    (resolver.rs, builtins.rs, interp.rs) — `p3b_a_` / `p3b_b_` /
-   `p3c_a_` / `p3c_b_` / `p4a_` / etc. Avoids the M27 closing-brace
-   alignment hazard that bit two M27 + M28 integrations.
+   `p3c_a_` / `p3c_b_` / `p4a_` / `p4b_` / `p4c_` / etc. Avoids the
+   M27 closing-brace alignment hazard that bit two M27 + M28
+   integrations. M35 reconfirmed this works.
 
 3. **Always diff against the pre-round common ancestor** when
    cherry-picking sequentially. NEVER `git diff main..worktree` if
    another worktree has already landed on main — produces
    reverse-deletions. The M28 P3b-B integration disaster (1806
-   lines deleted) is the cautionary tale.
+   lines deleted) is the cautionary tale. M35 followed this
+   discipline (pre-M35 base `475ab47`) and integrated cleanly.
 
 4. **Auto-resolve "keep-both" Python script** for git-apply conflicts
    that produce simple `<<<<<<<` markers around purely additive
@@ -223,9 +174,11 @@ Document these in any new agent brief:
 
 5. **Scope-down discretion**: agents who hit STOP CRITERIA and ship
    a smaller working version are the most useful. M33 (shadow-stack
-   instead of full Cranelift safepoints) and M34 (prelude
-   registration instead of `StdlibItemKind::Class`) are the
-   exemplars — both shipped working features that v0.4 can extend.
+   instead of full Cranelift safepoints), M34 (prelude registration
+   instead of `StdlibItemKind::Class`), and M35 ×3 (inheriting M34's
+   prelude path rather than building module-level class infra) are
+   the exemplars — each shipped working features that v0.4 can
+   extend.
 
 ## Honest open items to revisit
 
@@ -236,12 +189,11 @@ Document these in any new agent brief:
   StrictPy code hits at depth. Investigate during the
   Cranelift-safepoints v0.4 work.
 
-- **The M34 scope-down note**: M34 chose prelude registration for
-  JsonValue classes. M35 inherits this. If the prelude class table
-  starts feeling crowded (we'll add 4 more classes in M35 → 11+
-  total in the prelude beyond the original Channel/Thread/File/Dict/
-  Set/List), the `StdlibItemKind::Class` refactor becomes urgent.
-  Probably "before M40" rather than "before M50".
+- **The prelude is getting crowded**: M34 added 7 JsonValue classes,
+  M35 added 4 more (Pattern + Connection + Cursor + Hasher). The
+  prelude now hosts **17 stdlib classes** (6 base + 11 v0.3 stdlib).
+  The `StdlibItemKind::Class` refactor is now urgent. Probably
+  "before M40" rather than "before M50".
 
 - **Async I/O perf delta**: M32 ships Shape A (thread-backed). The
   M29 framework's ~2× gap to Flask+gunicorn was supposed to be
@@ -259,14 +211,17 @@ git log --oneline -10
 git status
 git tag --list  # should show v0.2.0
 
-# Quick smoke test
-cargo build --workspace --release && cargo test --release -p strictpy-vm --test m34_json_value
+# Quick smoke test (M35-specific)
+cargo build --workspace --release && \
+  cargo test --release -p strictpy-vm --test m35_re_pattern && \
+  cargo test --release -p strictpy-vm --test m35_sqlite_class && \
+  cargo test --release -p strictpy-vm --test m35_hashlib_streaming
 
 # Full test sweep (~5 min on Windows; reports total at end)
 cargo test --workspace --release --no-fail-fast 2>&1 | grep -E "^test result:" | \
   awk '{passed+=$4; failed+=$6; ignored+=$8} END {print "passed:",passed,"failed:",failed,"ignored:",ignored}'
 
-# Pre-M35 base for integration:
+# Pre-M35 base (kept for reference):
 PRE_M35=475ab47
 
 # List active worktrees:
@@ -279,5 +234,5 @@ git worktree list
 C:\Users\AG\.claude\projects\C--Users-AG-CascadeProjects-PythonCompiler\memory\project_strictpy.md
 ```
 
-Update the "Status as of end of M..." block when M35 lands. The
-file is ~150 lines; keep additions concise.
+Update the "Status as of end of M..." block when v0.4 lands. The
+file is ~155 lines; keep additions concise.

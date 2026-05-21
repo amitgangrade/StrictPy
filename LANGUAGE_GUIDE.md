@@ -1,6 +1,6 @@
 # StrictPy — language guide for AI coding tools
 
-**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M34 (2026-05-21).
+**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M35 (2026-05-21).
 
 **Audience**: any AI coding tool (Claude, GPT, Gemini, etc.) being asked to write a StrictPy program. This file is the single source of truth for writing idiomatic StrictPy — you should NOT need to read the compiler source (`compiler/src/`) or VM source (`vm/src/`) to write correct code.
 
@@ -408,7 +408,7 @@ j.parse(text)
 
 You can import:
 - Stdlib modules (37 listed in §5)
-- Stdlib classes via `from json import JsonValue` etc. (M34)
+- Stdlib classes via `from json import JsonValue` etc. (M34) — also `from re import Pattern`, `from sqlite3 import Connection, Cursor`, `from hashlib import Hasher` (M35)
 - Prelude classes directly: `from threading import Thread`
 
 You CANNOT import user-defined `.spy` modules in v0.3 (deferred to v0.4).
@@ -444,7 +444,7 @@ Integer division `/` on integers gives an integer result (use `f64(a) / f64(b)` 
 
 ### 4.3 Class types
 
-Any user-defined `class Foo:` introduces type `Foo`. Subclasses are subtypes. The 7 stdlib JsonValue classes (`JsonValue`, `JNull`, `JBool`, `JInt`, `JFloat`, `JString`, `JList`, `JObject`) registered in the prelude (M34) are usable like any other class.
+Any user-defined `class Foo:` introduces type `Foo`. Subclasses are subtypes. The 11 stdlib classes registered in the prelude — the 7 JsonValue classes (`JsonValue` + `JNull` / `JBool` / `JInt` / `JFloat` / `JString` / `JList` / `JObject`) from M34, plus `Pattern` / `Connection` / `Cursor` / `Hasher` from M35 — are usable like any other class.
 
 ### 4.4 Generic types
 
@@ -714,10 +714,11 @@ match v:
                 case JString(s): println("name = " + s)
 ```
 
-### re (M20c)
+### re (M20c, extended by M35)
 
 ```python
 import re
+# Flat surface (M20c — recompiles on every call):
 re.is_valid(pattern: str) -> bool
 re.fullmatch(pattern: str, s: str) -> bool
 re.search(pattern: str, s: str) -> str?           # first match or none
@@ -726,9 +727,23 @@ re.find_all(pattern: str, s: str) -> List[str]
 re.replace(pattern: str, s: str, repl: str) -> str   # first match
 re.replace_all(pattern: str, s: str, repl: str) -> str
 re.split(pattern: str, s: str) -> List[str]
+
+# Compiled Pattern class — M35. Compile once, reuse cheaply in hot loops.
+re.compile(s: str) -> Pattern                     # raises ValueError on bad regex
+
+# Pattern methods:
+p.matches(s: str) -> bool                          # full-string match
+p.find(s: str) -> str?                             # first match or none
+p.find_all(s: str) -> List[str]
+p.replace(s: str, repl: str) -> str                # first match
+p.replace_all(s: str, repl: str) -> str
+p.split(s: str) -> List[str]
+p.source() -> str                                  # the original pattern string
 ```
 
 `re.match` is renamed to `re.fullmatch` because `match` is a hard keyword since M16.
+
+Use `re.compile` when the same pattern runs in a loop — it's strictly cheaper than the flat surface, which recompiles on every call.
 
 ### argparse (M22 P2A)
 
@@ -794,10 +809,14 @@ hashlib.sha256(data: str) -> str
 hashlib.sha512(data: str) -> str
 hashlib.hmac_sha256(key: str, data: str) -> str
 
-# Streaming Hasher class — M35 (verify in your build):
-# let h: Hasher = hashlib.new("sha256")
-# h.update(chunk)
-# let digest: str = h.hexdigest()
+# Streaming Hasher class — M35:
+hashlib.new(algo: str) -> Hasher                  # algo: "md5" | "sha1" | "sha256" | "sha512"
+h.update(data: str) -> None                       # feed a chunk
+h.hexdigest() -> str                              # current digest as hex string
+h.digest() -> str                                 # current digest as raw byte-buffer
+h.copy() -> Hasher                                # snapshot for multi-output digests
+h.reset() -> None                                 # start over with the same algorithm
+h.name() -> str                                   # the algorithm name
 ```
 
 NOT suitable for password storage (no bcrypt/argon2 in v0.3).
@@ -956,10 +975,21 @@ sqlite3.changes(conn: i64) -> i32
 sqlite3.close(conn: i64) -> None
 sqlite3.column_names(conn: i64, sql: str) -> List[str]
 
-# Connection / Cursor classes — M35 (verify in your build).
-# let conn: Connection = sqlite3.open(path)
-# let cur: Cursor = conn.query("SELECT ...")
-# let row: List[str]? = cur.fetchone()
+# Connection / Cursor classes — M35:
+sqlite3.open(path: str) -> Connection             # ":memory:" for in-memory
+conn.execute(sql: str) -> None
+conn.execute_params(sql: str, params: List[str]) -> None
+conn.query(sql: str) -> Cursor
+conn.query_params(sql: str, params: List[str]) -> Cursor
+conn.last_insert_rowid() -> i64
+conn.changes() -> i32
+conn.close() -> None                              # idempotent
+
+# Cursor methods (always check fetchone() against none — `is not none` narrows):
+cur.fetchone() -> List[str]?                      # next row or none
+cur.fetchall() -> List[List[str]]                 # remaining rows
+cur.column_names() -> List[str]
+cur.row_count() -> i64                            # rows the underlying query produced
 ```
 
 All cells are stringified (v0.4 will add typed cell access).
@@ -1236,6 +1266,9 @@ These are available without import:
 | `Thread` | OS thread | M6 |
 | `io.File` | Open file handle (via `open()` or `with open(...)`) | M5 |
 | `JsonValue` + 6 subclasses (JNull, JBool, JInt, JFloat, JString, JList, JObject) | Typed JSON tree | M34 |
+| `Pattern` | Compiled regex (via `re.compile(s)`) | M35 |
+| `Connection` + `Cursor` | SQLite connection / query cursor (via `sqlite3.open(path)`) | M35 |
+| `Hasher` | Streaming hasher (via `hashlib.new(algo)`) | M35 |
 | 10 exception names | See §3.10 | M15 |
 
 ### 6.3 List, Dict, Set methods
