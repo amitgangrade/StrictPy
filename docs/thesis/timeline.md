@@ -1117,6 +1117,143 @@ No language/compiler changes; new pure-bench infrastructure only.
 
 ---
 
+## M42 — `tabular` index propagation through existing methods (2026-05-22)
+
+Closes the M41 explicit v1 scope-down. The 11 existing DataFrame
+methods that returned a fresh frame (filter / sort_by / head /
+tail / iloc / select / drop / rename / dropna / dropna_subset /
+fillna_* / merge) now **propagate the index** instead of dropping
+it. Single agent, **5 separable per-phase commits** (Phase A
+through Phase E), ~700-1000 LOC mostly modifying existing handlers,
+**zero STOP CRITERIA cuts**.
+
+### The pattern — one helper applied 11 times
+
+The whole milestone is a single recipe:
+
+```rust
+// Before M42: each handler ended with
+m37_build_df(interp, names, permuted_columns)
+//
+// After M42: each handler ends with
+m42_permute_index_into_df(interp, parent_df_ptr, names,
+                          permuted_columns, &keep_indices)
+```
+
+The helper reads the parent's optional index, permutes it by the
+same `keep_indices` vector the handler already builds, and emits
+via `m41_build_df_with_index` (or `m37_build_df` if the parent had
+no index — preserving today's behavior for unindexed inputs). 280
+LOC added to `vm/src/builtins.rs` total: 4 helpers + 11 emit-call
+swaps. **No new NativeFn IDs** — M42 modifies existing handlers,
+not adds.
+
+### Surface (extends `tabular` module's existing methods)
+
+- **Phase A** (filter, sort_by, head, tail, iloc): `m42_permute_index_into_df`
+  + 5 handler edits. The row-selection vectors already exist in
+  each handler; M42 plumbs the index through them.
+- **Phase B** (select, drop, rename): sibling helper
+  `m42_copy_index_into_df` (no permutation needed — these methods
+  don't touch rows) + 3 handler edits.
+- **Phase C** (dropna, dropna_subset, fillna_*): 2 handler edits
+  (fillna's per-dtype dispatch via the shared `m40_df_fillna`
+  body — one edit threads through all 5 `fillna_*` variants).
+- **Phase D** (merge): `m42_merge_build_index` +
+  `m42_merge_outer_index_column`. **Index policy per `how`**: lhs
+  wins for inner / left / outer; rhs wins for right. Outer with
+  dtype mismatch falls back to RangeIndex (v1 simplification;
+  pandas's NaN-padded MultiIndex is M43+ work).
+- **Phase E**: 19 VM tests + 2 demo-runs +
+  `examples/tabular_index_propagation_demo.spy` (~210 LOC
+  end-to-end pipeline that set_indexes a frame, filters, sorts,
+  drops nulls, fills, merges, projects, and verifies the index
+  threaded through everything) + LANGUAGE_GUIDE.md §5 + §11.26
+  rewrite (the M41 v1 scope-down section is now "closed by M42").
+
+### Three findings worth recording
+
+1. **The M41/M42 cadence contrast confirms the streak nuance**. M41
+   slipped to combined Phase A+B+C because all three phases shared
+   `m41_build_df_with_index` + the 40-byte payload (shared
+   infrastructure → splitting becomes revert-and-reapply). M42
+   returned to clean per-phase commits because its phases modify
+   disjoint handlers (each phase touches a different subset of
+   handlers, no shared revert risk). **Generalizable lesson now
+   confirmed across two milestones**: brief language should call
+   out "shared-infra" vs "disjoint-handler" so the agent aims at
+   the right cadence.
+2. **Merge index policy is per-`how`** — lhs wins for inner / left
+   / outer; rhs wins for right. Outer-with-dtype-mismatch falls
+   back to RangeIndex (no NaN-padded MultiIndex in v1). Documented
+   in §11.29.
+3. **Edit-tool worktree leak hit 5 times in M42** (back up from 1×
+   in M41) because M42 made many small Edits to `builtins.rs`
+   across 5 phase commits — each "first Edit on a shared file"
+   per-phase triggered the leak. Each recovered via a single `cp`
+   (~5 seconds total). Cause narrowing from M40 (Edit-on-existing-
+   files leaks; Write with absolute paths doesn't) confirmed across
+   6 milestones now.
+
+### M41 tests flipped (1)
+
+`vm/tests/m41_tabular_index.rs::filter_drops_index` was renamed to
+`filter_preserves_index_m42` with its assertion flipped from
+`has_index == false` to `has_index == true`. The test now verifies
+the M42 behavior on the same input shape it used to verify the M41
+v1 scope-down. **This is the first test in the project's history
+that an agent intentionally flipped to verify a behavior change**
+— all prior test work was additive.
+
+### Tests + size
+
+- Tests: 847 → 868 (+21 net: 19 new VM tests in
+  `vm/tests/m42_tabular_index_propagation.rs`, 2 new demo-runs in
+  `compiler/tests/tabular_index_propagation_demo_runs.rs`, 1 M41
+  test flipped — old assertion deleted, new assertion added).
+- Examples: 105 → 106
+  (`examples/tabular_index_propagation_demo.spy` ~210 LOC).
+- Stdlib classes: unchanged at 18. NativeFn IDs: unchanged
+  (no new methods).
+- LOC: `vm/src/builtins.rs` +283 (the 4 helpers + 11 emit-call
+  swaps), `vm/tests/m42_tabular_index_propagation.rs` +940 (new),
+  `examples/tabular_index_propagation_demo.spy` +210 (new),
+  `compiler/tests/tabular_index_propagation_demo_runs.rs` +99
+  (new), `LANGUAGE_GUIDE.md` +58, `docs/thesis/agent_reports/
+  m42_tabular_index_propagation.md` +103. Total ~1693 LOC.
+
+### Lesson 1 streak: 24 consecutive clean agents
+
+(M28 + M28.5 + M29 + M29.5 + M30×2 + M31 + M32 + M33 + M34 + M35×3 +
+M36 + M37 + M38 + M39 + M40 + M41 + M42). **Six consecutive
+`tabular` package agents shipped clean** — M37 / M38 / M39 / M40 /
+M41 / M42.
+
+### After M42: the `tabular` v1 single-index surface is closed
+
+What's done:
+- 11 row/column-transforming methods preserve the index (M42).
+- 4 explicitly-index-aware methods shape the index (M41:
+  sort_index / resample_index / asof_merge_index /
+  select_by_label_*).
+
+What still drops the index (M43 anchor list):
+- `pivot_table` — `index_col` should become the result's index.
+- `group_by` + agg — group-key column should become the result's
+  index (single-column first; multi-column requires MultiIndex).
+- `pivot` / `melt` — case-by-case design.
+- `concat_rows` / `concat_cols` — case-by-case (likely take lhs's
+  index).
+
+What's deferred to M44+:
+- MultiIndex — currently the index is a single column. Real Pandas
+  nested indices for stack/unstack/groupby.agg.
+- `df.loc[label_list]` / range-by-label.
+- Outer-merge MultiIndex fallback (replaces M42's RangeIndex
+  fallback for dtype-mismatched indexes).
+
+---
+
 ## M41 — `tabular` Phase 5b: DatetimeIndex (minimum viable) + pivot_table (2026-05-22)
 
 Phase 5b of the Pandas plan. After M40 deferred DatetimeIndex to

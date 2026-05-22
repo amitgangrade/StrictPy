@@ -1,4 +1,4 @@
-# Session handoff — 2026-05-22 (post-M41)
+# Session handoff — 2026-05-22 (post-M42)
 
 ## Read this FIRST in the next session
 
@@ -17,22 +17,64 @@ Everything you need to resume is in:
 ## Current head
 
 - Branch: `main`
-- Latest commit: `dad1b6d` (M41 D: tabular DatetimeIndex + pivot_table — demo + LANGUAGE_GUIDE + agent report)
+- Latest commit: `cbcab82` (M42 E: tabular index propagation — tests + demo + LANGUAGE_GUIDE + agent report)
 - Tag: `v0.2.0` (commit `121483f`, pushed)
-- Tests passing on main: **847** (+25 over M40)
+- Tests passing on main: **868** (+21 net over M41 — 19 vm + 2 demo new; 1 M41 test flipped to assert new behavior)
 
 ## Status snapshot
 
 | Metric | Value |
 |---|---:|
-| Milestones complete on main | M0–M41 |
+| Milestones complete on main | M0–M42 |
 | **v0.2.0 release** | **Tagged at M30 (commit 121483f)** |
-| Tests | 847 / 0 fail / 1 ignored |
+| Tests | 868 / 0 fail / 1 ignored |
 | Bugs | 35 / 35 / **0 deferred** |
 | Stdlib modules | 38 |
-| Stdlib classes | 18 (unchanged — M41 adds methods + an optional DataFrame field, no new classes) |
-| Example programs | **105** (+1 in M41: `tabular_index_demo.spy`) |
-| Lesson 1 streak | **23 consecutive clean-commit agents** (M28 → M41 — see methodology note on M41 commit cadence below) |
+| Stdlib classes | 18 (unchanged — M42 modifies existing handlers, no new methods or NativeFns) |
+| Example programs | **106** (+1 in M42: `tabular_index_propagation_demo.spy`) |
+| Lesson 1 streak | **24 consecutive clean-commit agents** (M28 → M42 — M42 returned to per-phase commit cadence cleanly after the M41 cross-cutting-infrastructure nuance) |
+
+## M42 — completed (single agent, 5 per-phase commits, no STOP CRITERIA cuts)
+
+| Agent | Scope | Var prefix | NativeFn IDs | Commits |
+|---|---|---|---|---|
+| **M42 index propagation** | Extend 11 existing handlers to propagate the M41 index | `m42_` | none new (modifies existing handlers) | `e84160c` (A), `b02de3e` (B), `98d977a` (C), `5a73af2` (D), `cbcab82` (E) |
+
+### What shipped
+
+Closes the M41 explicit v1 scope-down. The 11 existing DataFrame methods that returned a fresh frame now PROPAGATE the index instead of dropping it.
+
+- **Phase A** (filter, sort_by, head, tail, iloc): one new helper `m42_permute_index_into_df` + 5 handler edits + 6 tests + 1 flipped M41 test.
+- **Phase B** (select, drop, rename): sibling helper `m42_copy_index_into_df` + 3 handler edits + 3 tests.
+- **Phase C** (dropna, dropna_subset, fillna_*): 2 handler edits (fillna's per-dtype dispatch via the shared `m40_df_fillna` body) + 5 tests.
+- **Phase D** (merge): `m42_merge_build_index` + `m42_merge_outer_index_column` with dtype-mismatch fallback to RangeIndex; index_name policy = lhs wins for inner/left/outer, rhs wins for right + 5 tests.
+- **Phase E**: 19 VM tests + 2 demo-runs; `examples/tabular_index_propagation_demo.spy` (~210 LOC end-to-end pipeline); LANGUAGE_GUIDE.md §5 + §11.26 rewrite (the M41 v1 scope-down section now reads as "closed by M42"); banner bumped to post-M42.
+
+### Key M42 finding — methodology streak nuance closed
+
+M41 introduced the first per-phase-cadence slip in the streak (combined Phases A+B+C because they shared cross-cutting infrastructure). **M42 returned to clean per-phase commits** because its phases modify disjoint handlers — each Phase has a green build + targeted tests at commit time, no shared revert-and-reapply risk. This confirms the M41 nuance is a true *infrastructure-then-uses* exception, not a general drift in agent discipline.
+
+### Architectural pattern worth recording
+
+The whole M42 milestone is a single recipe applied 11 times:
+
+```rust
+// In each row-transforming handler:
+let keep_indices: Vec<usize> = /* existing code that builds row selection */;
+let permuted_columns: Vec<u64> = /* existing per-column permute by keep_indices */;
+// NEW: one line, replacing the existing m37_build_df call.
+m42_permute_index_into_df(interp, parent_df_ptr, names, permuted_columns, &keep_indices)
+```
+
+The helper reads the parent's optional index, permutes it by the same `keep_indices`, and emits via `m41_build_df_with_index` (or `m37_build_df` if there was no index — preserving today's behavior for unindexed inputs). 280 LOC added to `builtins.rs` total — 4 helpers + 11 emit-call swaps.
+
+### M41 tests flipped (1 total)
+
+- `vm/tests/m41_tabular_index.rs::filter_drops_index` → `filter_preserves_index_m42`. Old asserted `has=false` (drops index per M41 v1 scope-down); new asserts `has=true` (M42 propagates).
+
+### Edit-tool worktree leak — 5 recurrences
+
+Detected at every "first Edit on a shared file" boundary: `vm/src/builtins.rs` (4× across phases), `vm/tests/m41_tabular_index.rs` (1×), `LANGUAGE_GUIDE.md` (1×). Each recovered with one `cp`. Total ~5 seconds. `Write` calls all landed correctly. Pattern now well-routinized — M40 narrowing (Edit-on-existing-files leaks, Write-with-absolute-paths doesn't) holds across 6 milestones now.
 
 ## M41 — completed (single agent, 2 commits, no STOP CRITERIA cuts)
 
@@ -225,41 +267,41 @@ Per the THESIS §8.4 next-pass priority list + M34/M35 deferred items:
 
 ### Highest leverage (in order)
 
-1. **THESIS + BLOG_POST refresh to M41** (small writing task, ~30 min).
-   Both are at post-M39 currently. Concrete deltas to fold in for
-   M40 + M41:
-   - Tests: 794 → 847 (+28 in M40, +25 in M41)
-   - Stdlib classes: unchanged at 18 (M40+M41 ship methods + an
-     optional DataFrame field)
-   - Examples: 103 → 105
-   - Lesson 1 streak: 21 → 23
+1. **THESIS + BLOG_POST refresh to M42** (small writing task, ~30 min).
+   Both are at post-M39 currently. Concrete deltas for M40-M42:
+   - Tests: 794 → 868 (+28 M40, +25 M41, +21 M42)
+   - Stdlib classes: unchanged at 18 (M40-M42 ship methods + an
+     optional DataFrame field; no new classes)
+   - Examples: 103 → 106
+   - Lesson 1 streak: 21 → 24 (with one explicit per-phase-cadence
+     nuance in M41 due to cross-cutting infrastructure; M42 returned
+     to clean per-phase commits)
    - `tabular` coverage: common-80% (post-M39) → ~95% (post-M40
      adds cumulative/null/iloc/rolling/resample/asof) → DatetimeIndex
-     opt-in (post-M41) with explicit M42 anchor for full index
-     propagation.
+     opt-in (post-M41) → DatetimeIndex propagates through 11
+     existing methods (post-M42, closing the M41 v1 scope-down).
 
-2. **M42 — Index propagation through existing methods**
-   (the M41 anchor follow-up). Concrete punch list from the M41
-   agent's report, sorted by frequency-of-use:
-   - **Index propagation through `filter`** — highest-value drop
-   - **Index propagation through `sort_by(col, ascending)`** — sort
-     by a regular column without losing the index
-   - **Index propagation through `head` / `tail` / `iloc`** — slicing
-     preserves index slice
-   - **Index propagation through `dropna` / `dropna_subset` /
-     `fillna_*`** — null cleaning preserves index
-   - **Index propagation through `merge`** — left-merge preserves
-     left's index
-   - **Index propagation through `select` / `drop` / `rename`** —
-     column-list manipulation never touches index
-   - Estimated 600-800 LOC in `builtins.rs` across 6 existing
-     handlers; each gains read-parent-index + permute-by-row-vector
-     + emit-via-`m41_build_df_with_index`.
-   - Also: `df.loc[label_list]` / range-by-label; MultiIndex;
-     `pivot_table` `margins=True` + aggfunc-as-list.
+2. **M43 — Index propagation through reshape + group_by + pivot_table**
+   (the remaining "still drops index" methods, per the M42 agent's
+   "what M43 should pick up" list):
+   - **Index propagation through `pivot_table`** — `index_col`
+     becomes the result's index (currently the output is a regular
+     column with RangeIndex)
+   - **Index propagation through `group_by` + agg** — group-key
+     columns become the result's index (single-column key first;
+     multi-column key requires MultiIndex which is later)
+   - **Index propagation through `pivot` / `melt` / `concat_rows` /
+     `concat_cols`** — needs case-by-case design
+   - **MultiIndex support** — currently the index is a single
+     column; real Pandas-style nested indices for stack/unstack/
+     groupby.agg
+   - **`df.loc[label_list]` / range-by-label** — currently
+     `select_by_label_*` returns one row; range support would
+     mirror pandas's `df.loc["a":"c"]`
+   - **Outer-merge MultiIndex fallback** — replace M42's current
+     RangeIndex fallback for dtype-mismatched indexes
 
-3. **M43+ — Rolling-window optimizations + categorical**
-   (separate from M42 because logically distinct):
+3. **M44+ — Rolling-window optimizations + categorical**:
    - Welford incremental sum-of-squares for rolling_std stability
    - `min_periods` argument
    - `center=True` window alignment
@@ -268,6 +310,7 @@ Per the THESIS §8.4 next-pass priority list + M34/M35 deferred items:
    - Categorical column type (memory-efficient group-by keys)
    - `df.iloc[rows, cols]` — 2-D indexing
    - Negative-index support for `iloc`
+   - `pivot_table margins=True` + `aggfunc=list`
 
 3. **M36 follow-up — flip M34/M35 tests to explicit imports + delete
    the legacy "prelude wins" branch.** Mechanical migration; ~39 test
@@ -357,20 +400,25 @@ After v0.4 language/stdlib work, update:
 Document these in any new agent brief:
 
 1. **"FIRST commit before 60% of your time budget"** with explicit
-   20%/40%/60%/80% checkpoint discipline. **23 consecutive clean
-   agents** (M28 → M41) — the streak is the strongest empirical
+   20%/40%/60%/80% checkpoint discipline. **24 consecutive clean
+   agents** (M28 → M42) — the streak is the strongest empirical
    data point in the project. M37 + M38 + M39 + M40 each ran 4-5
    phase commits across ~2100-2800 LOC milestones. **M41 slipped on
    per-phase cadence** (first commit at ~75% of budget, combined
-   A+B+C) because the three phases share cross-cutting infrastructure
-   (40-byte payload + `m41_build_df_with_index`). The streak holds
-   because the commits were still clean and orchestrator-intervention-
-   free. **Generalizable lesson for future briefs**: when phases share
-   cross-cutting infrastructure (struct layout changes, shared
-   helpers), accept "first commit after the infrastructure lands,
-   even if late" as the right shape — splitting becomes a
-   revert-and-reapply antipattern. Don't soften the 60%/20% language
-   in general; just note the cross-cutting-infrastructure exception.
+   A+B+C) because the three phases shared cross-cutting infrastructure
+   (40-byte payload + `m41_build_df_with_index`). **M42 returned to
+   clean per-phase commits** (first commit at ~20%; 5 separable
+   phase commits) because its phases modified disjoint handlers —
+   no shared revert-and-reapply risk. The streak holds. **Generalizable
+   lesson, now confirmed by the M41/M42 contrast**: when phases share
+   cross-cutting infrastructure (struct layout changes, shared helpers
+   that everything later uses), accept "first commit after the
+   infrastructure lands, even if late" as the right shape — splitting
+   becomes a revert-and-reapply antipattern. When phases modify
+   disjoint handlers (M42's pattern), clean per-phase commits are
+   straightforward. Don't soften the 60%/20% language; explicitly
+   note in briefs whether the planned phases are "shared-infra" or
+   "disjoint-handler" so the agent knows what cadence to aim for.
 
 2. **Distinctive variable prefixes per agent** in shared files
    (resolver.rs, builtins.rs, interp.rs) — `p3b_a_` / `p3b_b_` /
