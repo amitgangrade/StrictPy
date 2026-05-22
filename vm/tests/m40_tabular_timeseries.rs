@@ -604,3 +604,294 @@ fn main() -> i32:
     let out = run("rolling_sum_f64", src);
     assert!(out.contains("v1=3"), "got: {out:?}");
 }
+
+// ── Phase C: resample + asof_merge ───────────────────────────────────
+
+#[test]
+fn resample_daily_sum() {
+    // 5 timestamps spanning 5 days, all with amount=10, daily sum.
+    let src = "\
+from tabular import Column, ColumnDateTime, ColumnI64, DataFrame
+import tabular
+fn main() -> i32:
+    day_ms: i64 = 86400000i64
+    ts_vs: List[i64] = []
+    ts_vs.append(0i64)
+    ts_vs.append(day_ms)
+    ts_vs.append(2i64 * day_ms)
+    ts_vs.append(3i64 * day_ms)
+    ts_vs.append(4i64 * day_ms)
+    tc: ColumnDateTime = tabular.col_datetime(ts_vs, [false, false, false, false, false])
+    amt_vs: List[i64] = []
+    amt_vs.append(10i64)
+    amt_vs.append(10i64)
+    amt_vs.append(10i64)
+    amt_vs.append(10i64)
+    amt_vs.append(10i64)
+    ac: ColumnI64 = tabular.col_i64_simple(amt_vs)
+    cn: List[str] = []
+    cn.append(\"ts\")
+    cn.append(\"amt\")
+    cs: List[Column] = []
+    cs.append(tc)
+    cs.append(ac)
+    df: DataFrame = tabular.from_columns(cn, cs)
+    r: DataFrame = df.resample(\"ts\", \"1d\", \"sum\")
+    println(\"rlen=\" + str(r.length()))
+    sa: ColumnI64? = r.get_column_i64(\"amt\")
+    if sa is not none:
+        v0: i64? = sa.get(0i64)
+        v4: i64? = sa.get(4i64)
+        if v0 is not none:
+            println(\"v0=\" + str(v0))
+        if v4 is not none:
+            println(\"v4=\" + str(v4))
+    return 0
+";
+    let out = run("resample_daily", src);
+    assert!(out.contains("rlen=5"), "got: {out:?}");
+    assert!(out.contains("v0=10"), "got: {out:?}");
+    assert!(out.contains("v4=10"), "got: {out:?}");
+}
+
+#[test]
+fn resample_empty_bucket_gets_null() {
+    // Timestamps at day 0 and day 3 (no day 1 or 2 data).
+    let src = "\
+from tabular import Column, ColumnDateTime, ColumnI64, DataFrame
+import tabular
+fn main() -> i32:
+    day_ms: i64 = 86400000i64
+    ts_vs: List[i64] = []
+    ts_vs.append(0i64)
+    ts_vs.append(3i64 * day_ms)
+    tc: ColumnDateTime = tabular.col_datetime(ts_vs, [false, false])
+    amt_vs: List[i64] = []
+    amt_vs.append(5i64)
+    amt_vs.append(7i64)
+    ac: ColumnI64 = tabular.col_i64_simple(amt_vs)
+    cn: List[str] = []
+    cn.append(\"ts\")
+    cn.append(\"amt\")
+    cs: List[Column] = []
+    cs.append(tc)
+    cs.append(ac)
+    df: DataFrame = tabular.from_columns(cn, cs)
+    r: DataFrame = df.resample(\"ts\", \"1d\", \"sum\")
+    println(\"rlen=\" + str(r.length()))
+    sa: ColumnI64? = r.get_column_i64(\"amt\")
+    if sa is not none:
+        println(\"nc=\" + str(sa.null_count()))
+    return 0
+";
+    let out = run("resample_empty", src);
+    assert!(out.contains("rlen=4"), "got: {out:?}");
+    // Days 1 and 2 are empty buckets → 2 nulls.
+    assert!(out.contains("nc=2"), "got: {out:?}");
+}
+
+#[test]
+fn resample_bad_rule_raises() {
+    let src = "\
+from tabular import Column, ColumnDateTime, ColumnI64, DataFrame
+import tabular
+fn main() -> i32:
+    ts_vs: List[i64] = []
+    ts_vs.append(0i64)
+    tc: ColumnDateTime = tabular.col_datetime(ts_vs, [false])
+    amt_vs: List[i64] = []
+    amt_vs.append(1i64)
+    ac: ColumnI64 = tabular.col_i64_simple(amt_vs)
+    cn: List[str] = []
+    cn.append(\"ts\")
+    cn.append(\"amt\")
+    cs: List[Column] = []
+    cs.append(tc)
+    cs.append(ac)
+    df: DataFrame = tabular.from_columns(cn, cs)
+    try:
+        r: DataFrame = df.resample(\"ts\", \"xyz\", \"sum\")
+        println(\"no-raise\")
+    except ValueError:
+        println(\"got-ve\")
+    return 0
+";
+    let out = run("resample_bad_rule", src);
+    assert!(out.contains("got-ve"), "got: {out:?}");
+}
+
+#[test]
+fn asof_merge_happy_path() {
+    // Left ts: [10, 20, 30].  Right ts: [5, 15, 25] with vals [a, b, c].
+    // Matches: 10→a (5<=10), 20→b (15<=20), 30→c (25<=30).
+    let src = "\
+from tabular import Column, ColumnDateTime, ColumnStr, DataFrame
+import tabular
+fn main() -> i32:
+    lts_vs: List[i64] = []
+    lts_vs.append(10i64)
+    lts_vs.append(20i64)
+    lts_vs.append(30i64)
+    ltc: ColumnDateTime = tabular.col_datetime(lts_vs, [false, false, false])
+    lcn: List[str] = []
+    lcn.append(\"lts\")
+    lcs: List[Column] = []
+    lcs.append(ltc)
+    lhs: DataFrame = tabular.from_columns(lcn, lcs)
+    rts_vs: List[i64] = []
+    rts_vs.append(5i64)
+    rts_vs.append(15i64)
+    rts_vs.append(25i64)
+    rtc: ColumnDateTime = tabular.col_datetime(rts_vs, [false, false, false])
+    tag_vs: List[str] = []
+    tag_vs.append(\"a\")
+    tag_vs.append(\"b\")
+    tag_vs.append(\"c\")
+    tag: ColumnStr = tabular.col_str_simple(tag_vs)
+    rcn: List[str] = []
+    rcn.append(\"rts\")
+    rcn.append(\"tag\")
+    rcs: List[Column] = []
+    rcs.append(rtc)
+    rcs.append(tag)
+    rhs: DataFrame = tabular.from_columns(rcn, rcs)
+    merged: DataFrame = lhs.asof_merge(rhs, \"lts\", \"rts\")
+    println(\"mlen=\" + str(merged.length()))
+    println(\"mcols=\" + str(merged.ncols()))
+    tg: ColumnStr? = merged.get_column_str(\"tag\")
+    if tg is not none:
+        t0: str? = tg.get(0i64)
+        t1: str? = tg.get(1i64)
+        t2: str? = tg.get(2i64)
+        if t0 is not none:
+            println(\"t0=\" + t0)
+        if t1 is not none:
+            println(\"t1=\" + t1)
+        if t2 is not none:
+            println(\"t2=\" + t2)
+    return 0
+";
+    let out = run("asof_happy", src);
+    assert!(out.contains("mlen=3"), "got: {out:?}");
+    assert!(out.contains("mcols=2"), "got: {out:?}");
+    assert!(out.contains("t0=a"), "got: {out:?}");
+    assert!(out.contains("t1=b"), "got: {out:?}");
+    assert!(out.contains("t2=c"), "got: {out:?}");
+}
+
+#[test]
+fn asof_merge_no_match_emits_null() {
+    // Left ts: [1, 5].  Right ts: [10, 20].  No right row <= 1 or <= 5
+    // → both null.
+    let src = "\
+from tabular import Column, ColumnDateTime, ColumnStr, DataFrame
+import tabular
+fn main() -> i32:
+    lts_vs: List[i64] = []
+    lts_vs.append(1i64)
+    lts_vs.append(5i64)
+    ltc: ColumnDateTime = tabular.col_datetime(lts_vs, [false, false])
+    lcn: List[str] = []
+    lcn.append(\"lts\")
+    lcs: List[Column] = []
+    lcs.append(ltc)
+    lhs: DataFrame = tabular.from_columns(lcn, lcs)
+    rts_vs: List[i64] = []
+    rts_vs.append(10i64)
+    rts_vs.append(20i64)
+    rtc: ColumnDateTime = tabular.col_datetime(rts_vs, [false, false])
+    tag_vs: List[str] = []
+    tag_vs.append(\"a\")
+    tag_vs.append(\"b\")
+    tag: ColumnStr = tabular.col_str_simple(tag_vs)
+    rcn: List[str] = []
+    rcn.append(\"rts\")
+    rcn.append(\"tag\")
+    rcs: List[Column] = []
+    rcs.append(rtc)
+    rcs.append(tag)
+    rhs: DataFrame = tabular.from_columns(rcn, rcs)
+    merged: DataFrame = lhs.asof_merge(rhs, \"lts\", \"rts\")
+    tg: ColumnStr? = merged.get_column_str(\"tag\")
+    if tg is not none:
+        println(\"nc=\" + str(tg.null_count()))
+    return 0
+";
+    let out = run("asof_nomatch", src);
+    assert!(out.contains("nc=2"), "got: {out:?}");
+}
+
+#[test]
+fn asof_merge_dtype_mismatch_raises() {
+    let src = "\
+from tabular import Column, ColumnDateTime, ColumnI64, DataFrame
+import tabular
+fn main() -> i32:
+    lts_vs: List[i64] = []
+    lts_vs.append(1i64)
+    ltc: ColumnDateTime = tabular.col_datetime(lts_vs, [false])
+    lcn: List[str] = []
+    lcn.append(\"lts\")
+    lcs: List[Column] = []
+    lcs.append(ltc)
+    lhs: DataFrame = tabular.from_columns(lcn, lcs)
+    rkey_vs: List[i64] = []
+    rkey_vs.append(1i64)
+    rkey: ColumnI64 = tabular.col_i64_simple(rkey_vs)
+    rcn: List[str] = []
+    rcn.append(\"rkey\")
+    rcs: List[Column] = []
+    rcs.append(rkey)
+    rhs: DataFrame = tabular.from_columns(rcn, rcs)
+    try:
+        merged: DataFrame = lhs.asof_merge(rhs, \"lts\", \"rkey\")
+        println(\"no-raise\")
+    except ValueError:
+        println(\"got-ve\")
+    return 0
+";
+    let out = run("asof_dtype", src);
+    assert!(out.contains("got-ve"), "got: {out:?}");
+}
+
+#[test]
+fn asof_merge_i64_keys_work() {
+    let src = "\
+from tabular import Column, ColumnI64, ColumnStr, DataFrame
+import tabular
+fn main() -> i32:
+    lk_vs: List[i64] = []
+    lk_vs.append(10i64)
+    lk_vs.append(20i64)
+    lk: ColumnI64 = tabular.col_i64_simple(lk_vs)
+    lcn: List[str] = []
+    lcn.append(\"k\")
+    lcs: List[Column] = []
+    lcs.append(lk)
+    lhs: DataFrame = tabular.from_columns(lcn, lcs)
+    rk_vs: List[i64] = []
+    rk_vs.append(5i64)
+    rk_vs.append(15i64)
+    rk: ColumnI64 = tabular.col_i64_simple(rk_vs)
+    tag_vs: List[str] = []
+    tag_vs.append(\"x\")
+    tag_vs.append(\"y\")
+    tag: ColumnStr = tabular.col_str_simple(tag_vs)
+    rcn: List[str] = []
+    rcn.append(\"k\")
+    rcn.append(\"tag\")
+    rcs: List[Column] = []
+    rcs.append(rk)
+    rcs.append(tag)
+    rhs: DataFrame = tabular.from_columns(rcn, rcs)
+    merged: DataFrame = lhs.asof_merge(rhs, \"k\", \"k\")
+    tg: ColumnStr? = merged.get_column_str(\"tag\")
+    if tg is not none:
+        t1: str? = tg.get(1i64)
+        if t1 is not none:
+            println(\"t1=\" + t1)
+    return 0
+";
+    let out = run("asof_i64", src);
+    assert!(out.contains("t1=y"), "got: {out:?}");
+}
