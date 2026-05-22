@@ -409,3 +409,198 @@ fn main() -> i32:
     let out = run("iloc_neg", src);
     assert!(out.contains("got-valueerror"), "got: {out:?}");
 }
+
+// ── Phase B: rolling ─────────────────────────────────────────────────
+
+#[test]
+fn rolling_sum_window_3_on_5_rows() {
+    // [1, 2, 3, 4, 5] window=3 → [null, null, 6, 9, 12]
+    let src = "\
+from tabular import ColumnI64
+import tabular
+fn main() -> i32:
+    vs: List[i64] = []
+    vs.append(1i64)
+    vs.append(2i64)
+    vs.append(3i64)
+    vs.append(4i64)
+    vs.append(5i64)
+    c: ColumnI64 = tabular.col_i64_simple(vs)
+    r: ColumnI64 = c.rolling_sum(3i64)
+    println(\"nc=\" + str(r.null_count()))
+    v2: i64? = r.get(2i64)
+    v3: i64? = r.get(3i64)
+    v4: i64? = r.get(4i64)
+    if v2 is not none:
+        println(\"v2=\" + str(v2))
+    if v3 is not none:
+        println(\"v3=\" + str(v3))
+    if v4 is not none:
+        println(\"v4=\" + str(v4))
+    return 0
+";
+    let out = run("rolling_sum_3", src);
+    assert!(out.contains("nc=2"), "got: {out:?}");
+    assert!(out.contains("v2=6"), "got: {out:?}");
+    assert!(out.contains("v3=9"), "got: {out:?}");
+    assert!(out.contains("v4=12"), "got: {out:?}");
+}
+
+#[test]
+fn rolling_mean_returns_f64_from_i64() {
+    let src = "\
+from tabular import ColumnI64, ColumnF64
+import tabular
+fn main() -> i32:
+    vs: List[i64] = []
+    vs.append(1i64)
+    vs.append(2i64)
+    vs.append(3i64)
+    c: ColumnI64 = tabular.col_i64_simple(vs)
+    r: ColumnF64 = c.rolling_mean(2i64)
+    v1: f64? = r.get(1i64)
+    if v1 is not none:
+        println(\"v1=\" + str(v1))
+    v2: f64? = r.get(2i64)
+    if v2 is not none:
+        println(\"v2=\" + str(v2))
+    return 0
+";
+    let out = run("rolling_mean", src);
+    assert!(out.contains("v1=1.5"), "got: {out:?}");
+    assert!(out.contains("v2=2.5"), "got: {out:?}");
+}
+
+#[test]
+fn rolling_std_sanity() {
+    // [1, 2, 3, 4, 5] window=3 → sample std on [1,2,3]=1, [2,3,4]=1, [3,4,5]=1.
+    let src = "\
+from tabular import ColumnI64, ColumnF64
+import tabular
+fn main() -> i32:
+    vs: List[i64] = []
+    vs.append(1i64)
+    vs.append(2i64)
+    vs.append(3i64)
+    vs.append(4i64)
+    vs.append(5i64)
+    c: ColumnI64 = tabular.col_i64_simple(vs)
+    r: ColumnF64 = c.rolling_std(3i64)
+    v2: f64? = r.get(2i64)
+    if v2 is not none:
+        println(\"v2=\" + str(v2))
+    return 0
+";
+    let out = run("rolling_std", src);
+    // sample std of [1,2,3] = sqrt(((1-2)^2+(2-2)^2+(3-2)^2)/2) = sqrt(1) = 1
+    assert!(out.contains("v2=1"), "got: {out:?}");
+}
+
+#[test]
+fn rolling_window_too_big_raises() {
+    let src = "\
+from tabular import ColumnI64
+import tabular
+fn main() -> i32:
+    vs: List[i64] = []
+    vs.append(1i64)
+    vs.append(2i64)
+    c: ColumnI64 = tabular.col_i64_simple(vs)
+    try:
+        r: ColumnI64 = c.rolling_sum(5i64)
+        println(\"no-raise\")
+    except ValueError:
+        println(\"got-ve\")
+    return 0
+";
+    let out = run("rolling_too_big", src);
+    assert!(out.contains("got-ve"), "got: {out:?}");
+}
+
+#[test]
+fn rolling_propagates_input_nulls() {
+    // [1, null, 3, 4] window=2 → [null, null, null, 7]
+    let src = "\
+from tabular import ColumnI64
+import tabular
+fn main() -> i32:
+    vs: List[i64] = []
+    vs.append(1i64)
+    vs.append(0i64)
+    vs.append(3i64)
+    vs.append(4i64)
+    ns: List[bool] = []
+    ns.append(false)
+    ns.append(true)
+    ns.append(false)
+    ns.append(false)
+    c: ColumnI64 = tabular.col_i64(vs, ns)
+    r: ColumnI64 = c.rolling_sum(2i64)
+    println(\"nc=\" + str(r.null_count()))
+    v3: i64? = r.get(3i64)
+    if v3 is not none:
+        println(\"v3=\" + str(v3))
+    return 0
+";
+    let out = run("rolling_null", src);
+    assert!(out.contains("nc=3"), "got: {out:?}");
+    assert!(out.contains("v3=7"), "got: {out:?}");
+}
+
+#[test]
+fn rolling_max_min_smoke() {
+    let src = "\
+from tabular import ColumnI64
+import tabular
+fn main() -> i32:
+    vs: List[i64] = []
+    vs.append(3i64)
+    vs.append(1i64)
+    vs.append(4i64)
+    vs.append(1i64)
+    vs.append(5i64)
+    c: ColumnI64 = tabular.col_i64_simple(vs)
+    rmx: ColumnI64 = c.rolling_max(3i64)
+    rmn: ColumnI64 = c.rolling_min(3i64)
+    mx2: i64? = rmx.get(2i64)
+    mn2: i64? = rmn.get(2i64)
+    mx4: i64? = rmx.get(4i64)
+    mn4: i64? = rmn.get(4i64)
+    if mx2 is not none:
+        println(\"mx2=\" + str(mx2))
+    if mn2 is not none:
+        println(\"mn2=\" + str(mn2))
+    if mx4 is not none:
+        println(\"mx4=\" + str(mx4))
+    if mn4 is not none:
+        println(\"mn4=\" + str(mn4))
+    return 0
+";
+    let out = run("rolling_max_min", src);
+    assert!(out.contains("mx2=4"), "got: {out:?}");
+    assert!(out.contains("mn2=1"), "got: {out:?}");
+    assert!(out.contains("mx4=5"), "got: {out:?}");
+    assert!(out.contains("mn4=1"), "got: {out:?}");
+}
+
+#[test]
+fn rolling_sum_f64_smoke() {
+    let src = "\
+from tabular import ColumnF64
+import tabular
+fn main() -> i32:
+    vs: List[f64] = []
+    vs.append(1.0)
+    vs.append(2.0)
+    vs.append(3.0)
+    vs.append(4.0)
+    c: ColumnF64 = tabular.col_f64_simple(vs)
+    r: ColumnF64 = c.rolling_sum(2i64)
+    v1: f64? = r.get(1i64)
+    if v1 is not none:
+        println(\"v1=\" + str(v1))
+    return 0
+";
+    let out = run("rolling_sum_f64", src);
+    assert!(out.contains("v1=3"), "got: {out:?}");
+}
