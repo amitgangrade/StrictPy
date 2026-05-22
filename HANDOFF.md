@@ -1,4 +1,4 @@
-# Session handoff — 2026-05-22 (post-M42)
+# Session handoff — 2026-05-22 (post-M43)
 
 ## Read this FIRST in the next session
 
@@ -17,22 +17,58 @@ Everything you need to resume is in:
 ## Current head
 
 - Branch: `main`
-- Latest commit: `cbcab82` (M42 E: tabular index propagation — tests + demo + LANGUAGE_GUIDE + agent report)
+- Latest commit: `fdd2e35` (M43 D: tabular reshape index propagation — tests + demo + LANGUAGE_GUIDE update + agent report)
 - Tag: `v0.2.0` (commit `121483f`, pushed)
-- Tests passing on main: **868** (+21 net over M41 — 19 vm + 2 demo new; 1 M41 test flipped to assert new behavior)
+- Tests passing on main: **888** (+20 net over M42 — 18 new vm + 2 new demo; 9 M38/M39/M41 tests flipped — see "test flip cascade" below)
 
 ## Status snapshot
 
 | Metric | Value |
 |---|---:|
-| Milestones complete on main | M0–M42 |
+| Milestones complete on main | M0–M43 |
 | **v0.2.0 release** | **Tagged at M30 (commit 121483f)** |
-| Tests | 868 / 0 fail / 1 ignored |
+| Tests | 888 / 0 fail / 1 ignored |
 | Bugs | 35 / 35 / **0 deferred** |
 | Stdlib modules | 38 |
-| Stdlib classes | 18 (unchanged — M42 modifies existing handlers, no new methods or NativeFns) |
-| Example programs | **106** (+1 in M42: `tabular_index_propagation_demo.spy`) |
-| Lesson 1 streak | **24 consecutive clean-commit agents** (M28 → M42 — M42 returned to per-phase commit cadence cleanly after the M41 cross-cutting-infrastructure nuance) |
+| Stdlib classes | 18 (unchanged — M43 modifies existing handlers, no new methods or NativeFns) |
+| Example programs | **107** (+1 in M43: `tabular_index_reshape_demo.spy`) |
+| Lesson 1 streak | **25 consecutive clean-commit agents** (M28 → M43) |
+
+## M43 — completed (single agent, 4 per-phase commits, no STOP CRITERIA cuts)
+
+| Agent | Scope | Var prefix | NativeFn IDs | Commits |
+|---|---|---|---|---|
+| **M43 reshape index propagation** | Extend reshape + group_by + pivot_table to index-promote | `m43_` | none new | `f4b4249` (A), `61fd3d5` (B), `13e64fe` (C), `fdd2e35` (D) |
+
+### What shipped
+
+Closes the v1 single-index propagation story. After M43 the `tabular` package is **fully index-aware end-to-end for single-column indexes** (multi-column / MultiIndex still M44+).
+
+- **Phase A**: `pivot_table` promotes `index_col` to the result's index; **single-column** `group_by([col])` with `sum/mean/min/max/count/agg/size/keys` promotes the key column to the index. **Multi-column** `group_by` retains today's keys-as-regular-columns shape (deferred to M44 MultiIndex).
+- **Phase B**: `pivot` promotes `index` to the output's index. `concat_rows` concatenates input indexes when all share dtype + name (else RangeIndex fallback). `concat_cols` takes lhs's index (consistent with M42's merge policy).
+- **Phase C**: `melt` repeats the input index per `value_var` (preserves name + dtype). Matches pandas's default behavior for indexed melt.
+- **Phase D**: 18 VM tests + 2 demo-runs + `examples/tabular_index_reshape_demo.spy` (~190 LOC) + LANGUAGE_GUIDE.md §5 + §11.26 + §11.28 + new §11.30 (melt index repetition) + §11.31 (concat_rows index reconciliation rules).
+
+### Two methodology data points worth elevating
+
+**1. Test flip cascade was larger than estimated (9 vs brief's 2-4).**
+
+The brief estimated 2-4 M41/M42 tests to flip. Actual: **9 tests across M38/M39/M41 + 3 demo updates**:
+
+| Source | Count | Reason |
+|---|---:|---|
+| M41 | 1 | `pivot_table_sum_happy_path` (ncols 3→2 + index checks) |
+| M39 | 2 | `pivot_happy_path` + `pivot_missing_cell_is_null` (pivot promotes index) |
+| M38 | 6 | `group_by_*` tests had keys-as-columns assertions; **single-column group_by promotion cascaded into all 6 group_by test cases** |
+| Demos | 3 | `tabular_groupby_demo.spy`, `tabular_index_demo.spy`, `tabular_reshape_demo.spy` updated to use `sort_index` and adjust column counts |
+
+**Generalizable lesson**: when a contract change is cross-cutting (every group_by now promotes its key), the test-flip count scales with how widely the old contract was tested. M38 had 6 group_by tests because group_by was M38's headline feature. **Next brief that changes a feature with broad existing test coverage should explicitly estimate the flip count from existing test files.**
+
+**2. Edit-tool worktree leak is broader than the M40 narrowing claimed.**
+
+M40 said: "Edit on already-existing files leaks; Write with absolute worktree paths doesn't." M43 found: **`Write` of new files ALSO leaked** at first-edit-per-file boundaries. Agent burned ~90 seconds across ~15 `cp` recoveries (vs ~5 seconds in M42, ~30 in M41, ~2 minutes in M40).
+
+**M43 agent's recommendation, now adopted**: future briefs should suggest a **precautionary `cp` of all shared files at session start** rather than waiting for `git status` to surface the leak per phase. The defensive copy is cheap; the per-phase discovery loops are not.
 
 ## M42 — completed (single agent, 5 per-phase commits, no STOP CRITERIA cuts)
 
@@ -267,41 +303,49 @@ Per the THESIS §8.4 next-pass priority list + M34/M35 deferred items:
 
 ### Highest leverage (in order)
 
-1. **THESIS + BLOG_POST refresh to M42** (small writing task, ~30 min).
-   Both are at post-M39 currently. Concrete deltas for M40-M42:
-   - Tests: 794 → 868 (+28 M40, +25 M41, +21 M42)
-   - Stdlib classes: unchanged at 18 (M40-M42 ship methods + an
+1. **THESIS + BLOG_POST refresh to M43** (small writing task, ~30-45 min).
+   Both are at post-M39 currently. Concrete deltas for M40-M43:
+   - Tests: 794 → 888 (+28 M40, +25 M41, +21 M42, +20 M43)
+   - Stdlib classes: unchanged at 18 (M40-M43 ship methods + an
      optional DataFrame field; no new classes)
-   - Examples: 103 → 106
-   - Lesson 1 streak: 21 → 24 (with one explicit per-phase-cadence
-     nuance in M41 due to cross-cutting infrastructure; M42 returned
-     to clean per-phase commits)
+   - Examples: 103 → 107
+   - Lesson 1 streak: 21 → 25 (with one explicit per-phase-cadence
+     nuance in M41 due to cross-cutting infrastructure; M42 + M43
+     returned to clean per-phase commits)
    - `tabular` coverage: common-80% (post-M39) → ~95% (post-M40
      adds cumulative/null/iloc/rolling/resample/asof) → DatetimeIndex
-     opt-in (post-M41) → DatetimeIndex propagates through 11
-     existing methods (post-M42, closing the M41 v1 scope-down).
+     opt-in (post-M41) → DatetimeIndex propagates through 11 row/col
+     methods (post-M42) → **fully index-aware for single-column
+     indexes** (post-M43, closing the v1 single-index story).
+   - **Methodology notes worth flagging in BLOG**: (a) the M41/M42
+     per-phase-cadence nuance (shared-infra vs disjoint-handler);
+     (b) the M43 9-test-flip cascade (contract changes propagate
+     widely); (c) the Edit-tool leak now confirmed broader than
+     M40 narrowing claimed (M43 saw Write leak too).
 
-2. **M43 — Index propagation through reshape + group_by + pivot_table**
-   (the remaining "still drops index" methods, per the M42 agent's
-   "what M43 should pick up" list):
-   - **Index propagation through `pivot_table`** — `index_col`
-     becomes the result's index (currently the output is a regular
-     column with RangeIndex)
-   - **Index propagation through `group_by` + agg** — group-key
-     columns become the result's index (single-column key first;
-     multi-column key requires MultiIndex which is later)
-   - **Index propagation through `pivot` / `melt` / `concat_rows` /
-     `concat_cols`** — needs case-by-case design
-   - **MultiIndex support** — currently the index is a single
-     column; real Pandas-style nested indices for stack/unstack/
-     groupby.agg
-   - **`df.loc[label_list]` / range-by-label** — currently
+2. **M44 — MultiIndex** (the headline remaining `tabular` work):
+   - **Multi-column group_by promotion**: lift the M43 v1 restriction
+     (`df.group_by([col1, col2])` currently keeps keys as columns)
+     by introducing MultiIndex
+   - **MultiIndex as a Column subclass** OR as a new `ColumnTuple`
+     dtype: design call. Likely a new dtype to keep the Column
+     hierarchy sealed clean.
+   - **Outer-merge MultiIndex fallback**: replace M42's current
+     RangeIndex fallback for dtype-mismatched indexes
+   - **`df.loc[label_list]` / range-by-label**: currently
      `select_by_label_*` returns one row; range support would
      mirror pandas's `df.loc["a":"c"]`
-   - **Outer-merge MultiIndex fallback** — replace M42's current
-     RangeIndex fallback for dtype-mismatched indexes
+   - **`set_index` from multi-column tuple**:
+     `df.set_index([col1, col2])` for MultiIndex
+   - **`stack` / `unstack`**: rotate between MultiIndex and
+     wide-frame representations (pandas's MultiIndex bread-and-butter)
+   - Estimated: this is a substantial architectural milestone,
+     likely 2500-3000 LOC. Probably worth splitting into M44a
+     (MultiIndex storage + set_index multi-col + group_by
+     promotion) and M44b (stack/unstack + outer-merge fallback +
+     loc range).
 
-3. **M44+ — Rolling-window optimizations + categorical**:
+3. **M45+ — Rolling-window optimizations + categorical**:
    - Welford incremental sum-of-squares for rolling_std stability
    - `min_periods` argument
    - `center=True` window alignment
@@ -317,17 +361,22 @@ Per the THESIS §8.4 next-pass priority list + M34/M35 deferred items:
    files. M37+M38+M39 all confirmed the canonical path works.
 
 4. **Edit-tool worktree leak — investigate or work around at harness level.**
-   Confirmed-recurring across M37 + M38 + M39 + M40 (4 consecutive
-   milestones). **Key M40 finding**: the leak is specific to `Edit`
-   calls on already-existing files; `Write` calls (which take absolute
-   worktree paths) land correctly. The agent recovered M40 leaks in
-   ~2 minutes total via `cp` from project root to worktree. Current
+   Confirmed-recurring across M37 + M38 + M39 + M40 + M41 + M42 + M43
+   (7 consecutive milestones). **M40 narrowing partially revised in
+   M43**: M40-M42 thought the leak was specific to `Edit` on existing
+   files, with `Write` (absolute paths) unaffected. M43 found Write
+   also leaks at first-edit-per-file boundaries — broader than the
+   M40 hypothesis. Total recovery time per milestone: M40 ~2 min, M41
+   ~30s, M42 ~5s, **M43 ~90s across ~15 cp recoveries**. Current
    orchestrator-side workaround (checkout-and-merge-ff against worktree
-   HEAD) is reliable. Worth a focused investigation — does Edit's
-   path resolution skip the worktree's CWD? Single no-coding session
-   probably. As an interim: brief language now tells agents to use
-   `Write` for new files (already the case) and to check `git status`
-   after bulk Edits to existing shared files.
+   HEAD) is reliable. **Updated interim brief language**: agents should
+   do a **precautionary `cp` of all shared files at session start**
+   rather than waiting for `git status` per phase. Defensive copy is
+   cheap; per-phase discovery loops are not. Investigation: cause is
+   not what the M40 narrowing suggested — needs another look. Could
+   be a CWD/HOME env-var resolution issue in the harness's git-worktree
+   wrapper; could be a path-canonicalization race. Single no-coding
+   session probably enough to diagnose.
 
 5. **Real Cranelift safepoints** (replaces M33 shadow stack):
    `cranelift-jit 0.115` doesn't stably expose PC ranges; check if
@@ -400,25 +449,25 @@ After v0.4 language/stdlib work, update:
 Document these in any new agent brief:
 
 1. **"FIRST commit before 60% of your time budget"** with explicit
-   20%/40%/60%/80% checkpoint discipline. **24 consecutive clean
-   agents** (M28 → M42) — the streak is the strongest empirical
-   data point in the project. M37 + M38 + M39 + M40 each ran 4-5
-   phase commits across ~2100-2800 LOC milestones. **M41 slipped on
-   per-phase cadence** (first commit at ~75% of budget, combined
-   A+B+C) because the three phases shared cross-cutting infrastructure
-   (40-byte payload + `m41_build_df_with_index`). **M42 returned to
-   clean per-phase commits** (first commit at ~20%; 5 separable
-   phase commits) because its phases modified disjoint handlers —
-   no shared revert-and-reapply risk. The streak holds. **Generalizable
-   lesson, now confirmed by the M41/M42 contrast**: when phases share
-   cross-cutting infrastructure (struct layout changes, shared helpers
-   that everything later uses), accept "first commit after the
-   infrastructure lands, even if late" as the right shape — splitting
-   becomes a revert-and-reapply antipattern. When phases modify
-   disjoint handlers (M42's pattern), clean per-phase commits are
-   straightforward. Don't soften the 60%/20% language; explicitly
-   note in briefs whether the planned phases are "shared-infra" or
-   "disjoint-handler" so the agent knows what cadence to aim for.
+   20%/40%/60%/80% checkpoint discipline. **25 consecutive clean
+   agents** (M28 → M43) — the streak is the strongest empirical
+   data point in the project. M37-M40 each ran 4-5 phase commits
+   across ~2100-2800 LOC milestones. M41 slipped on per-phase cadence
+   (cross-cutting infrastructure exception). M42 + M43 returned to
+   clean per-phase commits (disjoint handlers). **Lesson confirmed
+   across the M41/M42/M43 trio**: brief language should call out
+   "shared-infra" vs "disjoint-handler" phases so the agent aims at
+   the right cadence.
+
+2. **Test-flip cascade lesson (M43)**: when a contract change is
+   cross-cutting (every single-column group_by now promotes its
+   key), the test-flip count scales with how widely the old contract
+   was tested. M43 flipped **9 tests** vs the brief's 2-4 estimate —
+   M38's 6 group_by tests cascaded because group_by was M38's
+   headline feature. **Next brief that changes a feature with broad
+   existing test coverage should explicitly grep existing tests
+   for old-contract assertions and estimate the flip count from
+   that, not from intuition.**
 
 2. **Distinctive variable prefixes per agent** in shared files
    (resolver.rs, builtins.rs, interp.rs) — `p3b_a_` / `p3b_b_` /

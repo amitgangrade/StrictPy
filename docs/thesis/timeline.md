@@ -1117,6 +1117,148 @@ No language/compiler changes; new pure-bench infrastructure only.
 
 ---
 
+## M43 — `tabular` reshape index propagation (closes v1 single-index story) (2026-05-22)
+
+Closes the v1 single-index propagation. M42 propagated the index
+through 11 row/column-transforming methods; M43 finishes by making
+the remaining "still drops index" methods (pivot_table, group_by +
+agg, pivot, melt, concat_rows, concat_cols) index-aware. Single
+agent, 4 separable per-phase commits, ~1715 LOC mostly modifying
+existing handlers, **zero STOP CRITERIA cuts**. After M43 the
+`tabular` package is **fully index-aware end-to-end for
+single-column indexes**; MultiIndex remains M44+ work.
+
+### Surface
+
+- **Phase A**:
+  - `pivot_table(index_col, columns_col, values_col, aggfunc)` —
+    `index_col` becomes the result's index instead of a column.
+  - **Single-column** `group_by([col])` with all aggregations
+    (`sum / mean / min / max / count / agg / size / keys`) — the
+    single group-key column becomes the result's index.
+  - **Multi-column** `group_by([col1, col2])` retains today's
+    keys-as-columns shape (deferred to M44 MultiIndex). Documented
+    as the v1 contract.
+
+- **Phase B**:
+  - `pivot(index, columns, values)` — `index` value becomes the
+    result's index (parallels `pivot_table` in Phase A).
+  - `concat_rows(dfs)` — concatenates input indexes when all share
+    dtype + name. Falls back to RangeIndex if any df lacks an
+    index, or dtypes mismatch, or names mismatch.
+  - `concat_cols(dfs)` — lhs's index wins (consistent with M42's
+    merge policy).
+
+- **Phase C**: `melt(id_vars, value_vars)` — if the input has an
+  index, the output's index is the input's index **repeated
+  `len(value_vars)` times** (one label per produced row, matching
+  pandas's default). Preserves index name + dtype.
+
+- **Phase D**: 18 VM tests + 2 demo-runs +
+  `examples/tabular_index_reshape_demo.spy` (~190 LOC) +
+  LANGUAGE_GUIDE.md §5 + §11.26 (now "fully index-aware for
+  single-column indexes") + §11.28 + new §11.30 (melt index
+  repetition) + §11.31 (concat_rows index reconciliation rules).
+
+### Two methodology data points worth recording
+
+**1. The test-flip cascade was 9 vs the brief's 2-4 estimate.**
+
+The brief expected 2-4 M41/M42 tests to flip. Actual: 9 tests
+across M38, M39, M41, plus 3 demo updates.
+
+| Source | Flips | Reason |
+|---|---:|---|
+| M41 | 1 | `pivot_table_sum_happy_path` (ncols 3→2 + index checks) |
+| M39 | 2 | `pivot_happy_path` + `pivot_missing_cell_is_null` |
+| **M38** | **6** | All 6 group_by test cases asserted keys-as-columns; single-column group_by promotion cascaded into every one |
+| Demos | 3 | `tabular_groupby_demo.spy` / `tabular_index_demo.spy` / `tabular_reshape_demo.spy` updated for new index column counts + sort_index calls |
+
+**Generalizable lesson**: when a contract change is cross-cutting
+(every group_by now promotes its key), the test-flip count scales
+with how widely the old contract was tested in the milestone that
+shipped it. M38's 6 group_by tests cascaded because group_by was
+M38's headline feature. **Next brief that changes a broadly-tested
+feature should grep existing tests for old-contract assertions
+and estimate the flip count from that, not from intuition.**
+
+**2. The Edit-tool worktree leak is broader than the M40 narrowing
+claimed.**
+
+M40-M42 thought the leak was Edit-on-existing-files only (Write
+with absolute paths unaffected). M43 found **Write of new files
+ALSO leaked** at first-edit-per-file boundaries. Recovery time:
+M40 ~2 min, M41 ~30s, M42 ~5s, **M43 ~90s across ~15 cp recoveries**.
+M43 agent recommended (and HANDOFF.md now adopts): **precautionary
+`cp` of all shared files at session start** rather than per-phase
+`git status` discovery loops. Defensive copy is cheap; per-phase
+discovery is not. Cause unknown — not Edit-specific as the M40
+hypothesis suggested; needs a focused harness investigation.
+
+### Three findings worth noting
+
+1. **Single-column detection** in group_by promotion is a single
+   read of `group_keys.length()` at the top of each handler. If
+   1, promote to index; if N, today's behavior. Tiny additional
+   surface area (~3 lines per of 8 group_by handlers).
+2. **`concat_rows` index reconciliation** required two distinct
+   checks (dtype-match AND name-match). The agent went with strict
+   reconciliation — if either differs, fall back to RangeIndex.
+   No "best-effort" concatenation in v1; pandas's behavior is to
+   raise on incompatible indexes, which is also a valid choice but
+   would have broken more existing tests.
+3. **`melt` index repetition** preserves dtype + name through the
+   N × len(value_vars) row expansion. A vec-of-i64 input index
+   becomes a longer vec-of-i64 output index with each input
+   element repeated.
+
+### Tests + size
+
+- Tests: 868 → 888 (+20 net: 18 new VM in
+  `vm/tests/m43_tabular_index_reshape.rs`, 2 new demo-runs in
+  `compiler/tests/tabular_index_reshape_demo_runs.rs`, 9 M38/M39/M41
+  flipped — old assertions deleted, new added).
+- Examples: 106 → 107
+  (`examples/tabular_index_reshape_demo.spy` ~190 LOC).
+- Stdlib classes: unchanged at 18. NativeFn IDs: unchanged.
+- LOC: `vm/src/builtins.rs` +295 (handler edits + 1 new helper
+  `m43_concat_rows_index`), `vm/tests/m43_tabular_index_reshape.rs`
+  +925 (new), `examples/tabular_index_reshape_demo.spy` +188 (new),
+  `compiler/tests/tabular_index_reshape_demo_runs.rs` +96 (new),
+  `LANGUAGE_GUIDE.md` +59, plus demo + test updates. Total ~1715
+  LOC.
+
+### Lesson 1 streak: 25 consecutive clean agents
+
+(M28 → M43). **Seven consecutive `tabular` package agents shipped
+clean** — M37 / M38 / M39 / M40 / M41 / M42 / M43, with the M41
+shared-infra nuance and the M42 / M43 disjoint-handler return.
+
+### After M43: the `tabular` v1 single-index surface is closed
+
+What's done:
+- 11 row/column-transforming methods propagate the index (M42).
+- 4 explicitly-index-aware methods shape the index (M41:
+  sort_index / resample_index / asof_merge_index /
+  select_by_label_*).
+- 6 reshape + group methods propagate or promote the index (M43:
+  pivot_table / single-col group_by / pivot / melt / concat_rows /
+  concat_cols).
+
+What's deferred to M44+:
+- **MultiIndex** — currently the index is a single column. Real
+  pandas's nested indices for stack/unstack/groupby.agg-multikey.
+  Headline missing piece; substantial architectural lift.
+- **Multi-column group_by promotion** — waits for MultiIndex.
+- **Outer-merge MultiIndex fallback** — replaces M42's current
+  RangeIndex fallback for dtype-mismatched indexes.
+- **`df.loc[label_list]` / range-by-label** — currently
+  `select_by_label_*` is one-row only.
+- **`set_index([col1, col2])`** — waits for MultiIndex.
+- **`stack` / `unstack`** — pandas's MultiIndex bread-and-butter.
+
+---
+
 ## M42 — `tabular` index propagation through existing methods (2026-05-22)
 
 Closes the M41 explicit v1 scope-down. The 11 existing DataFrame
