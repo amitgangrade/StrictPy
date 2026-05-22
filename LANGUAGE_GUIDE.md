@@ -1,6 +1,6 @@
 # StrictPy — language guide for AI coding tools
 
-**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M40 (2026-05-22).
+**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M41 (2026-05-22).
 
 **Audience**: any AI coding tool (Claude, GPT, Gemini, etc.) being asked to write a StrictPy program. This file is the single source of truth for writing idiomatic StrictPy — you should NOT need to read the compiler source (`compiler/src/`) or VM source (`vm/src/`) to write correct code.
 
@@ -996,7 +996,7 @@ cur.row_count() -> i64                            # rows the underlying query pr
 
 All cells are stringified (v0.4 will add typed cell access).
 
-### tabular (M37, extended by M38, M39, M40)
+### tabular (M37, extended by M38, M39, M40, M41)
 
 First Pandas-shaped data package — native Rust impl (real pandas can't import). Sealed `Column` hierarchy + `DataFrame` with named columns + per-column null mask. First stdlib package to register its classes module-scoped from the start (no prelude bloat — see §6.2). M38 rounds out the M37 STOP-CRITERIA debt and adds per-column aggregations, `df.describe`, `Column.fill_null`, `tabular.from_dict`, and hash-based group-by via a new `GroupedDataFrame` class. M39 adds the Phase 4 reshape surface: per-dtype `unique`, `value_counts`, `concat_rows`/`concat_cols`, `df.merge` (hash-join), `df.pivot`, and `df.melt`. M40 closes the time-series / null-handling / cumulative / range-slicing surface: per-column cumulative ops, whole-frame `dropna` / `fillna_*`, `df.iloc` range slicing, rolling-window aggregations, `df.resample` time-bucketing, and `df.asof_merge`.
 
@@ -1272,6 +1272,72 @@ df.asof_merge(other: DataFrame, on_self: str, on_other: str) -> DataFrame
 ```
 
 See `examples/tabular_timeseries_demo.spy` for an end-to-end M40 walkthrough (cleaned → cumsum → cummax → rolling_mean → resample → asof_merge → iloc → dropna).
+
+#### M41 additions — DatetimeIndex (minimum viable) + pivot_table
+
+Phase 5b of the Pandas-shaped data package. Closes the headline M40 omission (DatetimeIndex) plus adds pandas's most-loved DataFrame method (`pivot_table`).
+
+**Optional index slot.** `DataFrame` gains an internal optional index column + the original column name. Constructors default to a `RangeIndex` (no index — today's behavior), so existing user code keeps working byte-identically. Opt in with `set_index`.
+
+```python
+df.set_index(col_name: str) -> DataFrame    # raises ValueError if col_name absent
+                                            # or df already has an index
+df.reset_index() -> DataFrame               # restores index as col at position 0
+                                            # (no-op if no index)
+df.has_index() -> bool
+df.index() -> Column?                       # none if RangeIndex
+df.index_name() -> str?                     # none if RangeIndex
+df.sort_index(ascending: bool) -> DataFrame # stable; preserves the index
+                                            # raises ValueError if no index
+```
+
+**EXPLICIT SCOPE-DOWN — index-dropping is the v1 default.** Every existing DataFrame method that returns a fresh frame (`filter`, `sort_by`, `head`, `tail`, `iloc`, `select`, `drop`, `merge`, `pivot`, `melt`, `concat`, `dropna`, `fillna_*`, `resample`, `asof_merge`, `set_index` itself, etc.) **drops the index in v1** — the result is a `RangeIndex` frame. Only the following M41 methods preserve the index:
+
+- `sort_index(ascending)`
+- `resample_index(rule, agg)`
+- `asof_merge_index(other)`
+- `select_by_label_{i64,str,datetime}(label)` (one-row outputs)
+
+Full index propagation through every method is M42 work. The v1 split makes the new surface usable without changing the behavior of any pre-M41 op.
+
+**Index-aware time-series.** Variants of M40's `resample` / `asof_merge` that read the key from the DataFrame's index.
+
+```python
+df.resample_index(rule: str, agg: str) -> DataFrame
+# Requires a ColumnDateTime index.  rule + agg vocabulary identical to
+# M40 resample.  Output preserves its own (bucket-start) index.
+
+df.asof_merge_index(other: DataFrame) -> DataFrame
+# Both frames must have an index of matching dtype (ColumnDateTime or
+# ColumnI64).  Output preserves self's index.
+```
+
+**Lookup by index label.** Per-dtype variants (StrictPy has no runtime-dispatched generics — same shape as M38's `get_column_*`). Returns a one-row `DataFrame` or `none` if absent. Duplicate labels are legal but unusual — only the first matching row is returned in v1.
+
+```python
+df.select_by_label_i64(label: i64) -> DataFrame?       # requires ColumnI64 index
+df.select_by_label_str(label: str) -> DataFrame?       # requires ColumnStr index
+df.select_by_label_datetime(label: i64) -> DataFrame?  # epoch-ms; ColumnDateTime
+```
+
+**`pivot_table` — pandas's pivot + group-by + agg in one call.** Combines the three operations in a single method.
+
+```python
+df.pivot_table(index_col: str, columns_col: str,
+               values_col: str, aggfunc: str) -> DataFrame
+# aggfunc ∈ {"sum", "mean", "min", "max", "count"} — same vocabulary as
+# M38's group-by shortcuts.  Output rows are the unique index_col
+# values (first-seen order); output cols are one per unique columns_col
+# value (stringified, first-seen order); cells are the aggregated
+# values, null where no (index, columns) pair existed in the source.
+# Output uses RangeIndex (no propagation in v1).
+#
+# Output dtype: matches values_col, EXCEPT
+#   - "mean" → ColumnF64 (matches M38 mean)
+#   - "count" → ColumnI64 (matches M38 count)
+```
+
+See `examples/tabular_index_demo.spy` for an end-to-end M41 walkthrough (set_index → resample_index → sort_index → pivot_table → asof_merge_index → select_by_label_str → reset_index).
 
 ### shutil (M27 P3c-A)
 
@@ -2187,6 +2253,18 @@ For the M40 `df.resample(time_col, rule, agg)`: M40 does NOT add a DatetimeIndex
 ### 11.25 `tabular.asof_merge` requires same-dtype keys
 
 For the M40 `df.asof_merge(other, on_self, on_other)`: both key columns must share dtype — either both `ColumnDateTime` (matching the typical time-series-merge case) or both `ColumnI64`. Mixed-dtype keys raise `ValueError`. The match rule is `other[on_other] <= self[on_self]` for the largest such row; self rows with no matching other row get null in the right-side columns. Null cells in either key column are treated as non-matchable.
+
+### 11.26 `tabular` DatetimeIndex v1 scope-down — existing methods drop the index
+
+The M41 `set_index` / `reset_index` / `has_index` surface adds an optional index slot to `DataFrame`. In v1 (M41) only four methods preserve the index: `sort_index`, `resample_index`, `asof_merge_index`, and the `select_by_label_*` family. **Every other method that returns a fresh frame** — `filter`, `sort_by`, `head`, `tail`, `iloc`, `select`, `drop`, `merge`, `pivot`, `melt`, `concat`, `dropna`, `fillna_*`, `resample`, `asof_merge`, `pivot_table`, etc. — **drops the index in v1**, returning a `RangeIndex` frame. This is the explicit v1 scope-down: full index propagation through every path is M42 work, deferred so M41 could ship the index surface in a single milestone. The propagation list will be driven by the methods users actually exercise with indexed frames; flagged callers should round-trip the index with `set_index` after the op.
+
+### 11.27 `tabular.select_by_label_*` returns the first matching row on duplicates
+
+The M41 `df.select_by_label_{i64, str, datetime}(label)` family returns a one-row `DataFrame` (or `none` if the label is absent from the index). If the index has duplicate labels — legal but unusual — only the **first matching row** in current row order is returned. To get every matching row, use `df.filter(df.get_column_*(name).eq(label))` instead (which drops the index in v1; see §11.26).
+
+### 11.28 `tabular.pivot_table` aggfunc vocabulary
+
+The M41 `df.pivot_table(index_col, columns_col, values_col, aggfunc)` accepts the same `aggfunc` vocabulary as M38's group-by shortcuts: `"sum" | "mean" | "min" | "max" | "count"`. Other values raise `ValueError`. Output value-cell dtype matches `values_col` except: `"mean"` always produces `ColumnF64`, `"count"` always produces `ColumnI64`. Missing `(index, columns)` cells are null. Row + column orderings are first-seen-in-source. The output uses a `RangeIndex` (the index_col becomes a regular column in the output, named after the source index_col).
 
 ---
 

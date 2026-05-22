@@ -1,0 +1,225 @@
+"""tabular_index_demo.spy — M41 walkthrough of the DatetimeIndex
+(minimum viable) + pivot_table surface.
+
+Phase 5b of the Pandas plan.  Constructs a small trades frame
+(timestamp + symbol + side + qty + price) plus a rates lookup,
+then exercises:
+
+  1. set_index("ts") to make it time-indexed
+  2. resample_index("1d", "sum") for daily totals
+  3. sort_index(false) for most-recent-first
+  4. pivot_table("symbol", "side", "qty", "sum") — buys/sells matrix
+  5. asof_merge_index against a rates DataFrame
+  6. select_by_label_str — look up a single row by label
+  7. reset_index — turn the index back into a regular column
+
+Output is deterministic so `tabular_index_demo_runs` can assert
+on every println.
+
+Surface demonstrated (post-M41):
+  - DataFrame.set_index / reset_index / has_index / index / index_name
+  - DataFrame.sort_index(ascending)
+  - DataFrame.resample_index(rule, agg)
+  - DataFrame.asof_merge_index(other)
+  - DataFrame.select_by_label_str(label) -> DataFrame?
+  - DataFrame.pivot_table(index, columns, values, aggfunc)
+
+EXPLICIT SCOPE-DOWN: most existing DataFrame methods drop the index
+in v1 — only the methods above preserve it.  M42 will round out
+propagation through filter/sort/head/etc.
+"""
+
+from tabular import Column, ColumnI64, ColumnF64, ColumnStr, ColumnDateTime, DataFrame
+import tabular
+
+
+fn build_trades() -> DataFrame:
+    """Construct a 6-row trades frame.
+
+    ts             symbol  side   qty   price
+    day*0          AAPL    buy    10    100.0
+    day*1          GOOG    sell   5     200.0
+    day*2          AAPL    sell   3     105.0
+    day*3          AAPL    buy    7     110.0
+    day*4          GOOG    buy    2     210.0
+    day*5          AAPL    buy    4     115.0
+    """
+    day: i64 = 86400000i64
+    ts_vs: List[i64] = []
+    ts_vs.append(0i64)
+    ts_vs.append(day)
+    ts_vs.append(2i64 * day)
+    ts_vs.append(3i64 * day)
+    ts_vs.append(4i64 * day)
+    ts_vs.append(5i64 * day)
+    ts_ns: List[bool] = []
+    ts_ns.append(false)
+    ts_ns.append(false)
+    ts_ns.append(false)
+    ts_ns.append(false)
+    ts_ns.append(false)
+    ts_ns.append(false)
+    ts: ColumnDateTime = tabular.col_datetime(ts_vs, ts_ns)
+
+    syms_vs: List[str] = []
+    syms_vs.append("AAPL")
+    syms_vs.append("GOOG")
+    syms_vs.append("AAPL")
+    syms_vs.append("AAPL")
+    syms_vs.append("GOOG")
+    syms_vs.append("AAPL")
+    syms: ColumnStr = tabular.col_str_simple(syms_vs)
+
+    sides_vs: List[str] = []
+    sides_vs.append("buy")
+    sides_vs.append("sell")
+    sides_vs.append("sell")
+    sides_vs.append("buy")
+    sides_vs.append("buy")
+    sides_vs.append("buy")
+    sides: ColumnStr = tabular.col_str_simple(sides_vs)
+
+    qty_vs: List[i64] = []
+    qty_vs.append(10i64)
+    qty_vs.append(5i64)
+    qty_vs.append(3i64)
+    qty_vs.append(7i64)
+    qty_vs.append(2i64)
+    qty_vs.append(4i64)
+    qty: ColumnI64 = tabular.col_i64_simple(qty_vs)
+
+    px_vs: List[f64] = []
+    px_vs.append(100.0)
+    px_vs.append(200.0)
+    px_vs.append(105.0)
+    px_vs.append(110.0)
+    px_vs.append(210.0)
+    px_vs.append(115.0)
+    price: ColumnF64 = tabular.col_f64_simple(px_vs)
+
+    cn: List[str] = []
+    cn.append("ts")
+    cn.append("symbol")
+    cn.append("side")
+    cn.append("qty")
+    cn.append("price")
+    cols: List[Column] = []
+    cols.append(ts)
+    cols.append(syms)
+    cols.append(sides)
+    cols.append(qty)
+    cols.append(price)
+    return tabular.from_columns(cn, cols)
+
+
+fn build_rates() -> DataFrame:
+    """Construct a 2-row rates lookup, keyed by event-time epoch ms."""
+    day: i64 = 86400000i64
+    ts_vs: List[i64] = []
+    ts_vs.append(0i64)
+    ts_vs.append(3i64 * day)
+    ts_ns: List[bool] = []
+    ts_ns.append(false)
+    ts_ns.append(false)
+    ts: ColumnDateTime = tabular.col_datetime(ts_vs, ts_ns)
+
+    rate_vs: List[f64] = []
+    rate_vs.append(0.05)
+    rate_vs.append(0.07)
+    rate: ColumnF64 = tabular.col_f64_simple(rate_vs)
+
+    cn: List[str] = []
+    cn.append("ts")
+    cn.append("rate")
+    cols: List[Column] = []
+    cols.append(ts)
+    cols.append(rate)
+    return tabular.from_columns(cn, cols)
+
+
+fn main() -> i32:
+    trades: DataFrame = build_trades()
+    rates: DataFrame = build_rates()
+    println("trades_nrows=" + str(trades.length()))
+
+    # 1. set_index — make the trades frame DateTime-indexed.
+    indexed: DataFrame = trades.set_index("ts")
+    println("indexed_has=" + str(indexed.has_index()))
+    nm: str? = indexed.index_name()
+    if nm is not none:
+        println("index_name=" + nm)
+    # ncols drops by 1 because ts moved out of the regular column list.
+    println("indexed_ncols=" + str(indexed.ncols()))
+
+    # 2. resample_index — daily totals for the qty column.
+    daily: DataFrame = indexed.resample_index("1d", "sum")
+    println("daily_nrows=" + str(daily.length()))
+    println("daily_has=" + str(daily.has_index()))
+    dq: ColumnI64? = daily.get_column_i64("qty")
+    if dq is not none:
+        d0: i64? = dq.get(0i64)
+        d5: i64? = dq.get(5i64)
+        if d0 is not none:
+            println("d0=" + str(d0))
+        if d5 is not none:
+            println("d5=" + str(d5))
+
+    # 3. sort_index descending — most-recent-first.
+    rev: DataFrame = daily.sort_index(false)
+    rq: ColumnI64? = rev.get_column_i64("qty")
+    if rq is not none:
+        r0: i64? = rq.get(0i64)
+        if r0 is not none:
+            println("rev0=" + str(r0))
+
+    # 4. pivot_table — symbol × side qty matrix (from the trades frame,
+    #    not the indexed one — pivot_table works on regular columns).
+    pivot: DataFrame = trades.pivot_table("symbol", "side", "qty", "sum")
+    println("pivot_nrows=" + str(pivot.length()))
+    println("pivot_ncols=" + str(pivot.ncols()))
+    bc: ColumnI64? = pivot.get_column_i64("buy")
+    if bc is not none:
+        b0: i64? = bc.get(0i64)
+        b1: i64? = bc.get(1i64)
+        if b0 is not none:
+            println("pv_buy0=" + str(b0))
+        if b1 is not none:
+            println("pv_buy1=" + str(b1))
+    sc: ColumnI64? = pivot.get_column_i64("sell")
+    if sc is not none:
+        s0: i64? = sc.get(0i64)
+        if s0 is not none:
+            println("pv_sell0=" + str(s0))
+
+    # 5. asof_merge_index — attach rates by index.
+    rates_idx: DataFrame = rates.set_index("ts")
+    merged: DataFrame = indexed.asof_merge_index(rates_idx)
+    println("merged_nrows=" + str(merged.length()))
+    println("merged_has=" + str(merged.has_index()))
+    mr: ColumnF64? = merged.get_column_f64("rate")
+    if mr is not none:
+        mr0: f64? = mr.get(0i64)
+        mr5: f64? = mr.get(5i64)
+        if mr0 is not none:
+            println("mr0=" + str(mr0))
+        if mr5 is not none:
+            println("mr5=" + str(mr5))
+
+    # 6. select_by_label_str — index a string-indexed pivot output.
+    keyed: DataFrame = pivot.set_index("symbol")
+    aapl: DataFrame? = keyed.select_by_label_str("AAPL")
+    if aapl is not none:
+        println("aapl_nrows=" + str(aapl.length()))
+        ac: ColumnI64? = aapl.get_column_i64("buy")
+        if ac is not none:
+            ab: i64? = ac.get(0i64)
+            if ab is not none:
+                println("aapl_buy=" + str(ab))
+
+    # 7. reset_index — flatten back to a regular column.
+    flat: DataFrame = indexed.reset_index()
+    println("flat_has=" + str(flat.has_index()))
+    println("flat_ncols=" + str(flat.ncols()))
+
+    println("done")
+    return 0
