@@ -1117,6 +1117,139 @@ No language/compiler changes; new pure-bench infrastructure only.
 
 ---
 
+## M40 — `tabular` Phase 5: time series + cumulative + null + iloc (2026-05-22)
+
+Phase 5 of the Pandas plan. After M37+M38+M39 shipped the
+common-80% surface (types + IO + filter + sort + aggregations +
+group-by + reshape), M40 closes the time-series and null-handling
+ops that real workflows hit constantly. Single agent, 4 phase
+commits, ~2175 LOC, **zero STOP CRITERIA cuts**. **DatetimeIndex
+deferred** — would require adding `index: Column` to DataFrame +
+index-bearing variants of every existing op (~2-3× M40 scope);
+M40's time-series ops take a column-name argument instead.
+
+A previous launch attempt died on a transient 529 (API overloaded)
+within ~3.5 minutes before any work was done. The successful
+implementation is the second attempt. Worth flagging as a
+methodology note: transient API failures are not state hazards
+because no commits or worktree state are created if the agent
+crashes before its first tool call.
+
+### Surface (extends `tabular` module)
+
+- **Phase A — cumulative + null handling + range slicing**:
+  - Per-column cumulative on numeric: `ColumnI64.cumsum() / cumprod() /
+    cummax() / cummin()`; same 4 on `ColumnF64` (8 NativeFns).
+    Null-propagation rule: once a null is hit, every output cell
+    after it is null (simpler than pandas's `min_periods=1`).
+  - Whole-frame null: `df.dropna()` + `df.dropna_subset(cols)`; per-
+    dtype `df.fillna_i64(v) / fillna_f64(v) / fillna_str(v) /
+    fillna_bool(v) / fillna_datetime(v)` (7 NativeFns).
+  - Range slicing: `df.iloc(start, stop)` — half-open, no negative
+    indices in v1.
+
+- **Phase B — rolling windows**: `ColumnI64` / `ColumnF64` ×
+  `rolling_sum / rolling_mean / rolling_min / rolling_max /
+  rolling_std` (10 NativeFns). Output length = input; cells
+  0..window-1 are null (matches pandas's `min_periods=window`);
+  any null in a window produces null output. Mean and std return
+  `ColumnF64` regardless of input dtype. Sample n-1 std.
+
+- **Phase C — time-series ops**:
+  - `df.resample(time_col, rule, agg) -> DataFrame`. Rule parser
+    accepts `<i64><m|h|d>` (e.g. `"15m"`, `"1d"`); week/month/year
+    need a calendar layer (M41). Aggregations: `sum` / `mean` /
+    `min` / `max` / `count`. Empty buckets emit non-null bucket-
+    start times but null aggregated cells. String + bool source
+    columns are silently dropped.
+  - `df.asof_merge(other, on_self, on_other) -> DataFrame`. Left-
+    join where each self row matches the largest other row with
+    `other[on_other] <= self[on_self]`. Uses `Vec::partition_point`
+    for O(log n) per-row matching after stable-sorting rhs. Both
+    keys must share dtype (`ColumnDateTime` or `ColumnI64`).
+
+- **Phase D**: 26 VM tests + 2 demo-runs + `examples/tabular_
+  timeseries_demo.spy` (~170 LOC: fillna → cumsum → cummax →
+  rolling_mean → resample → asof_merge → iloc → dropna pipeline)
+  + LANGUAGE_GUIDE.md §5 M40 subsection + §11.22-§11.25 gotchas.
+
+### Six findings worth recording
+
+1. **Cumulative null-propagation choice** — "propagate from first
+   null forward" is simpler than pandas's `min_periods=1` and
+   trivially overridable user-side via `col.fill_null(0).cumsum()`.
+   Documented as §11.22.
+2. **Resample rule parser** is `<i64><m|h|d>` only. Week / month /
+   year would need a calendar layer and don't fit a single-rule-
+   width bucket model anyway. v1 has explicit `ValueError` messages
+   for unrecognized rule formats.
+3. **`asof_merge` binary search** uses
+   `Vec::partition_point(|k| *k <= needle)` which returns the first
+   index past the run of matches — the largest matching index is
+   `pp - 1`, and `pp == 0` cleanly maps to "no match" (null right-
+   side). Stable sort over rhs ensures duplicate keys preserve
+   original row order.
+4. **`fillna_*` pass-through** — non-matching-dtype columns are
+   returned by raw pointer reuse (not copied). Safe because no
+   codepath mutates Column payloads in place.
+5. **Resample drops string + bool columns** — no defined v1
+   aggregation for them. Could add `"first"` / `"last"` / `"mode"`
+   later; v1 keeps the aggregation set numeric-only + `count`.
+6. **Edit-tool worktree leak — key new finding**: confirmed-
+   recurring across M37+M38+M39+M40 (now 4 milestones), but M40
+   **narrowed the cause**. The leak is specific to `Edit` calls on
+   already-existing files — `Write` calls (which take absolute
+   worktree paths) land correctly. Agent recovered M40 leaks in
+   ~2 minutes total via `cp` from project root to worktree. The
+   interim workaround for M41+ briefs is to check `git status`
+   after bulk Edits to shared files (resolver.rs / ir.rs /
+   builtins.rs / native.rs); `Write` for new files is unaffected.
+   This is the first time we've narrowed the leak's cause across
+   four milestones of observation.
+
+### Tests + size
+
+- Tests: 794 → 822 (+28: 26 in `vm/tests/m40_tabular_timeseries.rs`,
+  2 in `compiler/tests/tabular_timeseries_demo_runs.rs`).
+- Examples: 103 → 104 (`examples/tabular_timeseries_demo.spy`
+  ~170 LOC).
+- Stdlib classes: unchanged at 18 (M40 adds methods, not classes).
+- LOC: `vm/src/builtins.rs` +939, `shared/src/native.rs` +120,
+  `compiler/src/resolver.rs` +114, `compiler/src/ir.rs` +61, plus
+  new tests / example / report. Total ~2175 LOC.
+- NativeFn IDs: 985–1012 used (28 of the 50 reserved slots); 22
+  remain for v0.4.
+
+### Lesson 1 streak: 22 consecutive clean agents
+
+(M28 + M28.5 + M29 + M29.5 + M30×2 + M31 + M32 + M33 + M34 + M35×3 +
+M36 + M37 + M38 + M39 + M40). **Four consecutive `tabular` package
+agents shipped clean** — M37 / M38 / M39 / M40, each 4–5 phase
+commits across ~2100–2800 LOC.
+
+### After M40: the v0.3 narrows
+
+What remains of the originally-scoped v0.3 work:
+
+- **DatetimeIndex** — the architecturally substantial piece deferred
+  from M40. M41 anchor.
+- **Real Cranelift safepoint stack maps** — replaces M33 shadow
+  stack; waiting on `cranelift-jit` API stability.
+- **Real `mio` event loop** — replaces M32 thread-backed Future
+  façade; closes the M29 framework's ~2× gap to Flask+gunicorn.
+- **Edit-tool worktree leak investigation** — now narrowed to Edit-
+  on-existing-files; the harness investigation gets easier with
+  this data point.
+- **`tabular` Phase 6 desktop UI** — webview-served or Tauri/wry
+  hybrid. The compute backend is settled; the UI is the open
+  surface.
+
+The `tabular` package now spans Phases 1-5 of the original Pandas
+plan. Phase 6 (desktop UI) is the headline remaining design
+question; everything else is incremental.
+
+---
+
 ## M39 — `tabular` Phase 4: reshape ops (2026-05-22)
 
 Phase 4 of the Pandas plan. After M37+M38 shipped core types + IO +

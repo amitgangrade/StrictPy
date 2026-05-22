@@ -1,4 +1,4 @@
-# Session handoff — 2026-05-22 (post-M39)
+# Session handoff — 2026-05-22 (post-M40)
 
 ## Read this FIRST in the next session
 
@@ -17,22 +17,46 @@ Everything you need to resume is in:
 ## Current head
 
 - Branch: `main`
-- Latest commit: `0d73905` (M39 D: tabular reshape — tests + demo + LANGUAGE_GUIDE update + agent report)
+- Latest commit: `a9f9354` (M40 D: tabular time-series — tests + demo + LANGUAGE_GUIDE update + agent report)
 - Tag: `v0.2.0` (commit `121483f`, pushed)
-- Tests passing on main: **794** (+25 over M38)
+- Tests passing on main: **822** (+28 over M39)
 
 ## Status snapshot
 
 | Metric | Value |
 |---|---:|
-| Milestones complete on main | M0–M39 |
+| Milestones complete on main | M0–M40 |
 | **v0.2.0 release** | **Tagged at M30 (commit 121483f)** |
-| Tests | 794 / 0 fail / 1 ignored |
+| Tests | 822 / 0 fail / 1 ignored |
 | Bugs | 35 / 35 / **0 deferred** |
 | Stdlib modules | 38 |
-| Stdlib classes | 18 (unchanged — M39 ships reshape ops as DataFrame methods, no new classes) |
-| Example programs | **103** (+1 in M39: `tabular_reshape_demo.spy`) |
-| Lesson 1 streak | **21 consecutive clean-commit agents** (M28 → M39 — M39 agent shipped all 4 phases clean with no STOP CRITERIA cuts) |
+| Stdlib classes | 18 (unchanged — M40 ships time-series ops as DataFrame/Column methods, no new classes) |
+| Example programs | **104** (+1 in M40: `tabular_timeseries_demo.spy`) |
+| Lesson 1 streak | **22 consecutive clean-commit agents** (M28 → M40 — M40 agent shipped all 4 phases clean with no STOP CRITERIA cuts) |
+
+## M40 — completed (single agent, 4 phases, no STOP CRITERIA cuts)
+
+| Agent | Scope | Var prefix | NativeFn IDs | Commits |
+|---|---|---|---|---|
+| **M40 time-series** | `tabular` Phase 5 — cumulative + null + iloc + rolling + resample + asof_merge | `m40_` | 985-1012 (28 used) | `1b5c523` (A), `a2e1699` (B), `066a50f` (C), `a9f9354` (D) |
+
+**Note**: a previous launch attempt died on a transient 529 (API overloaded) within ~3.5 minutes. Zero state was created. The successful run is the second attempt.
+
+### What shipped
+
+- **Phase A**: cumulative ops on numeric columns (`ColumnI64`/`F64` × `cumsum`/`cumprod`/`cummax`/`cummin` = 8 NativeFns); whole-frame null handling (`df.dropna` / `df.dropna_subset(cols)` + per-dtype `df.fillna_{i64,f64,str,bool,datetime}` = 7 NativeFns); range slicing (`df.iloc(start, stop)` — half-open, no negative indices). Null-propagation rule on cumulative: once a null is hit, every output cell after it is null (simpler than pandas's `min_periods=1` skip).
+- **Phase B**: rolling-window aggregations (`ColumnI64`/`F64` × `rolling_{sum,mean,min,max,std}` = 10 NativeFns). Output length = input length; cells 0..window-1 are null; window-with-any-input-null produces null output. `rolling_mean`/`rolling_std` return `ColumnF64` regardless of input dtype. Sample n-1 std.
+- **Phase C**: `df.resample(time_col, rule, agg)` — buckets a `ColumnDateTime` by rule width (`<i64><m|h|d>` parser), aggregates per-bucket via `sum`/`mean`/`min`/`max`/`count`. Empty buckets emit non-null bucket-start times but null aggregated cells. `df.asof_merge(other, on_self, on_other)` — left-join via `Vec::partition_point` after stable-sorting rhs. Both keys must share dtype (`ColumnDateTime` or `ColumnI64`).
+- **Phase D**: 28 new tests (26 vm + 2 demo) + `examples/tabular_timeseries_demo.spy` (~170 LOC: fillna → cumsum → cummax → rolling_mean → resample → asof_merge → iloc → dropna pipeline). LANGUAGE_GUIDE.md §5 M40 subsection + §11.22-§11.25 gotchas.
+
+### Six findings worth knowing
+
+1. **Cumulative null-propagation choice**: "propagate from first null forward" is simpler than pandas's `min_periods=1`. Trivial user-side override: `col.fill_null(0).cumsum()`. Documented as §11.22.
+2. **Resample rule parser** accepts only `<i64><m|h|d>` (e.g. `"15m"`, `"1d"`). Week/month/year require a calendar layer; M41 work if needed.
+3. **`asof_merge` binary search** uses `Vec::partition_point(|k| *k <= needle)` which returns the first index past the run of `<=` matches — the largest matching index is `pp - 1`; `pp == 0` cleanly maps to "no match" (null right-side).
+4. **`fillna_*` returns non-matching-dtype columns by raw pointer reuse** (not copies). Safe because no codepath mutates Column payloads in place.
+5. **Resample drops string + bool columns** — no defined v1 aggregation. Could add `"first"` / `"last"` / `"mode"` later.
+6. **Edit-tool worktree leak — key new finding**: the leak is specific to `Edit` calls on already-existing files; `Write` calls (with absolute worktree paths) land correctly. The agent recovered both leak instances in M40 with a one-shot `cp` from project root to worktree. ~2 minutes total burned. **Workaround for the M41 agent brief**: when bulk-editing existing shared files (`resolver.rs`, `ir.rs`, `native.rs`, `builtins.rs`), check `git status` after the first edit and `cp` if needed; `Write` calls for new files don't have this problem.
 
 ## M39 — completed (single agent, 4 phases, no STOP CRITERIA cuts)
 
@@ -172,43 +196,50 @@ Per the THESIS §8.4 next-pass priority list + M34/M35 deferred items:
 
 ### Highest leverage (in order)
 
-1. **THESIS + BLOG_POST refresh to M35-M39** (small writing task, ~30-60 min).
-   Both are frozen at M34. Concrete deltas to fold in:
-   - Tests: 690 → 794 (M35 +33; M36 pure refactor; M37 +21; M38 +25; M39 +25)
-   - Stdlib classes: 7 → 18 (M35 +4; M36 promoted via `StdlibItemKind::Class`;
-     M37 added 6 module-scoped; M38 added 1 GroupedDataFrame)
-   - Stdlib modules: 37 → 38 (M37 added `tabular`; M38+M39 extended it)
-   - Demo programs: 97 → 103
-   - Lesson 1 streak: 14 → 21
-   - **New thesis chapter**: "Pandas-shaped data package as v0.3 stdlib growth"
-     — M37 ships Phase 1+2; M38 ships Phase 3 (aggregations + group-by);
-     M39 ships Phase 4 (reshape). `tabular` now covers the common-80%
-     of pandas workflows. Phase 5 (time series) is M40.
+1. **THESIS + BLOG_POST refresh to M40** (small writing task, ~30 min).
+   Both are now at post-M39. Concrete deltas to fold in for M40:
+   - Tests: 794 → 822 (+28)
+   - Stdlib classes: unchanged at 18 (M40 ships methods, no new classes)
+   - Examples: 103 → 104 (`tabular_timeseries_demo.spy`)
+   - Lesson 1 streak: 21 → 22
+   - `tabular` coverage extends from common-80% of pandas → ~95%
+     (cumulative, null handling, range slicing, rolling, resample, asof).
+     DatetimeIndex remains the headline omission.
 
-2. **M40 — tabular Phase 5: time series + cumulative ops** (the natural M39 follow-up).
-   Per the original Pandas plan + M39's agent report follow-up list:
-   - `DatetimeIndex` / index-aware operations on top of `ColumnDateTime`
-   - `df.rolling(window).mean() / sum() / std()` — rolling-window aggregates
-   - `df.resample("1H") / "1D" / etc.` — time-based resampling
-   - `df.asof_merge(other, on)` — asof joins
-   - `Column.cumsum / cumprod / cummax / cummin` — running aggregates
-   - `df.dropna() / df.dropna(subset=cols)` — drop null-bearing rows
-   - `df.fillna(value)` — whole-frame fill
-   - `df.iloc(start, stop)` — explicit range slicing
-   - Estimated ~1500-2000 LOC.
+2. **M41 — DatetimeIndex + pivot_table + rolling optimizations**
+   (the natural M40 follow-up). Per M40 agent's "what M41 should pick up":
+   - **DatetimeIndex** — the architecturally substantial piece. Adds
+     `index: Column` to `DataFrame`; index-bearing variants of every
+     existing op. M40 deliberately deferred this; `resample` and
+     `asof_merge` would become index-aware and lose explicit `time_col`.
+     Likely 2-3× M40's scope; may want to split into M41a (index
+     plumbing) + M41b (index-aware ops).
+   - `df.pivot_table(index, columns, values, aggfunc)` — pandas's
+     pivot + group-by + agg in one call.
+   - Rolling-window optimizations — incremental sliding sum (Welford
+     for std stability), `min_periods` argument, `center=True`.
+   - More resample rules — `1w` / `1M` / `1Y` (needs calendar layer).
+   - `df.iloc(rows, cols)` — 2-D indexing (currently row-range only).
+   - Negative-index support for `iloc`.
+   - Categorical columns — typed enumeration; memory-efficient
+     group-by keys.
 
 3. **M36 follow-up — flip M34/M35 tests to explicit imports + delete
    the legacy "prelude wins" branch.** Mechanical migration; ~39 test
    files. M37+M38+M39 all confirmed the canonical path works.
 
 4. **Edit-tool worktree leak — investigate or work around at harness level.**
-   Confirmed-recurring across M37 + M38 + M39 (3 consecutive milestones).
-   Each time the agent's Edit/Write tool writes to project-root copies
-   instead of the worktree. Current orchestrator-side workaround
-   (checkout-and-merge-ff against worktree HEAD) is reliable but should
-   not be permanent. Worth a focused investigation — does this happen
-   with the harness's git-worktree path resolution? Is there a setup
-   step missing? Single, no-coding session probably.
+   Confirmed-recurring across M37 + M38 + M39 + M40 (4 consecutive
+   milestones). **Key M40 finding**: the leak is specific to `Edit`
+   calls on already-existing files; `Write` calls (which take absolute
+   worktree paths) land correctly. The agent recovered M40 leaks in
+   ~2 minutes total via `cp` from project root to worktree. Current
+   orchestrator-side workaround (checkout-and-merge-ff against worktree
+   HEAD) is reliable. Worth a focused investigation — does Edit's
+   path resolution skip the worktree's CWD? Single no-coding session
+   probably. As an interim: brief language now tells agents to use
+   `Write` for new files (already the case) and to check `git status`
+   after bulk Edits to existing shared files.
 
 5. **Real Cranelift safepoints** (replaces M33 shadow stack):
    `cranelift-jit 0.115` doesn't stably expose PC ranges; check if
@@ -281,11 +312,11 @@ After v0.4 language/stdlib work, update:
 Document these in any new agent brief:
 
 1. **"FIRST commit before 60% of your time budget"** with explicit
-   20%/40%/60%/80% checkpoint discipline. **21 consecutive clean
-   agents** (M28 → M39) — the streak is the strongest empirical
-   data point in the project. M37 + M38 + M39 each ran 4-5 phase
-   commits across ~2400-2800 LOC milestones without breaking the
-   streak. Don't soften this language.
+   20%/40%/60%/80% checkpoint discipline. **22 consecutive clean
+   agents** (M28 → M40) — the streak is the strongest empirical
+   data point in the project. M37 + M38 + M39 + M40 each ran 4-5
+   phase commits across ~2100-2800 LOC milestones without breaking
+   the streak. Don't soften this language.
 
 2. **Distinctive variable prefixes per agent** in shared files
    (resolver.rs, builtins.rs, interp.rs) — `p3b_a_` / `p3b_b_` /
