@@ -1,0 +1,178 @@
+"""tabular_timeseries_demo.spy — M40 walkthrough of the `tabular` time-series surface.
+
+Constructs a small 6-row event frame (timestamp + amount + category)
+plus a category lookup, then exercises:
+
+  1. cumsum / cummax on the amount column.
+  2. rolling_mean over a 3-row window.
+  3. resample("1d", "sum") to roll daily totals.
+  4. asof_merge against a small category-to-tax-rate frame.
+  5. dropna / fillna for cleaning a sparse column.
+  6. iloc range slicing.
+
+Output is deterministic so `tabular_timeseries_demo_runs` can assert
+on every println.
+
+Surface demonstrated (post-M40):
+  - Column{I64,F64}.cumsum / cumprod / cummax / cummin
+  - Column{I64,F64}.rolling_{sum,mean,min,max,std}(window)
+  - DataFrame.dropna / dropna_subset / fillna_{i64,f64,str,bool,datetime}
+  - DataFrame.iloc(start, stop)
+  - DataFrame.resample(time_col, rule, agg)
+  - DataFrame.asof_merge(other, on_self, on_other)
+"""
+
+from tabular import Column, ColumnI64, ColumnF64, ColumnStr, ColumnDateTime, DataFrame
+import tabular
+
+
+fn build_events() -> DataFrame:
+    """Construct a 6-row event frame.
+
+    ts (epoch ms)    amount  category
+    0                10       a
+    86_400_000       20       b
+    172_800_000      30       a
+    259_200_000      null     b
+    345_600_000      50       a
+    432_000_000      60       b
+    """
+    day: i64 = 86400000i64
+    ts_vs: List[i64] = []
+    ts_vs.append(0i64)
+    ts_vs.append(day)
+    ts_vs.append(2i64 * day)
+    ts_vs.append(3i64 * day)
+    ts_vs.append(4i64 * day)
+    ts_vs.append(5i64 * day)
+    ts_ns: List[bool] = []
+    ts_ns.append(false)
+    ts_ns.append(false)
+    ts_ns.append(false)
+    ts_ns.append(false)
+    ts_ns.append(false)
+    ts_ns.append(false)
+    ts: ColumnDateTime = tabular.col_datetime(ts_vs, ts_ns)
+
+    amt_vs: List[i64] = []
+    amt_vs.append(10i64)
+    amt_vs.append(20i64)
+    amt_vs.append(30i64)
+    amt_vs.append(0i64)
+    amt_vs.append(50i64)
+    amt_vs.append(60i64)
+    amt_ns: List[bool] = []
+    amt_ns.append(false)
+    amt_ns.append(false)
+    amt_ns.append(false)
+    amt_ns.append(true)
+    amt_ns.append(false)
+    amt_ns.append(false)
+    amt: ColumnI64 = tabular.col_i64(amt_vs, amt_ns)
+
+    cat_vs: List[str] = []
+    cat_vs.append("a")
+    cat_vs.append("b")
+    cat_vs.append("a")
+    cat_vs.append("b")
+    cat_vs.append("a")
+    cat_vs.append("b")
+    cat: ColumnStr = tabular.col_str_simple(cat_vs)
+
+    cn: List[str] = []
+    cn.append("ts")
+    cn.append("amount")
+    cn.append("category")
+    cols: List[Column] = []
+    cols.append(ts)
+    cols.append(amt)
+    cols.append(cat)
+    return tabular.from_columns(cn, cols)
+
+
+fn build_tax_lookup() -> DataFrame:
+    """Construct a 2-row category → tax_rate frame keyed by event-time
+    epoch ms (asof key).  Tax-rate effective from these times forward."""
+    ts_vs: List[i64] = []
+    ts_vs.append(0i64)
+    ts_vs.append(3i64 * 86400000i64)
+    ts: ColumnDateTime = tabular.col_datetime(ts_vs, [false, false])
+
+    rate_vs: List[f64] = []
+    rate_vs.append(0.05)
+    rate_vs.append(0.07)
+    rate: ColumnF64 = tabular.col_f64_simple(rate_vs)
+
+    cn: List[str] = []
+    cn.append("ts")
+    cn.append("rate")
+    cols: List[Column] = []
+    cols.append(ts)
+    cols.append(rate)
+    return tabular.from_columns(cn, cols)
+
+
+fn main() -> i32:
+    events: DataFrame = build_events()
+    tax: DataFrame = build_tax_lookup()
+    println("events_nrows=" + str(events.length()))
+    println("tax_nrows=" + str(tax.length()))
+
+    # 1. fillna on the amount column then cumsum / cummax.
+    cleaned: DataFrame = events.fillna_i64(0i64)
+    amt: ColumnI64? = cleaned.get_column_i64("amount")
+    if amt is not none:
+        cs: ColumnI64 = amt.cumsum()
+        cx: ColumnI64 = amt.cummax()
+        cs5: i64? = cs.get(5i64)
+        cx5: i64? = cx.get(5i64)
+        if cs5 is not none:
+            println("cumsum5=" + str(cs5))
+        if cx5 is not none:
+            println("cummax5=" + str(cx5))
+
+    # 2. rolling_mean window=3 on the cleaned amount.
+    if amt is not none:
+        rm: ColumnF64 = amt.rolling_mean(3i64)
+        rm2: f64? = rm.get(2i64)
+        rm5: f64? = rm.get(5i64)
+        if rm2 is not none:
+            println("rmean2=" + str(rm2))
+        if rm5 is not none:
+            println("rmean5=" + str(rm5))
+
+    # 3. Resample daily sum — 6 days × 1 sum each.
+    daily: DataFrame = cleaned.resample("ts", "1d", "sum")
+    println("daily_nrows=" + str(daily.length()))
+    da: ColumnI64? = daily.get_column_i64("amount")
+    if da is not none:
+        d0: i64? = da.get(0i64)
+        d3: i64? = da.get(3i64)
+        if d0 is not none:
+            println("d0=" + str(d0))
+        if d3 is not none:
+            println("d3=" + str(d3))
+
+    # 4. asof_merge events with the tax lookup.
+    merged: DataFrame = cleaned.asof_merge(tax, "ts", "ts")
+    println("merged_nrows=" + str(merged.length()))
+    println("merged_ncols=" + str(merged.ncols()))
+    rr: ColumnF64? = merged.get_column_f64("rate")
+    if rr is not none:
+        r0: f64? = rr.get(0i64)
+        r5: f64? = rr.get(5i64)
+        if r0 is not none:
+            println("rate0=" + str(r0))
+        if r5 is not none:
+            println("rate5=" + str(r5))
+
+    # 5. iloc — first 3 events.
+    head3: DataFrame = events.iloc(0i64, 3i64)
+    println("head3_nrows=" + str(head3.length()))
+
+    # 6. dropna — drop the one null amount row.
+    cleaned2: DataFrame = events.dropna()
+    println("clean_nrows=" + str(cleaned2.length()))
+
+    println("done")
+    return 0

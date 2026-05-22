@@ -1,6 +1,6 @@
 # StrictPy — language guide for AI coding tools
 
-**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M39 (2026-05-22).
+**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M40 (2026-05-22).
 
 **Audience**: any AI coding tool (Claude, GPT, Gemini, etc.) being asked to write a StrictPy program. This file is the single source of truth for writing idiomatic StrictPy — you should NOT need to read the compiler source (`compiler/src/`) or VM source (`vm/src/`) to write correct code.
 
@@ -996,9 +996,9 @@ cur.row_count() -> i64                            # rows the underlying query pr
 
 All cells are stringified (v0.4 will add typed cell access).
 
-### tabular (M37, extended by M38, M39)
+### tabular (M37, extended by M38, M39, M40)
 
-First Pandas-shaped data package — native Rust impl (real pandas can't import). Sealed `Column` hierarchy + `DataFrame` with named columns + per-column null mask. First stdlib package to register its classes module-scoped from the start (no prelude bloat — see §6.2). M38 rounds out the M37 STOP-CRITERIA debt and adds per-column aggregations, `df.describe`, `Column.fill_null`, `tabular.from_dict`, and hash-based group-by via a new `GroupedDataFrame` class. M39 adds the Phase 4 reshape surface: per-dtype `unique`, `value_counts`, `concat_rows`/`concat_cols`, `df.merge` (hash-join), `df.pivot`, and `df.melt`.
+First Pandas-shaped data package — native Rust impl (real pandas can't import). Sealed `Column` hierarchy + `DataFrame` with named columns + per-column null mask. First stdlib package to register its classes module-scoped from the start (no prelude bloat — see §6.2). M38 rounds out the M37 STOP-CRITERIA debt and adds per-column aggregations, `df.describe`, `Column.fill_null`, `tabular.from_dict`, and hash-based group-by via a new `GroupedDataFrame` class. M39 adds the Phase 4 reshape surface: per-dtype `unique`, `value_counts`, `concat_rows`/`concat_cols`, `df.merge` (hash-join), `df.pivot`, and `df.melt`. M40 closes the time-series / null-handling / cumulative / range-slicing surface: per-column cumulative ops, whole-frame `dropna` / `fillna_*`, `df.iloc` range slicing, rolling-window aggregations, `df.resample` time-bucketing, and `df.asof_merge`.
 
 ```python
 import tabular
@@ -1209,6 +1209,69 @@ df.melt(id_vars: List[str], value_vars: List[str]) -> DataFrame
 ```
 
 See `examples/tabular_reshape_demo.spy` for an end-to-end M39 walkthrough (unique → value_counts → merge → pivot → melt → concat).
+
+#### M40 additions — time series, cumulative, null handling, range slicing
+
+Phase 5 of the Pandas-shaped data package. Closes the time-series + null-handling + range-slicing surface that real workflows hit constantly. **DatetimeIndex is deferred** — time-series ops take a column-name argument matching the existing `tabular` idiom (`df.sort_by("date", true)`, `df.group_by(["category"])`).
+
+**Cumulative reductions on numeric columns.** Running aggregates with null-propagation: once a null cell is encountered, the output is null at that position and every position after (v1 simplification — pandas's `min_periods=1` skip-nulls behavior is not implemented). NaN on f64 propagates per IEEE-754.
+
+```python
+ColumnI64.cumsum() -> ColumnI64
+ColumnI64.cumprod() -> ColumnI64
+ColumnI64.cummax() -> ColumnI64
+ColumnI64.cummin() -> ColumnI64
+
+ColumnF64.cumsum() -> ColumnF64
+ColumnF64.cumprod() -> ColumnF64
+ColumnF64.cummax() -> ColumnF64
+ColumnF64.cummin() -> ColumnF64
+```
+
+**Whole-frame null handling.** `dropna` drops every row with at least one null in any column; `dropna_subset` only considers the listed columns. The `fillna_*` per-dtype methods replace nulls in matching columns; other columns pass through unchanged (the per-dtype split mirrors M38's `get_column_*` — `fillna(any)` with a runtime-dispatched value doesn't fit StrictPy's typing).
+
+```python
+df.dropna() -> DataFrame
+df.dropna_subset(cols: List[str]) -> DataFrame
+
+df.fillna_i64(v: i64) -> DataFrame          # fills only ColumnI64 columns
+df.fillna_f64(v: f64) -> DataFrame
+df.fillna_str(v: str) -> DataFrame
+df.fillna_bool(v: bool) -> DataFrame
+df.fillna_datetime(v: i64) -> DataFrame     # epoch-ms
+```
+
+**Range slicing.** Half-open `[start, stop)`. Negative indices raise `ValueError` (v1 simplification — pandas accepts -1). `stop > nrows` clamps to `nrows`; `start > nrows` yields an empty frame.
+
+```python
+df.iloc(start: i64, stop: i64) -> DataFrame
+```
+
+**Rolling-window aggregations.** Output length = input length. Cells `0..window-1` are null (incomplete window — matches pandas's default `min_periods=window`). A window containing any input null produces null in that output position. `rolling_mean` / `rolling_std` return `ColumnF64` even on i64 input. `rolling_std` is sample std (n-1 denominator). `window < 1` or `window > nrows` raises `ValueError`.
+
+```python
+ColumnI64.rolling_sum(window: i64) -> ColumnI64
+ColumnI64.rolling_mean(window: i64) -> ColumnF64
+ColumnI64.rolling_min(window: i64) -> ColumnI64
+ColumnI64.rolling_max(window: i64) -> ColumnI64
+ColumnI64.rolling_std(window: i64) -> ColumnF64
+
+ColumnF64.rolling_{sum,mean,min,max,std}(window: i64) -> ColumnF64
+```
+
+**Time-bucket resample.** `time_col` names a `ColumnDateTime` column. `rule` is `<i64><m|h|d>` (e.g. `"5m"`, `"1h"`, `"1d"`, `"7d"`); other patterns raise `ValueError`. `agg` ∈ `{"sum", "mean", "min", "max", "count"}` applied to every non-time numeric column. String and bool columns are dropped from the output. Empty buckets emit a non-null bucket-start time but null cells for the aggregated columns.
+
+```python
+df.resample(time_col: str, rule: str, agg: str) -> DataFrame
+```
+
+**As-of merge.** Left-joins where each self row matches the largest other row with `other[on_other] <= self[on_self]`. Both keys must share dtype (`ColumnDateTime` or `ColumnI64`) — otherwise `ValueError`. Output is all self columns + all other columns except `on_other` (no duplicate keys). Self rows with no matching other row get null in the right-side slots.
+
+```python
+df.asof_merge(other: DataFrame, on_self: str, on_other: str) -> DataFrame
+```
+
+See `examples/tabular_timeseries_demo.spy` for an end-to-end M40 walkthrough (cleaned → cumsum → cummax → rolling_mean → resample → asof_merge → iloc → dropna).
 
 ### shutil (M27 P3c-A)
 
@@ -2108,6 +2171,22 @@ For the M39 `df.merge(other, on, how)`: a row whose `on` cells contain any null 
 ### 11.21 `tabular` pivot raises on duplicate (index, columns) pairs
 
 `df.pivot(index, columns, values)` requires that each `(index_value, columns_value)` pair appears at most once in the source frame — otherwise it would have to choose between conflicting `values` cells. v1 raises `ValueError` on the first duplicate. If you have duplicates and want to aggregate them, run `df.group_by([index, columns]).agg(...)` first, then pivot the result. (A future `df.pivot_table(..., aggfunc=...)` matching pandas would fold the agg in, but v1 keeps the two operations separate.)
+
+### 11.22 `tabular` cumulative ops propagate nulls forward
+
+For the M40 `Column.cum{sum,prod,max,min}` family: once a null cell is encountered, the output is null at that position AND every position after. v1 picks this "propagate from first null forward" semantics rather than pandas's default `min_periods=1` skip-nulls behavior — it's simpler to reason about, and skip-null behavior can be obtained explicitly with `col.fill_null(identity).cum*()` (use 0 for sum, 1 for prod). NaN on f64 separately propagates per IEEE-754; only the explicit null mask triggers the "all output forward is null" rule.
+
+### 11.23 `tabular` rolling-window leading cells are null
+
+For the M40 `Column.rolling_*(window)` family: the first `window - 1` output cells are always null (incomplete window — matches pandas's default `min_periods=window`). A window containing any input null produces a null in that output position. `window < 1` or `window > nrows` raises `ValueError`. `rolling_mean` and `rolling_std` return `ColumnF64` even on `ColumnI64` input.
+
+### 11.24 `tabular` resample rule format and DatetimeIndex deferral
+
+For the M40 `df.resample(time_col, rule, agg)`: M40 does NOT add a DatetimeIndex; the `time_col` argument names a `ColumnDateTime` column in the frame, matching the existing `tabular` idiom (`df.sort_by("date", true)`, `df.group_by(["category"])`). The `rule` string is `<i64><m|h|d>` only (e.g. `"5m"`, `"1h"`, `"1d"`, `"7d"`); week / month / year suffixes are NOT supported in v1 — `7d` is the closest "weekly" approximation. String + bool columns are silently dropped from the output (no v1 agg for them). Empty buckets emit a non-null bucket-start time but null cells in every aggregated column.
+
+### 11.25 `tabular.asof_merge` requires same-dtype keys
+
+For the M40 `df.asof_merge(other, on_self, on_other)`: both key columns must share dtype — either both `ColumnDateTime` (matching the typical time-series-merge case) or both `ColumnI64`. Mixed-dtype keys raise `ValueError`. The match rule is `other[on_other] <= self[on_self]` for the largest such row; self rows with no matching other row get null in the right-side columns. Null cells in either key column are treated as non-matchable.
 
 ---
 
