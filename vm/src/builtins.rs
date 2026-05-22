@@ -12912,7 +12912,8 @@ fn m37_df_filter(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError>
     let names = m37_read_list_str_lst(names_lst);
     let col_ptrs = m37_df_col_ptrs(recv);
     let new_cols: Vec<u64> = col_ptrs.iter().map(|cp| m37_column_take(interp, *cp, &keep)).collect();
-    Ok(m37_build_df(interp, &names, &new_cols, keep.len() as i64))
+    // M42: propagate parent's index through the same keep vector.
+    Ok(m42_permute_index_into_df(interp, recv, &names, &new_cols, keep.len() as i64, &keep))
 }
 
 fn m37_df_select(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
@@ -12964,7 +12965,8 @@ fn m37_df_head(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let names = m37_read_list_str_lst(names_lst);
     let col_ptrs = m37_df_col_ptrs(recv);
     let new_cols: Vec<u64> = col_ptrs.iter().map(|cp| m37_column_take(interp, *cp, &indices)).collect();
-    Ok(m37_build_df(interp, &names, &new_cols, keep_n as i64))
+    // M42: propagate parent's index sliced to [0, keep_n).
+    Ok(m42_permute_index_into_df(interp, recv, &names, &new_cols, keep_n as i64, &indices))
 }
 
 fn m37_df_tail(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
@@ -12977,7 +12979,8 @@ fn m37_df_tail(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let names = m37_read_list_str_lst(names_lst);
     let col_ptrs = m37_df_col_ptrs(recv);
     let new_cols: Vec<u64> = col_ptrs.iter().map(|cp| m37_column_take(interp, *cp, &indices)).collect();
-    Ok(m37_build_df(interp, &names, &new_cols, keep_n as i64))
+    // M42: propagate parent's index sliced to the trailing window.
+    Ok(m42_permute_index_into_df(interp, recv, &names, &new_cols, keep_n as i64, &indices))
 }
 
 fn m37_df_row(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
@@ -13069,7 +13072,8 @@ fn m37_df_sort_by(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError
     let mut perm = non_null_indices;
     perm.extend(null_indices);
     let new_cols: Vec<u64> = col_ptrs.iter().map(|cp| m37_column_take(interp, *cp, &perm)).collect();
-    Ok(m37_build_df(interp, &names, &new_cols, nrows))
+    // M42: propagate parent's index through the same sort permutation.
+    Ok(m42_permute_index_into_df(interp, recv, &names, &new_cols, nrows, &perm))
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -15646,7 +15650,8 @@ fn m40_df_iloc(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let e = (stop  as usize).min(nrows as usize);
     let take: Vec<usize> = if s < e { (s..e).collect() } else { Vec::new() };
     let new_cols: Vec<u64> = col_ptrs.iter().map(|cp| m37_column_take(interp, *cp, &take)).collect();
-    Ok(m37_build_df(interp, &names, &new_cols, take.len() as i64))
+    // M42: propagate parent's index sliced to [s, e).
+    Ok(m42_permute_index_into_df(interp, recv, &names, &new_cols, take.len() as i64, &take))
 }
 
 // ── M40 Phase B: rolling-window aggregations ──────────────────────────
@@ -16287,6 +16292,74 @@ fn m41_clone_column(interp: &mut Interpreter, src: u64) -> u64 {
         _ => m37_alloc_list_i64(interp, &m37_read_list_i64(vals)),
     };
     m37_alloc_column(interp, &cls, v_lst, n_lst, length) as u64
+}
+
+// ── M42: index propagation through existing methods ─────────────────────
+//
+// M41 added an optional index to DataFrame but every existing handler
+// that returned a fresh frame DROPPED the index.  M42 closes that
+// scope-down: each affected handler now routes its emit through
+// `m42_permute_index_into_df` (row-transforming ops) or
+// `m42_copy_index_into_df` (column-list ops that don't touch rows).
+//
+// Pattern: handler already builds `keep_indices: Vec<usize>` (the
+// row-selection vector that produces the new column data).  The new
+// helper reads the parent's index + index_name, permutes the index by
+// the same `keep_indices`, and emits via `m41_build_df_with_index`.
+// If the parent has no index, the helper emits a RangeIndex frame via
+// `m37_build_df` — preserving v1 behavior on un-indexed inputs.
+
+/// Permute the parent DataFrame's index by `keep_indices` and emit the
+/// result DataFrame via `m41_build_df_with_index`.  If the parent has
+/// no index, emits via `m37_build_df` instead (RangeIndex, same as
+/// pre-M42 behavior on un-indexed inputs).
+fn m42_permute_index_into_df(
+    interp: &mut Interpreter,
+    parent_df_ptr: u64,
+    new_names: &[String],
+    new_columns: &[u64],
+    nrows: i64,
+    keep_indices: &[usize],
+) -> u64 {
+    let (parent_index, parent_index_name) = m41_df_index_fields(parent_df_ptr);
+    if parent_index == 0 {
+        return m37_build_df(interp, new_names, new_columns, nrows);
+    }
+    let permuted_index = m37_column_take(interp, parent_index, keep_indices);
+    m41_build_df_with_index(
+        interp,
+        new_names,
+        new_columns,
+        nrows,
+        permuted_index,
+        parent_index_name,
+    )
+}
+
+/// Copy the parent DataFrame's index unchanged into a fresh output
+/// frame.  For column-list ops (select / drop / rename / fillna_*) the
+/// row order is unchanged, so the index is cloned (not permuted) and
+/// attached.  Falls back to RangeIndex when the parent has no index.
+fn m42_copy_index_into_df(
+    interp: &mut Interpreter,
+    parent_df_ptr: u64,
+    new_names: &[String],
+    new_columns: &[u64],
+    nrows: i64,
+) -> u64 {
+    let (parent_index, parent_index_name) = m41_df_index_fields(parent_df_ptr);
+    if parent_index == 0 {
+        return m37_build_df(interp, new_names, new_columns, nrows);
+    }
+    let cloned_index = m41_clone_column(interp, parent_index);
+    m41_build_df_with_index(
+        interp,
+        new_names,
+        new_columns,
+        nrows,
+        cloned_index,
+        parent_index_name,
+    )
 }
 
 /// `DataFrame.set_index(self, col_name: str) -> DataFrame`.  Removes

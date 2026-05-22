@@ -924,12 +924,14 @@ fn main() -> i32:
     assert!(out.contains("got-valueerror"), "got: {out:?}");
 }
 
-// ── Existing-ops drop-the-index sanity check ─────────────────────────
+// ── Existing-ops index-propagation sanity check (M42 update) ─────────
 
 #[test]
-fn filter_drops_index() {
-    // Sanity-check the v1 scope-down: filter returns a fresh frame with
-    // a RangeIndex.  This is the documented behavior.
+fn filter_preserves_index_m42() {
+    // M42 flipped the v1 scope-down: filter now PROPAGATES the index
+    // through its row-selection vector.  The full M42 coverage lives in
+    // vm/tests/m42_tabular_index_propagation.rs; this is the kept-but-
+    // flipped M41 sanity check.
     let src = "\
 from tabular import Column, ColumnI64, ColumnStr, ColumnBool, DataFrame
 import tabular
@@ -962,8 +964,8 @@ fn main() -> i32:
     println(\"nrows=\" + str(df3.length()))
     return 0
 ";
-    let out = run("filter_drops_index", src);
-    // Per scope-down: filter drops the index, returning RangeIndex.
-    assert!(out.contains("has=false"), "got: {out:?}");
+    let out = run("filter_preserves_index_m42", src);
+    // Post-M42: filter PROPAGATES the index, returning an indexed frame.
+    assert!(out.contains("has=true"), "got: {out:?}");
     assert!(out.contains("nrows=2"), "got: {out:?}");
 }
