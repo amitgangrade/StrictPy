@@ -1,6 +1,6 @@
 # StrictPy — language guide for AI coding tools
 
-**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M42 (2026-05-22).
+**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M43 (2026-05-22).
 
 **Audience**: any AI coding tool (Claude, GPT, Gemini, etc.) being asked to write a StrictPy program. This file is the single source of truth for writing idiomatic StrictPy — you should NOT need to read the compiler source (`compiler/src/`) or VM source (`vm/src/`) to write correct code.
 
@@ -1298,7 +1298,7 @@ df.sort_index(ascending: bool) -> DataFrame # stable; preserves the index
 - `asof_merge_index(other)`
 - `select_by_label_{i64,str,datetime}(label)` (one-row outputs)
 
-Full index propagation through every method is M42 work. **Status post-M42: closed for 11 methods (filter, sort_by, head, tail, iloc, select, drop, rename, dropna, dropna_subset, fillna_\*, merge).** See the "M42 additions" subsection below and §11.26 for the current propagation table.
+Full index propagation through every method shipped across M42 and M43. **Status post-M43: closed for the v1 single-column-index surface** — every reshape op (pivot, melt, concat_rows, concat_cols, pivot_table, single-column group_by + agg) now carries the index. Multi-column group_by remains a M44 anchor (MultiIndex). See the "M42 additions" + "M43 additions" subsections below and §11.26 for the current propagation table.
 
 **Index-aware time-series.** Variants of M40's `resample` / `asof_merge` that read the key from the DataFrame's index.
 
@@ -1356,6 +1356,19 @@ In every case, if the parent (or the chosen side, for merge) has no index, the r
 The following methods still drop the index in v1 (M42 scope): `pivot`, `melt`, `group_by` + agg, `pivot_table`, `concat_rows`, `concat_cols`, plus the M40 time-series shortcuts `resample` and `asof_merge` (the index-aware `resample_index` / `asof_merge_index` already carry the index). M43+ may revisit. Column-returning ops (`unique_*`, `value_counts`) trivially have no index — they return a `Column` or a 2-column `DataFrame`.
 
 See `examples/tabular_index_propagation_demo.spy` for an end-to-end M42 walkthrough (set_index → filter → sort_by → dropna_subset → fillna_f64 → merge → select → sort_index).
+
+#### M43 additions — index propagation through reshape + group_by + pivot_table
+
+M43 closes the index-propagation story for the remaining reshape ops. After M43, the `tabular` package is **fully index-aware end-to-end for single-column indexes** (multi-column / MultiIndex is M44+).
+
+- **`pivot_table(index_col, columns_col, values_col, aggfunc)` (Phase A):** the `index_col`'s unique values now become the output's index (`index_name = index_col`). Regular columns are just the unique `columns_col` values.
+- **`GroupedDataFrame.{sum, mean, min, max, count, agg, size, keys}` (Phase A):** when called on a single-column `group_by([col])`, the group-key column is promoted to the output's index (`index_name = col`). For `keys()`, the output is a 0-regular-column frame whose index IS the unique keys. **Multi-column `group_by([col1, col2])` retains today's behavior** — group keys stay as regular columns with a RangeIndex. MultiIndex is M44+ territory.
+- **`pivot(index, columns, values)` (Phase B):** the `index` argument's unique values become the output's index (same shape change as `pivot_table`).
+- **`concat_rows(dfs)` (Phase B):** when every input frame has an index AND all share the same dtype AND all share the same `index_name`, the output's index is the cell-wise concatenation of input indexes (parallel to the column concatenation). Otherwise the output falls back to RangeIndex.
+- **`concat_cols(dfs)` (Phase B):** **lhs's index wins** (consistent with M42's merge lhs-wins policy). If the first frame has an index, the output gets that index; otherwise RangeIndex.
+- **`melt(id_vars, value_vars)` (Phase C):** if the input has an index, the output's index is the input's index with **each label repeated `len(value_vars)` times** (matches pandas's default melt-on-indexed-frame behavior). Index name + dtype preserved. No index → RangeIndex.
+
+See `examples/tabular_index_reshape_demo.spy` for an end-to-end M43 walkthrough (pivot_table → group_by mean → concat_rows → melt with index-repeat).
 
 ### shutil (M27 P3c-A)
 
@@ -2272,22 +2285,25 @@ For the M40 `df.resample(time_col, rule, agg)`: M40 does NOT add a DatetimeIndex
 
 For the M40 `df.asof_merge(other, on_self, on_other)`: both key columns must share dtype — either both `ColumnDateTime` (matching the typical time-series-merge case) or both `ColumnI64`. Mixed-dtype keys raise `ValueError`. The match rule is `other[on_other] <= self[on_self]` for the largest such row; self rows with no matching other row get null in the right-side columns. Null cells in either key column are treated as non-matchable.
 
-### 11.26 `tabular` DatetimeIndex propagation rules (post-M42)
+### 11.26 `tabular` DatetimeIndex propagation rules (post-M43)
 
-M41 shipped the optional DatetimeIndex slot but every existing method that returned a fresh frame **dropped the index in v1**. M42 closed that scope-down. Today the index propagation rules are:
+M41 shipped the optional DatetimeIndex slot but every existing method that returned a fresh frame **dropped the index in v1**. M42 closed that scope-down for the 11 most-used DataFrame methods; M43 closed it for the remaining reshape ops. Today the `tabular` package is **fully index-aware end-to-end for single-column indexes**.
 
-**Preserve the parent's index (post-M42):**
+**Preserve the parent's index (post-M43):**
 
-- Row-selection ops: `filter`, `sort_by`, `head`, `tail`, `iloc` — index permuted by the row-selection vector.
-- Column-list ops: `select`, `drop`, `rename` — index cloned unchanged.
-- Null handling: `dropna`, `dropna_subset`, `fillna_i64`, `fillna_f64`, `fillna_str`, `fillna_bool`, `fillna_datetime`.
-- Merge: `merge(other, on, how)` — per-`how` rules below.
+- Row-selection ops (M42): `filter`, `sort_by`, `head`, `tail`, `iloc` — index permuted by the row-selection vector.
+- Column-list ops (M42): `select`, `drop`, `rename` — index cloned unchanged.
+- Null handling (M42): `dropna`, `dropna_subset`, `fillna_i64`, `fillna_f64`, `fillna_str`, `fillna_bool`, `fillna_datetime`.
+- Merge (M42): `merge(other, on, how)` — per-`how` rules below.
+- Reshape that promotes a key to the index (M43): `pivot_table(index_col, ...)`, `pivot(index, ...)` — the `index_col` / `index` argument becomes the output's index.
+- Single-column group_by aggregation (M43): `group_by([col]).{sum, mean, min, max, count, agg, size, keys}` — the key column is promoted to the result's index. **Multi-column `group_by([col1, col2])` does NOT promote** (the keys remain regular columns); MultiIndex is M44+.
+- Concatenation (M43): `concat_rows(dfs)` concatenates indexes when all share dtype + name (else RangeIndex fallback — see §11.31). `concat_cols(dfs)` takes lhs's index (consistent with merge lhs-wins).
+- Reshape that repeats the index (M43): `melt(id_vars, value_vars)` — each input row's index label appears once per `value_var` in the output (see §11.30).
 - M41 index-aware ops: `sort_index`, `resample_index`, `asof_merge_index`, `select_by_label_*`.
 
-**Still drop the index (v1 scope, may be revisited M43+):**
+**Still drop the index (v1 scope, M44+ anchors):**
 
-- Reshape: `pivot`, `melt`, `concat_rows`, `concat_cols`.
-- Aggregation that re-keys: `group_by` + agg shortcuts, `pivot_table`.
+- Multi-column group_by: `group_by([col1, col2]) + agg/sum/mean/min/max/count` — waits for MultiIndex.
 - M40 time-series shortcuts that don't read the index: `resample`, `asof_merge` (use the `_index` variants to preserve an index).
 
 Column-returning ops (`unique_*`, `value_counts`) trivially carry no index — they return a `Column` or a small 2-column `DataFrame`.
@@ -2297,10 +2313,8 @@ Column-returning ops (`unique_*`, `value_counts`) trivially carry no index — t
 - `inner`: result index = self's index restricted to matched rows. Falls back to RangeIndex if self has no index.
 - `left`: result index = self's index (all left rows preserved). Falls back to RangeIndex if self has no index.
 - `right`: result index = other's index (all right rows preserved). Falls back to RangeIndex if other has no index.
-- `outer`: result index = self's index for matched/left-only rows + other's index for right-only rows. **Requires both indexes share a dtype**; on mismatch the result falls back to RangeIndex (v1 simplification — pandas's NaN-padded MultiIndex output is M43+ territory).
+- `outer`: result index = self's index for matched/left-only rows + other's index for right-only rows. **Requires both indexes share a dtype**; on mismatch the result falls back to RangeIndex (v1 simplification — pandas's NaN-padded MultiIndex output is M44+ territory).
 - `index_name` policy: lhs wins for inner/left/outer; rhs wins for right.
-
-For methods that still drop the index, callers can round-trip it with `set_index(df.index_name())` after the op (assuming the original index column is also a regular column in the output).
 
 ### 11.27 `tabular.select_by_label_*` returns the first matching row on duplicates
 
@@ -2308,7 +2322,20 @@ The M41 `df.select_by_label_{i64, str, datetime}(label)` family returns a one-ro
 
 ### 11.28 `tabular.pivot_table` aggfunc vocabulary
 
-The M41 `df.pivot_table(index_col, columns_col, values_col, aggfunc)` accepts the same `aggfunc` vocabulary as M38's group-by shortcuts: `"sum" | "mean" | "min" | "max" | "count"`. Other values raise `ValueError`. Output value-cell dtype matches `values_col` except: `"mean"` always produces `ColumnF64`, `"count"` always produces `ColumnI64`. Missing `(index, columns)` cells are null. Row + column orderings are first-seen-in-source. The output uses a `RangeIndex` (the index_col becomes a regular column in the output, named after the source index_col).
+The M41 `df.pivot_table(index_col, columns_col, values_col, aggfunc)` accepts the same `aggfunc` vocabulary as M38's group-by shortcuts: `"sum" | "mean" | "min" | "max" | "count"`. Other values raise `ValueError`. Output value-cell dtype matches `values_col` except: `"mean"` always produces `ColumnF64`, `"count"` always produces `ColumnI64`. Missing `(index, columns)` cells are null. Row + column orderings are first-seen-in-source. **Post-M43:** the output's index is the unique `index_col` values (`index_name = index_col`); regular columns are just the `columns_col` value-stringifications. Pre-M43 the index_col was the first regular column with a RangeIndex output.
+
+### 11.30 `tabular.melt` repeats the input index per `value_var`
+
+Post-M43, if `df.melt(id_vars, value_vars)` is called on an indexed frame, the output's index is the input's index with **each label repeated `len(value_vars)` times** (one occurrence per value_var per input row). The index name and dtype are preserved. If the input has no index, the output uses RangeIndex. This matches pandas's default behavior for melt on an indexed frame.
+
+### 11.31 `tabular.concat_rows` index reconciliation rules
+
+Post-M43, `tabular.concat_rows(dfs)` reconciles per-frame indexes by these rules:
+
+- If **every** input frame has an index AND all input indexes share the same dtype AND all share the same `index_name`: the output's index is the cell-wise concatenation of input indexes (parallel to the per-column concatenation).
+- Otherwise (any frame missing an index, or any mismatch in dtype / name): the output falls back to RangeIndex.
+
+For `concat_cols(dfs)`, **lhs's index wins** — if the first frame has an index, the output gets it (cloned); otherwise RangeIndex. Other dfs' indexes are ignored. This mirrors M42's merge lhs-wins policy.
 
 ---
 

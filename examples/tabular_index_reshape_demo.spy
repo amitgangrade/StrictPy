@@ -1,0 +1,188 @@
+"""tabular_index_reshape_demo.spy — M43 end-to-end walkthrough.
+
+M41 added the optional DatetimeIndex.  M42 propagated it through 11
+row/column-transforming methods.  M43 finishes the story by making
+the remaining reshape ops index-aware:
+
+  - pivot_table: index_col → output's index
+  - single-column group_by: key column → output's index
+  - pivot: index value → output's index
+  - melt: input index repeated per value_var
+  - concat_rows: input indexes concatenated when dtype + name match
+  - concat_cols: lhs's index wins
+
+Multi-column group_by retains today's "keys as regular columns"
+shape (deferred to M44 with MultiIndex).
+
+This demo threads an index end-to-end through pivot_table,
+single-column group_by, concat_rows, and melt.  Output is
+deterministic so the demo-runs integration test can assert on it.
+"""
+
+from tabular import Column, ColumnI64, ColumnF64, ColumnStr, GroupedDataFrame, DataFrame
+import tabular
+
+
+fn build_trades() -> DataFrame:
+    """6 trades — symbol × side × qty.  trade_id 100..105."""
+    tid_vs: List[i64] = []
+    tid_vs.append(100i64)
+    tid_vs.append(101i64)
+    tid_vs.append(102i64)
+    tid_vs.append(103i64)
+    tid_vs.append(104i64)
+    tid_vs.append(105i64)
+    trade_id: ColumnI64 = tabular.col_i64_simple(tid_vs)
+
+    sym_vs: List[str] = []
+    sym_vs.append("AAPL")
+    sym_vs.append("AAPL")
+    sym_vs.append("GOOG")
+    sym_vs.append("GOOG")
+    sym_vs.append("AAPL")
+    sym_vs.append("GOOG")
+    sym: ColumnStr = tabular.col_str_simple(sym_vs)
+
+    side_vs: List[str] = []
+    side_vs.append("buy")
+    side_vs.append("sell")
+    side_vs.append("buy")
+    side_vs.append("sell")
+    side_vs.append("buy")
+    side_vs.append("buy")
+    side: ColumnStr = tabular.col_str_simple(side_vs)
+
+    qty_vs: List[i64] = []
+    qty_vs.append(10i64)
+    qty_vs.append(5i64)
+    qty_vs.append(7i64)
+    qty_vs.append(3i64)
+    qty_vs.append(8i64)
+    qty_vs.append(2i64)
+    qty: ColumnI64 = tabular.col_i64_simple(qty_vs)
+
+    px_vs: List[f64] = []
+    px_vs.append(100.0)
+    px_vs.append(102.0)
+    px_vs.append(200.0)
+    px_vs.append(199.0)
+    px_vs.append(101.0)
+    px_vs.append(198.0)
+    price: ColumnF64 = tabular.col_f64_simple(px_vs)
+
+    cn: List[str] = []
+    cn.append("trade_id")
+    cn.append("symbol")
+    cn.append("side")
+    cn.append("qty")
+    cn.append("price")
+    cols: List[Column] = []
+    cols.append(trade_id)
+    cols.append(sym)
+    cols.append(side)
+    cols.append(qty)
+    cols.append(price)
+    return tabular.from_columns(cn, cols)
+
+
+fn main() -> i32:
+    trades: DataFrame = build_trades()
+    println("trades_nrows=" + str(trades.length()))
+
+    # 1. set_index — trade_id moves out of the regular column list.
+    indexed: DataFrame = trades.set_index("trade_id")
+    println("ix_has=" + str(indexed.has_index()))
+
+    # 2. pivot_table — symbol × side qty matrix.  M43 promotes
+    # `symbol` to the output's index.
+    pt: DataFrame = trades.pivot_table("symbol", "side", "qty", "sum")
+    println("pt_nrows=" + str(pt.length()))
+    println("pt_ncols=" + str(pt.ncols()))
+    println("pt_has=" + str(pt.has_index()))
+    pt_inm: str? = pt.index_name()
+    if pt_inm is not none:
+        println("pt_iname=" + pt_inm)
+
+    # 3. single-column group_by — symbol mean of qty.  M43 promotes
+    # `symbol` to the result's index.
+    keys: List[str] = []
+    keys.append("symbol")
+    gdf: GroupedDataFrame = trades.group_by(keys)
+    m: DataFrame = gdf.mean()
+    sorted_m: DataFrame = m.sort_index(true)
+    println("m_ncols=" + str(sorted_m.ncols()))
+    println("m_has=" + str(sorted_m.has_index()))
+    qc: ColumnF64? = sorted_m.get_column_f64("qty")
+    if qc is not none:
+        q0: f64? = qc.get(0i64)
+        q1: f64? = qc.get(1i64)
+        if q0 is not none:
+            println("m_aapl=" + str(q0))
+        if q1 is not none:
+            println("m_goog=" + str(q1))
+
+    # 4. concat_rows of two daily-aggregated frames with shared index.
+    daily_a: DataFrame = build_trades().head(3i64).set_index("trade_id")
+    daily_b: DataFrame = build_trades().tail(3i64).set_index("trade_id")
+    dfs: List[DataFrame] = []
+    dfs.append(daily_a)
+    dfs.append(daily_b)
+    stacked: DataFrame = tabular.concat_rows(dfs)
+    println("st_nrows=" + str(stacked.length()))
+    println("st_has=" + str(stacked.has_index()))
+    sorted_st: DataFrame = stacked.sort_index(true)
+    flat_st: DataFrame = sorted_st.reset_index()
+    stid: ColumnI64? = flat_st.get_column_i64("trade_id")
+    if stid is not none:
+        s0: i64? = stid.get(0i64)
+        s5: i64? = stid.get(5i64)
+        if s0 is not none:
+            println("st_t0=" + str(s0))
+        if s5 is not none:
+            println("st_t5=" + str(s5))
+
+    # 5. melt a wide frame — input trade_id index repeats per value_var.
+    # value_vars must share a dtype, so we melt on the two ColumnI64
+    # buckets (qty + a derived qty2 we build below).  Actually the
+    # indexed frame already has qty as i64; we'll just melt one column
+    # to verify the repeat shape (1 value_var) — for ≥2 value_vars use
+    # a homogeneous-dtype pair.
+    qty2_vs: List[i64] = []
+    qty2_vs.append(20i64)
+    qty2_vs.append(10i64)
+    qty2_vs.append(14i64)
+    qty2_vs.append(6i64)
+    qty2_vs.append(16i64)
+    qty2_vs.append(4i64)
+    qty2: ColumnI64 = tabular.col_i64_simple(qty2_vs)
+    extra_names: List[str] = []
+    extra_names.append("qty2")
+    extra_cols: List[Column] = []
+    extra_cols.append(qty2)
+    extra_dfs: List[DataFrame] = []
+    extra_dfs.append(indexed)
+    extra_dfs.append(tabular.from_columns(extra_names, extra_cols))
+    indexed2: DataFrame = tabular.concat_cols(extra_dfs)
+    id_vars: List[str] = []
+    value_vars: List[str] = []
+    value_vars.append("qty")
+    value_vars.append("qty2")
+    melted: DataFrame = indexed2.melt(id_vars, value_vars)
+    println("ml_nrows=" + str(melted.length()))
+    println("ml_has=" + str(melted.has_index()))
+    ml_inm: str? = melted.index_name()
+    if ml_inm is not none:
+        println("ml_iname=" + ml_inm)
+    sorted_ml: DataFrame = melted.sort_index(true)
+    flat_ml: DataFrame = sorted_ml.reset_index()
+    mtid: ColumnI64? = flat_ml.get_column_i64("trade_id")
+    if mtid is not none:
+        m0: i64? = mtid.get(0i64)
+        m1: i64? = mtid.get(1i64)
+        if m0 is not none:
+            println("ml_t0=" + str(m0))
+        if m1 is not none:
+            println("ml_t1=" + str(m1))
+
+    println("done")
+    return 0
