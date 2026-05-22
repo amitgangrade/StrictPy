@@ -960,6 +960,97 @@ pub enum NativeFn {
     /// dtype.
     M39TabDfMelt               = 951,
 
+    // ── M40 Phase 5: tabular time-series + cumulative + null + iloc ────
+    // Cumulative ops on numeric columns + whole-frame null handling +
+    // range slicing + rolling-window aggregations + time-bucket
+    // resample + asof-merge joins.  All dispatched class-method-style
+    // via `m40_tabular_class_method_native_id_by_name` in ir.rs.
+    // Variable prefix `m40_` in shared files.
+
+    // ── Phase A: cumulative reductions on numeric columns ──
+    /// `ColumnI64.cumsum(self) -> ColumnI64`.  Running sum; null cells
+    /// propagate (output null at that position AND every position
+    /// after — the v1 "propagate from first null forward" rule).
+    M40TabColI64Cumsum         = 985,
+    /// `ColumnI64.cumprod(self) -> ColumnI64`.  Same null-propagation
+    /// rule as `cumsum`.
+    M40TabColI64Cumprod        = 986,
+    /// `ColumnI64.cummax(self) -> ColumnI64`.
+    M40TabColI64Cummax         = 987,
+    /// `ColumnI64.cummin(self) -> ColumnI64`.
+    M40TabColI64Cummin         = 988,
+    /// `ColumnF64.cumsum(self) -> ColumnF64`.  NaN propagates per IEEE.
+    M40TabColF64Cumsum         = 989,
+    /// `ColumnF64.cumprod(self) -> ColumnF64`.
+    M40TabColF64Cumprod        = 990,
+    /// `ColumnF64.cummax(self) -> ColumnF64`.
+    M40TabColF64Cummax         = 991,
+    /// `ColumnF64.cummin(self) -> ColumnF64`.
+    M40TabColF64Cummin         = 992,
+
+    // ── Phase A: whole-frame null handling ──
+    /// `DataFrame.dropna(self) -> DataFrame`.  Drops every row that
+    /// has at least one null in any column.
+    M40TabDfDropna             = 993,
+    /// `DataFrame.dropna_subset(self, cols: List[str]) -> DataFrame`.
+    /// Drops rows with nulls only in the listed columns.
+    M40TabDfDropnaSubset       = 994,
+    /// `DataFrame.fillna_i64(self, v: i64) -> DataFrame`.  Fills nulls
+    /// in every ColumnI64 column; other dtypes unchanged.
+    M40TabDfFillnaI64          = 995,
+    /// `DataFrame.fillna_f64(self, v: f64) -> DataFrame`.
+    M40TabDfFillnaF64          = 996,
+    /// `DataFrame.fillna_str(self, v: str) -> DataFrame`.
+    M40TabDfFillnaStr          = 997,
+    /// `DataFrame.fillna_bool(self, v: bool) -> DataFrame`.
+    M40TabDfFillnaBool         = 998,
+    /// `DataFrame.fillna_datetime(self, v: i64) -> DataFrame`.  epoch-ms.
+    M40TabDfFillnaDateTime     = 999,
+
+    // ── Phase A: range slicing ──
+    /// `DataFrame.iloc(self, start: i64, stop: i64) -> DataFrame`.
+    /// Half-open [start, stop).  Negative indices raise ValueError;
+    /// stop > nrows clamps to nrows.
+    M40TabDfIloc               = 1000,
+
+    // ── Phase B: rolling-window aggregations ──
+    /// `ColumnI64.rolling_sum(self, window: i64) -> ColumnI64`.
+    /// Output[i] = sum of input[i-window+1..=i].  Leading window-1
+    /// cells are null; windows containing any input null are null.
+    M40TabColI64RollingSum     = 1001,
+    /// `ColumnI64.rolling_mean(self, window: i64) -> ColumnF64`.
+    /// Mean is f64 even on i64 input.
+    M40TabColI64RollingMean    = 1002,
+    /// `ColumnI64.rolling_min(self, window: i64) -> ColumnI64`.
+    M40TabColI64RollingMin     = 1003,
+    /// `ColumnI64.rolling_max(self, window: i64) -> ColumnI64`.
+    M40TabColI64RollingMax     = 1004,
+    /// `ColumnI64.rolling_std(self, window: i64) -> ColumnF64`.
+    /// Sample standard deviation (n-1 denominator).
+    M40TabColI64RollingStd     = 1005,
+    /// `ColumnF64.rolling_sum(self, window: i64) -> ColumnF64`.
+    M40TabColF64RollingSum     = 1006,
+    /// `ColumnF64.rolling_mean(self, window: i64) -> ColumnF64`.
+    M40TabColF64RollingMean    = 1007,
+    /// `ColumnF64.rolling_min(self, window: i64) -> ColumnF64`.
+    M40TabColF64RollingMin     = 1008,
+    /// `ColumnF64.rolling_max(self, window: i64) -> ColumnF64`.
+    M40TabColF64RollingMax     = 1009,
+    /// `ColumnF64.rolling_std(self, window: i64) -> ColumnF64`.
+    M40TabColF64RollingStd     = 1010,
+
+    // ── Phase C: time-series ops ──
+    /// `DataFrame.resample(self, time_col: str, rule: str, agg: str) -> DataFrame`.
+    /// Bucket rows by `rule` (e.g. "1d", "5m", "1h") on a ColumnDateTime
+    /// `time_col`, then apply `agg` ("sum"|"mean"|"min"|"max"|"count")
+    /// to every non-time numeric column.
+    M40TabDfResample           = 1011,
+    /// `DataFrame.asof_merge(self, other: DataFrame, on_self: str, on_other: str) -> DataFrame`.
+    /// Left-join where each self row matches the latest other row with
+    /// `other[on_other] <= self[on_self]`.  Both keys must share dtype
+    /// (ColumnDateTime or ColumnI64).
+    M40TabDfAsofMerge          = 1012,
+
     // ── 250–289: M22 P2A (argparse + collections + csv) ─────────────────
     // Phase 2 starts here.  P2A's job is to bring three high-ROI stdlib
     // modules online on top of the M19 stdlib-module-table:
@@ -2463,6 +2554,35 @@ impl NativeFn {
             945 => Some(Self::M39TabDfMerge),
             950 => Some(Self::M39TabDfPivot),
             951 => Some(Self::M39TabDfMelt),
+            // ── M40 (tabular time-series + cumulative + null + iloc) ──
+            985 => Some(Self::M40TabColI64Cumsum),
+            986 => Some(Self::M40TabColI64Cumprod),
+            987 => Some(Self::M40TabColI64Cummax),
+            988 => Some(Self::M40TabColI64Cummin),
+            989 => Some(Self::M40TabColF64Cumsum),
+            990 => Some(Self::M40TabColF64Cumprod),
+            991 => Some(Self::M40TabColF64Cummax),
+            992 => Some(Self::M40TabColF64Cummin),
+            993 => Some(Self::M40TabDfDropna),
+            994 => Some(Self::M40TabDfDropnaSubset),
+            995 => Some(Self::M40TabDfFillnaI64),
+            996 => Some(Self::M40TabDfFillnaF64),
+            997 => Some(Self::M40TabDfFillnaStr),
+            998 => Some(Self::M40TabDfFillnaBool),
+            999 => Some(Self::M40TabDfFillnaDateTime),
+            1000 => Some(Self::M40TabDfIloc),
+            1001 => Some(Self::M40TabColI64RollingSum),
+            1002 => Some(Self::M40TabColI64RollingMean),
+            1003 => Some(Self::M40TabColI64RollingMin),
+            1004 => Some(Self::M40TabColI64RollingMax),
+            1005 => Some(Self::M40TabColI64RollingStd),
+            1006 => Some(Self::M40TabColF64RollingSum),
+            1007 => Some(Self::M40TabColF64RollingMean),
+            1008 => Some(Self::M40TabColF64RollingMin),
+            1009 => Some(Self::M40TabColF64RollingMax),
+            1010 => Some(Self::M40TabColF64RollingStd),
+            1011 => Some(Self::M40TabDfResample),
+            1012 => Some(Self::M40TabDfAsofMerge),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

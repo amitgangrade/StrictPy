@@ -7003,6 +7003,40 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         NativeFn::M39TabDfPivot          => m39_df_pivot(interp, args),
         NativeFn::M39TabDfMelt           => m39_df_melt(interp, args),
 
+        // ── M40 Phase A: cumulative reductions on numeric columns ──
+        NativeFn::M40TabColI64Cumsum     => m40_col_cum(interp, args, "i64", "sum"),
+        NativeFn::M40TabColI64Cumprod    => m40_col_cum(interp, args, "i64", "prod"),
+        NativeFn::M40TabColI64Cummax     => m40_col_cum(interp, args, "i64", "max"),
+        NativeFn::M40TabColI64Cummin     => m40_col_cum(interp, args, "i64", "min"),
+        NativeFn::M40TabColF64Cumsum     => m40_col_cum(interp, args, "f64", "sum"),
+        NativeFn::M40TabColF64Cumprod    => m40_col_cum(interp, args, "f64", "prod"),
+        NativeFn::M40TabColF64Cummax     => m40_col_cum(interp, args, "f64", "max"),
+        NativeFn::M40TabColF64Cummin     => m40_col_cum(interp, args, "f64", "min"),
+        // ── M40 Phase A: whole-frame null handling ──
+        NativeFn::M40TabDfDropna         => m40_df_dropna(interp, args, None),
+        NativeFn::M40TabDfDropnaSubset   => m40_df_dropna_subset(interp, args),
+        NativeFn::M40TabDfFillnaI64      => m40_df_fillna(interp, args, "i64"),
+        NativeFn::M40TabDfFillnaF64      => m40_df_fillna(interp, args, "f64"),
+        NativeFn::M40TabDfFillnaStr      => m40_df_fillna(interp, args, "str"),
+        NativeFn::M40TabDfFillnaBool     => m40_df_fillna(interp, args, "bool"),
+        NativeFn::M40TabDfFillnaDateTime => m40_df_fillna(interp, args, "datetime"),
+        // ── M40 Phase A: range slicing ──
+        NativeFn::M40TabDfIloc           => m40_df_iloc(interp, args),
+        // ── M40 Phase B: rolling-window aggregations ──
+        NativeFn::M40TabColI64RollingSum  => m40_col_rolling(interp, args, "i64", "sum"),
+        NativeFn::M40TabColI64RollingMean => m40_col_rolling(interp, args, "i64", "mean"),
+        NativeFn::M40TabColI64RollingMin  => m40_col_rolling(interp, args, "i64", "min"),
+        NativeFn::M40TabColI64RollingMax  => m40_col_rolling(interp, args, "i64", "max"),
+        NativeFn::M40TabColI64RollingStd  => m40_col_rolling(interp, args, "i64", "std"),
+        NativeFn::M40TabColF64RollingSum  => m40_col_rolling(interp, args, "f64", "sum"),
+        NativeFn::M40TabColF64RollingMean => m40_col_rolling(interp, args, "f64", "mean"),
+        NativeFn::M40TabColF64RollingMin  => m40_col_rolling(interp, args, "f64", "min"),
+        NativeFn::M40TabColF64RollingMax  => m40_col_rolling(interp, args, "f64", "max"),
+        NativeFn::M40TabColF64RollingStd  => m40_col_rolling(interp, args, "f64", "std"),
+        // ── M40 Phase C: time-series ops ──
+        NativeFn::M40TabDfResample        => m40_df_resample(interp, args),
+        NativeFn::M40TabDfAsofMerge       => m40_df_asof_merge(interp, args),
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
@@ -15242,6 +15276,911 @@ fn m39_df_melt(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
         m37_alloc_column(interp, &first_cls, val_v_lst, val_n_lst, val_nulls.len() as i64) as u64,
     );
     Ok(m37_build_df(interp, &out_names, &out_cols, out_nrows as i64))
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// ── M40: tabular time-series + cumulative + null handling + iloc ──────
+// Phase 5 of the Pandas-shaped data package.  All locals here use the
+// `m40_` prefix per the M40 brief.  Handlers reuse the M37 column /
+// DataFrame plumbing (`m37_col_fields`, `m37_alloc_column`,
+// `m37_build_df`, `m37_column_take`) and the M38 column-class probe
+// (`m38_col_class_name`).
+// ═══════════════════════════════════════════════════════════════════════
+
+// ── M40 Phase A: cumulative reductions on numeric columns ────────────
+
+/// `ColumnI64.cum<op>(self) -> ColumnI64` (and same for ColumnF64).
+/// `dtype` ∈ {"i64", "f64"}; `op` ∈ {"sum", "prod", "max", "min"}.
+///
+/// Null-handling rule (v1): null cells PROPAGATE.  Once a null is
+/// encountered the output is null at that position and every position
+/// after — strictly simpler than pandas's `min_periods=1` skip-nulls.
+/// Documented in LANGUAGE_GUIDE.md §11.
+///
+/// NaN on f64: propagates per IEEE (sum + NaN = NaN, etc.) — no
+/// special-case.  An f64 NaN does NOT mark the cell null; you'd
+/// have to set the null flag explicitly.
+fn m40_col_cum(
+    interp: &mut Interpreter,
+    args: &[u64],
+    dtype: &str,
+    op: &str,
+) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let (vals, nulls, length) = m37_col_fields(recv);
+    let n = length as usize;
+    let ns = m37_read_list_bool(nulls);
+    let mut out_nulls: Vec<bool> = vec![false; n];
+    let mut hit_null = false;
+    let mut out_i64: Vec<i64> = Vec::new();
+    let mut out_f64: Vec<f64> = Vec::new();
+    match dtype {
+        "i64" => {
+            let vs = m37_read_list_i64(vals);
+            out_i64.reserve(n);
+            // Accumulator state per op.
+            let mut acc: i64 = match op {
+                "sum"  => 0,
+                "prod" => 1,
+                "max"  => i64::MIN,
+                "min"  => i64::MAX,
+                _ => 0,
+            };
+            let mut started = false;
+            for i in 0..n {
+                if hit_null || ns.get(i).copied().unwrap_or(false) {
+                    hit_null = true;
+                    out_nulls[i] = true;
+                    out_i64.push(0);
+                    continue;
+                }
+                let v = vs.get(i).copied().unwrap_or(0);
+                if !started {
+                    acc = v;
+                    started = true;
+                } else {
+                    acc = match op {
+                        "sum"  => acc.wrapping_add(v),
+                        "prod" => acc.wrapping_mul(v),
+                        "max"  => if v > acc { v } else { acc },
+                        "min"  => if v < acc { v } else { acc },
+                        _ => acc,
+                    };
+                }
+                out_i64.push(acc);
+            }
+            let v_lst = m37_alloc_list_i64(interp, &out_i64);
+            let n_lst = m37_alloc_list_bool(interp, &out_nulls);
+            Ok(m37_alloc_column(interp, "ColumnI64", v_lst, n_lst, n as i64) as u64)
+        }
+        "f64" => {
+            let vs = m37_read_list_f64(vals);
+            out_f64.reserve(n);
+            let mut acc: f64 = match op {
+                "sum"  => 0.0,
+                "prod" => 1.0,
+                "max"  => f64::NEG_INFINITY,
+                "min"  => f64::INFINITY,
+                _ => 0.0,
+            };
+            let mut started = false;
+            for i in 0..n {
+                if hit_null || ns.get(i).copied().unwrap_or(false) {
+                    hit_null = true;
+                    out_nulls[i] = true;
+                    out_f64.push(0.0);
+                    continue;
+                }
+                let v = vs.get(i).copied().unwrap_or(0.0);
+                if !started {
+                    acc = v;
+                    started = true;
+                } else {
+                    acc = match op {
+                        "sum"  => acc + v,
+                        "prod" => acc * v,
+                        // For max/min, NaN propagation via partial_cmp:
+                        // any NaN poisons the comparison.  Use the
+                        // partial_cmp fallback path to keep NaN winning.
+                        "max"  => if v.is_nan() || acc.is_nan() { f64::NAN } else if v > acc { v } else { acc },
+                        "min"  => if v.is_nan() || acc.is_nan() { f64::NAN } else if v < acc { v } else { acc },
+                        _ => acc,
+                    };
+                }
+                out_f64.push(acc);
+            }
+            let v_lst = m37_alloc_list_f64(interp, &out_f64);
+            let n_lst = m37_alloc_list_bool(interp, &out_nulls);
+            Ok(m37_alloc_column(interp, "ColumnF64", v_lst, n_lst, n as i64) as u64)
+        }
+        _ => Err(VmError::Trap(format!(
+            "m40_col_cum: bad dtype {:?}", dtype
+        ))),
+    }
+}
+
+// ── M40 Phase A: whole-frame null handling ────────────────────────────
+
+/// `DataFrame.dropna(self) -> DataFrame`.  Drops every row that has at
+/// least one null in any column.  The `subset` form passes its list of
+/// column indices; the bare form considers all columns.
+fn m40_df_dropna(
+    interp: &mut Interpreter,
+    args: &[u64],
+    subset_idx: Option<&[usize]>,
+) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let (names_lst, _, nrows) = m37_df_fields(recv);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_ptrs = m37_df_col_ptrs(recv);
+    // Pre-decode all nulls vectors we care about.
+    let consider: Vec<usize> = match subset_idx {
+        Some(s) => s.to_vec(),
+        None => (0..col_ptrs.len()).collect(),
+    };
+    let per_col_nulls: Vec<Vec<bool>> = consider
+        .iter()
+        .map(|i| {
+            let (_, nu, _) = m37_col_fields(col_ptrs[*i]);
+            m37_read_list_bool(nu)
+        })
+        .collect();
+    let mut keep: Vec<usize> = Vec::with_capacity(nrows as usize);
+    for r in 0..nrows as usize {
+        let mut row_has_null = false;
+        for ns in &per_col_nulls {
+            if ns.get(r).copied().unwrap_or(false) {
+                row_has_null = true;
+                break;
+            }
+        }
+        if !row_has_null {
+            keep.push(r);
+        }
+    }
+    // Take every column down to the kept rows.
+    let new_cols: Vec<u64> = col_ptrs
+        .iter()
+        .map(|cp| m37_column_take(interp, *cp, &keep))
+        .collect();
+    Ok(m37_build_df(interp, &names, &new_cols, keep.len() as i64))
+}
+
+/// `DataFrame.dropna_subset(self, cols: List[str]) -> DataFrame`.
+fn m40_df_dropna_subset(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let want = read_list_str(args, 1);
+    let (names_lst, _, _) = m37_df_fields(recv);
+    let names = m37_read_list_str_lst(names_lst);
+    let mut subset_idx: Vec<usize> = Vec::with_capacity(want.len());
+    for w in &want {
+        match names.iter().position(|n| n == w) {
+            None => return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!("DataFrame.dropna_subset: column {:?} not found", w),
+            }),
+            Some(i) => subset_idx.push(i),
+        }
+    }
+    m40_df_dropna(interp, args, Some(&subset_idx))
+}
+
+/// `DataFrame.fillna_<dtype>(self, v) -> DataFrame`.  Fills nulls in
+/// every column whose dtype matches `target_dtype`; other columns are
+/// returned unchanged (pointer-reused, so cheap).
+fn m40_df_fillna(
+    interp: &mut Interpreter,
+    args: &[u64],
+    target_dtype: &str,
+) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let (names_lst, _, nrows) = m37_df_fields(recv);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_ptrs = m37_df_col_ptrs(recv);
+    let target_cls = m40_class_name_for_dtype(target_dtype);
+    let mut new_cols: Vec<u64> = Vec::with_capacity(col_ptrs.len());
+    for cp in &col_ptrs {
+        let cls = m38_col_class_name(*cp);
+        if cls != target_cls {
+            // Pass through unchanged.
+            new_cols.push(*cp);
+            continue;
+        }
+        // Fill nulls per-dtype.
+        let (vals, nulls, length) = m37_col_fields(*cp);
+        let ns = m37_read_list_bool(nulls);
+        let n = length as usize;
+        match target_dtype {
+            "i64" | "datetime" => {
+                let v_fill = arg_i64(args, 1);
+                let vs = m37_read_list_i64(vals);
+                let mut new_vs: Vec<i64> = Vec::with_capacity(n);
+                for i in 0..n {
+                    let is_null = ns.get(i).copied().unwrap_or(false);
+                    new_vs.push(if is_null { v_fill } else { vs.get(i).copied().unwrap_or(0) });
+                }
+                let v_lst = m37_alloc_list_i64(interp, &new_vs);
+                let n_lst = m37_alloc_list_bool(interp, &vec![false; n]);
+                new_cols.push(m37_alloc_column(interp, &cls, v_lst, n_lst, length) as u64);
+            }
+            "f64" => {
+                let v_fill = arg_f64(args, 1);
+                let vs = m37_read_list_f64(vals);
+                let mut new_vs: Vec<f64> = Vec::with_capacity(n);
+                for i in 0..n {
+                    let is_null = ns.get(i).copied().unwrap_or(false);
+                    new_vs.push(if is_null { v_fill } else { vs.get(i).copied().unwrap_or(0.0) });
+                }
+                let v_lst = m37_alloc_list_f64(interp, &new_vs);
+                let n_lst = m37_alloc_list_bool(interp, &vec![false; n]);
+                new_cols.push(m37_alloc_column(interp, &cls, v_lst, n_lst, length) as u64);
+            }
+            "str" => {
+                let v_fill = arg_str(args, 1);
+                let vs = m37_read_list_str_lst(vals);
+                let mut new_vs: Vec<String> = Vec::with_capacity(n);
+                for i in 0..n {
+                    let is_null = ns.get(i).copied().unwrap_or(false);
+                    new_vs.push(if is_null { v_fill.clone() } else { vs.get(i).cloned().unwrap_or_default() });
+                }
+                let v_lst = m37_alloc_list_str(interp, &new_vs);
+                let n_lst = m37_alloc_list_bool(interp, &vec![false; n]);
+                new_cols.push(m37_alloc_column(interp, &cls, v_lst, n_lst, length) as u64);
+            }
+            "bool" => {
+                let v_fill = arg_u64(args, 1) != 0;
+                let vs = m37_read_list_bool(vals);
+                let mut new_vs: Vec<bool> = Vec::with_capacity(n);
+                for i in 0..n {
+                    let is_null = ns.get(i).copied().unwrap_or(false);
+                    new_vs.push(if is_null { v_fill } else { vs.get(i).copied().unwrap_or(false) });
+                }
+                let v_lst = m37_alloc_list_bool(interp, &new_vs);
+                let n_lst = m37_alloc_list_bool(interp, &vec![false; n]);
+                new_cols.push(m37_alloc_column(interp, &cls, v_lst, n_lst, length) as u64);
+            }
+            _ => new_cols.push(*cp),
+        }
+    }
+    Ok(m37_build_df(interp, &names, &new_cols, nrows))
+}
+
+/// Translate a M40 dtype tag ("i64"/"f64"/"str"/"bool"/"datetime")
+/// to the corresponding Column subclass name.
+fn m40_class_name_for_dtype(dtype: &str) -> String {
+    match dtype {
+        "i64"      => "ColumnI64".into(),
+        "f64"      => "ColumnF64".into(),
+        "str"      => "ColumnStr".into(),
+        "bool"     => "ColumnBool".into(),
+        "datetime" => "ColumnDateTime".into(),
+        _          => "ColumnI64".into(),
+    }
+}
+
+// ── M40 Phase A: range slicing ────────────────────────────────────────
+
+/// `DataFrame.iloc(self, start: i64, stop: i64) -> DataFrame`.
+/// Half-open [start, stop).  Negative indices raise ValueError;
+/// stop > nrows clamps to nrows.  start > nrows yields an empty frame.
+fn m40_df_iloc(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let start = arg_i64(args, 1);
+    let stop = arg_i64(args, 2);
+    if start < 0 || stop < 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "DataFrame.iloc: negative indices not supported (start={}, stop={})",
+                start, stop
+            ),
+        });
+    }
+    let (names_lst, _, nrows) = m37_df_fields(recv);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_ptrs = m37_df_col_ptrs(recv);
+    let s = (start as usize).min(nrows as usize);
+    let e = (stop  as usize).min(nrows as usize);
+    let take: Vec<usize> = if s < e { (s..e).collect() } else { Vec::new() };
+    let new_cols: Vec<u64> = col_ptrs.iter().map(|cp| m37_column_take(interp, *cp, &take)).collect();
+    Ok(m37_build_df(interp, &names, &new_cols, take.len() as i64))
+}
+
+// ── M40 Phase B: rolling-window aggregations ──────────────────────────
+
+/// `Column<dtype>.rolling_<op>(self, window: i64) -> Column<out_dtype>`.
+/// `dtype` ∈ {"i64", "f64"}; `op` ∈ {"sum", "mean", "min", "max", "std"}.
+///
+/// Output length = input length.  Cells 0..window-1 are null
+/// (incomplete window — matches pandas `min_periods=window`).  A
+/// window containing any input-null cell produces a null output.
+///
+/// Mean returns f64 even on i64 input (since mean of integers is
+/// rational).  Std is sample standard deviation (n-1 denominator)
+/// and likewise f64.  Sum / min / max preserve the input dtype.
+fn m40_col_rolling(
+    interp: &mut Interpreter,
+    args: &[u64],
+    dtype: &str,
+    op: &str,
+) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let window = arg_i64(args, 1);
+    let (vals, nulls, length) = m37_col_fields(recv);
+    let n = length as usize;
+    if window < 1 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("Column.rolling_{}: window must be >= 1, got {}", op, window),
+        });
+    }
+    if (window as usize) > n {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "Column.rolling_{}: window {} exceeds column length {}",
+                op, window, n
+            ),
+        });
+    }
+    let w = window as usize;
+    let ns = m37_read_list_bool(nulls);
+    // For each window-end position i in w-1..n, check whether the
+    // window [i-w+1..=i] contains any null cell.  Output position i
+    // is null when this is true OR when i < w-1.
+    let mut out_nulls: Vec<bool> = vec![true; n];
+    for i in (w - 1)..n {
+        let mut any_null = false;
+        for j in (i + 1 - w)..=i {
+            if ns.get(j).copied().unwrap_or(false) {
+                any_null = true;
+                break;
+            }
+        }
+        if !any_null {
+            out_nulls[i] = false;
+        }
+    }
+    // Now compute per dtype.  We use a fresh O(n*w) loop (not a
+    // sliding window) — w is bounded by n, and v1 row counts are
+    // small; O(n*w) is fine for typical usage.  An incremental
+    // sliding-window optimization can come later.
+    let out_dtype = match op {
+        "mean" | "std" => "f64",
+        _ => dtype,
+    };
+    let out_cls = m40_class_name_for_dtype(out_dtype);
+    match (dtype, out_dtype) {
+        ("i64", "i64") => {
+            let vs = m37_read_list_i64(vals);
+            let mut out: Vec<i64> = vec![0; n];
+            for i in 0..n {
+                if out_nulls[i] { continue; }
+                let mut acc = vs[i + 1 - w];
+                for j in (i + 2 - w)..=i {
+                    let v = vs[j];
+                    acc = match op {
+                        "sum" => acc.wrapping_add(v),
+                        "min" => if v < acc { v } else { acc },
+                        "max" => if v > acc { v } else { acc },
+                        _ => acc,
+                    };
+                }
+                if op == "sum" {
+                    // single-element window short-circuit handled by acc init = vs[i+1-w]
+                    out[i] = if w == 1 { vs[i] } else { acc };
+                } else {
+                    out[i] = acc;
+                }
+            }
+            let v_lst = m37_alloc_list_i64(interp, &out);
+            let n_lst = m37_alloc_list_bool(interp, &out_nulls);
+            Ok(m37_alloc_column(interp, &out_cls, v_lst, n_lst, n as i64) as u64)
+        }
+        ("i64", "f64") => {
+            // mean / std on i64 input.
+            let vs = m37_read_list_i64(vals);
+            let mut out: Vec<f64> = vec![0.0; n];
+            for i in 0..n {
+                if out_nulls[i] { continue; }
+                let mut sum: f64 = 0.0;
+                let mut sumsq: f64 = 0.0;
+                for j in (i + 1 - w)..=i {
+                    let v = vs[j] as f64;
+                    sum += v;
+                    sumsq += v * v;
+                }
+                let mean = sum / (w as f64);
+                if op == "mean" {
+                    out[i] = mean;
+                } else if op == "std" {
+                    if w <= 1 {
+                        out[i] = 0.0;
+                    } else {
+                        // sample variance = (sumsq - n*mean^2) / (n-1)
+                        let var = (sumsq - (w as f64) * mean * mean) / ((w as f64) - 1.0);
+                        out[i] = if var > 0.0 { var.sqrt() } else { 0.0 };
+                    }
+                }
+            }
+            let v_lst = m37_alloc_list_f64(interp, &out);
+            let n_lst = m37_alloc_list_bool(interp, &out_nulls);
+            Ok(m37_alloc_column(interp, &out_cls, v_lst, n_lst, n as i64) as u64)
+        }
+        ("f64", _) => {
+            let vs = m37_read_list_f64(vals);
+            let mut out: Vec<f64> = vec![0.0; n];
+            for i in 0..n {
+                if out_nulls[i] { continue; }
+                match op {
+                    "sum" => {
+                        let mut acc: f64 = 0.0;
+                        for j in (i + 1 - w)..=i { acc += vs[j]; }
+                        out[i] = acc;
+                    }
+                    "min" => {
+                        let mut acc = vs[i + 1 - w];
+                        for j in (i + 2 - w)..=i {
+                            let v = vs[j];
+                            if v.is_nan() || acc.is_nan() { acc = f64::NAN; }
+                            else if v < acc { acc = v; }
+                        }
+                        out[i] = acc;
+                    }
+                    "max" => {
+                        let mut acc = vs[i + 1 - w];
+                        for j in (i + 2 - w)..=i {
+                            let v = vs[j];
+                            if v.is_nan() || acc.is_nan() { acc = f64::NAN; }
+                            else if v > acc { acc = v; }
+                        }
+                        out[i] = acc;
+                    }
+                    "mean" => {
+                        let mut sum: f64 = 0.0;
+                        for j in (i + 1 - w)..=i { sum += vs[j]; }
+                        out[i] = sum / (w as f64);
+                    }
+                    "std" => {
+                        if w <= 1 { out[i] = 0.0; continue; }
+                        let mut sum: f64 = 0.0;
+                        let mut sumsq: f64 = 0.0;
+                        for j in (i + 1 - w)..=i {
+                            let v = vs[j];
+                            sum += v;
+                            sumsq += v * v;
+                        }
+                        let mean = sum / (w as f64);
+                        let var = (sumsq - (w as f64) * mean * mean) / ((w as f64) - 1.0);
+                        out[i] = if var > 0.0 { var.sqrt() } else { 0.0 };
+                    }
+                    _ => {}
+                }
+            }
+            let v_lst = m37_alloc_list_f64(interp, &out);
+            let n_lst = m37_alloc_list_bool(interp, &out_nulls);
+            Ok(m37_alloc_column(interp, &out_cls, v_lst, n_lst, n as i64) as u64)
+        }
+        _ => Err(VmError::Trap(format!(
+            "m40_col_rolling: bad dtype/op combination ({:?}, {:?})", dtype, op
+        ))),
+    }
+}
+
+// ── M40 Phase C: time-series ops ──────────────────────────────────────
+
+/// Parse a resample rule string like "5m", "1h", "1d" into bucket
+/// width in milliseconds.  Accepted suffixes: `m`, `h`, `d`.  Any
+/// other suffix or non-numeric prefix raises ValueError.
+fn m40_parse_rule_ms(rule: &str) -> Result<i64, VmError> {
+    if rule.is_empty() {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "DataFrame.resample: rule must not be empty".into(),
+        });
+    }
+    let (num_part, suffix) = rule.split_at(rule.len() - 1);
+    let n: i64 = num_part.parse().map_err(|_| VmError::UncaughtException {
+        type_name: "ValueError".into(),
+        message: format!(
+            "DataFrame.resample: invalid rule {:?} (expected <i64><m|h|d>)",
+            rule
+        ),
+    })?;
+    if n <= 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("DataFrame.resample: rule {:?} must be positive", rule),
+        });
+    }
+    let unit_ms: i64 = match suffix {
+        "m" => 60_000,
+        "h" => 60 * 60_000,
+        "d" => 24 * 60 * 60_000,
+        _ => return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "DataFrame.resample: unknown rule suffix in {:?} (expected m/h/d)",
+                rule
+            ),
+        }),
+    };
+    Ok(n.checked_mul(unit_ms).ok_or_else(|| VmError::UncaughtException {
+        type_name: "ValueError".into(),
+        message: format!("DataFrame.resample: rule {:?} overflows i64 ms", rule),
+    })?)
+}
+
+/// `DataFrame.resample(self, time_col: str, rule: str, agg: str) -> DataFrame`.
+/// Bucket rows by `rule` width on a ColumnDateTime, then apply `agg`
+/// to every non-time numeric column.
+fn m40_df_resample(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let time_col = arg_str(args, 1);
+    let rule = arg_str(args, 2);
+    let agg = arg_str(args, 3);
+    let (names_lst, _, nrows) = m37_df_fields(recv);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_ptrs = m37_df_col_ptrs(recv);
+    // 1. Locate the time column and validate dtype.
+    let tidx = match names.iter().position(|n| n == &time_col) {
+        None => return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("DataFrame.resample: time column {:?} not found", time_col),
+        }),
+        Some(i) => i,
+    };
+    let tcol = col_ptrs[tidx];
+    let tcls = m38_col_class_name(tcol);
+    if tcls != "ColumnDateTime" {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "DataFrame.resample: time column {:?} must be ColumnDateTime, got {}",
+                time_col, tcls
+            ),
+        });
+    }
+    // 2. Parse rule.
+    let rule_ms = m40_parse_rule_ms(&rule)?;
+    // 3. Validate agg name and pre-compute per-column dispatch.
+    let agg_ok = matches!(agg.as_str(), "sum" | "mean" | "min" | "max" | "count");
+    if !agg_ok {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "DataFrame.resample: agg must be sum|mean|min|max|count, got {:?}",
+                agg
+            ),
+        });
+    }
+    // 4. Find min / max non-null timestamp.
+    let (tvals, tnulls, _) = m37_col_fields(tcol);
+    let ts_vs = m37_read_list_i64(tvals);
+    let ts_ns = m37_read_list_bool(tnulls);
+    let mut t_min: Option<i64> = None;
+    let mut t_max: Option<i64> = None;
+    for i in 0..nrows as usize {
+        if ts_ns.get(i).copied().unwrap_or(false) {
+            continue;
+        }
+        let v = ts_vs.get(i).copied().unwrap_or(0);
+        t_min = Some(t_min.map(|m| m.min(v)).unwrap_or(v));
+        t_max = Some(t_max.map(|m| m.max(v)).unwrap_or(v));
+    }
+    let (t_min, t_max) = match (t_min, t_max) {
+        (Some(a), Some(b)) => (a, b),
+        _ => {
+            // No non-null timestamps — return an empty frame with the
+            // time column and one count/agg column per non-time numeric.
+            let mut out_names: Vec<String> = vec![time_col.clone()];
+            let mut out_cols: Vec<u64> = vec![];
+            let tv_empty = m37_alloc_list_i64(interp, &[]);
+            let tn_empty = m37_alloc_list_bool(interp, &[]);
+            out_cols.push(m37_alloc_column(interp, "ColumnDateTime", tv_empty, tn_empty, 0) as u64);
+            for (i, n) in names.iter().enumerate() {
+                if i == tidx { continue; }
+                let cls = m38_col_class_name(col_ptrs[i]);
+                if cls != "ColumnI64" && cls != "ColumnF64" { continue; }
+                out_names.push(n.clone());
+                let v = m37_alloc_list_f64(interp, &[]);
+                let nu = m37_alloc_list_bool(interp, &[]);
+                out_cols.push(m37_alloc_column(interp,
+                    if agg == "count" { "ColumnI64" } else { &cls },
+                    v, nu, 0,
+                ) as u64);
+            }
+            return Ok(m37_build_df(interp, &out_names, &out_cols, 0));
+        }
+    };
+    // Floor-align bucket starts to rule_ms boundaries from t_min.
+    // Using simple anchor: first bucket begins at t_min (no floor; the
+    // user expects the data range to define the buckets).
+    let bucket_start_anchor = t_min;
+    let num_buckets: i64 = if rule_ms == 0 {
+        1
+    } else {
+        ((t_max - bucket_start_anchor) / rule_ms) + 1
+    };
+    let num_buckets = num_buckets as usize;
+    // bucket_rows[b] = Vec<row_idx> falling in bucket b.
+    let mut bucket_rows: Vec<Vec<usize>> = vec![Vec::new(); num_buckets];
+    for r in 0..nrows as usize {
+        if ts_ns.get(r).copied().unwrap_or(false) {
+            continue;
+        }
+        let v = ts_vs.get(r).copied().unwrap_or(0);
+        let b = ((v - bucket_start_anchor) / rule_ms) as usize;
+        if b < num_buckets {
+            bucket_rows[b].push(r);
+        }
+    }
+    // Build output time column: one row per bucket.
+    let bucket_starts: Vec<i64> = (0..num_buckets as i64)
+        .map(|b| bucket_start_anchor + b * rule_ms)
+        .collect();
+    let mut out_names: Vec<String> = vec![time_col.clone()];
+    let mut out_cols: Vec<u64> = Vec::new();
+    let tv_lst = m37_alloc_list_i64(interp, &bucket_starts);
+    let tn_lst = m37_alloc_list_bool(interp, &vec![false; num_buckets]);
+    out_cols.push(m37_alloc_column(interp, "ColumnDateTime", tv_lst, tn_lst, num_buckets as i64) as u64);
+    // For each non-time numeric column, build an aggregated column.
+    for (i, name) in names.iter().enumerate() {
+        if i == tidx { continue; }
+        let src = col_ptrs[i];
+        let cls = m38_col_class_name(src);
+        // count is allowed on any column, but other aggs require numeric.
+        if agg != "count" && cls != "ColumnI64" && cls != "ColumnF64" {
+            continue;
+        }
+        if agg == "count" && cls != "ColumnI64" && cls != "ColumnF64" {
+            continue; // also drop non-numeric to match the brief
+        }
+        out_names.push(name.clone());
+        let (svals, snulls, _) = m37_col_fields(src);
+        let s_ns = m37_read_list_bool(snulls);
+        let s_i64 = if cls == "ColumnI64" { m37_read_list_i64(svals) } else { Vec::new() };
+        let s_f64 = if cls == "ColumnF64" { m37_read_list_f64(svals) } else { Vec::new() };
+        if agg == "count" {
+            let mut out: Vec<i64> = Vec::with_capacity(num_buckets);
+            let mut out_nu: Vec<bool> = vec![false; num_buckets];
+            for b in 0..num_buckets {
+                let mut c: i64 = 0;
+                for r in &bucket_rows[b] {
+                    if !s_ns.get(*r).copied().unwrap_or(false) {
+                        c += 1;
+                    }
+                }
+                out.push(c);
+                if bucket_rows[b].is_empty() { out_nu[b] = true; out[b] = 0; }
+            }
+            let v_lst = m37_alloc_list_i64(interp, &out);
+            let n_lst = m37_alloc_list_bool(interp, &out_nu);
+            out_cols.push(m37_alloc_column(interp, "ColumnI64", v_lst, n_lst, num_buckets as i64) as u64);
+            continue;
+        }
+        // Numeric agg: emit same dtype as source.
+        if cls == "ColumnI64" {
+            let mut out: Vec<i64> = vec![0; num_buckets];
+            let mut out_nu: Vec<bool> = vec![false; num_buckets];
+            for b in 0..num_buckets {
+                let mut acc: i64 = match agg.as_str() {
+                    "sum" => 0, "min" => i64::MAX, "max" => i64::MIN, _ => 0,
+                };
+                let mut sum_for_mean: i64 = 0;
+                let mut cnt: i64 = 0;
+                for r in &bucket_rows[b] {
+                    if s_ns.get(*r).copied().unwrap_or(false) { continue; }
+                    let v = s_i64[*r];
+                    cnt += 1;
+                    match agg.as_str() {
+                        "sum"  => { acc = acc.wrapping_add(v); }
+                        "mean" => { sum_for_mean = sum_for_mean.wrapping_add(v); }
+                        "min"  => { if v < acc { acc = v; } }
+                        "max"  => { if v > acc { acc = v; } }
+                        _ => {}
+                    }
+                }
+                if cnt == 0 {
+                    out_nu[b] = true;
+                    out[b] = 0;
+                } else {
+                    out[b] = match agg.as_str() {
+                        "sum"  => acc,
+                        "mean" => sum_for_mean / cnt, // integer mean
+                        "min" | "max" => acc,
+                        _ => acc,
+                    };
+                }
+            }
+            let v_lst = m37_alloc_list_i64(interp, &out);
+            let n_lst = m37_alloc_list_bool(interp, &out_nu);
+            out_cols.push(m37_alloc_column(interp, "ColumnI64", v_lst, n_lst, num_buckets as i64) as u64);
+        } else {
+            let mut out: Vec<f64> = vec![0.0; num_buckets];
+            let mut out_nu: Vec<bool> = vec![false; num_buckets];
+            for b in 0..num_buckets {
+                let mut acc: f64 = match agg.as_str() {
+                    "sum" => 0.0, "min" => f64::INFINITY, "max" => f64::NEG_INFINITY, _ => 0.0,
+                };
+                let mut sum_for_mean: f64 = 0.0;
+                let mut cnt: i64 = 0;
+                for r in &bucket_rows[b] {
+                    if s_ns.get(*r).copied().unwrap_or(false) { continue; }
+                    let v = s_f64[*r];
+                    cnt += 1;
+                    match agg.as_str() {
+                        "sum"  => acc += v,
+                        "mean" => sum_for_mean += v,
+                        "min"  => { if v < acc { acc = v; } }
+                        "max"  => { if v > acc { acc = v; } }
+                        _ => {}
+                    }
+                }
+                if cnt == 0 {
+                    out_nu[b] = true;
+                    out[b] = 0.0;
+                } else {
+                    out[b] = match agg.as_str() {
+                        "sum"  => acc,
+                        "mean" => sum_for_mean / (cnt as f64),
+                        "min" | "max" => acc,
+                        _ => acc,
+                    };
+                }
+            }
+            let v_lst = m37_alloc_list_f64(interp, &out);
+            let n_lst = m37_alloc_list_bool(interp, &out_nu);
+            out_cols.push(m37_alloc_column(interp, "ColumnF64", v_lst, n_lst, num_buckets as i64) as u64);
+        }
+    }
+    Ok(m37_build_df(interp, &out_names, &out_cols, num_buckets as i64))
+}
+
+/// `DataFrame.asof_merge(self, other: DataFrame, on_self: str, on_other: str) -> DataFrame`.
+/// Left-join where each self row matches the latest other row with
+/// `other[on_other] <= self[on_self]`.  Both keys must share dtype
+/// (ColumnDateTime or ColumnI64).
+fn m40_df_asof_merge(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let lhs = arg_u64(args, 0);
+    let rhs = arg_u64(args, 1);
+    let on_self = arg_str(args, 2);
+    let on_other = arg_str(args, 3);
+    let (lnames_lst, _, l_nrows) = m37_df_fields(lhs);
+    let lnames = m37_read_list_str_lst(lnames_lst);
+    let l_col_ptrs = m37_df_col_ptrs(lhs);
+    let (rnames_lst, _, _r_nrows) = m37_df_fields(rhs);
+    let rnames = m37_read_list_str_lst(rnames_lst);
+    let r_col_ptrs = m37_df_col_ptrs(rhs);
+    let l_idx = match lnames.iter().position(|n| n == &on_self) {
+        None => return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("DataFrame.asof_merge: on_self {:?} not found", on_self),
+        }),
+        Some(i) => i,
+    };
+    let r_idx = match rnames.iter().position(|n| n == &on_other) {
+        None => return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("DataFrame.asof_merge: on_other {:?} not found", on_other),
+        }),
+        Some(i) => i,
+    };
+    let l_key_cls = m38_col_class_name(l_col_ptrs[l_idx]);
+    let r_key_cls = m38_col_class_name(r_col_ptrs[r_idx]);
+    if l_key_cls != r_key_cls {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "DataFrame.asof_merge: key dtype mismatch ({} vs {})",
+                l_key_cls, r_key_cls
+            ),
+        });
+    }
+    if l_key_cls != "ColumnDateTime" && l_key_cls != "ColumnI64" {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "DataFrame.asof_merge: key column must be ColumnDateTime or ColumnI64, got {}",
+                l_key_cls
+            ),
+        });
+    }
+    // Read lhs + rhs keys.
+    let (lv, ln, _) = m37_col_fields(l_col_ptrs[l_idx]);
+    let l_vs = m37_read_list_i64(lv);
+    let l_ns = m37_read_list_bool(ln);
+    let (rv, rn, r_len_i) = m37_col_fields(r_col_ptrs[r_idx]);
+    let r_vs = m37_read_list_i64(rv);
+    let r_ns = m37_read_list_bool(rn);
+    let r_len = r_len_i as usize;
+    // Build a sorted index over rhs by non-null key ascending.  Null
+    // rhs keys are dropped from the searchable set (we'd never want
+    // to "match" a null key from the left side either).
+    let mut sorted: Vec<usize> = (0..r_len)
+        .filter(|i| !r_ns.get(*i).copied().unwrap_or(false))
+        .collect();
+    sorted.sort_by_key(|i| r_vs[*i]);
+    let sorted_keys: Vec<i64> = sorted.iter().map(|i| r_vs[*i]).collect();
+    // For each lhs row, binary-search for the largest sorted_key <= lhs_key.
+    let mut matches: Vec<Option<usize>> = Vec::with_capacity(l_nrows as usize);
+    for r in 0..l_nrows as usize {
+        if l_ns.get(r).copied().unwrap_or(false) {
+            matches.push(None);
+            continue;
+        }
+        let needle = l_vs[r];
+        // partition_point: first index where sorted_keys[k] > needle.
+        let pp = sorted_keys.partition_point(|k| *k <= needle);
+        if pp == 0 {
+            matches.push(None);
+        } else {
+            matches.push(Some(sorted[pp - 1]));
+        }
+    }
+    // Build the output frame: lhs columns (all rows) + rhs columns
+    // (except on_other) plucked by `matches`.
+    let mut out_names: Vec<String> = lnames.clone();
+    let mut out_cols: Vec<u64> = Vec::new();
+    // lhs columns — pass through unchanged (m37_column_take with
+    // identity perm; reusing pointers is cheaper but the existing
+    // code base never mutates columns, so pass-through is safe).
+    for cp in &l_col_ptrs {
+        out_cols.push(*cp);
+    }
+    // rhs columns (except on_other): pluck by matches.
+    for (i, name) in rnames.iter().enumerate() {
+        if i == r_idx { continue; }
+        out_names.push(name.clone());
+        let src = r_col_ptrs[i];
+        let cls = m38_col_class_name(src);
+        let (svals, snulls, _) = m37_col_fields(src);
+        let s_ns = m37_read_list_bool(snulls);
+        let s_i64 = if cls == "ColumnI64" || cls == "ColumnDateTime" { m37_read_list_i64(svals) } else { Vec::new() };
+        let s_f64 = if cls == "ColumnF64" { m37_read_list_f64(svals) } else { Vec::new() };
+        let s_str = if cls == "ColumnStr" { m37_read_list_str_lst(svals) } else { Vec::new() };
+        let s_bool = if cls == "ColumnBool" { m37_read_list_bool(svals) } else { Vec::new() };
+        let n = l_nrows as usize;
+        let mut out_nu: Vec<bool> = Vec::with_capacity(n);
+        let mut out_i64: Vec<i64> = Vec::new();
+        let mut out_f64: Vec<f64> = Vec::new();
+        let mut out_str: Vec<String> = Vec::new();
+        let mut out_bool: Vec<bool> = Vec::new();
+        for r in 0..n {
+            match matches[r] {
+                Some(mi) => {
+                    out_nu.push(s_ns.get(mi).copied().unwrap_or(false));
+                    match cls.as_str() {
+                        "ColumnI64" | "ColumnDateTime" => out_i64.push(s_i64.get(mi).copied().unwrap_or(0)),
+                        "ColumnF64" => out_f64.push(s_f64.get(mi).copied().unwrap_or(0.0)),
+                        "ColumnStr" => out_str.push(s_str.get(mi).cloned().unwrap_or_default()),
+                        "ColumnBool" => out_bool.push(s_bool.get(mi).copied().unwrap_or(false)),
+                        _ => {}
+                    }
+                }
+                None => {
+                    out_nu.push(true);
+                    match cls.as_str() {
+                        "ColumnI64" | "ColumnDateTime" => out_i64.push(0),
+                        "ColumnF64" => out_f64.push(0.0),
+                        "ColumnStr" => out_str.push(String::new()),
+                        "ColumnBool" => out_bool.push(false),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let n_lst = m37_alloc_list_bool(interp, &out_nu);
+        let v_lst = match cls.as_str() {
+            "ColumnI64" | "ColumnDateTime" => m37_alloc_list_i64(interp, &out_i64),
+            "ColumnF64" => m37_alloc_list_f64(interp, &out_f64),
+            "ColumnStr" => m37_alloc_list_str(interp, &out_str),
+            "ColumnBool" => m37_alloc_list_bool(interp, &out_bool),
+            _ => m37_alloc_list_i64(interp, &out_i64),
+        };
+        out_cols.push(m37_alloc_column(interp, &cls, v_lst, n_lst, n as i64) as u64);
+    }
+    Ok(m37_build_df(interp, &out_names, &out_cols, l_nrows))
 }
 
 #[cfg(test)]

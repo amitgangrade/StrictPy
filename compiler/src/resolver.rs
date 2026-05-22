@@ -4326,6 +4326,40 @@ impl Resolver {
                     name: "fill_null".into(), params: vec![m37_i64.clone()],
                     ret: m37_col_i64_ty.clone(),
                 });
+                // ── M40 Phase A: cumulative reductions (i64 → i64) ──
+                v.push(MethodSig {
+                    name: "cumsum".into(), params: vec![], ret: m37_col_i64_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "cumprod".into(), params: vec![], ret: m37_col_i64_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "cummax".into(), params: vec![], ret: m37_col_i64_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "cummin".into(), params: vec![], ret: m37_col_i64_ty.clone(),
+                });
+                // ── M40 Phase B: rolling-window aggregations (i64) ──
+                v.push(MethodSig {
+                    name: "rolling_sum".into(), params: vec![m37_i64.clone()],
+                    ret: m37_col_i64_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "rolling_mean".into(), params: vec![m37_i64.clone()],
+                    ret: m37_col_f64_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "rolling_min".into(), params: vec![m37_i64.clone()],
+                    ret: m37_col_i64_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "rolling_max".into(), params: vec![m37_i64.clone()],
+                    ret: m37_col_i64_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "rolling_std".into(), params: vec![m37_i64.clone()],
+                    ret: m37_col_f64_ty.clone(),
+                });
                 v
             },
             generics: vec![], generic_tvars: vec![],
@@ -4406,6 +4440,40 @@ impl Resolver {
                 // ── M38 Phase C: fill_null ──
                 v.push(MethodSig {
                     name: "fill_null".into(), params: vec![m37_f64.clone()],
+                    ret: m37_col_f64_ty.clone(),
+                });
+                // ── M40 Phase A: cumulative reductions (f64 → f64) ──
+                v.push(MethodSig {
+                    name: "cumsum".into(), params: vec![], ret: m37_col_f64_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "cumprod".into(), params: vec![], ret: m37_col_f64_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "cummax".into(), params: vec![], ret: m37_col_f64_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "cummin".into(), params: vec![], ret: m37_col_f64_ty.clone(),
+                });
+                // ── M40 Phase B: rolling-window aggregations (f64) ──
+                v.push(MethodSig {
+                    name: "rolling_sum".into(), params: vec![m37_i64.clone()],
+                    ret: m37_col_f64_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "rolling_mean".into(), params: vec![m37_i64.clone()],
+                    ret: m37_col_f64_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "rolling_min".into(), params: vec![m37_i64.clone()],
+                    ret: m37_col_f64_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "rolling_max".into(), params: vec![m37_i64.clone()],
+                    ret: m37_col_f64_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "rolling_std".into(), params: vec![m37_i64.clone()],
                     ret: m37_col_f64_ty.clone(),
                 });
                 v
@@ -4665,6 +4733,52 @@ impl Resolver {
                 MethodSig {
                     name: "melt".into(),
                     params: vec![m37_list_str.clone(), m37_list_str.clone()],
+                    ret: m37_df_ty.clone(),
+                },
+                // ── M40 Phase A: whole-frame null handling ──
+                MethodSig {
+                    name: "dropna".into(), params: vec![], ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "dropna_subset".into(),
+                    params: vec![m37_list_str.clone()],
+                    ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "fillna_i64".into(),
+                    params: vec![m37_i64.clone()], ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "fillna_f64".into(),
+                    params: vec![m37_f64.clone()], ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "fillna_str".into(),
+                    params: vec![m37_str.clone()], ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "fillna_bool".into(),
+                    params: vec![m37_bool.clone()], ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "fillna_datetime".into(),
+                    params: vec![m37_i64.clone()], ret: m37_df_ty.clone(),
+                },
+                // ── M40 Phase A: range slicing ──
+                MethodSig {
+                    name: "iloc".into(),
+                    params: vec![m37_i64.clone(), m37_i64.clone()],
+                    ret: m37_df_ty.clone(),
+                },
+                // ── M40 Phase C: time-series ops ──
+                MethodSig {
+                    name: "resample".into(),
+                    params: vec![m37_str.clone(), m37_str.clone(), m37_str.clone()],
+                    ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "asof_merge".into(),
+                    params: vec![m37_df_ty.clone(), m37_str.clone(), m37_str.clone()],
                     ret: m37_df_ty.clone(),
                 },
             ],

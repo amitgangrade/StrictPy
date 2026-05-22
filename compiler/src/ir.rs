@@ -4246,6 +4246,19 @@ fn lower_method_call(
                     },
                 );
             }
+            // M40: `tabular` time-series + cumulative + null + iloc methods.
+            // Same class-name + method-name shape as M37/M38/M39.
+            if let Some(nid) = m40_tabular_class_method_native_id_by_name(
+                layout.name.as_str(), method,
+            ) {
+                return fb.push_value(
+                    ret_ty,
+                    ValueKind::Op {
+                        op: IROp::NativeCall { native_id: nid },
+                        args: arg_vs,
+                    },
+                );
+            }
         }
     }
 
@@ -4683,6 +4696,54 @@ fn m39_tabular_class_method_native_id_by_name(
         // ── Phase C: pivot + melt ──
         ("DataFrame", "pivot")           => NativeFn::M39TabDfPivot as u32,
         ("DataFrame", "melt")            => NativeFn::M39TabDfMelt as u32,
+        _ => return None,
+    })
+}
+
+/// M40: dispatch a `tabular` time-series / cumulative / null-handling /
+/// iloc method by class name + method name.  Mirrors
+/// `m39_tabular_class_method_native_id_by_name`.
+///
+/// Per the M40 brief, all locals in shared compiler files use the
+/// `m40_` prefix.
+fn m40_tabular_class_method_native_id_by_name(
+    class_name: &str,
+    method: &str,
+) -> Option<u32> {
+    Some(match (class_name, method) {
+        // ── Phase A: cumulative reductions ──
+        ("ColumnI64", "cumsum")  => NativeFn::M40TabColI64Cumsum  as u32,
+        ("ColumnI64", "cumprod") => NativeFn::M40TabColI64Cumprod as u32,
+        ("ColumnI64", "cummax")  => NativeFn::M40TabColI64Cummax  as u32,
+        ("ColumnI64", "cummin")  => NativeFn::M40TabColI64Cummin  as u32,
+        ("ColumnF64", "cumsum")  => NativeFn::M40TabColF64Cumsum  as u32,
+        ("ColumnF64", "cumprod") => NativeFn::M40TabColF64Cumprod as u32,
+        ("ColumnF64", "cummax")  => NativeFn::M40TabColF64Cummax  as u32,
+        ("ColumnF64", "cummin")  => NativeFn::M40TabColF64Cummin  as u32,
+        // ── Phase A: whole-frame null handling ──
+        ("DataFrame", "dropna")          => NativeFn::M40TabDfDropna         as u32,
+        ("DataFrame", "dropna_subset")   => NativeFn::M40TabDfDropnaSubset   as u32,
+        ("DataFrame", "fillna_i64")      => NativeFn::M40TabDfFillnaI64      as u32,
+        ("DataFrame", "fillna_f64")      => NativeFn::M40TabDfFillnaF64      as u32,
+        ("DataFrame", "fillna_str")      => NativeFn::M40TabDfFillnaStr      as u32,
+        ("DataFrame", "fillna_bool")     => NativeFn::M40TabDfFillnaBool     as u32,
+        ("DataFrame", "fillna_datetime") => NativeFn::M40TabDfFillnaDateTime as u32,
+        // ── Phase A: range slicing ──
+        ("DataFrame", "iloc") => NativeFn::M40TabDfIloc as u32,
+        // ── Phase B: rolling-window aggregations ──
+        ("ColumnI64", "rolling_sum")  => NativeFn::M40TabColI64RollingSum  as u32,
+        ("ColumnI64", "rolling_mean") => NativeFn::M40TabColI64RollingMean as u32,
+        ("ColumnI64", "rolling_min")  => NativeFn::M40TabColI64RollingMin  as u32,
+        ("ColumnI64", "rolling_max")  => NativeFn::M40TabColI64RollingMax  as u32,
+        ("ColumnI64", "rolling_std")  => NativeFn::M40TabColI64RollingStd  as u32,
+        ("ColumnF64", "rolling_sum")  => NativeFn::M40TabColF64RollingSum  as u32,
+        ("ColumnF64", "rolling_mean") => NativeFn::M40TabColF64RollingMean as u32,
+        ("ColumnF64", "rolling_min")  => NativeFn::M40TabColF64RollingMin  as u32,
+        ("ColumnF64", "rolling_max")  => NativeFn::M40TabColF64RollingMax  as u32,
+        ("ColumnF64", "rolling_std")  => NativeFn::M40TabColF64RollingStd  as u32,
+        // ── Phase C: time-series ops ──
+        ("DataFrame", "resample")    => NativeFn::M40TabDfResample   as u32,
+        ("DataFrame", "asof_merge")  => NativeFn::M40TabDfAsofMerge  as u32,
         _ => return None,
     })
 }
