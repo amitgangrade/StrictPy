@@ -15513,7 +15513,8 @@ fn m40_df_dropna(
         .iter()
         .map(|cp| m37_column_take(interp, *cp, &keep))
         .collect();
-    Ok(m37_build_df(interp, &names, &new_cols, keep.len() as i64))
+    // M42: propagate parent's index through the same keep vector.
+    Ok(m42_permute_index_into_df(interp, recv, &names, &new_cols, keep.len() as i64, &keep))
 }
 
 /// `DataFrame.dropna_subset(self, cols: List[str]) -> DataFrame`.
@@ -15612,7 +15613,8 @@ fn m40_df_fillna(
             _ => new_cols.push(*cp),
         }
     }
-    Ok(m37_build_df(interp, &names, &new_cols, nrows))
+    // M42: fillna is a pure row-pass-through; clone parent's index.
+    Ok(m42_copy_index_into_df(interp, recv, &names, &new_cols, nrows))
 }
 
 /// Translate a M40 dtype tag ("i64"/"f64"/"str"/"bool"/"datetime")

@@ -463,3 +463,238 @@ fn main() -> i32:
     assert!(out.contains("name=k"), "got: {out:?}");
     assert!(out.contains("renamed=ok"), "got: {out:?}");
 }
+
+// ── Phase C: null-handling — dropna / dropna_subset / fillna_* ─────────
+
+#[test]
+fn dropna_preserves_index() {
+    // dropna drops the 1 row with a null in v; the surviving 2 labels
+    // are a subset of the input labels.
+    let src = "\
+from tabular import Column, ColumnI64, ColumnStr, DataFrame
+import tabular
+fn main() -> i32:
+    keys: List[str] = []
+    keys.append(\"a\")
+    keys.append(\"b\")
+    keys.append(\"c\")
+    k: ColumnStr = tabular.col_str_simple(keys)
+    vs: List[i64] = []
+    vs.append(1i64)
+    vs.append(0i64)
+    vs.append(3i64)
+    ns: List[bool] = []
+    ns.append(false)
+    ns.append(true)
+    ns.append(false)
+    v: ColumnI64 = tabular.col_i64(vs, ns)
+    cn: List[str] = []
+    cn.append(\"k\")
+    cn.append(\"v\")
+    cols: List[Column] = []
+    cols.append(k)
+    cols.append(v)
+    df: DataFrame = tabular.from_columns(cn, cols)
+    df2: DataFrame = df.set_index(\"k\")
+    df3: DataFrame = df2.dropna()
+    println(\"has=\" + str(df3.has_index()))
+    println(\"nrows=\" + str(df3.length()))
+    nm: str? = df3.index_name()
+    if nm is not none:
+        println(\"name=\" + nm)
+    flat: DataFrame = df3.reset_index()
+    s: ColumnStr? = flat.get_column_str(\"k\")
+    if s is not none:
+        a: str? = s.get(0i64)
+        b: str? = s.get(1i64)
+        if a is not none:
+            println(\"l0=\" + a)
+        if b is not none:
+            println(\"l1=\" + b)
+    return 0
+";
+    let out = run("dropna_preserves_index", src);
+    assert!(out.contains("has=true"), "got: {out:?}");
+    assert!(out.contains("nrows=2"), "got: {out:?}");
+    assert!(out.contains("name=k"), "got: {out:?}");
+    assert!(out.contains("l0=a"), "got: {out:?}");
+    assert!(out.contains("l1=c"), "got: {out:?}");
+}
+
+#[test]
+fn dropna_subset_preserves_index() {
+    let src = "\
+from tabular import Column, ColumnI64, ColumnF64, ColumnStr, DataFrame
+import tabular
+fn main() -> i32:
+    keys: List[str] = []
+    keys.append(\"a\")
+    keys.append(\"b\")
+    keys.append(\"c\")
+    k: ColumnStr = tabular.col_str_simple(keys)
+    vs: List[i64] = []
+    vs.append(1i64)
+    vs.append(2i64)
+    vs.append(3i64)
+    v: ColumnI64 = tabular.col_i64_simple(vs)
+    fs: List[f64] = []
+    fs.append(0.0)
+    fs.append(2.5)
+    fs.append(0.0)
+    fns: List[bool] = []
+    fns.append(true)
+    fns.append(false)
+    fns.append(true)
+    fc: ColumnF64 = tabular.col_f64(fs, fns)
+    cn: List[str] = []
+    cn.append(\"k\")
+    cn.append(\"v\")
+    cn.append(\"f\")
+    cols: List[Column] = []
+    cols.append(k)
+    cols.append(v)
+    cols.append(fc)
+    df: DataFrame = tabular.from_columns(cn, cols)
+    df2: DataFrame = df.set_index(\"k\")
+    subset: List[str] = []
+    subset.append(\"f\")
+    df3: DataFrame = df2.dropna_subset(subset)
+    println(\"has=\" + str(df3.has_index()))
+    println(\"nrows=\" + str(df3.length()))
+    flat: DataFrame = df3.reset_index()
+    s: ColumnStr? = flat.get_column_str(\"k\")
+    if s is not none:
+        a: str? = s.get(0i64)
+        if a is not none:
+            println(\"l0=\" + a)
+    return 0
+";
+    let out = run("dropna_subset_preserves_index", src);
+    assert!(out.contains("has=true"), "got: {out:?}");
+    assert!(out.contains("nrows=1"), "got: {out:?}");
+    assert!(out.contains("l0=b"), "got: {out:?}");
+}
+
+#[test]
+fn fillna_i64_preserves_index() {
+    let src = "\
+from tabular import Column, ColumnI64, ColumnStr, DataFrame
+import tabular
+fn main() -> i32:
+    keys: List[str] = []
+    keys.append(\"a\")
+    keys.append(\"b\")
+    keys.append(\"c\")
+    k: ColumnStr = tabular.col_str_simple(keys)
+    vs: List[i64] = []
+    vs.append(1i64)
+    vs.append(0i64)
+    vs.append(3i64)
+    ns: List[bool] = []
+    ns.append(false)
+    ns.append(true)
+    ns.append(false)
+    v: ColumnI64 = tabular.col_i64(vs, ns)
+    cn: List[str] = []
+    cn.append(\"k\")
+    cn.append(\"v\")
+    cols: List[Column] = []
+    cols.append(k)
+    cols.append(v)
+    df: DataFrame = tabular.from_columns(cn, cols)
+    df2: DataFrame = df.set_index(\"k\")
+    df3: DataFrame = df2.fillna_i64(99i64)
+    println(\"has=\" + str(df3.has_index()))
+    println(\"nrows=\" + str(df3.length()))
+    flat: DataFrame = df3.reset_index()
+    s: ColumnStr? = flat.get_column_str(\"k\")
+    if s is not none:
+        a: str? = s.get(1i64)
+        if a is not none:
+            println(\"l1=\" + a)
+    vc: ColumnI64? = df3.get_column_i64(\"v\")
+    if vc is not none:
+        v1: i64? = vc.get(1i64)
+        if v1 is not none:
+            println(\"v1=\" + str(v1))
+    return 0
+";
+    let out = run("fillna_i64_preserves_index", src);
+    assert!(out.contains("has=true"), "got: {out:?}");
+    assert!(out.contains("nrows=3"), "got: {out:?}");
+    assert!(out.contains("l1=b"), "got: {out:?}");
+    assert!(out.contains("v1=99"), "got: {out:?}");
+}
+
+#[test]
+fn fillna_f64_preserves_index() {
+    let src = "\
+from tabular import Column, ColumnF64, ColumnStr, DataFrame
+import tabular
+fn main() -> i32:
+    keys: List[str] = []
+    keys.append(\"a\")
+    keys.append(\"b\")
+    k: ColumnStr = tabular.col_str_simple(keys)
+    fs: List[f64] = []
+    fs.append(0.0)
+    fs.append(1.5)
+    ns: List[bool] = []
+    ns.append(true)
+    ns.append(false)
+    f: ColumnF64 = tabular.col_f64(fs, ns)
+    cn: List[str] = []
+    cn.append(\"k\")
+    cn.append(\"f\")
+    cols: List[Column] = []
+    cols.append(k)
+    cols.append(f)
+    df: DataFrame = tabular.from_columns(cn, cols)
+    df2: DataFrame = df.set_index(\"k\")
+    df3: DataFrame = df2.fillna_f64(0.0)
+    println(\"has=\" + str(df3.has_index()))
+    println(\"nrows=\" + str(df3.length()))
+    return 0
+";
+    let out = run("fillna_f64_preserves_index", src);
+    assert!(out.contains("has=true"), "got: {out:?}");
+    assert!(out.contains("nrows=2"), "got: {out:?}");
+}
+
+#[test]
+fn fillna_str_preserves_index() {
+    let src = "\
+from tabular import Column, ColumnStr, ColumnI64, DataFrame
+import tabular
+fn main() -> i32:
+    keys: List[str] = []
+    keys.append(\"a\")
+    keys.append(\"b\")
+    keys.append(\"c\")
+    k: ColumnStr = tabular.col_str_simple(keys)
+    vs: List[str] = []
+    vs.append(\"x\")
+    vs.append(\"\")
+    vs.append(\"z\")
+    ns: List[bool] = []
+    ns.append(false)
+    ns.append(true)
+    ns.append(false)
+    v: ColumnStr = tabular.col_str(vs, ns)
+    cn: List[str] = []
+    cn.append(\"k\")
+    cn.append(\"v\")
+    cols: List[Column] = []
+    cols.append(k)
+    cols.append(v)
+    df: DataFrame = tabular.from_columns(cn, cols)
+    df2: DataFrame = df.set_index(\"k\")
+    df3: DataFrame = df2.fillna_str(\"missing\")
+    println(\"has=\" + str(df3.has_index()))
+    println(\"nrows=\" + str(df3.length()))
+    return 0
+";
+    let out = run("fillna_str_preserves_index", src);
+    assert!(out.contains("has=true"), "got: {out:?}");
+    assert!(out.contains("nrows=3"), "got: {out:?}");
+}
