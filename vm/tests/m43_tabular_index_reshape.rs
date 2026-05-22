@@ -720,6 +720,166 @@ fn main() -> i32:
     assert!(out.contains("has=false"), "got: {out:?}");
 }
 
+// ── Phase C: melt index repetition ───────────────────────────────────
+
+#[test]
+fn melt_repeats_input_index_per_value_var() {
+    // Input has 3 rows with index labels [100, 200, 300].  2 value_vars
+    // → output has 6 rows with index [100,100,200,200,300,300].
+    let src = "\
+from tabular import Column, ColumnI64, DataFrame
+import tabular
+fn main() -> i32:
+    ids: List[i64] = []
+    ids.append(100i64)
+    ids.append(200i64)
+    ids.append(300i64)
+    id: ColumnI64 = tabular.col_i64_simple(ids)
+    av: List[i64] = []
+    av.append(1i64)
+    av.append(2i64)
+    av.append(3i64)
+    a: ColumnI64 = tabular.col_i64_simple(av)
+    bv: List[i64] = []
+    bv.append(10i64)
+    bv.append(20i64)
+    bv.append(30i64)
+    b: ColumnI64 = tabular.col_i64_simple(bv)
+    cn: List[str] = []
+    cn.append(\"id\")
+    cn.append(\"a\")
+    cn.append(\"b\")
+    cols: List[Column] = []
+    cols.append(id)
+    cols.append(a)
+    cols.append(b)
+    df: DataFrame = tabular.from_columns(cn, cols)
+    df2: DataFrame = df.set_index(\"id\")
+    id_vars: List[str] = []
+    value_vars: List[str] = []
+    value_vars.append(\"a\")
+    value_vars.append(\"b\")
+    m: DataFrame = df2.melt(id_vars, value_vars)
+    println(\"nrows=\" + str(m.length()))
+    println(\"has=\" + str(m.has_index()))
+    inm: str? = m.index_name()
+    if inm is not none:
+        println(\"iname=\" + inm)
+    flat: DataFrame = m.reset_index()
+    ic: ColumnI64? = flat.get_column_i64(\"id\")
+    if ic is not none:
+        i0: i64? = ic.get(0i64)
+        i1: i64? = ic.get(1i64)
+        i2: i64? = ic.get(2i64)
+        i3: i64? = ic.get(3i64)
+        if i0 is not none:
+            println(\"i0=\" + str(i0))
+        if i1 is not none:
+            println(\"i1=\" + str(i1))
+        if i2 is not none:
+            println(\"i2=\" + str(i2))
+        if i3 is not none:
+            println(\"i3=\" + str(i3))
+    return 0
+";
+    let out = run("melt_index_repeats", src);
+    assert!(out.contains("nrows=6"), "got: {out:?}");
+    assert!(out.contains("has=true"), "got: {out:?}");
+    assert!(out.contains("iname=id"), "got: {out:?}");
+    // Each input row index repeated twice (one per value_var):
+    // 100,100,200,200,300,300
+    assert!(out.contains("i0=100"), "got: {out:?}");
+    assert!(out.contains("i1=100"), "got: {out:?}");
+    assert!(out.contains("i2=200"), "got: {out:?}");
+    assert!(out.contains("i3=200"), "got: {out:?}");
+}
+
+#[test]
+fn melt_without_index_produces_range_index() {
+    // Input has no index → output uses RangeIndex (today's behavior).
+    let src = "\
+from tabular import Column, ColumnI64, DataFrame
+import tabular
+fn main() -> i32:
+    av: List[i64] = []
+    av.append(1i64)
+    av.append(2i64)
+    a: ColumnI64 = tabular.col_i64_simple(av)
+    bv: List[i64] = []
+    bv.append(10i64)
+    bv.append(20i64)
+    b: ColumnI64 = tabular.col_i64_simple(bv)
+    cn: List[str] = []
+    cn.append(\"a\")
+    cn.append(\"b\")
+    cols: List[Column] = []
+    cols.append(a)
+    cols.append(b)
+    df: DataFrame = tabular.from_columns(cn, cols)
+    id_vars: List[str] = []
+    value_vars: List[str] = []
+    value_vars.append(\"a\")
+    value_vars.append(\"b\")
+    m: DataFrame = df.melt(id_vars, value_vars)
+    println(\"has=\" + str(m.has_index()))
+    return 0
+";
+    let out = run("melt_no_index", src);
+    assert!(out.contains("has=false"), "got: {out:?}");
+}
+
+#[test]
+fn melt_preserves_index_dtype_str() {
+    // String-typed index repeats per value_var.
+    let src = "\
+from tabular import Column, ColumnI64, ColumnStr, DataFrame
+import tabular
+fn main() -> i32:
+    ids: List[str] = []
+    ids.append(\"x\")
+    ids.append(\"y\")
+    id: ColumnStr = tabular.col_str_simple(ids)
+    av: List[i64] = []
+    av.append(1i64)
+    av.append(2i64)
+    a: ColumnI64 = tabular.col_i64_simple(av)
+    bv: List[i64] = []
+    bv.append(10i64)
+    bv.append(20i64)
+    b: ColumnI64 = tabular.col_i64_simple(bv)
+    cn: List[str] = []
+    cn.append(\"id\")
+    cn.append(\"a\")
+    cn.append(\"b\")
+    cols: List[Column] = []
+    cols.append(id)
+    cols.append(a)
+    cols.append(b)
+    df: DataFrame = tabular.from_columns(cn, cols)
+    df2: DataFrame = df.set_index(\"id\")
+    id_vars: List[str] = []
+    value_vars: List[str] = []
+    value_vars.append(\"a\")
+    value_vars.append(\"b\")
+    m: DataFrame = df2.melt(id_vars, value_vars)
+    println(\"nrows=\" + str(m.length()))
+    flat: DataFrame = m.reset_index()
+    ic: ColumnStr? = flat.get_column_str(\"id\")
+    if ic is not none:
+        i0: str? = ic.get(0i64)
+        i2: str? = ic.get(2i64)
+        if i0 is not none:
+            println(\"i0=\" + i0)
+        if i2 is not none:
+            println(\"i2=\" + i2)
+    return 0
+";
+    let out = run("melt_index_str", src);
+    assert!(out.contains("nrows=4"), "got: {out:?}");
+    assert!(out.contains("i0=x"), "got: {out:?}");
+    assert!(out.contains("i2=y"), "got: {out:?}");
+}
+
 #[test]
 fn single_col_group_by_size_promotes_to_index() {
     let src = "\

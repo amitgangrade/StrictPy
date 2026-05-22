@@ -15720,7 +15720,31 @@ fn m39_df_melt(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     out_cols.push(
         m37_alloc_column(interp, &first_cls, val_v_lst, val_n_lst, val_nulls.len() as i64) as u64,
     );
-    Ok(m37_build_df(interp, &out_names, &out_cols, out_nrows as i64))
+    // M43: if the input has an index, the output's index is the input's
+    // index with each label repeated `len(value_vars)` times.  No
+    // index → RangeIndex (today's behavior).
+    let (m43_melt_parent_index, m43_melt_parent_index_name) = m41_df_index_fields(recv);
+    let (m43_melt_out_index, m43_melt_out_index_name) = if m43_melt_parent_index != 0 {
+        // Build the repeated row-index vector.
+        let mut m43_melt_take: Vec<usize> = Vec::with_capacity(out_nrows);
+        for r in 0..nrows as usize {
+            for _ in 0..value_vars.len() {
+                m43_melt_take.push(r);
+            }
+        }
+        let permuted = m37_column_take(interp, m43_melt_parent_index, &m43_melt_take);
+        (permuted, m43_melt_parent_index_name)
+    } else {
+        (0u64, 0u64)
+    };
+    Ok(m41_build_df_with_index(
+        interp,
+        &out_names,
+        &out_cols,
+        out_nrows as i64,
+        m43_melt_out_index,
+        m43_melt_out_index_name,
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════
