@@ -667,7 +667,12 @@ fn main() -> i32:
 // ── Phase C: pivot_table ──────────────────────────────────────────────
 
 #[test]
-fn pivot_table_sum_happy_path() {
+fn pivot_table_sum_happy_path_m43() {
+    // M43 flipped pivot_table to promote `index_col` to the output's
+    // index instead of inserting it as a regular column.  The original
+    // M41 test asserted `ncols=3` (sym + buy + sell); post-M43 it's
+    // `ncols=2` (just buy + sell) and the frame's index is the unique
+    // sym values.  Original name: pivot_table_sum_happy_path.
     let src = "\
 from tabular import Column, ColumnI64, ColumnStr, DataFrame
 import tabular
@@ -708,6 +713,10 @@ fn main() -> i32:
     pt: DataFrame = df.pivot_table(\"sym\", \"side\", \"qty\", \"sum\")
     println(\"nrows=\" + str(pt.length()))
     println(\"ncols=\" + str(pt.ncols()))
+    println(\"has=\" + str(pt.has_index()))
+    inm: str? = pt.index_name()
+    if inm is not none:
+        println(\"iname=\" + inm)
     bc: ColumnI64? = pt.get_column_i64(\"buy\")
     if bc is not none:
         b0: i64? = bc.get(0i64)
@@ -727,9 +736,11 @@ fn main() -> i32:
     return 0
 ";
     let out = run("pivot_table_sum", src);
-    // 2 sym values × (1 index col + 2 side cols) = 3 cols
+    // 2 sym values × (2 side cols) = 2 cols — sym promoted to index.
     assert!(out.contains("nrows=2"), "got: {out:?}");
-    assert!(out.contains("ncols=3"), "got: {out:?}");
+    assert!(out.contains("ncols=2"), "got: {out:?}");
+    assert!(out.contains("has=true"), "got: {out:?}");
+    assert!(out.contains("iname=sym"), "got: {out:?}");
     // a: buys = 10 + 2 = 12, sell = 5
     // b: buys = 7 + 1 = 8, sell = 3
     assert!(out.contains("a_buy=12"), "got: {out:?}");

@@ -74,10 +74,10 @@ fn tabular_index_demo_runs_via_spy_exe() {
     // sort_index descending: rev0 is the day-5 bucket (qty=4).
     assert!(stdout.contains("rev0=4"), "stdout:\n{stdout}");
 
-    // pivot_table: AAPL has 4 trades, GOOG has 2.  2 rows × (1 index col
-    // + 2 side cols) = 3 columns.
+    // pivot_table: AAPL has 4 trades, GOOG has 2.  M43 promotes the
+    // index_col ("symbol") to the output's index; 2 rows × 2 side cols.
     assert!(stdout.contains("pivot_nrows=2"), "stdout:\n{stdout}");
-    assert!(stdout.contains("pivot_ncols=3"), "stdout:\n{stdout}");
+    assert!(stdout.contains("pivot_ncols=2"), "stdout:\n{stdout}");
     // AAPL buys = 10 + 7 + 4 = 21
     // GOOG buys = 2
     // AAPL sells = 3

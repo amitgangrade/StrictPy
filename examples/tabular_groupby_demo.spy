@@ -95,8 +95,9 @@ fn main() -> i32:
     println("groups=" + str(sizes.length()))
 
     totals: DataFrame = gdf.sum()
-    # Sort by category ascending for deterministic print order.
-    totals = totals.sort_by("category", true)
+    # M43: single-column group_by promotes "category" to the index;
+    # sort_index orders rows by the unique category labels.
+    totals = totals.sort_index(true)
     # Read out the qty totals by category.
     qty_totals: ColumnI64? = totals.get_column_i64("qty")
     if qty_totals is not none:
@@ -112,13 +113,16 @@ fn main() -> i32:
     specs.append(("qty", "sum"))
     specs.append(("price", "mean"))
     agg_out: DataFrame = gdf.agg(specs)
-    agg_out = agg_out.sort_by("category", true)
+    agg_out = agg_out.sort_index(true)
     println("agg_cols=" + str(agg_out.ncols()))
 
-    # ── Phase A: rename — produce a small renamed projection ──
+    # ── Phase A: rename — operates on the qty regular column.  Post-
+    # M43 "category" is the index, not a regular column, so rename it
+    # by reset_index → rename → set_index back.
+    flat: DataFrame = totals.reset_index()
     rs: List[Tuple[str, str]] = []
     rs.append(("category", "cat"))
-    renamed: DataFrame = totals.rename(rs)
+    renamed: DataFrame = flat.rename(rs)
     new_names: List[str] = renamed.columns()
     println("renamed_first=" + new_names[0i32])
 

@@ -67,8 +67,9 @@ fn tabular_groupby_demo_runs_via_spy_exe() {
     // food: 10 + 7 + 3 = 20; tools: 2.
     assert!(stdout.contains("food_qty=20"), "stdout:\n{stdout}");
     assert!(stdout.contains("tools_qty=2"), "stdout:\n{stdout}");
-    // Custom agg specs: category + qty_sum + price_mean = 3 cols.
-    assert!(stdout.contains("agg_cols=3"), "stdout:\n{stdout}");
+    // M43 flipped: single-column group_by promotes "category" to the
+    // index, so agg() now returns 2 regular cols (qty_sum + price_mean).
+    assert!(stdout.contains("agg_cols=2"), "stdout:\n{stdout}");
     // Rename.
     assert!(stdout.contains("renamed_first=cat"), "stdout:\n{stdout}");
     assert!(stdout.contains("done"), "stdout:\n{stdout}");

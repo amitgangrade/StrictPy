@@ -578,30 +578,36 @@ fn make_frame() -> DataFrame:
 
 #[test]
 fn group_by_single_column_size() {
+    // M43 flipped: single-column group_by promotes the key to the
+    // result's index; the regular-columns list shrinks by one.
     let src = format!(
         "{GBY_SRC_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"cat\")\n    gdf: GroupedDataFrame = df.group_by(keys)\n    sz: DataFrame = gdf.size()\n    println(\"size_rows=\" + str(sz.length()))\n    println(\"size_cols=\" + str(sz.ncols()))\n    return 0\n"
     );
     let out = run("gby_size", &src);
     // 2 groups (a, b)
     assert!(out.contains("size_rows=2"), "got: {out:?}");
-    // cat + size = 2 cols
-    assert!(out.contains("size_cols=2"), "got: {out:?}");
+    // size only — cat is now the index, not a regular column.
+    assert!(out.contains("size_cols=1"), "got: {out:?}");
 }
 
 #[test]
 fn group_by_keys_returns_unique_groups() {
+    // M43 flipped: single-column gdf.keys() returns a 0-regular-col
+    // frame whose index IS the unique group keys.
     let src = format!(
         "{GBY_SRC_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"cat\")\n    gdf: GroupedDataFrame = df.group_by(keys)\n    k: DataFrame = gdf.keys()\n    println(\"k_rows=\" + str(k.length()))\n    println(\"k_cols=\" + str(k.ncols()))\n    return 0\n"
     );
     let out = run("gby_keys", &src);
     assert!(out.contains("k_rows=2"), "got: {out:?}");
-    assert!(out.contains("k_cols=1"), "got: {out:?}");
+    assert!(out.contains("k_cols=0"), "got: {out:?}");
 }
 
 #[test]
 fn group_by_sum_shortcut() {
+    // M43 flipped: cat promoted to index → sort by the index, not by
+    // the (no-longer-present) cat regular column.
     let src = format!(
-        "{GBY_SRC_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"cat\")\n    gdf: GroupedDataFrame = df.group_by(keys)\n    s: DataFrame = gdf.sum()\n    println(\"s_rows=\" + str(s.length()))\n    println(\"s_cols=\" + str(s.ncols()))\n    sorted_s: DataFrame = s.sort_by(\"cat\", true)\n    qty_col: ColumnI64? = sorted_s.get_column_i64(\"qty\")\n    if qty_col is not none:\n        a: i64? = qty_col.get(0i64)\n        b: i64? = qty_col.get(1i64)\n        if a is not none:\n            println(\"a_sum=\" + str(a))\n        if b is not none:\n            println(\"b_sum=\" + str(b))\n    return 0\n"
+        "{GBY_SRC_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"cat\")\n    gdf: GroupedDataFrame = df.group_by(keys)\n    s: DataFrame = gdf.sum()\n    println(\"s_rows=\" + str(s.length()))\n    println(\"s_cols=\" + str(s.ncols()))\n    sorted_s: DataFrame = s.sort_index(true)\n    qty_col: ColumnI64? = sorted_s.get_column_i64(\"qty\")\n    if qty_col is not none:\n        a: i64? = qty_col.get(0i64)\n        b: i64? = qty_col.get(1i64)\n        if a is not none:\n            println(\"a_sum=\" + str(a))\n        if b is not none:\n            println(\"b_sum=\" + str(b))\n    return 0\n"
     );
     let out = run("gby_sum", &src);
     // a: 10+20+30 = 60; b: 5+15 = 20
@@ -611,8 +617,9 @@ fn group_by_sum_shortcut() {
 
 #[test]
 fn group_by_mean_shortcut() {
+    // M43 flipped: sort_by("cat") → sort_index(true).
     let src = format!(
-        "{GBY_SRC_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"cat\")\n    gdf: GroupedDataFrame = df.group_by(keys)\n    m: DataFrame = gdf.mean()\n    sorted_m: DataFrame = m.sort_by(\"cat\", true)\n    qty_col: ColumnF64? = sorted_m.get_column_f64(\"qty\")\n    if qty_col is not none:\n        a: f64? = qty_col.get(0i64)\n        if a is not none:\n            println(\"a_mean=\" + str(a))\n    return 0\n"
+        "{GBY_SRC_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"cat\")\n    gdf: GroupedDataFrame = df.group_by(keys)\n    m: DataFrame = gdf.mean()\n    sorted_m: DataFrame = m.sort_index(true)\n    qty_col: ColumnF64? = sorted_m.get_column_f64(\"qty\")\n    if qty_col is not none:\n        a: f64? = qty_col.get(0i64)\n        if a is not none:\n            println(\"a_mean=\" + str(a))\n    return 0\n"
     );
     let out = run("gby_mean", &src);
     // a mean: (10+20+30)/3 = 20
@@ -621,8 +628,9 @@ fn group_by_mean_shortcut() {
 
 #[test]
 fn group_by_count_shortcut() {
+    // M43 flipped: sort_by("cat") → sort_index(true).
     let src = format!(
-        "{GBY_SRC_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"cat\")\n    gdf: GroupedDataFrame = df.group_by(keys)\n    c: DataFrame = gdf.count()\n    sorted_c: DataFrame = c.sort_by(\"cat\", true)\n    qty_col: ColumnI64? = sorted_c.get_column_i64(\"qty\")\n    if qty_col is not none:\n        a: i64? = qty_col.get(0i64)\n        b: i64? = qty_col.get(1i64)\n        if a is not none:\n            println(\"a_count=\" + str(a))\n        if b is not none:\n            println(\"b_count=\" + str(b))\n    return 0\n"
+        "{GBY_SRC_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"cat\")\n    gdf: GroupedDataFrame = df.group_by(keys)\n    c: DataFrame = gdf.count()\n    sorted_c: DataFrame = c.sort_index(true)\n    qty_col: ColumnI64? = sorted_c.get_column_i64(\"qty\")\n    if qty_col is not none:\n        a: i64? = qty_col.get(0i64)\n        b: i64? = qty_col.get(1i64)\n        if a is not none:\n            println(\"a_count=\" + str(a))\n        if b is not none:\n            println(\"b_count=\" + str(b))\n    return 0\n"
     );
     let out = run("gby_count", &src);
     assert!(out.contains("a_count=3"), "got: {out:?}");
@@ -631,15 +639,18 @@ fn group_by_count_shortcut() {
 
 #[test]
 fn group_by_agg_specs() {
+    // M43 flipped: single-column group_by → cat is the index, so
+    // a_cols counts only qty_sum + qty_max (= 2), and out_names[0] is
+    // qty_sum, out_names[1] is qty_max (no leading "cat" column).
     let src = format!(
-        "{GBY_SRC_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"cat\")\n    gdf: GroupedDataFrame = df.group_by(keys)\n    specs: List[Tuple[str, str]] = []\n    specs.append((\"qty\", \"sum\"))\n    specs.append((\"qty\", \"max\"))\n    a: DataFrame = gdf.agg(specs)\n    println(\"a_rows=\" + str(a.length()))\n    println(\"a_cols=\" + str(a.ncols()))\n    out_names: List[str] = a.columns()\n    println(\"col1=\" + out_names[1i32])\n    println(\"col2=\" + out_names[2i32])\n    return 0\n"
+        "{GBY_SRC_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"cat\")\n    gdf: GroupedDataFrame = df.group_by(keys)\n    specs: List[Tuple[str, str]] = []\n    specs.append((\"qty\", \"sum\"))\n    specs.append((\"qty\", \"max\"))\n    a: DataFrame = gdf.agg(specs)\n    println(\"a_rows=\" + str(a.length()))\n    println(\"a_cols=\" + str(a.ncols()))\n    out_names: List[str] = a.columns()\n    println(\"col0=\" + out_names[0i32])\n    println(\"col1=\" + out_names[1i32])\n    return 0\n"
     );
     let out = run("gby_agg_specs", &src);
     assert!(out.contains("a_rows=2"), "got: {out:?}");
-    // cat + qty_sum + qty_max = 3
-    assert!(out.contains("a_cols=3"), "got: {out:?}");
-    assert!(out.contains("col1=qty_sum"), "got: {out:?}");
-    assert!(out.contains("col2=qty_max"), "got: {out:?}");
+    // qty_sum + qty_max = 2 cols; cat is the index.
+    assert!(out.contains("a_cols=2"), "got: {out:?}");
+    assert!(out.contains("col0=qty_sum"), "got: {out:?}");
+    assert!(out.contains("col1=qty_max"), "got: {out:?}");
 }
 
 #[test]
