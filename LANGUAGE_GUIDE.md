@@ -1,6 +1,6 @@
 # StrictPy — language guide for AI coding tools
 
-**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M41 (2026-05-22).
+**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M42 (2026-05-22).
 
 **Audience**: any AI coding tool (Claude, GPT, Gemini, etc.) being asked to write a StrictPy program. This file is the single source of truth for writing idiomatic StrictPy — you should NOT need to read the compiler source (`compiler/src/`) or VM source (`vm/src/`) to write correct code.
 
@@ -996,7 +996,7 @@ cur.row_count() -> i64                            # rows the underlying query pr
 
 All cells are stringified (v0.4 will add typed cell access).
 
-### tabular (M37, extended by M38, M39, M40, M41)
+### tabular (M37, extended by M38, M39, M40, M41, M42)
 
 First Pandas-shaped data package — native Rust impl (real pandas can't import). Sealed `Column` hierarchy + `DataFrame` with named columns + per-column null mask. First stdlib package to register its classes module-scoped from the start (no prelude bloat — see §6.2). M38 rounds out the M37 STOP-CRITERIA debt and adds per-column aggregations, `df.describe`, `Column.fill_null`, `tabular.from_dict`, and hash-based group-by via a new `GroupedDataFrame` class. M39 adds the Phase 4 reshape surface: per-dtype `unique`, `value_counts`, `concat_rows`/`concat_cols`, `df.merge` (hash-join), `df.pivot`, and `df.melt`. M40 closes the time-series / null-handling / cumulative / range-slicing surface: per-column cumulative ops, whole-frame `dropna` / `fillna_*`, `df.iloc` range slicing, rolling-window aggregations, `df.resample` time-bucketing, and `df.asof_merge`.
 
@@ -1291,14 +1291,14 @@ df.sort_index(ascending: bool) -> DataFrame # stable; preserves the index
                                             # raises ValueError if no index
 ```
 
-**EXPLICIT SCOPE-DOWN — index-dropping is the v1 default.** Every existing DataFrame method that returns a fresh frame (`filter`, `sort_by`, `head`, `tail`, `iloc`, `select`, `drop`, `merge`, `pivot`, `melt`, `concat`, `dropna`, `fillna_*`, `resample`, `asof_merge`, `set_index` itself, etc.) **drops the index in v1** — the result is a `RangeIndex` frame. Only the following M41 methods preserve the index:
+**EXPLICIT SCOPE-DOWN (M41) — index-dropping is the v1 default.** Every existing DataFrame method that returns a fresh frame (`filter`, `sort_by`, `head`, `tail`, `iloc`, `select`, `drop`, `merge`, `pivot`, `melt`, `concat`, `dropna`, `fillna_*`, `resample`, `asof_merge`, `set_index` itself, etc.) **drops the index in v1 (M41)** — the result is a `RangeIndex` frame. Only the following M41 methods preserve the index:
 
 - `sort_index(ascending)`
 - `resample_index(rule, agg)`
 - `asof_merge_index(other)`
 - `select_by_label_{i64,str,datetime}(label)` (one-row outputs)
 
-Full index propagation through every method is M42 work. The v1 split makes the new surface usable without changing the behavior of any pre-M41 op.
+Full index propagation through every method is M42 work. **Status post-M42: closed for 11 methods (filter, sort_by, head, tail, iloc, select, drop, rename, dropna, dropna_subset, fillna_\*, merge).** See the "M42 additions" subsection below and §11.26 for the current propagation table.
 
 **Index-aware time-series.** Variants of M40's `resample` / `asof_merge` that read the key from the DataFrame's index.
 
@@ -1338,6 +1338,24 @@ df.pivot_table(index_col: str, columns_col: str,
 ```
 
 See `examples/tabular_index_demo.spy` for an end-to-end M41 walkthrough (set_index → resample_index → sort_index → pivot_table → asof_merge_index → select_by_label_str → reset_index).
+
+#### M42 additions — index propagation through existing methods
+
+M42 closes the M41 v1 scope-down: 11 existing DataFrame methods that returned a fresh frame now PROPAGATE the index through their row/column transformations. No new methods, no new IDs — only behavior changes:
+
+- **Row-selection ops (Phase A):** `filter`, `sort_by`, `head`, `tail`, `iloc` — the parent's index is permuted by the same row-selection vector that produces the new column data, then attached to the result.
+- **Column-list ops (Phase B):** `select`, `drop`, `rename` — these don't touch row order; the index is cloned unchanged.
+- **Null handling (Phase C):** `dropna` and `dropna_subset` permute the index by the surviving-row vector. `fillna_i64` / `fillna_f64` / `fillna_str` / `fillna_bool` / `fillna_datetime` are pure row-pass-throughs and clone the index unchanged.
+- **Merge (Phase D):** `merge(other, on, how)` carries an index per pandas-style rules per `how`:
+  - `inner` / `left`: result index = self's index, permuted to the kept rows.
+  - `right`: result index = other's index.
+  - `outer`: result index = self's index for matched/left-only rows + other's index for right-only rows. Requires matching dtypes; on dtype mismatch the result falls back to RangeIndex (v1 simplification — see §11.26).
+
+In every case, if the parent (or the chosen side, for merge) has no index, the result is a RangeIndex frame — same as pre-M42 behavior on un-indexed inputs. **index_name policy:** preserved from the parent (lhs wins for inner/left/outer merge; rhs wins for right merge).
+
+The following methods still drop the index in v1 (M42 scope): `pivot`, `melt`, `group_by` + agg, `pivot_table`, `concat_rows`, `concat_cols`, plus the M40 time-series shortcuts `resample` and `asof_merge` (the index-aware `resample_index` / `asof_merge_index` already carry the index). M43+ may revisit. Column-returning ops (`unique_*`, `value_counts`) trivially have no index — they return a `Column` or a 2-column `DataFrame`.
+
+See `examples/tabular_index_propagation_demo.spy` for an end-to-end M42 walkthrough (set_index → filter → sort_by → dropna_subset → fillna_f64 → merge → select → sort_index).
 
 ### shutil (M27 P3c-A)
 
@@ -2254,13 +2272,39 @@ For the M40 `df.resample(time_col, rule, agg)`: M40 does NOT add a DatetimeIndex
 
 For the M40 `df.asof_merge(other, on_self, on_other)`: both key columns must share dtype — either both `ColumnDateTime` (matching the typical time-series-merge case) or both `ColumnI64`. Mixed-dtype keys raise `ValueError`. The match rule is `other[on_other] <= self[on_self]` for the largest such row; self rows with no matching other row get null in the right-side columns. Null cells in either key column are treated as non-matchable.
 
-### 11.26 `tabular` DatetimeIndex v1 scope-down — existing methods drop the index
+### 11.26 `tabular` DatetimeIndex propagation rules (post-M42)
 
-The M41 `set_index` / `reset_index` / `has_index` surface adds an optional index slot to `DataFrame`. In v1 (M41) only four methods preserve the index: `sort_index`, `resample_index`, `asof_merge_index`, and the `select_by_label_*` family. **Every other method that returns a fresh frame** — `filter`, `sort_by`, `head`, `tail`, `iloc`, `select`, `drop`, `merge`, `pivot`, `melt`, `concat`, `dropna`, `fillna_*`, `resample`, `asof_merge`, `pivot_table`, etc. — **drops the index in v1**, returning a `RangeIndex` frame. This is the explicit v1 scope-down: full index propagation through every path is M42 work, deferred so M41 could ship the index surface in a single milestone. The propagation list will be driven by the methods users actually exercise with indexed frames; flagged callers should round-trip the index with `set_index` after the op.
+M41 shipped the optional DatetimeIndex slot but every existing method that returned a fresh frame **dropped the index in v1**. M42 closed that scope-down. Today the index propagation rules are:
+
+**Preserve the parent's index (post-M42):**
+
+- Row-selection ops: `filter`, `sort_by`, `head`, `tail`, `iloc` — index permuted by the row-selection vector.
+- Column-list ops: `select`, `drop`, `rename` — index cloned unchanged.
+- Null handling: `dropna`, `dropna_subset`, `fillna_i64`, `fillna_f64`, `fillna_str`, `fillna_bool`, `fillna_datetime`.
+- Merge: `merge(other, on, how)` — per-`how` rules below.
+- M41 index-aware ops: `sort_index`, `resample_index`, `asof_merge_index`, `select_by_label_*`.
+
+**Still drop the index (v1 scope, may be revisited M43+):**
+
+- Reshape: `pivot`, `melt`, `concat_rows`, `concat_cols`.
+- Aggregation that re-keys: `group_by` + agg shortcuts, `pivot_table`.
+- M40 time-series shortcuts that don't read the index: `resample`, `asof_merge` (use the `_index` variants to preserve an index).
+
+Column-returning ops (`unique_*`, `value_counts`) trivially carry no index — they return a `Column` or a small 2-column `DataFrame`.
+
+**Merge index-propagation rules per `how`:**
+
+- `inner`: result index = self's index restricted to matched rows. Falls back to RangeIndex if self has no index.
+- `left`: result index = self's index (all left rows preserved). Falls back to RangeIndex if self has no index.
+- `right`: result index = other's index (all right rows preserved). Falls back to RangeIndex if other has no index.
+- `outer`: result index = self's index for matched/left-only rows + other's index for right-only rows. **Requires both indexes share a dtype**; on mismatch the result falls back to RangeIndex (v1 simplification — pandas's NaN-padded MultiIndex output is M43+ territory).
+- `index_name` policy: lhs wins for inner/left/outer; rhs wins for right.
+
+For methods that still drop the index, callers can round-trip it with `set_index(df.index_name())` after the op (assuming the original index column is also a regular column in the output).
 
 ### 11.27 `tabular.select_by_label_*` returns the first matching row on duplicates
 
-The M41 `df.select_by_label_{i64, str, datetime}(label)` family returns a one-row `DataFrame` (or `none` if the label is absent from the index). If the index has duplicate labels — legal but unusual — only the **first matching row** in current row order is returned. To get every matching row, use `df.filter(df.get_column_*(name).eq(label))` instead (which drops the index in v1; see §11.26).
+The M41 `df.select_by_label_{i64, str, datetime}(label)` family returns a one-row `DataFrame` (or `none` if the label is absent from the index). If the index has duplicate labels — legal but unusual — only the **first matching row** in current row order is returned. To get every matching row, use `df.filter(df.get_column_*(name).eq(label))` — post-M42 the filtered frame preserves the index (see §11.26 for the full propagation table).
 
 ### 11.28 `tabular.pivot_table` aggfunc vocabulary
 

@@ -1,0 +1,210 @@
+"""tabular_index_propagation_demo.spy — M42 end-to-end walkthrough.
+
+M41 shipped an optional DatetimeIndex on DataFrame but every existing
+method that returned a fresh frame DROPPED the index in v1.  M42
+closes that scope-down: 11 existing methods (filter, sort_by, head,
+tail, iloc, select, drop, rename, dropna, dropna_subset, fillna_*,
+merge) now PROPAGATE the index through their row/column work.
+
+This demo threads an index through a realistic chain:
+
+  1. Build trades + traders frames; set_index("trade_id") on trades.
+  2. filter(amount > threshold)       — index preserved (M42).
+  3. sort_by("price", false)          — index permuted with rows (M42).
+  4. dropna_subset(["counterparty"])  — index restricted to non-null (M42).
+  5. fillna_f64(0.0)                  — index unchanged (M42).
+  6. merge(traders, on="trader_id", how="left")
+                                      — left's index preserved (M42).
+  7. select(["price", "qty", "trader_name"])
+                                      — index unchanged (M42).
+  8. sort_index(true)                 — final sort by trade_id (M41).
+
+Output is deterministic so `tabular_index_propagation_demo_runs`
+asserts on every println.
+"""
+
+from tabular import Column, ColumnI64, ColumnF64, ColumnStr, ColumnBool, DataFrame
+import tabular
+
+
+fn build_trades() -> DataFrame:
+    """5 trades — trade_id 100..104; tid (trader_id) keys traders."""
+    tid_vs: List[i64] = []
+    tid_vs.append(100i64)
+    tid_vs.append(101i64)
+    tid_vs.append(102i64)
+    tid_vs.append(103i64)
+    tid_vs.append(104i64)
+    trade_id: ColumnI64 = tabular.col_i64_simple(tid_vs)
+
+    tr_vs: List[i64] = []
+    tr_vs.append(1i64)
+    tr_vs.append(2i64)
+    tr_vs.append(1i64)
+    tr_vs.append(3i64)
+    tr_vs.append(2i64)
+    trader_id: ColumnI64 = tabular.col_i64_simple(tr_vs)
+
+    px_vs: List[f64] = []
+    px_vs.append(100.0)
+    px_vs.append(200.0)
+    px_vs.append(150.0)
+    px_vs.append(250.0)
+    px_vs.append(175.0)
+    price: ColumnF64 = tabular.col_f64_simple(px_vs)
+
+    qty_vs: List[i64] = []
+    qty_vs.append(10i64)
+    qty_vs.append(5i64)
+    qty_vs.append(20i64)
+    qty_vs.append(3i64)
+    qty_vs.append(8i64)
+    qty: ColumnI64 = tabular.col_i64_simple(qty_vs)
+
+    amt_vs: List[f64] = []
+    amt_vs.append(1000.0)
+    amt_vs.append(1000.0)
+    amt_vs.append(3000.0)
+    amt_vs.append(750.0)
+    amt_vs.append(1400.0)
+    amount: ColumnF64 = tabular.col_f64_simple(amt_vs)
+
+    cp_vs: List[str] = []
+    cp_vs.append("ACME")
+    cp_vs.append("")
+    cp_vs.append("BETA")
+    cp_vs.append("GAMMA")
+    cp_vs.append("DELTA")
+    cp_ns: List[bool] = []
+    cp_ns.append(false)
+    cp_ns.append(true)
+    cp_ns.append(false)
+    cp_ns.append(false)
+    cp_ns.append(false)
+    counterparty: ColumnStr = tabular.col_str(cp_vs, cp_ns)
+
+    fee_vs: List[f64] = []
+    fee_vs.append(0.0)
+    fee_vs.append(2.5)
+    fee_vs.append(0.0)
+    fee_vs.append(1.0)
+    fee_vs.append(0.0)
+    fee_ns: List[bool] = []
+    fee_ns.append(true)
+    fee_ns.append(false)
+    fee_ns.append(true)
+    fee_ns.append(false)
+    fee_ns.append(true)
+    fee: ColumnF64 = tabular.col_f64(fee_vs, fee_ns)
+
+    cn: List[str] = []
+    cn.append("trade_id")
+    cn.append("trader_id")
+    cn.append("price")
+    cn.append("qty")
+    cn.append("amount")
+    cn.append("counterparty")
+    cn.append("fee")
+    cols: List[Column] = []
+    cols.append(trade_id)
+    cols.append(trader_id)
+    cols.append(price)
+    cols.append(qty)
+    cols.append(amount)
+    cols.append(counterparty)
+    cols.append(fee)
+    return tabular.from_columns(cn, cols)
+
+
+fn build_traders() -> DataFrame:
+    tr_vs: List[i64] = []
+    tr_vs.append(1i64)
+    tr_vs.append(2i64)
+    tr_vs.append(3i64)
+    trader_id: ColumnI64 = tabular.col_i64_simple(tr_vs)
+    name_vs: List[str] = []
+    name_vs.append("Alice")
+    name_vs.append("Bob")
+    name_vs.append("Cara")
+    trader_name: ColumnStr = tabular.col_str_simple(name_vs)
+    cn: List[str] = []
+    cn.append("trader_id")
+    cn.append("trader_name")
+    cols: List[Column] = []
+    cols.append(trader_id)
+    cols.append(trader_name)
+    return tabular.from_columns(cn, cols)
+
+
+fn main() -> i32:
+    trades: DataFrame = build_trades()
+    traders: DataFrame = build_traders()
+    println("trades_nrows=" + str(trades.length()))
+
+    # 1. set_index — trade_id moves out of the regular column list.
+    indexed: DataFrame = trades.set_index("trade_id")
+    println("indexed_has=" + str(indexed.has_index()))
+    inm: str? = indexed.index_name()
+    if inm is not none:
+        println("index_name=" + inm)
+
+    # 2. filter — keep only amounts >= 1000.  M42: index preserved.
+    amt: ColumnF64? = indexed.get_column_f64("amount")
+    if amt is none:
+        return 1
+    mask: ColumnBool = amt.ge(1000.0)
+    filtered: DataFrame = indexed.filter(mask)
+    println("filt_nrows=" + str(filtered.length()))
+    println("filt_has=" + str(filtered.has_index()))
+
+    # 3. sort_by price descending.  M42: index moves with rows.
+    sorted_df: DataFrame = filtered.sort_by("price", false)
+    println("sort_has=" + str(sorted_df.has_index()))
+
+    # 4. dropna_subset on counterparty.  M42: index restricted.
+    subset: List[str] = []
+    subset.append("counterparty")
+    cleaned: DataFrame = sorted_df.dropna_subset(subset)
+    println("clean_nrows=" + str(cleaned.length()))
+    println("clean_has=" + str(cleaned.has_index()))
+
+    # 5. fillna_f64 on remaining nulls.  M42: index unchanged.
+    filled: DataFrame = cleaned.fillna_f64(0.0)
+    println("filled_has=" + str(filled.has_index()))
+
+    # 6. left-merge against traders.  M42: lhs's index preserved.
+    on_keys: List[str] = []
+    on_keys.append("trader_id")
+    enriched: DataFrame = filled.merge(traders, on_keys, "left")
+    println("enr_nrows=" + str(enriched.length()))
+    println("enr_has=" + str(enriched.has_index()))
+    enm: str? = enriched.index_name()
+    if enm is not none:
+        println("enr_name=" + enm)
+
+    # 7. select a tidy projection.  M42: index unchanged.
+    want: List[str] = []
+    want.append("price")
+    want.append("qty")
+    want.append("trader_name")
+    tidy: DataFrame = enriched.select(want)
+    println("tidy_ncols=" + str(tidy.ncols()))
+    println("tidy_has=" + str(tidy.has_index()))
+
+    # 8. sort_index ascending to verify the index threaded through.
+    final_df: DataFrame = tidy.sort_index(true)
+    println("final_has=" + str(final_df.has_index()))
+    idx: Column? = final_df.index()
+    if idx is not none:
+        flat: DataFrame = final_df.reset_index()
+        ti: ColumnI64? = flat.get_column_i64("trade_id")
+        if ti is not none:
+            t0: i64? = ti.get(0i64)
+            t1: i64? = ti.get(1i64)
+            if t0 is not none:
+                println("t0=" + str(t0))
+            if t1 is not none:
+                println("t1=" + str(t1))
+
+    println("done")
+    return 0
