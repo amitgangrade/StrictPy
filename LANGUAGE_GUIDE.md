@@ -1,6 +1,6 @@
 # StrictPy — language guide for AI coding tools
 
-**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M43 (2026-05-22).
+**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M44 (2026-05-22).
 
 **Audience**: any AI coding tool (Claude, GPT, Gemini, etc.) being asked to write a StrictPy program. This file is the single source of truth for writing idiomatic StrictPy — you should NOT need to read the compiler source (`compiler/src/`) or VM source (`vm/src/`) to write correct code.
 
@@ -996,7 +996,7 @@ cur.row_count() -> i64                            # rows the underlying query pr
 
 All cells are stringified (v0.4 will add typed cell access).
 
-### tabular (M37, extended by M38, M39, M40, M41, M42)
+### tabular (M37, extended by M38, M39, M40, M41, M42, M43, M44)
 
 First Pandas-shaped data package — native Rust impl (real pandas can't import). Sealed `Column` hierarchy + `DataFrame` with named columns + per-column null mask. First stdlib package to register its classes module-scoped from the start (no prelude bloat — see §6.2). M38 rounds out the M37 STOP-CRITERIA debt and adds per-column aggregations, `df.describe`, `Column.fill_null`, `tabular.from_dict`, and hash-based group-by via a new `GroupedDataFrame` class. M39 adds the Phase 4 reshape surface: per-dtype `unique`, `value_counts`, `concat_rows`/`concat_cols`, `df.merge` (hash-join), `df.pivot`, and `df.melt`. M40 closes the time-series / null-handling / cumulative / range-slicing surface: per-column cumulative ops, whole-frame `dropna` / `fillna_*`, `df.iloc` range slicing, rolling-window aggregations, `df.resample` time-bucketing, and `df.asof_merge`.
 
@@ -1298,7 +1298,7 @@ df.sort_index(ascending: bool) -> DataFrame # stable; preserves the index
 - `asof_merge_index(other)`
 - `select_by_label_{i64,str,datetime}(label)` (one-row outputs)
 
-Full index propagation through every method shipped across M42 and M43. **Status post-M43: closed for the v1 single-column-index surface** — every reshape op (pivot, melt, concat_rows, concat_cols, pivot_table, single-column group_by + agg) now carries the index. Multi-column group_by remains a M44 anchor (MultiIndex). See the "M42 additions" + "M43 additions" subsections below and §11.26 for the current propagation table.
+Full index propagation through every method shipped across M42 and M43; M44 adds MultiIndex storage + multi-column `group_by` promotion + minimal propagation through 4 row-selection ops. **Status post-M44: single-column-index surface is closed for v1; MultiIndex surface is M44a (storage + group_by promotion + filter/head/tail/iloc propagation), with M44b lifting the drops through the remaining ops.** See the "M42 additions", "M43 additions", and "M44 additions" subsections below; §11.26 for the single-col propagation table; §11.32 for the M44a/M44b MultiIndex drop table.
 
 **Index-aware time-series.** Variants of M40's `resample` / `asof_merge` that read the key from the DataFrame's index.
 
@@ -1369,6 +1369,61 @@ M43 closes the index-propagation story for the remaining reshape ops. After M43,
 - **`melt(id_vars, value_vars)` (Phase C):** if the input has an index, the output's index is the input's index with **each label repeated `len(value_vars)` times** (matches pandas's default melt-on-indexed-frame behavior). Index name + dtype preserved. No index → RangeIndex.
 
 See `examples/tabular_index_reshape_demo.spy` for an end-to-end M43 walkthrough (pivot_table → group_by mean → concat_rows → melt with index-repeat).
+
+#### M44 additions — MultiIndex (storage + multi-col group_by promotion + minimal propagation)
+
+M44 adds the headline missing piece from the v1 single-index story: nested indices that let `group_by([col1, col2])` produce a structured row label rather than retaining the keys as regular columns.
+
+**Storage.** The `DataFrame` payload grows 40 → 56 bytes to carry an optional MultiIndex (`index_levels: List[Column]? + index_names: List[str]?`) alongside the existing M41 single-column index. The two index representations are **mutually exclusive**: a frame has one OR the other OR neither (RangeIndex). `set_index` clears any MultiIndex; `set_index_multi` clears any single-col index.
+
+**6 new methods:**
+
+```python
+df.set_index_multi(cols: List[str]) -> DataFrame
+# Removes cols from the regular column list, attaches them as a
+# MultiIndex.  Raises ValueError if cols is empty, any col is absent,
+# or the frame already has any kind of index.
+
+df.reset_index_multi() -> DataFrame
+# Drops the MultiIndex, re-inserts each level as a regular column at
+# the start (named by index_names[i]).  Returns RangeIndex.  No-op
+# if no MultiIndex.
+
+df.index_nlevels() -> i64
+# 0 = RangeIndex; 1 = single-col index (M41); N = MultiIndex with N
+# levels.  Supplements has_index() — keep has_index() working as
+# "any kind of index" (returns true iff nlevels >= 1).
+
+df.index_level(i: i64) -> Column?
+# Returns the i-th index level as a Column.  None if i is out of range
+# or df has no index.  For a single-col index (nlevels=1), level(0)
+# returns the same column as index().
+
+df.index_level_name(i: i64) -> str?
+# Returns the i-th level's name.  None if out of range or no index.
+
+df.sort_index_multi(ascending: bool) -> DataFrame
+# Stable lexicographic sort by level 0, then level 1, etc.
+# ascending=false reverses the lexicographic order.  Raises
+# ValueError if df has no MultiIndex (use sort_index() for the
+# single-column case).
+```
+
+**Multi-column `group_by` promotion.** All 8 group_by aggregation methods (`sum`, `mean`, `min`, `max`, `count`, `agg`, `size`, `keys`) now promote multi-column group keys to a MultiIndex on the result. Detection is by key count:
+- 1 key  → M41 single-col index (M43 behavior).
+- ≥2 keys → M44 MultiIndex (all keys become levels in order).
+
+`keys()` with ≥2 keys returns a 0-regular-column DataFrame whose MultiIndex is the unique (col1, col2, ...) tuples — same shape principle as M43's single-column `keys()`.
+
+**Minimal propagation in M44a.** Only 4 row-selection ops carry a MultiIndex through:
+- `filter(mask)` — index levels are permuted by the same row-selection vector.
+- `head(n)` — index levels are sliced to `[0, n)`.
+- `tail(n)` — index levels are sliced to the trailing window.
+- `iloc(start, stop)` — index levels are sliced to `[start, stop)`.
+
+**Every OTHER op drops the MultiIndex back to RangeIndex in M44a — explicit M44b anchor.** This includes `sort_by`, `dropna`, `dropna_subset`, `fillna_*`, `merge`, `select`, `drop`, `rename`, `pivot`, `melt`, `concat_rows`, `concat_cols`, `pivot_table`, and the single-col-index time-series ops `resample_index` / `asof_merge_index`. M44b's scope is to lift this. See §11.32 for the full drop table.
+
+See `examples/tabular_multiindex_demo.spy` for an end-to-end M44 walkthrough (multi-col `group_by` sum → `sort_index_multi` → `filter` preserves MultiIndex → `index_level(i)` access → `reset_index_multi` round-trip).
 
 ### shutil (M27 P3c-A)
 
@@ -2285,9 +2340,9 @@ For the M40 `df.resample(time_col, rule, agg)`: M40 does NOT add a DatetimeIndex
 
 For the M40 `df.asof_merge(other, on_self, on_other)`: both key columns must share dtype — either both `ColumnDateTime` (matching the typical time-series-merge case) or both `ColumnI64`. Mixed-dtype keys raise `ValueError`. The match rule is `other[on_other] <= self[on_self]` for the largest such row; self rows with no matching other row get null in the right-side columns. Null cells in either key column are treated as non-matchable.
 
-### 11.26 `tabular` DatetimeIndex propagation rules (post-M43)
+### 11.26 `tabular` DatetimeIndex propagation rules (post-M44)
 
-M41 shipped the optional DatetimeIndex slot but every existing method that returned a fresh frame **dropped the index in v1**. M42 closed that scope-down for the 11 most-used DataFrame methods; M43 closed it for the remaining reshape ops. Today the `tabular` package is **fully index-aware end-to-end for single-column indexes**.
+M41 shipped the optional DatetimeIndex slot but every existing method that returned a fresh frame **dropped the index in v1**. M42 closed that scope-down for the 11 most-used DataFrame methods; M43 closed it for the remaining reshape ops. M44 added MultiIndex storage + multi-column `group_by` promotion + minimal propagation through 4 row-selection ops. Today the `tabular` package is **fully index-aware end-to-end for single-column indexes**, and **partially index-aware for MultiIndex** — see §11.32 for the M44a → M44b drop list.
 
 **Preserve the parent's index (post-M43):**
 
@@ -2296,15 +2351,16 @@ M41 shipped the optional DatetimeIndex slot but every existing method that retur
 - Null handling (M42): `dropna`, `dropna_subset`, `fillna_i64`, `fillna_f64`, `fillna_str`, `fillna_bool`, `fillna_datetime`.
 - Merge (M42): `merge(other, on, how)` — per-`how` rules below.
 - Reshape that promotes a key to the index (M43): `pivot_table(index_col, ...)`, `pivot(index, ...)` — the `index_col` / `index` argument becomes the output's index.
-- Single-column group_by aggregation (M43): `group_by([col]).{sum, mean, min, max, count, agg, size, keys}` — the key column is promoted to the result's index. **Multi-column `group_by([col1, col2])` does NOT promote** (the keys remain regular columns); MultiIndex is M44+.
+- Single-column group_by aggregation (M43): `group_by([col]).{sum, mean, min, max, count, agg, size, keys}` — the key column is promoted to the result's single-col index.
+- Multi-column group_by aggregation (M44): `group_by([col1, col2, ...]).{sum, mean, min, max, count, agg, size, keys}` — all keys are promoted to a MultiIndex on the result. See §11.32 for the M44a `filter / head / tail / iloc` minimal-propagation contract and the M44b anchor list (every other op currently drops the MultiIndex back to RangeIndex).
 - Concatenation (M43): `concat_rows(dfs)` concatenates indexes when all share dtype + name (else RangeIndex fallback — see §11.31). `concat_cols(dfs)` takes lhs's index (consistent with merge lhs-wins).
 - Reshape that repeats the index (M43): `melt(id_vars, value_vars)` — each input row's index label appears once per `value_var` in the output (see §11.30).
 - M41 index-aware ops: `sort_index`, `resample_index`, `asof_merge_index`, `select_by_label_*`.
 
-**Still drop the index (v1 scope, M44+ anchors):**
+**Still drop the index (v1 scope, M44b+ anchors):**
 
-- Multi-column group_by: `group_by([col1, col2]) + agg/sum/mean/min/max/count` — waits for MultiIndex.
 - M40 time-series shortcuts that don't read the index: `resample`, `asof_merge` (use the `_index` variants to preserve an index).
+- For frames carrying a MultiIndex (M44+): every op other than `filter / head / tail / iloc` drops the MultiIndex back to RangeIndex in M44a — see §11.32 for the explicit list.
 
 Column-returning ops (`unique_*`, `value_counts`) trivially carry no index — they return a `Column` or a small 2-column `DataFrame`.
 
@@ -2336,6 +2392,28 @@ Post-M43, `tabular.concat_rows(dfs)` reconciles per-frame indexes by these rules
 - Otherwise (any frame missing an index, or any mismatch in dtype / name): the output falls back to RangeIndex.
 
 For `concat_cols(dfs)`, **lhs's index wins** — if the first frame has an index, the output gets it (cloned); otherwise RangeIndex. Other dfs' indexes are ignored. This mirrors M42's merge lhs-wins policy.
+
+### 11.32 `tabular` MultiIndex propagation rules (M44a)
+
+M44a ships MultiIndex storage + multi-column `group_by` promotion + minimal propagation through 4 row-selection ops. The full propagation surface is **explicitly scoped down** in M44a — most ops drop a MultiIndex back to RangeIndex. M44b's anchor is to lift these drops.
+
+**Preserves the MultiIndex in M44a:**
+
+- `filter(mask)` — every level is permuted by the mask's selection vector.
+- `head(n)` — every level is sliced to `[0, n)`.
+- `tail(n)` — every level is sliced to the trailing window.
+- `iloc(start, stop)` — every level is sliced to `[start, stop)`.
+
+**Drops the MultiIndex back to RangeIndex in M44a (M44b anchors):**
+
+- Row-transforming ops other than the 4 above: `sort_by`, `dropna`, `dropna_subset`, `fillna_i64`, `fillna_f64`, `fillna_str`, `fillna_bool`, `fillna_datetime`, `merge`.
+- Column-list ops: `select`, `drop`, `rename`.
+- Reshape ops: `pivot`, `melt`, `concat_rows`, `concat_cols`, `pivot_table`.
+- Time-series ops: `resample`, `asof_merge`, `resample_index`, `asof_merge_index`.
+
+Within a single-column-index propagation flow (M42/M43), all of these ops still carry the M41 single-col index correctly — only a MultiIndex specifically drops.
+
+`stack` / `unstack`, `df.loc[label_list]` / range-by-label, outer-merge MultiIndex fallback, and `set_index([col])` accepting a 1-element list are all explicit M44b+ work.
 
 ---
 

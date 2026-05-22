@@ -1,0 +1,165 @@
+"""tabular_multiindex_demo.spy — M44 end-to-end walkthrough.
+
+M41 added an optional single-column DatetimeIndex.  M42 propagated
+it through 11 row/column-transforming methods.  M43 finished the v1
+single-index story through the reshape side (pivot_table, single-
+column group_by, pivot, melt, concat_rows, concat_cols).
+
+M44 adds MultiIndex — the headline missing piece for multi-column
+`group_by` to produce a structured row label rather than retaining
+the keys as regular columns:
+
+  - DataFrame.set_index_multi(cols) / .reset_index_multi()
+  - DataFrame.index_nlevels() / .index_level(i) / .index_level_name(i)
+  - DataFrame.sort_index_multi(ascending) — lexicographic
+  - Multi-column group_by aggregations (sum/mean/min/max/count/agg/
+    size/keys) promote ALL key columns to a MultiIndex on the result.
+  - Minimal propagation: filter / head / tail / iloc preserve the
+    MultiIndex.  Other ops drop it back to RangeIndex in M44a (M44b
+    anchor — see LANGUAGE_GUIDE §11.32).
+
+This demo threads a sales-style frame through a 2-level group_by sum
+followed by sort_index_multi, then a filter that preserves the
+MultiIndex, then accesses index_level(i)/index_level_name(i), and
+finally reset_index_multi to round-trip back to a flat frame.
+Output is deterministic so the demo-runs integration test can assert
+on every checkpoint.
+"""
+
+from tabular import Column, ColumnI64, ColumnStr, ColumnBool, GroupedDataFrame, DataFrame
+import tabular
+
+
+fn build_sales() -> DataFrame:
+    """8 sales — reg × category × qty.  Designed so two-level
+    group_by ((reg, category)) produces 4 unique groups."""
+    regs_v: List[str] = []
+    regs_v.append("east")
+    regs_v.append("east")
+    regs_v.append("west")
+    regs_v.append("west")
+    regs_v.append("east")
+    regs_v.append("east")
+    regs_v.append("west")
+    regs_v.append("west")
+    reg: ColumnStr = tabular.col_str_simple(regs_v)
+
+    cats_v: List[str] = []
+    cats_v.append("books")
+    cats_v.append("toys")
+    cats_v.append("books")
+    cats_v.append("toys")
+    cats_v.append("books")
+    cats_v.append("toys")
+    cats_v.append("books")
+    cats_v.append("toys")
+    category: ColumnStr = tabular.col_str_simple(cats_v)
+
+    qty_v: List[i64] = []
+    qty_v.append(10i64)
+    qty_v.append(5i64)
+    qty_v.append(20i64)
+    qty_v.append(15i64)
+    qty_v.append(8i64)
+    qty_v.append(3i64)
+    qty_v.append(12i64)
+    qty_v.append(7i64)
+    qty: ColumnI64 = tabular.col_i64_simple(qty_v)
+
+    cn: List[str] = []
+    cn.append("reg")
+    cn.append("category")
+    cn.append("qty")
+    cols: List[Column] = []
+    cols.append(reg)
+    cols.append(category)
+    cols.append(qty)
+    return tabular.from_columns(cn, cols)
+
+
+fn main() -> i32:
+    sales: DataFrame = build_sales()
+    println("sales_nrows=" + str(sales.length()))
+
+    # 1. Multi-column group_by sum promotes (reg, category) to a
+    # 2-level MultiIndex on the result.
+    keys: List[str] = []
+    keys.append("reg")
+    keys.append("category")
+    gdf: GroupedDataFrame = sales.group_by(keys)
+    summed: DataFrame = gdf.sum()
+    println("gb_nrows=" + str(summed.length()))
+    println("gb_ncols=" + str(summed.ncols()))
+    println("gb_nlev=" + str(summed.index_nlevels()))
+
+    # 2. Inspect level names — they survive the group_by promotion.
+    n0: str? = summed.index_level_name(0i64)
+    if n0 is not none:
+        println("lvl0_name=" + n0)
+    n1: str? = summed.index_level_name(1i64)
+    if n1 is not none:
+        println("lvl1_name=" + n1)
+
+    # 3. sort_index_multi — lexicographic by (reg, category).
+    sorted: DataFrame = summed.sort_index_multi(true)
+    qcol: ColumnI64? = sorted.get_column_i64("qty")
+    if qcol is not none:
+        q0: i64? = qcol.get(0i64)
+        q1: i64? = qcol.get(1i64)
+        q2: i64? = qcol.get(2i64)
+        q3: i64? = qcol.get(3i64)
+        if q0 is not none:
+            println("sorted_q0=" + str(q0))
+        if q1 is not none:
+            println("sorted_q1=" + str(q1))
+        if q2 is not none:
+            println("sorted_q2=" + str(q2))
+        if q3 is not none:
+            println("sorted_q3=" + str(q3))
+
+    # 4. filter preserves the MultiIndex.  Keep rows where qty > 12.
+    mvs: List[bool] = []
+    mns: List[bool] = []
+    i: i64 = 0i64
+    while i < sorted.length():
+        cv: ColumnI64? = sorted.get_column_i64("qty")
+        if cv is not none:
+            ov: i64? = cv.get(i)
+            v: i64 = 0i64
+            if ov is not none:
+                v = ov
+            if v > 12i64:
+                mvs.append(true)
+            else:
+                mvs.append(false)
+            mns.append(false)
+        i = i + 1i64
+    mask: ColumnBool = tabular.col_bool(mvs, mns)
+    filtered: DataFrame = sorted.filter(mask)
+    println("flt_nrows=" + str(filtered.length()))
+    println("flt_nlev=" + str(filtered.index_nlevels()))
+
+    # 5. index_level(i) — returns the i-th level column.  We just check
+    # it's not none and report dtype-agnostic shape.
+    l0: Column? = filtered.index_level(0i64)
+    if l0 is not none:
+        println("lvl0_ok=true")
+    l1: Column? = filtered.index_level(1i64)
+    if l1 is not none:
+        println("lvl1_ok=true")
+    l9: Column? = filtered.index_level(9i64)
+    if l9 is none:
+        println("lvl9_oob=true")
+
+    # 6. reset_index_multi — promotes both levels back into regular
+    # columns at the front of the frame.  Round-trip back to RangeIndex.
+    flat: DataFrame = filtered.reset_index_multi()
+    println("flat_nrows=" + str(flat.length()))
+    println("flat_ncols=" + str(flat.ncols()))
+    println("flat_nlev=" + str(flat.index_nlevels()))
+    fnames: List[str] = flat.columns()
+    println("flat_col0=" + fnames[0i32])
+    println("flat_col1=" + fnames[1i32])
+    println("flat_col2=" + fnames[2i32])
+
+    return 0
