@@ -323,3 +323,143 @@ fn main() -> i32:
     assert!(out.contains("l1=c"), "got: {out:?}");
     assert!(out.contains("l2=d"), "got: {out:?}");
 }
+
+// ── Phase B: column-list ops — select / drop / rename ──────────────────
+
+#[test]
+fn select_preserves_index() {
+    let src = "\
+from tabular import Column, ColumnI64, ColumnStr, DataFrame
+import tabular
+fn main() -> i32:
+    keys: List[str] = []
+    keys.append(\"a\")
+    keys.append(\"b\")
+    keys.append(\"c\")
+    k: ColumnStr = tabular.col_str_simple(keys)
+    vs: List[i64] = []
+    vs.append(1i64)
+    vs.append(2i64)
+    vs.append(3i64)
+    v: ColumnI64 = tabular.col_i64_simple(vs)
+    ws: List[i64] = []
+    ws.append(10i64)
+    ws.append(20i64)
+    ws.append(30i64)
+    w: ColumnI64 = tabular.col_i64_simple(ws)
+    cn: List[str] = []
+    cn.append(\"k\")
+    cn.append(\"v\")
+    cn.append(\"w\")
+    cols: List[Column] = []
+    cols.append(k)
+    cols.append(v)
+    cols.append(w)
+    df: DataFrame = tabular.from_columns(cn, cols)
+    df2: DataFrame = df.set_index(\"k\")
+    want: List[str] = []
+    want.append(\"v\")
+    df3: DataFrame = df2.select(want)
+    println(\"has=\" + str(df3.has_index()))
+    println(\"ncols=\" + str(df3.ncols()))
+    nm: str? = df3.index_name()
+    if nm is not none:
+        println(\"name=\" + nm)
+    return 0
+";
+    let out = run("select_preserves_index", src);
+    assert!(out.contains("has=true"), "got: {out:?}");
+    assert!(out.contains("ncols=1"), "got: {out:?}");
+    assert!(out.contains("name=k"), "got: {out:?}");
+}
+
+#[test]
+fn drop_preserves_index() {
+    let src = "\
+from tabular import Column, ColumnI64, ColumnStr, DataFrame
+import tabular
+fn main() -> i32:
+    keys: List[str] = []
+    keys.append(\"a\")
+    keys.append(\"b\")
+    keys.append(\"c\")
+    k: ColumnStr = tabular.col_str_simple(keys)
+    vs: List[i64] = []
+    vs.append(1i64)
+    vs.append(2i64)
+    vs.append(3i64)
+    v: ColumnI64 = tabular.col_i64_simple(vs)
+    ws: List[i64] = []
+    ws.append(10i64)
+    ws.append(20i64)
+    ws.append(30i64)
+    w: ColumnI64 = tabular.col_i64_simple(ws)
+    cn: List[str] = []
+    cn.append(\"k\")
+    cn.append(\"v\")
+    cn.append(\"w\")
+    cols: List[Column] = []
+    cols.append(k)
+    cols.append(v)
+    cols.append(w)
+    df: DataFrame = tabular.from_columns(cn, cols)
+    df2: DataFrame = df.set_index(\"k\")
+    drop_names: List[str] = []
+    drop_names.append(\"w\")
+    df3: DataFrame = df2.drop(drop_names)
+    println(\"has=\" + str(df3.has_index()))
+    println(\"ncols=\" + str(df3.ncols()))
+    nm: str? = df3.index_name()
+    if nm is not none:
+        println(\"name=\" + nm)
+    return 0
+";
+    let out = run("drop_preserves_index", src);
+    assert!(out.contains("has=true"), "got: {out:?}");
+    assert!(out.contains("ncols=1"), "got: {out:?}");
+    assert!(out.contains("name=k"), "got: {out:?}");
+}
+
+#[test]
+fn rename_preserves_index() {
+    let src = "\
+from tabular import Column, ColumnI64, ColumnStr, DataFrame
+import tabular
+fn main() -> i32:
+    keys: List[str] = []
+    keys.append(\"a\")
+    keys.append(\"b\")
+    keys.append(\"c\")
+    k: ColumnStr = tabular.col_str_simple(keys)
+    vs: List[i64] = []
+    vs.append(1i64)
+    vs.append(2i64)
+    vs.append(3i64)
+    v: ColumnI64 = tabular.col_i64_simple(vs)
+    cn: List[str] = []
+    cn.append(\"k\")
+    cn.append(\"v\")
+    cols: List[Column] = []
+    cols.append(k)
+    cols.append(v)
+    df: DataFrame = tabular.from_columns(cn, cols)
+    df2: DataFrame = df.set_index(\"k\")
+    renames: List[Tuple[str, str]] = []
+    renames.append((\"v\", \"value\"))
+    df3: DataFrame = df2.rename(renames)
+    println(\"has=\" + str(df3.has_index()))
+    println(\"nrows=\" + str(df3.length()))
+    nm: str? = df3.index_name()
+    if nm is not none:
+        println(\"name=\" + nm)
+    vc: ColumnI64? = df3.get_column_i64(\"value\")
+    if vc is not none:
+        println(\"renamed=ok\")
+    return 0
+";
+    let out = run("rename_preserves_index", src);
+    assert!(out.contains("has=true"), "got: {out:?}");
+    assert!(out.contains("nrows=3"), "got: {out:?}");
+    assert!(out.contains("name=k"), "got: {out:?}");
+    assert!(out.contains("renamed=ok"), "got: {out:?}");
+}

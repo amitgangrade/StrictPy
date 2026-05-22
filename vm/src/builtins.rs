@@ -12936,7 +12936,8 @@ fn m37_df_select(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError>
             }
         }
     }
-    Ok(m37_build_df(interp, &new_names, &new_cols, nrows))
+    // M42: column projection doesn't touch rows; clone parent's index.
+    Ok(m42_copy_index_into_df(interp, recv, &new_names, &new_cols, nrows))
 }
 
 fn m37_df_drop(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
@@ -12953,7 +12954,8 @@ fn m37_df_drop(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
             new_cols.push(col_ptrs[i]);
         }
     }
-    Ok(m37_build_df(interp, &new_names, &new_cols, nrows))
+    // M42: dropping columns doesn't touch rows; clone parent's index.
+    Ok(m42_copy_index_into_df(interp, recv, &new_names, &new_cols, nrows))
 }
 
 fn m37_df_head(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
@@ -13296,7 +13298,8 @@ fn m38_df_rename(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError>
             }
         }
     }
-    Ok(m37_build_df(interp, &names, &col_ptrs, nrows))
+    // M42: renaming columns doesn't touch rows or index; clone index.
+    Ok(m42_copy_index_into_df(interp, recv, &names, &col_ptrs, nrows))
 }
 
 // ── Phase B: per-column aggregations ──────────────────────────────────
