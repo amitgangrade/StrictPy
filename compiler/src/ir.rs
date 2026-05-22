@@ -4259,6 +4259,20 @@ fn lower_method_call(
                     },
                 );
             }
+            // M41: `tabular` DatetimeIndex + pivot_table methods.  Same
+            // class-name + method-name shape as M37/M38/M39/M40.  All
+            // dispatched on DataFrame.
+            if let Some(nid) = m41_tabular_class_method_native_id_by_name(
+                layout.name.as_str(), method,
+            ) {
+                return fb.push_value(
+                    ret_ty,
+                    ValueKind::Op {
+                        op: IROp::NativeCall { native_id: nid },
+                        args: arg_vs,
+                    },
+                );
+            }
         }
     }
 
@@ -4744,6 +4758,35 @@ fn m40_tabular_class_method_native_id_by_name(
         // ── Phase C: time-series ops ──
         ("DataFrame", "resample")    => NativeFn::M40TabDfResample   as u32,
         ("DataFrame", "asof_merge")  => NativeFn::M40TabDfAsofMerge  as u32,
+        _ => return None,
+    })
+}
+
+/// M41: dispatch a `tabular` DatetimeIndex / pivot_table method by class
+/// name + method name.  Mirrors `m40_tabular_class_method_native_id_by_name`.
+///
+/// Per the M41 brief, all locals in shared compiler files use the
+/// `m41_` prefix.
+fn m41_tabular_class_method_native_id_by_name(
+    class_name: &str,
+    method: &str,
+) -> Option<u32> {
+    Some(match (class_name, method) {
+        // ── Phase A: index storage + accessors + sort_index ──
+        ("DataFrame", "set_index")    => NativeFn::M41TabDfSetIndex    as u32,
+        ("DataFrame", "reset_index")  => NativeFn::M41TabDfResetIndex  as u32,
+        ("DataFrame", "has_index")    => NativeFn::M41TabDfHasIndex    as u32,
+        ("DataFrame", "index")        => NativeFn::M41TabDfIndex       as u32,
+        ("DataFrame", "index_name")   => NativeFn::M41TabDfIndexName   as u32,
+        ("DataFrame", "sort_index")   => NativeFn::M41TabDfSortIndex   as u32,
+        // ── Phase B: index-aware time-series + select by label ──
+        ("DataFrame", "resample_index")    => NativeFn::M41TabDfResampleIndex      as u32,
+        ("DataFrame", "asof_merge_index")  => NativeFn::M41TabDfAsofMergeIndex     as u32,
+        ("DataFrame", "select_by_label_i64")      => NativeFn::M41TabDfSelectByLabelI64      as u32,
+        ("DataFrame", "select_by_label_str")      => NativeFn::M41TabDfSelectByLabelStr      as u32,
+        ("DataFrame", "select_by_label_datetime") => NativeFn::M41TabDfSelectByLabelDateTime as u32,
+        // ── Phase C: pivot_table ──
+        ("DataFrame", "pivot_table")  => NativeFn::M41TabDfPivotTable  as u32,
         _ => return None,
     })
 }

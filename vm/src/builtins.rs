@@ -7037,6 +7037,22 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         NativeFn::M40TabDfResample        => m40_df_resample(interp, args),
         NativeFn::M40TabDfAsofMerge       => m40_df_asof_merge(interp, args),
 
+        // ── M41 Phase A: index storage + accessors + sort_index ──
+        NativeFn::M41TabDfSetIndex        => m41_df_set_index(interp, args),
+        NativeFn::M41TabDfResetIndex      => m41_df_reset_index(interp, args),
+        NativeFn::M41TabDfHasIndex        => m41_df_has_index(interp, args),
+        NativeFn::M41TabDfIndex           => m41_df_index(interp, args),
+        NativeFn::M41TabDfIndexName       => m41_df_index_name(interp, args),
+        NativeFn::M41TabDfSortIndex       => m41_df_sort_index(interp, args),
+        // ── M41 Phase B: index-aware time-series + select by label ──
+        NativeFn::M41TabDfResampleIndex      => m41_df_resample_index(interp, args),
+        NativeFn::M41TabDfAsofMergeIndex     => m41_df_asof_merge_index(interp, args),
+        NativeFn::M41TabDfSelectByLabelI64   => m41_df_select_by_label_i64(interp, args),
+        NativeFn::M41TabDfSelectByLabelStr   => m41_df_select_by_label_str(interp, args),
+        NativeFn::M41TabDfSelectByLabelDateTime => m41_df_select_by_label_datetime(interp, args),
+        // ── M41 Phase C: pivot_table ──
+        NativeFn::M41TabDfPivotTable      => m41_df_pivot_table(interp, args),
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
@@ -11925,14 +11941,19 @@ fn m37_alloc_dataframe(interp: &mut Interpreter, args: &[u64]) -> Result<u64, Vm
     for cp in &col_ptrs {
         unsafe { interp.list_push(cols_lst, *cp) };
     }
-    let df = m34_alloc_class_obj(interp, "DataFrame", 24);
+    // M41: 40-byte payload — names, columns, nrows, index (=0), index_name (=0).
+    let df = m34_alloc_class_obj(interp, "DataFrame", 40);
     unsafe {
         let n_slot = df.add(HDR) as *mut u64;
         let c_slot = df.add(HDR + 8) as *mut u64;
         let r_slot = df.add(HDR + 16) as *mut i64;
+        let i_slot = df.add(HDR + 24) as *mut u64;
+        let in_slot = df.add(HDR + 32) as *mut u64;
         std::ptr::write_unaligned(n_slot, names_lst as u64);
         std::ptr::write_unaligned(c_slot, cols_lst as u64);
         std::ptr::write_unaligned(r_slot, nrows);
+        std::ptr::write_unaligned(i_slot, 0u64);
+        std::ptr::write_unaligned(in_slot, 0u64);
     }
     Ok(df as u64)
 }
@@ -12461,14 +12482,19 @@ fn m37_build_df_from_rows(
     for cp in &col_ptrs {
         unsafe { interp.list_push(cols_lst, *cp) };
     }
-    let df = m34_alloc_class_obj(interp, "DataFrame", 24);
+    // M41: 40-byte payload — names, columns, nrows, index (=0), index_name (=0).
+    let df = m34_alloc_class_obj(interp, "DataFrame", 40);
     unsafe {
         let n_slot = df.add(HDR) as *mut u64;
         let c_slot = df.add(HDR + 8) as *mut u64;
         let r_slot = df.add(HDR + 16) as *mut i64;
+        let i_slot = df.add(HDR + 24) as *mut u64;
+        let in_slot = df.add(HDR + 32) as *mut u64;
         std::ptr::write_unaligned(n_slot, names_lst as u64);
         std::ptr::write_unaligned(c_slot, cols_lst as u64);
         std::ptr::write_unaligned(r_slot, nrows as i64);
+        std::ptr::write_unaligned(i_slot, 0u64);
+        std::ptr::write_unaligned(in_slot, 0u64);
     }
     Ok(df as u64)
 }
@@ -12791,27 +12817,64 @@ fn m37_column_take(
 }
 
 /// Build a fresh DataFrame from the given (names, col_ptrs, nrows).
+///
+/// M41: the DataFrame payload is now 40 bytes; the trailing 16 bytes
+/// hold an optional index Column pointer + index_name StringRepr
+/// pointer.  This helper always builds a RangeIndex frame (both index
+/// slots = 0).  Use `m41_build_df_with_index` to construct an
+/// index-bearing frame.
 fn m37_build_df(
     interp: &mut Interpreter,
     names: &[String],
     col_ptrs: &[u64],
     nrows: i64,
 ) -> u64 {
+    m41_build_df_with_index(interp, names, col_ptrs, nrows, 0, 0)
+}
+
+/// M41 helper: build a DataFrame with an optional index column.  Pass
+/// `index_col_ptr = 0` and `index_name_ptr = 0` for a RangeIndex frame.
+fn m41_build_df_with_index(
+    interp: &mut Interpreter,
+    names: &[String],
+    col_ptrs: &[u64],
+    nrows: i64,
+    index_col_ptr: u64,
+    index_name_ptr: u64,
+) -> u64 {
     let names_lst = m37_alloc_list_str(interp, names);
     let cols_lst = interp.alloc_list(col_ptrs.len().max(1));
     for cp in col_ptrs {
         unsafe { interp.list_push(cols_lst, *cp) };
     }
-    let df = m34_alloc_class_obj(interp, "DataFrame", 24);
+    let df = m34_alloc_class_obj(interp, "DataFrame", 40);
     unsafe {
         let n_slot = df.add(HDR) as *mut u64;
         let c_slot = df.add(HDR + 8) as *mut u64;
         let r_slot = df.add(HDR + 16) as *mut i64;
+        let i_slot = df.add(HDR + 24) as *mut u64;
+        let in_slot = df.add(HDR + 32) as *mut u64;
         std::ptr::write_unaligned(n_slot, names_lst as u64);
         std::ptr::write_unaligned(c_slot, cols_lst as u64);
         std::ptr::write_unaligned(r_slot, nrows);
+        std::ptr::write_unaligned(i_slot, index_col_ptr);
+        std::ptr::write_unaligned(in_slot, index_name_ptr);
     }
     df as u64
+}
+
+/// M41: read the (index_col_ptr, index_name_ptr) tail of a DataFrame
+/// payload.  Both are 0 when the frame uses a RangeIndex.
+fn m41_df_index_fields(recv: u64) -> (u64, u64) {
+    let obj = recv as *const u8;
+    if obj.is_null() {
+        return (0, 0);
+    }
+    unsafe {
+        let i = std::ptr::read_unaligned(obj.add(HDR + 24) as *const u64);
+        let n = std::ptr::read_unaligned(obj.add(HDR + 32) as *const u64);
+        (i, n)
+    }
 }
 
 /// Read the column pointers out of a DataFrame into a Vec<u64>.
@@ -16181,6 +16244,970 @@ fn m40_df_asof_merge(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmEr
         out_cols.push(m37_alloc_column(interp, &cls, v_lst, n_lst, n as i64) as u64);
     }
     Ok(m37_build_df(interp, &out_names, &out_cols, l_nrows))
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// ── M41 Phase 5b: tabular DatetimeIndex (minimum viable) + pivot_table ──
+// ═══════════════════════════════════════════════════════════════════════
+//
+// M41 adds an optional `index` slot to DataFrame plus a handful of
+// index-aware operations.  Variable prefix `m41_`.  The DataFrame
+// payload is now 40 bytes: names + columns + nrows + index + index_name.
+// `m37_build_df` zeros the trailing 16 bytes by default (RangeIndex);
+// `m41_build_df_with_index` lets a handler attach an index.
+//
+// EXPLICIT SCOPE-DOWN: every existing DataFrame method that returns a
+// fresh frame still drops the index in v1 — only the new M41 ops
+// (sort_index / resample_index / asof_merge_index / select_by_label_*)
+// preserve it.  Full index propagation through filter/sort/head/...
+// is M42 work.
+
+// ── Phase A helpers ────────────────────────────────────────────────────
+
+/// Allocate a fresh Column whose payload is a shallow clone of the
+/// source's values + nulls lists.  Used when we need an index column to
+/// outlive its parent frame's column list (e.g. for `set_index` which
+/// repackages a regular column as the index).  The existing code base
+/// never mutates Column payloads in place, so passing through the same
+/// pointer would be safe — but cloning keeps the index physically
+/// independent and matches the GC scanner's "every pointer slot is a
+/// distinct edge" assumption.
+fn m41_clone_column(interp: &mut Interpreter, src: u64) -> u64 {
+    if src == 0 || src == NONE_SENTINEL {
+        return 0;
+    }
+    let cls = m38_col_class_name(src);
+    let (vals, nulls, length) = m37_col_fields(src);
+    let n_lst = m37_alloc_list_bool(interp, &m37_read_list_bool(nulls));
+    let v_lst: *mut crate::object::ListRepr = match cls.as_str() {
+        "ColumnI64" | "ColumnDateTime" => m37_alloc_list_i64(interp, &m37_read_list_i64(vals)),
+        "ColumnF64" => m37_alloc_list_f64(interp, &m37_read_list_f64(vals)),
+        "ColumnStr" => m37_alloc_list_str(interp, &m37_read_list_str_lst(vals)),
+        "ColumnBool" => m37_alloc_list_bool(interp, &m37_read_list_bool(vals)),
+        _ => m37_alloc_list_i64(interp, &m37_read_list_i64(vals)),
+    };
+    m37_alloc_column(interp, &cls, v_lst, n_lst, length) as u64
+}
+
+/// `DataFrame.set_index(self, col_name: str) -> DataFrame`.  Removes
+/// `col_name` from the regular column list and attaches it as the new
+/// index.  Raises ValueError if `col_name` is absent or the frame
+/// already has an index (caller must `reset_index()` first).
+fn m41_df_set_index(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let col_name = arg_str(args, 1);
+    let (existing_index, _) = m41_df_index_fields(recv);
+    if existing_index != 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "DataFrame.set_index: frame already has an index; call reset_index() first".into(),
+        });
+    }
+    let (names_lst, _, nrows) = m37_df_fields(recv);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_ptrs = m37_df_col_ptrs(recv);
+    let idx = match names.iter().position(|n| n == &col_name) {
+        None => return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("DataFrame.set_index: column {:?} not found", col_name),
+        }),
+        Some(i) => i,
+    };
+    // Drop the chosen column from the regular list.
+    let mut new_names: Vec<String> = Vec::with_capacity(names.len() - 1);
+    let mut new_cols: Vec<u64> = Vec::with_capacity(col_ptrs.len() - 1);
+    for (i, n) in names.iter().enumerate() {
+        if i == idx { continue; }
+        new_names.push(n.clone());
+        new_cols.push(col_ptrs[i]);
+    }
+    // Clone the index column so it is physically distinct from the
+    // source column (which the caller still holds a reference to).
+    let index_col = m41_clone_column(interp, col_ptrs[idx]);
+    let index_name = interp.alloc_string(&col_name) as u64;
+    Ok(m41_build_df_with_index(interp, &new_names, &new_cols, nrows, index_col, index_name))
+}
+
+/// `DataFrame.reset_index(self) -> DataFrame`.  Removes the index and
+/// re-inserts it as a regular column at position 0 with its original
+/// name (or "index" if no original name was recorded).  No-op (returns
+/// a fresh RangeIndex frame with the same columns) if the receiver
+/// already uses a RangeIndex.
+fn m41_df_reset_index(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let (names_lst, _, nrows) = m37_df_fields(recv);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_ptrs = m37_df_col_ptrs(recv);
+    let (index_col, index_name_ptr) = m41_df_index_fields(recv);
+    if index_col == 0 {
+        // No-op: produce a fresh RangeIndex frame with identical columns.
+        return Ok(m37_build_df(interp, &names, &col_ptrs, nrows));
+    }
+    let restored_name: String = if index_name_ptr == 0 {
+        "index".to_string()
+    } else {
+        unsafe { read_str(index_name_ptr as *const StringRepr) }
+    };
+    let mut new_names: Vec<String> = Vec::with_capacity(names.len() + 1);
+    new_names.push(restored_name);
+    new_names.extend(names.iter().cloned());
+    let mut new_cols: Vec<u64> = Vec::with_capacity(col_ptrs.len() + 1);
+    new_cols.push(index_col);
+    new_cols.extend(col_ptrs.iter().copied());
+    Ok(m37_build_df(interp, &new_names, &new_cols, nrows))
+}
+
+/// `DataFrame.has_index(self) -> bool`.
+fn m41_df_has_index(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let (idx, _) = m41_df_index_fields(recv);
+    Ok(if idx != 0 { 1u64 } else { 0u64 })
+}
+
+/// `DataFrame.index(self) -> Column?`.
+fn m41_df_index(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let (idx, _) = m41_df_index_fields(recv);
+    if idx == 0 { Ok(NONE_SENTINEL) } else { Ok(idx) }
+}
+
+/// `DataFrame.index_name(self) -> str?`.
+fn m41_df_index_name(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let (_, name_ptr) = m41_df_index_fields(recv);
+    if name_ptr == 0 { Ok(NONE_SENTINEL) } else { Ok(name_ptr) }
+}
+
+/// Compute a stable sort permutation over the index column.  Per-dtype
+/// dispatch: ColumnI64/ColumnDateTime sort by i64; ColumnF64 sorts by
+/// total_cmp; ColumnStr sorts lexicographically; ColumnBool sorts
+/// false < true.  Nulls sort last (largest) for ascending; first for
+/// descending.
+fn m41_sort_index_perm(col: u64, ascending: bool) -> Vec<usize> {
+    let cls = m38_col_class_name(col);
+    let (vals, nulls, length) = m37_col_fields(col);
+    let n = length as usize;
+    let ns = m37_read_list_bool(nulls);
+    let mut perm: Vec<usize> = (0..n).collect();
+    match cls.as_str() {
+        "ColumnI64" | "ColumnDateTime" => {
+            let vs = m37_read_list_i64(vals);
+            perm.sort_by(|a, b| {
+                let na = ns.get(*a).copied().unwrap_or(false);
+                let nb = ns.get(*b).copied().unwrap_or(false);
+                match (na, nb) {
+                    (true, true) => std::cmp::Ordering::Equal,
+                    (true, false) => std::cmp::Ordering::Greater,
+                    (false, true) => std::cmp::Ordering::Less,
+                    (false, false) => vs[*a].cmp(&vs[*b]),
+                }
+            });
+        }
+        "ColumnF64" => {
+            let vs = m37_read_list_f64(vals);
+            perm.sort_by(|a, b| {
+                let na = ns.get(*a).copied().unwrap_or(false);
+                let nb = ns.get(*b).copied().unwrap_or(false);
+                match (na, nb) {
+                    (true, true) => std::cmp::Ordering::Equal,
+                    (true, false) => std::cmp::Ordering::Greater,
+                    (false, true) => std::cmp::Ordering::Less,
+                    (false, false) => vs[*a].total_cmp(&vs[*b]),
+                }
+            });
+        }
+        "ColumnStr" => {
+            let vs = m37_read_list_str_lst(vals);
+            perm.sort_by(|a, b| {
+                let na = ns.get(*a).copied().unwrap_or(false);
+                let nb = ns.get(*b).copied().unwrap_or(false);
+                match (na, nb) {
+                    (true, true) => std::cmp::Ordering::Equal,
+                    (true, false) => std::cmp::Ordering::Greater,
+                    (false, true) => std::cmp::Ordering::Less,
+                    (false, false) => vs[*a].cmp(&vs[*b]),
+                }
+            });
+        }
+        "ColumnBool" => {
+            let vs = m37_read_list_bool(vals);
+            perm.sort_by(|a, b| {
+                let na = ns.get(*a).copied().unwrap_or(false);
+                let nb = ns.get(*b).copied().unwrap_or(false);
+                match (na, nb) {
+                    (true, true) => std::cmp::Ordering::Equal,
+                    (true, false) => std::cmp::Ordering::Greater,
+                    (false, true) => std::cmp::Ordering::Less,
+                    (false, false) => (vs[*a] as u8).cmp(&(vs[*b] as u8)),
+                }
+            });
+        }
+        _ => {}
+    }
+    if !ascending {
+        perm.reverse();
+    }
+    perm
+}
+
+/// `DataFrame.sort_index(self, ascending: bool) -> DataFrame`.  Returns
+/// a new frame sorted by the index column (stable).  Output preserves
+/// its own index.  Raises ValueError if the frame has no index.
+fn m41_df_sort_index(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let ascending = arg_u64(args, 1) != 0;
+    let (index_col, index_name_ptr) = m41_df_index_fields(recv);
+    if index_col == 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "DataFrame.sort_index: frame has no index; call set_index() first".into(),
+        });
+    }
+    let perm = m41_sort_index_perm(index_col, ascending);
+    let (names_lst, _, nrows) = m37_df_fields(recv);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_ptrs = m37_df_col_ptrs(recv);
+    // Permute every regular column + the index column itself.
+    let new_cols: Vec<u64> = col_ptrs.iter()
+        .map(|cp| m37_column_take(interp, *cp, &perm))
+        .collect();
+    let new_index = m37_column_take(interp, index_col, &perm);
+    let _ = nrows; // unchanged
+    Ok(m41_build_df_with_index(
+        interp, &names, &new_cols, perm.len() as i64, new_index, index_name_ptr,
+    ))
+}
+
+// ── Phase B helpers ────────────────────────────────────────────────────
+
+/// `DataFrame.resample_index(self, rule: str, agg: str) -> DataFrame`.
+/// Like M40's resample, but uses the DataFrame's DateTime index.
+/// Output preserves its own (bucket-start) index.
+fn m41_df_resample_index(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let rule = arg_str(args, 1);
+    let agg = arg_str(args, 2);
+    let (index_col, _) = m41_df_index_fields(recv);
+    if index_col == 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "DataFrame.resample_index: frame has no index; call set_index() first".into(),
+        });
+    }
+    let icls = m38_col_class_name(index_col);
+    if icls != "ColumnDateTime" {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("DataFrame.resample_index: index must be ColumnDateTime, got {}", icls),
+        });
+    }
+    let rule_ms = m40_parse_rule_ms(&rule)?;
+    let agg_ok = matches!(agg.as_str(), "sum" | "mean" | "min" | "max" | "count");
+    if !agg_ok {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "DataFrame.resample_index: agg must be sum|mean|min|max|count, got {:?}",
+                agg
+            ),
+        });
+    }
+    let (names_lst, _, nrows) = m37_df_fields(recv);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_ptrs = m37_df_col_ptrs(recv);
+    let (tvals, tnulls, _) = m37_col_fields(index_col);
+    let ts_vs = m37_read_list_i64(tvals);
+    let ts_ns = m37_read_list_bool(tnulls);
+    // Find min / max non-null timestamp in the index.
+    let mut t_min: Option<i64> = None;
+    let mut t_max: Option<i64> = None;
+    for i in 0..nrows as usize {
+        if ts_ns.get(i).copied().unwrap_or(false) { continue; }
+        let v = ts_vs.get(i).copied().unwrap_or(0);
+        t_min = Some(t_min.map(|m| m.min(v)).unwrap_or(v));
+        t_max = Some(t_max.map(|m| m.max(v)).unwrap_or(v));
+    }
+    let (t_min, t_max) = match (t_min, t_max) {
+        (Some(a), Some(b)) => (a, b),
+        _ => {
+            // Empty index: emit an empty frame with an empty DateTime index.
+            let tv_empty = m37_alloc_list_i64(interp, &[]);
+            let tn_empty = m37_alloc_list_bool(interp, &[]);
+            let empty_index = m37_alloc_column(interp, "ColumnDateTime", tv_empty, tn_empty, 0) as u64;
+            let mut out_names: Vec<String> = Vec::new();
+            let mut out_cols: Vec<u64> = Vec::new();
+            for (i, n) in names.iter().enumerate() {
+                let cls = m38_col_class_name(col_ptrs[i]);
+                if cls != "ColumnI64" && cls != "ColumnF64" { continue; }
+                out_names.push(n.clone());
+                let v = m37_alloc_list_f64(interp, &[]);
+                let nu = m37_alloc_list_bool(interp, &[]);
+                out_cols.push(m37_alloc_column(interp,
+                    if agg == "count" { "ColumnI64" } else { &cls },
+                    v, nu, 0,
+                ) as u64);
+            }
+            return Ok(m41_build_df_with_index(interp, &out_names, &out_cols, 0, empty_index, 0));
+        }
+    };
+    let bucket_start_anchor = t_min;
+    let num_buckets: i64 = if rule_ms == 0 { 1 } else { ((t_max - bucket_start_anchor) / rule_ms) + 1 };
+    let num_buckets = num_buckets as usize;
+    let mut bucket_rows: Vec<Vec<usize>> = vec![Vec::new(); num_buckets];
+    for r in 0..nrows as usize {
+        if ts_ns.get(r).copied().unwrap_or(false) { continue; }
+        let v = ts_vs.get(r).copied().unwrap_or(0);
+        let b = ((v - bucket_start_anchor) / rule_ms) as usize;
+        if b < num_buckets { bucket_rows[b].push(r); }
+    }
+    let bucket_starts: Vec<i64> = (0..num_buckets as i64)
+        .map(|b| bucket_start_anchor + b * rule_ms)
+        .collect();
+    let tv_lst = m37_alloc_list_i64(interp, &bucket_starts);
+    let tn_lst = m37_alloc_list_bool(interp, &vec![false; num_buckets]);
+    let new_index = m37_alloc_column(interp, "ColumnDateTime", tv_lst, tn_lst, num_buckets as i64) as u64;
+    // Aggregate every non-index numeric column.
+    let mut out_names: Vec<String> = Vec::new();
+    let mut out_cols: Vec<u64> = Vec::new();
+    for (i, name) in names.iter().enumerate() {
+        let src = col_ptrs[i];
+        let cls = m38_col_class_name(src);
+        if cls != "ColumnI64" && cls != "ColumnF64" { continue; }
+        out_names.push(name.clone());
+        let (svals, snulls, _) = m37_col_fields(src);
+        let s_ns = m37_read_list_bool(snulls);
+        let s_i64 = if cls == "ColumnI64" { m37_read_list_i64(svals) } else { Vec::new() };
+        let s_f64 = if cls == "ColumnF64" { m37_read_list_f64(svals) } else { Vec::new() };
+        if agg == "count" {
+            let mut out: Vec<i64> = Vec::with_capacity(num_buckets);
+            let mut out_nu: Vec<bool> = vec![false; num_buckets];
+            for b in 0..num_buckets {
+                let mut c: i64 = 0;
+                for r in &bucket_rows[b] {
+                    if !s_ns.get(*r).copied().unwrap_or(false) { c += 1; }
+                }
+                out.push(c);
+                if bucket_rows[b].is_empty() { out_nu[b] = true; out[b] = 0; }
+            }
+            let v_lst = m37_alloc_list_i64(interp, &out);
+            let n_lst = m37_alloc_list_bool(interp, &out_nu);
+            out_cols.push(m37_alloc_column(interp, "ColumnI64", v_lst, n_lst, num_buckets as i64) as u64);
+            continue;
+        }
+        if cls == "ColumnI64" {
+            let mut out: Vec<i64> = vec![0; num_buckets];
+            let mut out_nu: Vec<bool> = vec![false; num_buckets];
+            for b in 0..num_buckets {
+                let mut acc: i64 = match agg.as_str() {
+                    "sum" => 0, "min" => i64::MAX, "max" => i64::MIN, _ => 0,
+                };
+                let mut sum_for_mean: i64 = 0;
+                let mut cnt: i64 = 0;
+                for r in &bucket_rows[b] {
+                    if s_ns.get(*r).copied().unwrap_or(false) { continue; }
+                    let v = s_i64[*r];
+                    cnt += 1;
+                    match agg.as_str() {
+                        "sum"  => { acc = acc.wrapping_add(v); }
+                        "mean" => { sum_for_mean = sum_for_mean.wrapping_add(v); }
+                        "min"  => { if v < acc { acc = v; } }
+                        "max"  => { if v > acc { acc = v; } }
+                        _ => {}
+                    }
+                }
+                if cnt == 0 {
+                    out_nu[b] = true; out[b] = 0;
+                } else {
+                    out[b] = match agg.as_str() {
+                        "sum" => acc,
+                        "mean" => sum_for_mean / cnt,
+                        "min" | "max" => acc,
+                        _ => acc,
+                    };
+                }
+            }
+            let v_lst = m37_alloc_list_i64(interp, &out);
+            let n_lst = m37_alloc_list_bool(interp, &out_nu);
+            out_cols.push(m37_alloc_column(interp, "ColumnI64", v_lst, n_lst, num_buckets as i64) as u64);
+        } else {
+            let mut out: Vec<f64> = vec![0.0; num_buckets];
+            let mut out_nu: Vec<bool> = vec![false; num_buckets];
+            for b in 0..num_buckets {
+                let mut acc: f64 = match agg.as_str() {
+                    "sum" => 0.0, "min" => f64::INFINITY, "max" => f64::NEG_INFINITY, _ => 0.0,
+                };
+                let mut sum_for_mean: f64 = 0.0;
+                let mut cnt: i64 = 0;
+                for r in &bucket_rows[b] {
+                    if s_ns.get(*r).copied().unwrap_or(false) { continue; }
+                    let v = s_f64[*r];
+                    cnt += 1;
+                    match agg.as_str() {
+                        "sum" => acc += v,
+                        "mean" => sum_for_mean += v,
+                        "min" => { if v < acc { acc = v; } }
+                        "max" => { if v > acc { acc = v; } }
+                        _ => {}
+                    }
+                }
+                if cnt == 0 {
+                    out_nu[b] = true; out[b] = 0.0;
+                } else {
+                    out[b] = match agg.as_str() {
+                        "sum" => acc,
+                        "mean" => sum_for_mean / (cnt as f64),
+                        "min" | "max" => acc,
+                        _ => acc,
+                    };
+                }
+            }
+            let v_lst = m37_alloc_list_f64(interp, &out);
+            let n_lst = m37_alloc_list_bool(interp, &out_nu);
+            out_cols.push(m37_alloc_column(interp, "ColumnF64", v_lst, n_lst, num_buckets as i64) as u64);
+        }
+    }
+    Ok(m41_build_df_with_index(interp, &out_names, &out_cols, num_buckets as i64, new_index, 0))
+}
+
+/// `DataFrame.asof_merge_index(self, other: DataFrame) -> DataFrame`.
+/// Like M40's asof_merge, but uses both frames' indexes as keys.
+/// Output preserves self's index.
+fn m41_df_asof_merge_index(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let lhs = arg_u64(args, 0);
+    let rhs = arg_u64(args, 1);
+    let (l_index, l_index_name) = m41_df_index_fields(lhs);
+    let (r_index, _) = m41_df_index_fields(rhs);
+    if l_index == 0 || r_index == 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "DataFrame.asof_merge_index: both frames must have an index".into(),
+        });
+    }
+    let l_cls = m38_col_class_name(l_index);
+    let r_cls = m38_col_class_name(r_index);
+    if l_cls != r_cls {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "DataFrame.asof_merge_index: index dtype mismatch ({} vs {})",
+                l_cls, r_cls
+            ),
+        });
+    }
+    if l_cls != "ColumnDateTime" && l_cls != "ColumnI64" {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "DataFrame.asof_merge_index: index must be ColumnDateTime or ColumnI64, got {}",
+                l_cls
+            ),
+        });
+    }
+    let (lnames_lst, _, l_nrows) = m37_df_fields(lhs);
+    let lnames = m37_read_list_str_lst(lnames_lst);
+    let l_col_ptrs = m37_df_col_ptrs(lhs);
+    let (rnames_lst, _, _r_nrows) = m37_df_fields(rhs);
+    let rnames = m37_read_list_str_lst(rnames_lst);
+    let r_col_ptrs = m37_df_col_ptrs(rhs);
+    // Read key arrays.
+    let (lv, ln, _) = m37_col_fields(l_index);
+    let l_vs = m37_read_list_i64(lv);
+    let l_ns = m37_read_list_bool(ln);
+    let (rv, rn, r_len_i) = m37_col_fields(r_index);
+    let r_vs = m37_read_list_i64(rv);
+    let r_ns = m37_read_list_bool(rn);
+    let r_len = r_len_i as usize;
+    // Sort rhs by non-null index ascending.
+    let mut sorted: Vec<usize> = (0..r_len)
+        .filter(|i| !r_ns.get(*i).copied().unwrap_or(false))
+        .collect();
+    sorted.sort_by_key(|i| r_vs[*i]);
+    let sorted_keys: Vec<i64> = sorted.iter().map(|i| r_vs[*i]).collect();
+    let mut matches: Vec<Option<usize>> = Vec::with_capacity(l_nrows as usize);
+    for r in 0..l_nrows as usize {
+        if l_ns.get(r).copied().unwrap_or(false) {
+            matches.push(None);
+            continue;
+        }
+        let needle = l_vs[r];
+        let pp = sorted_keys.partition_point(|k| *k <= needle);
+        if pp == 0 { matches.push(None); }
+        else { matches.push(Some(sorted[pp - 1])); }
+    }
+    // Output: self's regular columns (pass-through) + rhs columns (plucked).
+    // Self's index is preserved.
+    let mut out_names: Vec<String> = lnames.clone();
+    let mut out_cols: Vec<u64> = Vec::new();
+    for cp in &l_col_ptrs { out_cols.push(*cp); }
+    for (i, name) in rnames.iter().enumerate() {
+        out_names.push(name.clone());
+        let src = r_col_ptrs[i];
+        let cls = m38_col_class_name(src);
+        let (svals, snulls, _) = m37_col_fields(src);
+        let s_ns = m37_read_list_bool(snulls);
+        let s_i64 = if cls == "ColumnI64" || cls == "ColumnDateTime" { m37_read_list_i64(svals) } else { Vec::new() };
+        let s_f64 = if cls == "ColumnF64" { m37_read_list_f64(svals) } else { Vec::new() };
+        let s_str = if cls == "ColumnStr" { m37_read_list_str_lst(svals) } else { Vec::new() };
+        let s_bool = if cls == "ColumnBool" { m37_read_list_bool(svals) } else { Vec::new() };
+        let n = l_nrows as usize;
+        let mut out_nu: Vec<bool> = Vec::with_capacity(n);
+        let mut out_i64: Vec<i64> = Vec::new();
+        let mut out_f64: Vec<f64> = Vec::new();
+        let mut out_str: Vec<String> = Vec::new();
+        let mut out_bool: Vec<bool> = Vec::new();
+        for r in 0..n {
+            match matches[r] {
+                Some(mi) => {
+                    out_nu.push(s_ns.get(mi).copied().unwrap_or(false));
+                    match cls.as_str() {
+                        "ColumnI64" | "ColumnDateTime" => out_i64.push(s_i64.get(mi).copied().unwrap_or(0)),
+                        "ColumnF64" => out_f64.push(s_f64.get(mi).copied().unwrap_or(0.0)),
+                        "ColumnStr" => out_str.push(s_str.get(mi).cloned().unwrap_or_default()),
+                        "ColumnBool" => out_bool.push(s_bool.get(mi).copied().unwrap_or(false)),
+                        _ => {}
+                    }
+                }
+                None => {
+                    out_nu.push(true);
+                    match cls.as_str() {
+                        "ColumnI64" | "ColumnDateTime" => out_i64.push(0),
+                        "ColumnF64" => out_f64.push(0.0),
+                        "ColumnStr" => out_str.push(String::new()),
+                        "ColumnBool" => out_bool.push(false),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let n_lst = m37_alloc_list_bool(interp, &out_nu);
+        let v_lst = match cls.as_str() {
+            "ColumnI64" | "ColumnDateTime" => m37_alloc_list_i64(interp, &out_i64),
+            "ColumnF64" => m37_alloc_list_f64(interp, &out_f64),
+            "ColumnStr" => m37_alloc_list_str(interp, &out_str),
+            "ColumnBool" => m37_alloc_list_bool(interp, &out_bool),
+            _ => m37_alloc_list_i64(interp, &out_i64),
+        };
+        out_cols.push(m37_alloc_column(interp, &cls, v_lst, n_lst, n as i64) as u64);
+    }
+    // Clone the lhs index so the output owns it independently.
+    let new_index = m41_clone_column(interp, l_index);
+    Ok(m41_build_df_with_index(interp, &out_names, &out_cols, l_nrows, new_index, l_index_name))
+}
+
+/// Internal helper for `select_by_label_*`.  Given the matching row
+/// index in the source frame (or None), build a one-row DataFrame that
+/// preserves the index.  Returns NONE_SENTINEL when no match.
+fn m41_build_one_row_df(
+    interp: &mut Interpreter,
+    recv: u64,
+    row: Option<usize>,
+) -> u64 {
+    let row = match row {
+        Some(r) => r,
+        None => return NONE_SENTINEL,
+    };
+    let (names_lst, _, _) = m37_df_fields(recv);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_ptrs = m37_df_col_ptrs(recv);
+    let (index_col, index_name_ptr) = m41_df_index_fields(recv);
+    let perm: Vec<usize> = vec![row];
+    let new_cols: Vec<u64> = col_ptrs.iter()
+        .map(|cp| m37_column_take(interp, *cp, &perm))
+        .collect();
+    let new_index = if index_col == 0 { 0 } else { m37_column_take(interp, index_col, &perm) };
+    m41_build_df_with_index(interp, &names, &new_cols, 1, new_index, index_name_ptr)
+}
+
+/// `DataFrame.select_by_label_i64(self, label: i64) -> DataFrame?`.
+fn m41_df_select_by_label_i64(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let label = arg_i64(args, 1);
+    let (index_col, _) = m41_df_index_fields(recv);
+    if index_col == 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "DataFrame.select_by_label_i64: frame has no index".into(),
+        });
+    }
+    let cls = m38_col_class_name(index_col);
+    if cls != "ColumnI64" {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("DataFrame.select_by_label_i64: index dtype is {}, expected ColumnI64", cls),
+        });
+    }
+    let (vals, nulls, length) = m37_col_fields(index_col);
+    let vs = m37_read_list_i64(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut found: Option<usize> = None;
+    for i in 0..length as usize {
+        if ns.get(i).copied().unwrap_or(false) { continue; }
+        if vs.get(i).copied().unwrap_or(0) == label {
+            found = Some(i);
+            break;
+        }
+    }
+    Ok(m41_build_one_row_df(interp, recv, found))
+}
+
+/// `DataFrame.select_by_label_str(self, label: str) -> DataFrame?`.
+fn m41_df_select_by_label_str(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let label = arg_str(args, 1);
+    let (index_col, _) = m41_df_index_fields(recv);
+    if index_col == 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "DataFrame.select_by_label_str: frame has no index".into(),
+        });
+    }
+    let cls = m38_col_class_name(index_col);
+    if cls != "ColumnStr" {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("DataFrame.select_by_label_str: index dtype is {}, expected ColumnStr", cls),
+        });
+    }
+    let (vals, nulls, length) = m37_col_fields(index_col);
+    let vs = m37_read_list_str_lst(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut found: Option<usize> = None;
+    for i in 0..length as usize {
+        if ns.get(i).copied().unwrap_or(false) { continue; }
+        if vs.get(i).map(|s| s == &label).unwrap_or(false) {
+            found = Some(i);
+            break;
+        }
+    }
+    Ok(m41_build_one_row_df(interp, recv, found))
+}
+
+/// `DataFrame.select_by_label_datetime(self, label: i64) -> DataFrame?`.
+/// `label` is interpreted as epoch-ms; the index must be ColumnDateTime.
+fn m41_df_select_by_label_datetime(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let label = arg_i64(args, 1);
+    let (index_col, _) = m41_df_index_fields(recv);
+    if index_col == 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "DataFrame.select_by_label_datetime: frame has no index".into(),
+        });
+    }
+    let cls = m38_col_class_name(index_col);
+    if cls != "ColumnDateTime" {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("DataFrame.select_by_label_datetime: index dtype is {}, expected ColumnDateTime", cls),
+        });
+    }
+    let (vals, nulls, length) = m37_col_fields(index_col);
+    let vs = m37_read_list_i64(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut found: Option<usize> = None;
+    for i in 0..length as usize {
+        if ns.get(i).copied().unwrap_or(false) { continue; }
+        if vs.get(i).copied().unwrap_or(0) == label {
+            found = Some(i);
+            break;
+        }
+    }
+    Ok(m41_build_one_row_df(interp, recv, found))
+}
+
+// ── Phase C: pivot_table ───────────────────────────────────────────────
+
+/// `DataFrame.pivot_table(self, index_col: str, columns_col: str,
+///                         values_col: str, aggfunc: str) -> DataFrame`.
+/// Combines pivot + group-by + aggregate.  Output uses RangeIndex.
+fn m41_df_pivot_table(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let index_col = arg_str(args, 1);
+    let columns_col = arg_str(args, 2);
+    let values_col = arg_str(args, 3);
+    let aggfunc = arg_str(args, 4);
+    let agg_ok = matches!(aggfunc.as_str(), "sum" | "mean" | "min" | "max" | "count");
+    if !agg_ok {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "DataFrame.pivot_table: aggfunc must be sum|mean|min|max|count, got {:?}",
+                aggfunc
+            ),
+        });
+    }
+    let (names_lst, _, nrows) = m37_df_fields(recv);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_ptrs = m37_df_col_ptrs(recv);
+    let i_idx = match names.iter().position(|n| n == &index_col) {
+        None => return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("DataFrame.pivot_table: index column {:?} not found", index_col),
+        }),
+        Some(i) => i,
+    };
+    let c_idx = match names.iter().position(|n| n == &columns_col) {
+        None => return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("DataFrame.pivot_table: columns column {:?} not found", columns_col),
+        }),
+        Some(i) => i,
+    };
+    let v_idx = match names.iter().position(|n| n == &values_col) {
+        None => return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("DataFrame.pivot_table: values column {:?} not found", values_col),
+        }),
+        Some(i) => i,
+    };
+    let i_col_p = col_ptrs[i_idx];
+    let c_col_p = col_ptrs[c_idx];
+    let v_col_p = col_ptrs[v_idx];
+    let v_cls = m38_col_class_name(v_col_p);
+    if aggfunc != "count" && v_cls != "ColumnI64" && v_cls != "ColumnF64" {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "DataFrame.pivot_table: aggfunc {:?} requires numeric values column, got {}",
+                aggfunc, v_cls
+            ),
+        });
+    }
+    // Stringify the index / columns key columns.  Re-use M38's
+    // serialized-row-key shape (each column's row → string).
+    let i_cls = m38_col_class_name(i_col_p);
+    let c_cls = m38_col_class_name(c_col_p);
+    let i_label = |row: usize| -> Option<String> {
+        let (vals, nulls, _) = m37_col_fields(i_col_p);
+        let ns = m37_read_list_bool(nulls);
+        if ns.get(row).copied().unwrap_or(false) { return None; }
+        Some(match i_cls.as_str() {
+            "ColumnI64" | "ColumnDateTime" => m37_read_list_i64(vals).get(row).copied().unwrap_or(0).to_string(),
+            "ColumnF64" => m37_read_list_f64(vals).get(row).copied().unwrap_or(0.0).to_string(),
+            "ColumnStr" => m37_read_list_str_lst(vals).get(row).cloned().unwrap_or_default(),
+            "ColumnBool" => if m37_read_list_bool(vals).get(row).copied().unwrap_or(false) { "true".to_string() } else { "false".to_string() },
+            _ => "?".to_string(),
+        })
+    };
+    let c_label = |row: usize| -> Option<String> {
+        let (vals, nulls, _) = m37_col_fields(c_col_p);
+        let ns = m37_read_list_bool(nulls);
+        if ns.get(row).copied().unwrap_or(false) { return None; }
+        Some(match c_cls.as_str() {
+            "ColumnI64" | "ColumnDateTime" => m37_read_list_i64(vals).get(row).copied().unwrap_or(0).to_string(),
+            "ColumnF64" => m37_read_list_f64(vals).get(row).copied().unwrap_or(0.0).to_string(),
+            "ColumnStr" => m37_read_list_str_lst(vals).get(row).cloned().unwrap_or_default(),
+            "ColumnBool" => if m37_read_list_bool(vals).get(row).copied().unwrap_or(false) { "true".to_string() } else { "false".to_string() },
+            _ => "?".to_string(),
+        })
+    };
+    // Collect unique index labels + column labels in first-seen order.
+    let mut row_keys: Vec<String> = Vec::new();
+    let mut row_lookup: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut col_keys: Vec<String> = Vec::new();
+    let mut col_lookup: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    // For each (row_key_idx, col_key_idx) accumulate the values.
+    let (vvals, vnulls, _) = m37_col_fields(v_col_p);
+    let v_ns = m37_read_list_bool(vnulls);
+    let v_i64 = if v_cls == "ColumnI64" { m37_read_list_i64(vvals) } else { Vec::new() };
+    let v_f64 = if v_cls == "ColumnF64" { m37_read_list_f64(vvals) } else { Vec::new() };
+    // Accumulator state per (row, col) bucket.
+    enum Acc {
+        SumI64 { acc: i64, cnt: i64 },
+        MeanI64 { sum: i64, cnt: i64 },
+        MinI64 { acc: i64, cnt: i64 },
+        MaxI64 { acc: i64, cnt: i64 },
+        SumF64 { acc: f64, cnt: i64 },
+        MeanF64 { sum: f64, cnt: i64 },
+        MinF64 { acc: f64, cnt: i64 },
+        MaxF64 { acc: f64, cnt: i64 },
+        Count { cnt: i64 },
+    }
+    let make_acc = || -> Acc {
+        if aggfunc == "count" { return Acc::Count { cnt: 0 }; }
+        match v_cls.as_str() {
+            "ColumnI64" => match aggfunc.as_str() {
+                "sum"  => Acc::SumI64 { acc: 0, cnt: 0 },
+                "mean" => Acc::MeanI64 { sum: 0, cnt: 0 },
+                "min"  => Acc::MinI64 { acc: i64::MAX, cnt: 0 },
+                "max"  => Acc::MaxI64 { acc: i64::MIN, cnt: 0 },
+                _ => Acc::SumI64 { acc: 0, cnt: 0 },
+            },
+            "ColumnF64" => match aggfunc.as_str() {
+                "sum"  => Acc::SumF64 { acc: 0.0, cnt: 0 },
+                "mean" => Acc::MeanF64 { sum: 0.0, cnt: 0 },
+                "min"  => Acc::MinF64 { acc: f64::INFINITY, cnt: 0 },
+                "max"  => Acc::MaxF64 { acc: f64::NEG_INFINITY, cnt: 0 },
+                _ => Acc::SumF64 { acc: 0.0, cnt: 0 },
+            },
+            _ => Acc::Count { cnt: 0 },
+        }
+    };
+    // buckets[r][c] = Acc, lazily created.
+    let mut buckets: Vec<Vec<Option<Acc>>> = Vec::new();
+    for r in 0..nrows as usize {
+        let rk = match i_label(r) { Some(s) => s, None => continue };
+        let ck = match c_label(r) { Some(s) => s, None => continue };
+        let ri = match row_lookup.get(&rk).copied() {
+            Some(i) => i,
+            None => {
+                row_lookup.insert(rk.clone(), row_keys.len());
+                row_keys.push(rk);
+                buckets.push(Vec::new());
+                row_keys.len() - 1
+            }
+        };
+        let ci = match col_lookup.get(&ck).copied() {
+            Some(i) => i,
+            None => {
+                col_lookup.insert(ck.clone(), col_keys.len());
+                col_keys.push(ck);
+                col_keys.len() - 1
+            }
+        };
+        // Ensure buckets[ri] is wide enough.
+        while buckets[ri].len() <= ci {
+            buckets[ri].push(None);
+        }
+        // Skip null values for non-count aggs.
+        let val_null = v_ns.get(r).copied().unwrap_or(false);
+        if val_null && aggfunc != "count" { continue; }
+        if buckets[ri][ci].is_none() {
+            buckets[ri][ci] = Some(make_acc());
+        }
+        match buckets[ri][ci].as_mut().unwrap() {
+            Acc::Count { cnt } => { if !val_null { *cnt += 1; } }
+            Acc::SumI64 { acc, cnt } => { *acc = acc.wrapping_add(v_i64[r]); *cnt += 1; }
+            Acc::MeanI64 { sum, cnt } => { *sum = sum.wrapping_add(v_i64[r]); *cnt += 1; }
+            Acc::MinI64 { acc, cnt } => { if v_i64[r] < *acc { *acc = v_i64[r]; } *cnt += 1; }
+            Acc::MaxI64 { acc, cnt } => { if v_i64[r] > *acc { *acc = v_i64[r]; } *cnt += 1; }
+            Acc::SumF64 { acc, cnt } => { *acc += v_f64[r]; *cnt += 1; }
+            Acc::MeanF64 { sum, cnt } => { *sum += v_f64[r]; *cnt += 1; }
+            Acc::MinF64 { acc, cnt } => { if v_f64[r] < *acc { *acc = v_f64[r]; } *cnt += 1; }
+            Acc::MaxF64 { acc, cnt } => { if v_f64[r] > *acc { *acc = v_f64[r]; } *cnt += 1; }
+        }
+    }
+    // Determine output value dtype.
+    let out_dtype: &str = match aggfunc.as_str() {
+        "count" => "ColumnI64",
+        "mean"  => "ColumnF64",
+        _ => match v_cls.as_str() {
+            "ColumnI64" => "ColumnI64",
+            "ColumnF64" => "ColumnF64",
+            _ => "ColumnI64",
+        },
+    };
+    let nr = row_keys.len();
+    let nc = col_keys.len();
+    // Build columns:
+    //  - First column is the index_col, dtype = source dtype.
+    //  - Then one column per col_key, dtype = out_dtype.
+    let mut out_names: Vec<String> = Vec::with_capacity(nc + 1);
+    let mut out_cols: Vec<u64> = Vec::with_capacity(nc + 1);
+    out_names.push(index_col.clone());
+    // Build the index_col column from row_keys, parsed back into its
+    // original dtype.
+    let index_dtype = i_cls.clone();
+    match index_dtype.as_str() {
+        "ColumnI64" | "ColumnDateTime" => {
+            let vs: Vec<i64> = row_keys.iter().map(|s| s.parse::<i64>().unwrap_or(0)).collect();
+            let ns: Vec<bool> = vec![false; nr];
+            let v_lst = m37_alloc_list_i64(interp, &vs);
+            let n_lst = m37_alloc_list_bool(interp, &ns);
+            out_cols.push(m37_alloc_column(interp, &index_dtype, v_lst, n_lst, nr as i64) as u64);
+        }
+        "ColumnF64" => {
+            let vs: Vec<f64> = row_keys.iter().map(|s| s.parse::<f64>().unwrap_or(0.0)).collect();
+            let ns: Vec<bool> = vec![false; nr];
+            let v_lst = m37_alloc_list_f64(interp, &vs);
+            let n_lst = m37_alloc_list_bool(interp, &ns);
+            out_cols.push(m37_alloc_column(interp, "ColumnF64", v_lst, n_lst, nr as i64) as u64);
+        }
+        "ColumnBool" => {
+            let vs: Vec<bool> = row_keys.iter().map(|s| s == "true").collect();
+            let ns: Vec<bool> = vec![false; nr];
+            let v_lst = m37_alloc_list_bool(interp, &vs);
+            let n_lst = m37_alloc_list_bool(interp, &ns);
+            out_cols.push(m37_alloc_column(interp, "ColumnBool", v_lst, n_lst, nr as i64) as u64);
+        }
+        _ => {
+            // ColumnStr (default).
+            let ns: Vec<bool> = vec![false; nr];
+            let v_lst = m37_alloc_list_str(interp, &row_keys);
+            let n_lst = m37_alloc_list_bool(interp, &ns);
+            out_cols.push(m37_alloc_column(interp, "ColumnStr", v_lst, n_lst, nr as i64) as u64);
+        }
+    };
+    // Now one column per col_key.
+    for c in 0..nc {
+        out_names.push(col_keys[c].clone());
+        let mut nu_col: Vec<bool> = Vec::with_capacity(nr);
+        let mut i64_col: Vec<i64> = Vec::new();
+        let mut f64_col: Vec<f64> = Vec::new();
+        for r in 0..nr {
+            let acc_opt = buckets.get(r).and_then(|row| row.get(c)).and_then(|a| a.as_ref());
+            match acc_opt {
+                None => {
+                    nu_col.push(true);
+                    if out_dtype == "ColumnI64" { i64_col.push(0); } else { f64_col.push(0.0); }
+                }
+                Some(Acc::Count { cnt }) => {
+                    nu_col.push(false);
+                    i64_col.push(*cnt);
+                }
+                Some(Acc::SumI64 { acc, cnt }) => {
+                    if *cnt == 0 {
+                        nu_col.push(true); i64_col.push(0);
+                    } else {
+                        nu_col.push(false); i64_col.push(*acc);
+                    }
+                }
+                Some(Acc::MeanI64 { sum, cnt }) => {
+                    if *cnt == 0 {
+                        nu_col.push(true); f64_col.push(0.0);
+                    } else {
+                        nu_col.push(false); f64_col.push(*sum as f64 / *cnt as f64);
+                    }
+                }
+                Some(Acc::MinI64 { acc, cnt }) | Some(Acc::MaxI64 { acc, cnt }) => {
+                    if *cnt == 0 {
+                        nu_col.push(true); i64_col.push(0);
+                    } else {
+                        nu_col.push(false); i64_col.push(*acc);
+                    }
+                }
+                Some(Acc::SumF64 { acc, cnt }) => {
+                    if *cnt == 0 {
+                        nu_col.push(true); f64_col.push(0.0);
+                    } else {
+                        nu_col.push(false); f64_col.push(*acc);
+                    }
+                }
+                Some(Acc::MeanF64 { sum, cnt }) => {
+                    if *cnt == 0 {
+                        nu_col.push(true); f64_col.push(0.0);
+                    } else {
+                        nu_col.push(false); f64_col.push(*sum / *cnt as f64);
+                    }
+                }
+                Some(Acc::MinF64 { acc, cnt }) | Some(Acc::MaxF64 { acc, cnt }) => {
+                    if *cnt == 0 {
+                        nu_col.push(true); f64_col.push(0.0);
+                    } else {
+                        nu_col.push(false); f64_col.push(*acc);
+                    }
+                }
+            }
+        }
+        let n_lst = m37_alloc_list_bool(interp, &nu_col);
+        let v_lst = if out_dtype == "ColumnI64" {
+            m37_alloc_list_i64(interp, &i64_col)
+        } else {
+            m37_alloc_list_f64(interp, &f64_col)
+        };
+        out_cols.push(m37_alloc_column(interp, out_dtype, v_lst, n_lst, nr as i64) as u64);
+    }
+    Ok(m37_build_df(interp, &out_names, &out_cols, nr as i64))
 }
 
 #[cfg(test)]

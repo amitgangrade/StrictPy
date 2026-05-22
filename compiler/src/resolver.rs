@@ -4627,14 +4627,22 @@ impl Resolver {
             args: vec![Ty::Tuple(vec![m37_str.clone(), m37_str.clone()])],
         };
 
-        // ── DataFrame — { names: List[str], columns: List[Column], nrows: i64 }
+        // ── DataFrame — { names: List[str], columns: List[Column], nrows: i64,
+        //                 index: Column?, index_name: str? }
+        // M41 extended the payload from 24 → 40 bytes to carry an optional
+        // index column + its original-column name.  null (0) at the index
+        // slot means "RangeIndex" (today's default behavior).  See LANGUAGE_GUIDE
+        // §5 M41 additions and STRICTPY_SPEC §9.tabular for the index surface.
         self.class_layouts.insert(m37_df_cid, ClassLayout {
             id: m37_df_cid, name: "DataFrame".into(), base: None,
             is_open: false, is_sealed: false,
             fields: vec![
-                FieldInfo { name: "names".into(),   ty: m37_list_str.clone(),     offset: 0 },
-                FieldInfo { name: "columns".into(), ty: m37_list_col_ty.clone(), offset: 8 },
-                FieldInfo { name: "nrows".into(),   ty: m37_i64.clone(),          offset: 16 },
+                FieldInfo { name: "names".into(),      ty: m37_list_str.clone(),     offset: 0 },
+                FieldInfo { name: "columns".into(),    ty: m37_list_col_ty.clone(),  offset: 8 },
+                FieldInfo { name: "nrows".into(),      ty: m37_i64.clone(),          offset: 16 },
+                // M41: optional index — null pointer means RangeIndex.
+                FieldInfo { name: "index".into(),      ty: Ty::Nullable(Box::new(m37_col_ty.clone())), offset: 24 },
+                FieldInfo { name: "index_name".into(), ty: Ty::Nullable(Box::new(m37_str.clone())),    offset: 32 },
             ],
             methods: vec![
                 MethodSig { name: "length".into(),     params: vec![], ret: m37_i64.clone() },
@@ -4781,9 +4789,75 @@ impl Resolver {
                     params: vec![m37_df_ty.clone(), m37_str.clone(), m37_str.clone()],
                     ret: m37_df_ty.clone(),
                 },
+                // ── M41 Phase A: index storage + accessors + sort_index ──
+                MethodSig {
+                    name: "set_index".into(),
+                    params: vec![m37_str.clone()],
+                    ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "reset_index".into(),
+                    params: vec![],
+                    ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "has_index".into(),
+                    params: vec![],
+                    ret: m37_bool.clone(),
+                },
+                MethodSig {
+                    name: "index".into(),
+                    params: vec![],
+                    ret: Ty::Nullable(Box::new(m37_col_ty.clone())),
+                },
+                MethodSig {
+                    name: "index_name".into(),
+                    params: vec![],
+                    ret: Ty::Nullable(Box::new(m37_str.clone())),
+                },
+                MethodSig {
+                    name: "sort_index".into(),
+                    params: vec![m37_bool.clone()],
+                    ret: m37_df_ty.clone(),
+                },
+                // ── M41 Phase B: index-aware time-series + select by label ──
+                MethodSig {
+                    name: "resample_index".into(),
+                    params: vec![m37_str.clone(), m37_str.clone()],
+                    ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "asof_merge_index".into(),
+                    params: vec![m37_df_ty.clone()],
+                    ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "select_by_label_i64".into(),
+                    params: vec![m37_i64.clone()],
+                    ret: Ty::Nullable(Box::new(m37_df_ty.clone())),
+                },
+                MethodSig {
+                    name: "select_by_label_str".into(),
+                    params: vec![m37_str.clone()],
+                    ret: Ty::Nullable(Box::new(m37_df_ty.clone())),
+                },
+                MethodSig {
+                    name: "select_by_label_datetime".into(),
+                    params: vec![m37_i64.clone()],
+                    ret: Ty::Nullable(Box::new(m37_df_ty.clone())),
+                },
+                // ── M41 Phase C: pivot_table ──
+                MethodSig {
+                    name: "pivot_table".into(),
+                    params: vec![
+                        m37_str.clone(), m37_str.clone(),
+                        m37_str.clone(), m37_str.clone(),
+                    ],
+                    ret: m37_df_ty.clone(),
+                },
             ],
             generics: vec![], generic_tvars: vec![],
-            is_native: false, payload_size: 24,
+            is_native: false, payload_size: 40,
         });
 
         // ── GroupedDataFrame layout — payload carries (parent, group_keys, slot, group_count).

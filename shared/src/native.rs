@@ -1051,6 +1051,69 @@ pub enum NativeFn {
     /// (ColumnDateTime or ColumnI64).
     M40TabDfAsofMerge          = 1012,
 
+    // ── M41 Phase 5b: tabular DatetimeIndex (minimum viable) + pivot_table ─
+    // Adds an optional `index` slot on DataFrame plus a handful of
+    // index-aware ops (`sort_index`, `resample_index`, `asof_merge_index`,
+    // `select_by_label_*`) and pandas's `pivot_table`.  All dispatched
+    // class-method-style via `m41_tabular_class_method_native_id_by_name`
+    // in ir.rs.  Variable prefix `m41_` in shared files.
+    //
+    // EXPLICIT SCOPE-DOWN: every existing DataFrame method that returns a
+    // fresh DataFrame drops the index in v1 (returns a RangeIndex result).
+    // Only the new M41 ops (sort_index / resample_index / asof_merge_index
+    // / select_by_label_*) preserve the index.  Full index propagation
+    // through filter/sort/head/etc. is M42 work.
+
+    // ── Phase A: index storage + accessors + sort_index ──
+    /// `DataFrame.set_index(self, col_name: str) -> DataFrame`.  Removes
+    /// `col_name` from columns, attaches it as the new index.  Raises
+    /// ValueError if `col_name` is absent or df already has an index.
+    M41TabDfSetIndex           = 1015,
+    /// `DataFrame.reset_index(self) -> DataFrame`.  Removes the index;
+    /// re-inserts it as a regular column at position 0 with its original
+    /// name (or "index" if no original name).  No-op if df has no index.
+    M41TabDfResetIndex         = 1016,
+    /// `DataFrame.has_index(self) -> bool`.
+    M41TabDfHasIndex           = 1017,
+    /// `DataFrame.index(self) -> Column?`.  Returns the index column or
+    /// `none` if the frame has a RangeIndex.
+    M41TabDfIndex              = 1018,
+    /// `DataFrame.index_name(self) -> str?`.  Returns the original column
+    /// name or `none` if the frame has a RangeIndex.
+    M41TabDfIndexName          = 1019,
+    /// `DataFrame.sort_index(self, ascending: bool) -> DataFrame`.
+    /// Sorts by the index column (stable).  Output preserves the index.
+    /// Raises ValueError if df has no index.
+    M41TabDfSortIndex          = 1020,
+
+    // ── Phase B: index-aware time-series + select by label ──
+    /// `DataFrame.resample_index(self, rule: str, agg: str) -> DataFrame`.
+    /// Like M40's resample, but uses the DataFrame's DateTime index.
+    /// Output preserves its own (bucket-start) index.
+    M41TabDfResampleIndex      = 1021,
+    /// `DataFrame.asof_merge_index(self, other: DataFrame) -> DataFrame`.
+    /// Like M40's asof_merge, but uses both frames' indexes as keys.
+    /// Output preserves self's index.
+    M41TabDfAsofMergeIndex     = 1022,
+    /// `DataFrame.select_by_label_i64(self, label: i64) -> DataFrame?`.
+    /// Returns the first row whose ColumnI64 index value equals `label`,
+    /// or `none` if absent.  Raises ValueError on dtype mismatch.
+    M41TabDfSelectByLabelI64   = 1023,
+    /// `DataFrame.select_by_label_str(self, label: str) -> DataFrame?`.
+    /// Most-common index dtype.
+    M41TabDfSelectByLabelStr   = 1024,
+    /// `DataFrame.select_by_label_datetime(self, label: i64) -> DataFrame?`.
+    /// epoch-ms label against a ColumnDateTime index.
+    M41TabDfSelectByLabelDateTime = 1025,
+
+    // ── Phase C: pivot_table ──
+    /// `DataFrame.pivot_table(self, index_col: str, columns_col: str,
+    ///                        values_col: str, aggfunc: str) -> DataFrame`.
+    /// Pandas's pivot + group_by + aggregate in one call.  aggfunc is one
+    /// of "sum"|"mean"|"min"|"max"|"count".  Output is RangeIndex (no
+    /// index propagation in v1).
+    M41TabDfPivotTable         = 1026,
+
     // ── 250–289: M22 P2A (argparse + collections + csv) ─────────────────
     // Phase 2 starts here.  P2A's job is to bring three high-ROI stdlib
     // modules online on top of the M19 stdlib-module-table:
@@ -2583,6 +2646,19 @@ impl NativeFn {
             1010 => Some(Self::M40TabColF64RollingStd),
             1011 => Some(Self::M40TabDfResample),
             1012 => Some(Self::M40TabDfAsofMerge),
+            // ── M41 ──
+            1015 => Some(Self::M41TabDfSetIndex),
+            1016 => Some(Self::M41TabDfResetIndex),
+            1017 => Some(Self::M41TabDfHasIndex),
+            1018 => Some(Self::M41TabDfIndex),
+            1019 => Some(Self::M41TabDfIndexName),
+            1020 => Some(Self::M41TabDfSortIndex),
+            1021 => Some(Self::M41TabDfResampleIndex),
+            1022 => Some(Self::M41TabDfAsofMergeIndex),
+            1023 => Some(Self::M41TabDfSelectByLabelI64),
+            1024 => Some(Self::M41TabDfSelectByLabelStr),
+            1025 => Some(Self::M41TabDfSelectByLabelDateTime),
+            1026 => Some(Self::M41TabDfPivotTable),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }
