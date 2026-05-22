@@ -4787,6 +4787,13 @@ fn m41_tabular_class_method_native_id_by_name(
         ("DataFrame", "select_by_label_datetime") => NativeFn::M41TabDfSelectByLabelDateTime as u32,
         // ── Phase C: pivot_table ──
         ("DataFrame", "pivot_table")  => NativeFn::M41TabDfPivotTable  as u32,
+        // ── M44 Phase A: MultiIndex storage + accessors + sort_index_multi ──
+        ("DataFrame", "set_index_multi")    => NativeFn::M44TabDfSetIndexMulti    as u32,
+        ("DataFrame", "reset_index_multi")  => NativeFn::M44TabDfResetIndexMulti  as u32,
+        ("DataFrame", "index_nlevels")      => NativeFn::M44TabDfIndexNlevels     as u32,
+        ("DataFrame", "index_level")        => NativeFn::M44TabDfIndexLevel       as u32,
+        ("DataFrame", "index_level_name")   => NativeFn::M44TabDfIndexLevelName   as u32,
+        ("DataFrame", "sort_index_multi")   => NativeFn::M44TabDfSortIndexMulti   as u32,
         _ => return None,
     })
 }

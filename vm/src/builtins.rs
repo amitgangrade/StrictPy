@@ -7053,6 +7053,14 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         // ── M41 Phase C: pivot_table ──
         NativeFn::M41TabDfPivotTable      => m41_df_pivot_table(interp, args),
 
+        // ── M44 Phase A: MultiIndex storage + accessors + sort_index_multi ──
+        NativeFn::M44TabDfSetIndexMulti    => m44_df_set_index_multi(interp, args),
+        NativeFn::M44TabDfResetIndexMulti  => m44_df_reset_index_multi(interp, args),
+        NativeFn::M44TabDfIndexNlevels     => m44_df_index_nlevels(interp, args),
+        NativeFn::M44TabDfIndexLevel       => m44_df_index_level(interp, args),
+        NativeFn::M44TabDfIndexLevelName   => m44_df_index_level_name(interp, args),
+        NativeFn::M44TabDfSortIndexMulti   => m44_df_sort_index_multi(interp, args),
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
@@ -11941,19 +11949,25 @@ fn m37_alloc_dataframe(interp: &mut Interpreter, args: &[u64]) -> Result<u64, Vm
     for cp in &col_ptrs {
         unsafe { interp.list_push(cols_lst, *cp) };
     }
-    // M41: 40-byte payload — names, columns, nrows, index (=0), index_name (=0).
-    let df = m34_alloc_class_obj(interp, "DataFrame", 40);
+    // M44: 56-byte payload — names, columns, nrows, index (=0), index_name (=0),
+    // index_levels (=0), index_names (=0).  Both index representations null
+    // = RangeIndex (today's default).
+    let df = m34_alloc_class_obj(interp, "DataFrame", 56);
     unsafe {
         let n_slot = df.add(HDR) as *mut u64;
         let c_slot = df.add(HDR + 8) as *mut u64;
         let r_slot = df.add(HDR + 16) as *mut i64;
         let i_slot = df.add(HDR + 24) as *mut u64;
         let in_slot = df.add(HDR + 32) as *mut u64;
+        let il_slot = df.add(HDR + 40) as *mut u64;
+        let ins_slot = df.add(HDR + 48) as *mut u64;
         std::ptr::write_unaligned(n_slot, names_lst as u64);
         std::ptr::write_unaligned(c_slot, cols_lst as u64);
         std::ptr::write_unaligned(r_slot, nrows);
         std::ptr::write_unaligned(i_slot, 0u64);
         std::ptr::write_unaligned(in_slot, 0u64);
+        std::ptr::write_unaligned(il_slot, 0u64);
+        std::ptr::write_unaligned(ins_slot, 0u64);
     }
     Ok(df as u64)
 }
@@ -12482,19 +12496,24 @@ fn m37_build_df_from_rows(
     for cp in &col_ptrs {
         unsafe { interp.list_push(cols_lst, *cp) };
     }
-    // M41: 40-byte payload — names, columns, nrows, index (=0), index_name (=0).
-    let df = m34_alloc_class_obj(interp, "DataFrame", 40);
+    // M44: 56-byte payload — names, columns, nrows, index (=0), index_name (=0),
+    // index_levels (=0), index_names (=0).
+    let df = m34_alloc_class_obj(interp, "DataFrame", 56);
     unsafe {
         let n_slot = df.add(HDR) as *mut u64;
         let c_slot = df.add(HDR + 8) as *mut u64;
         let r_slot = df.add(HDR + 16) as *mut i64;
         let i_slot = df.add(HDR + 24) as *mut u64;
         let in_slot = df.add(HDR + 32) as *mut u64;
+        let il_slot = df.add(HDR + 40) as *mut u64;
+        let ins_slot = df.add(HDR + 48) as *mut u64;
         std::ptr::write_unaligned(n_slot, names_lst as u64);
         std::ptr::write_unaligned(c_slot, cols_lst as u64);
         std::ptr::write_unaligned(r_slot, nrows as i64);
         std::ptr::write_unaligned(i_slot, 0u64);
         std::ptr::write_unaligned(in_slot, 0u64);
+        std::ptr::write_unaligned(il_slot, 0u64);
+        std::ptr::write_unaligned(ins_slot, 0u64);
     }
     Ok(df as u64)
 }
@@ -12832,8 +12851,10 @@ fn m37_build_df(
     m41_build_df_with_index(interp, names, col_ptrs, nrows, 0, 0)
 }
 
-/// M41 helper: build a DataFrame with an optional index column.  Pass
-/// `index_col_ptr = 0` and `index_name_ptr = 0` for a RangeIndex frame.
+/// M41 helper: build a DataFrame with an optional single-column index.
+/// Pass `index_col_ptr = 0` and `index_name_ptr = 0` for a RangeIndex
+/// frame.  Always zeros the M44 MultiIndex slots (mutually exclusive
+/// with the M41 single-col index).
 fn m41_build_df_with_index(
     interp: &mut Interpreter,
     names: &[String],
@@ -12847,18 +12868,71 @@ fn m41_build_df_with_index(
     for cp in col_ptrs {
         unsafe { interp.list_push(cols_lst, *cp) };
     }
-    let df = m34_alloc_class_obj(interp, "DataFrame", 40);
+    let df = m34_alloc_class_obj(interp, "DataFrame", 56);
     unsafe {
         let n_slot = df.add(HDR) as *mut u64;
         let c_slot = df.add(HDR + 8) as *mut u64;
         let r_slot = df.add(HDR + 16) as *mut i64;
         let i_slot = df.add(HDR + 24) as *mut u64;
         let in_slot = df.add(HDR + 32) as *mut u64;
+        let il_slot = df.add(HDR + 40) as *mut u64;
+        let ins_slot = df.add(HDR + 48) as *mut u64;
         std::ptr::write_unaligned(n_slot, names_lst as u64);
         std::ptr::write_unaligned(c_slot, cols_lst as u64);
         std::ptr::write_unaligned(r_slot, nrows);
         std::ptr::write_unaligned(i_slot, index_col_ptr);
         std::ptr::write_unaligned(in_slot, index_name_ptr);
+        std::ptr::write_unaligned(il_slot, 0u64);
+        std::ptr::write_unaligned(ins_slot, 0u64);
+    }
+    df as u64
+}
+
+/// M44 helper: build a DataFrame with a MultiIndex.  `level_cols` is
+/// a slice of Column pointers (one per level); `level_names` is the
+/// matching list of level names.  Asserts the two have the same length
+/// at the caller.  Always zeros the M41 single-col index slots
+/// (mutually exclusive).  Pass empty slices to fall back to a
+/// RangeIndex frame (caller should prefer `m37_build_df` in that case).
+fn m44_build_df_with_multiindex(
+    interp: &mut Interpreter,
+    names: &[String],
+    col_ptrs: &[u64],
+    nrows: i64,
+    level_cols: &[u64],
+    level_names: &[String],
+) -> u64 {
+    let names_lst = m37_alloc_list_str(interp, names);
+    let cols_lst = interp.alloc_list(col_ptrs.len().max(1));
+    for cp in col_ptrs {
+        unsafe { interp.list_push(cols_lst, *cp) };
+    }
+    let (levels_lst, lnames_lst): (u64, u64) = if level_cols.is_empty() {
+        (0, 0)
+    } else {
+        let lvls = interp.alloc_list(level_cols.len().max(1));
+        for cp in level_cols {
+            unsafe { interp.list_push(lvls, *cp) };
+        }
+        let lnames = m37_alloc_list_str(interp, level_names);
+        (lvls as u64, lnames as u64)
+    };
+    let df = m34_alloc_class_obj(interp, "DataFrame", 56);
+    unsafe {
+        let n_slot = df.add(HDR) as *mut u64;
+        let c_slot = df.add(HDR + 8) as *mut u64;
+        let r_slot = df.add(HDR + 16) as *mut i64;
+        let i_slot = df.add(HDR + 24) as *mut u64;
+        let in_slot = df.add(HDR + 32) as *mut u64;
+        let il_slot = df.add(HDR + 40) as *mut u64;
+        let ins_slot = df.add(HDR + 48) as *mut u64;
+        std::ptr::write_unaligned(n_slot, names_lst as u64);
+        std::ptr::write_unaligned(c_slot, cols_lst as u64);
+        std::ptr::write_unaligned(r_slot, nrows);
+        std::ptr::write_unaligned(i_slot, 0u64);
+        std::ptr::write_unaligned(in_slot, 0u64);
+        std::ptr::write_unaligned(il_slot, levels_lst);
+        std::ptr::write_unaligned(ins_slot, lnames_lst);
     }
     df as u64
 }
@@ -12875,6 +12949,59 @@ fn m41_df_index_fields(recv: u64) -> (u64, u64) {
         let n = std::ptr::read_unaligned(obj.add(HDR + 32) as *const u64);
         (i, n)
     }
+}
+
+/// M44: read the (index_levels_ptr, index_names_ptr) tail of a
+/// DataFrame payload.  Both are 0 when the frame has no MultiIndex
+/// (either RangeIndex or single-col index).  When set, the two
+/// lists have identical length (`nlevels`).
+fn m44_df_multiindex_fields(recv: u64) -> (u64, u64) {
+    let obj = recv as *const u8;
+    if obj.is_null() {
+        return (0, 0);
+    }
+    unsafe {
+        let l = std::ptr::read_unaligned(obj.add(HDR + 40) as *const u64);
+        let n = std::ptr::read_unaligned(obj.add(HDR + 48) as *const u64);
+        (l, n)
+    }
+}
+
+/// M44: how many levels does the receiver's index have?  0 = no index
+/// (RangeIndex); 1 = single-col index (M41); N = MultiIndex.
+fn m44_df_nlevels(recv: u64) -> i64 {
+    let (mi_levels, _) = m44_df_multiindex_fields(recv);
+    if mi_levels != 0 {
+        let lst = mi_levels as *const crate::object::ListRepr;
+        return unsafe { (*lst).length as i64 };
+    }
+    let (idx, _) = m41_df_index_fields(recv);
+    if idx != 0 { 1 } else { 0 }
+}
+
+/// M44: read a MultiIndex's level columns into a Vec<u64> (one column
+/// pointer per level).  Returns empty if no MultiIndex.
+fn m44_read_index_levels(recv: u64) -> Vec<u64> {
+    let (mi_levels, _) = m44_df_multiindex_fields(recv);
+    if mi_levels == 0 {
+        return Vec::new();
+    }
+    let lst = mi_levels as *const crate::object::ListRepr;
+    unsafe {
+        let len = (*lst).length;
+        let data = (*lst).data as *const u64;
+        (0..len).map(|j| std::ptr::read_unaligned(data.add(j))).collect()
+    }
+}
+
+/// M44: read a MultiIndex's level names into a Vec<String> (one entry
+/// per level).  Returns empty if no MultiIndex.
+fn m44_read_index_level_names(recv: u64) -> Vec<String> {
+    let (_, mi_names) = m44_df_multiindex_fields(recv);
+    if mi_names == 0 {
+        return Vec::new();
+    }
+    m37_read_list_str_lst(mi_names as *const crate::object::ListRepr)
 }
 
 /// Read the column pointers out of a DataFrame into a Vec<u64>.
@@ -16952,6 +17079,285 @@ fn m41_df_sort_index(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmEr
     let _ = nrows; // unchanged
     Ok(m41_build_df_with_index(
         interp, &names, &new_cols, perm.len() as i64, new_index, index_name_ptr,
+    ))
+}
+
+// ═════════════════════════════════════════════════════════════════════
+//  M44 Phase A — MultiIndex storage + accessors + sort_index_multi
+//
+//  M41 added an optional single-column index; M44 layers an optional
+//  MultiIndex on top.  The single-col index and the MultiIndex are
+//  mutually exclusive at any given moment — every constructor enforces
+//  the invariant by zeroing one set of slots when it writes the other.
+//  See LANGUAGE_GUIDE §5 M44 additions and STRICTPY_SPEC §9.tabular for
+//  the full surface.
+//
+//  Variable prefix `m44_` for all new helpers / locals per the brief.
+// ═════════════════════════════════════════════════════════════════════
+
+/// `DataFrame.set_index_multi(self, cols: List[str]) -> DataFrame`.
+/// Removes the named columns from the regular column list and attaches
+/// them as a MultiIndex.  Raises ValueError if any column is absent,
+/// if `cols` is empty, or if the frame already has any kind of index
+/// (single-col or multi).
+fn m44_df_set_index_multi(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let m44_want = read_list_str(args, 1);
+    if m44_want.is_empty() {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "DataFrame.set_index_multi: cols must be non-empty".into(),
+        });
+    }
+    let (existing_index, _) = m41_df_index_fields(recv);
+    let m44_existing_nlevels = m44_df_nlevels(recv);
+    if existing_index != 0 || m44_existing_nlevels >= 1 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "DataFrame.set_index_multi: frame already has an index; call reset_index() or reset_index_multi() first".into(),
+        });
+    }
+    let (names_lst, _, nrows) = m37_df_fields(recv);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_ptrs = m37_df_col_ptrs(recv);
+    // Resolve each requested column.
+    let mut m44_level_indices: Vec<usize> = Vec::with_capacity(m44_want.len());
+    for w in &m44_want {
+        match names.iter().position(|n| n == w) {
+            None => return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!("DataFrame.set_index_multi: column {:?} not found", w),
+            }),
+            Some(i) => m44_level_indices.push(i),
+        }
+    }
+    // Build the new regular column list (all columns except the levels).
+    let mut m44_drop_set = std::collections::HashSet::new();
+    for i in &m44_level_indices { m44_drop_set.insert(*i); }
+    let mut m44_new_names: Vec<String> = Vec::with_capacity(names.len().saturating_sub(m44_want.len()));
+    let mut m44_new_cols: Vec<u64> = Vec::with_capacity(col_ptrs.len().saturating_sub(m44_want.len()));
+    for (i, n) in names.iter().enumerate() {
+        if m44_drop_set.contains(&i) { continue; }
+        m44_new_names.push(n.clone());
+        m44_new_cols.push(col_ptrs[i]);
+    }
+    // Clone each level column so it is physically independent.
+    let m44_level_cols: Vec<u64> = m44_level_indices.iter()
+        .map(|i| m41_clone_column(interp, col_ptrs[*i]))
+        .collect();
+    let m44_level_names: Vec<String> = m44_want.clone();
+    Ok(m44_build_df_with_multiindex(
+        interp,
+        &m44_new_names,
+        &m44_new_cols,
+        nrows,
+        &m44_level_cols,
+        &m44_level_names,
+    ))
+}
+
+/// `DataFrame.reset_index_multi(self) -> DataFrame`.  Drops the
+/// MultiIndex; re-inserts each level as a regular column at the start
+/// of the column list, named by `index_names[i]`.  Returns a fresh
+/// RangeIndex frame.  No-op (returns a fresh RangeIndex frame with
+/// identical columns) if the receiver has no MultiIndex.
+fn m44_df_reset_index_multi(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let (names_lst, _, nrows) = m37_df_fields(recv);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_ptrs = m37_df_col_ptrs(recv);
+    let m44_level_cols = m44_read_index_levels(recv);
+    let m44_level_names = m44_read_index_level_names(recv);
+    if m44_level_cols.is_empty() {
+        // No MultiIndex — emit a fresh RangeIndex frame with the same columns.
+        return Ok(m37_build_df(interp, &names, &col_ptrs, nrows));
+    }
+    let mut m44_new_names: Vec<String> = Vec::with_capacity(m44_level_names.len() + names.len());
+    let mut m44_new_cols:  Vec<u64>    = Vec::with_capacity(m44_level_cols.len()  + col_ptrs.len());
+    for (lname, lcol) in m44_level_names.iter().zip(m44_level_cols.iter()) {
+        m44_new_names.push(lname.clone());
+        m44_new_cols.push(*lcol);
+    }
+    m44_new_names.extend(names.iter().cloned());
+    m44_new_cols.extend(col_ptrs.iter().copied());
+    Ok(m37_build_df(interp, &m44_new_names, &m44_new_cols, nrows))
+}
+
+/// `DataFrame.index_nlevels(self) -> i64`.  0 = RangeIndex; 1 = single
+/// column index (M41); N = MultiIndex with N levels.
+fn m44_df_index_nlevels(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    Ok(m44_df_nlevels(recv) as u64)
+}
+
+/// `DataFrame.index_level(self, i: i64) -> Column?`.  Returns the i-th
+/// index level as a Column.  None if out of range or no index.  For a
+/// single-col index (nlevels=1), `level(0)` returns the same column as
+/// `index()`.
+fn m44_df_index_level(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let i = arg_i64(args, 1);
+    if i < 0 {
+        return Ok(NONE_SENTINEL);
+    }
+    let m44_levels = m44_read_index_levels(recv);
+    if !m44_levels.is_empty() {
+        let idx = i as usize;
+        if idx >= m44_levels.len() {
+            return Ok(NONE_SENTINEL);
+        }
+        return Ok(m44_levels[idx]);
+    }
+    // Fall through to single-col (M41).
+    let (single_idx, _) = m41_df_index_fields(recv);
+    if single_idx == 0 || i != 0 {
+        return Ok(NONE_SENTINEL);
+    }
+    Ok(single_idx)
+}
+
+/// `DataFrame.index_level_name(self, i: i64) -> str?`.
+fn m44_df_index_level_name(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let i = arg_i64(args, 1);
+    if i < 0 {
+        return Ok(NONE_SENTINEL);
+    }
+    let m44_lnames = m44_read_index_level_names(recv);
+    if !m44_lnames.is_empty() {
+        let idx = i as usize;
+        if idx >= m44_lnames.len() {
+            return Ok(NONE_SENTINEL);
+        }
+        let s = interp.alloc_string(&m44_lnames[idx]) as u64;
+        return Ok(s);
+    }
+    // Fall through to single-col (M41).
+    let (_, name_ptr) = m41_df_index_fields(recv);
+    if name_ptr == 0 || i != 0 {
+        return Ok(NONE_SENTINEL);
+    }
+    Ok(name_ptr)
+}
+
+/// Compute a stable lexicographic sort permutation over the MultiIndex
+/// levels (level 0 primary, level 1 secondary, etc.).  Within each
+/// level, comparisons use the same per-dtype rules as `m41_sort_index_perm`.
+/// Nulls sort last (largest) for ascending; first for descending.
+fn m44_sort_multiindex_perm(level_cols: &[u64], ascending: bool) -> Vec<usize> {
+    if level_cols.is_empty() {
+        return Vec::new();
+    }
+    let length = m37_col_fields(level_cols[0]).2 as usize;
+    let mut perm: Vec<usize> = (0..length).collect();
+    // Snapshot every level's value-list once (avoids repeated reads).
+    enum LevelVals {
+        I64 { vs: Vec<i64>, ns: Vec<bool> },
+        F64 { vs: Vec<f64>, ns: Vec<bool> },
+        Str { vs: Vec<String>, ns: Vec<bool> },
+        Bool { vs: Vec<bool>, ns: Vec<bool> },
+    }
+    let m44_snapshots: Vec<LevelVals> = level_cols.iter().map(|cp| {
+        let cls = m38_col_class_name(*cp);
+        let (vals, nulls, _) = m37_col_fields(*cp);
+        let ns = m37_read_list_bool(nulls);
+        match cls.as_str() {
+            "ColumnI64" | "ColumnDateTime" => LevelVals::I64 { vs: m37_read_list_i64(vals), ns },
+            "ColumnF64" => LevelVals::F64 { vs: m37_read_list_f64(vals), ns },
+            "ColumnStr" => LevelVals::Str { vs: m37_read_list_str_lst(vals), ns },
+            "ColumnBool" => LevelVals::Bool { vs: m37_read_list_bool(vals), ns },
+            _ => LevelVals::I64 { vs: m37_read_list_i64(vals), ns },
+        }
+    }).collect();
+    perm.sort_by(|a, b| {
+        for level in &m44_snapshots {
+            let ord = match level {
+                LevelVals::I64 { vs, ns } => {
+                    let na = ns.get(*a).copied().unwrap_or(false);
+                    let nb = ns.get(*b).copied().unwrap_or(false);
+                    match (na, nb) {
+                        (true, true)  => std::cmp::Ordering::Equal,
+                        (true, false) => std::cmp::Ordering::Greater,
+                        (false, true) => std::cmp::Ordering::Less,
+                        (false, false) => vs[*a].cmp(&vs[*b]),
+                    }
+                }
+                LevelVals::F64 { vs, ns } => {
+                    let na = ns.get(*a).copied().unwrap_or(false);
+                    let nb = ns.get(*b).copied().unwrap_or(false);
+                    match (na, nb) {
+                        (true, true)  => std::cmp::Ordering::Equal,
+                        (true, false) => std::cmp::Ordering::Greater,
+                        (false, true) => std::cmp::Ordering::Less,
+                        (false, false) => vs[*a].total_cmp(&vs[*b]),
+                    }
+                }
+                LevelVals::Str { vs, ns } => {
+                    let na = ns.get(*a).copied().unwrap_or(false);
+                    let nb = ns.get(*b).copied().unwrap_or(false);
+                    match (na, nb) {
+                        (true, true)  => std::cmp::Ordering::Equal,
+                        (true, false) => std::cmp::Ordering::Greater,
+                        (false, true) => std::cmp::Ordering::Less,
+                        (false, false) => vs[*a].cmp(&vs[*b]),
+                    }
+                }
+                LevelVals::Bool { vs, ns } => {
+                    let na = ns.get(*a).copied().unwrap_or(false);
+                    let nb = ns.get(*b).copied().unwrap_or(false);
+                    match (na, nb) {
+                        (true, true)  => std::cmp::Ordering::Equal,
+                        (true, false) => std::cmp::Ordering::Greater,
+                        (false, true) => std::cmp::Ordering::Less,
+                        (false, false) => (vs[*a] as u8).cmp(&(vs[*b] as u8)),
+                    }
+                }
+            };
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+    if !ascending {
+        perm.reverse();
+    }
+    perm
+}
+
+/// `DataFrame.sort_index_multi(self, ascending: bool) -> DataFrame`.
+/// Stable lexicographic sort by level 0, then level 1, etc.  Raises
+/// ValueError if the frame has no MultiIndex (use `sort_index` for the
+/// single-column case).
+fn m44_df_sort_index_multi(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let ascending = arg_u64(args, 1) != 0;
+    let m44_level_cols = m44_read_index_levels(recv);
+    let m44_level_names = m44_read_index_level_names(recv);
+    if m44_level_cols.is_empty() {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "DataFrame.sort_index_multi: frame has no MultiIndex; call set_index_multi() first or use sort_index for a single-column index".into(),
+        });
+    }
+    let m44_perm = m44_sort_multiindex_perm(&m44_level_cols, ascending);
+    let (names_lst, _, _) = m37_df_fields(recv);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_ptrs = m37_df_col_ptrs(recv);
+    // Permute every regular column + every level column.
+    let m44_new_cols: Vec<u64> = col_ptrs.iter()
+        .map(|cp| m37_column_take(interp, *cp, &m44_perm))
+        .collect();
+    let m44_new_levels: Vec<u64> = m44_level_cols.iter()
+        .map(|cp| m37_column_take(interp, *cp, &m44_perm))
+        .collect();
+    Ok(m44_build_df_with_multiindex(
+        interp,
+        &names,
+        &m44_new_cols,
+        m44_perm.len() as i64,
+        &m44_new_levels,
+        &m44_level_names,
     ))
 }
 

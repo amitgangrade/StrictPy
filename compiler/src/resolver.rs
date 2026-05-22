@@ -4628,11 +4628,15 @@ impl Resolver {
         };
 
         // ── DataFrame — { names: List[str], columns: List[Column], nrows: i64,
-        //                 index: Column?, index_name: str? }
+        //                 index: Column?, index_name: str?,
+        //                 index_levels: List[Column]?, index_names: List[str]? }
         // M41 extended the payload from 24 → 40 bytes to carry an optional
-        // index column + its original-column name.  null (0) at the index
-        // slot means "RangeIndex" (today's default behavior).  See LANGUAGE_GUIDE
-        // §5 M41 additions and STRICTPY_SPEC §9.tabular for the index surface.
+        // single-column index.  M44 extends it again 40 → 56 bytes to carry
+        // an optional MultiIndex (a List[Column] of level columns + a
+        // matching List[str] of level names).  The single-col index and the
+        // MultiIndex are mutually exclusive: a frame has one OR the other
+        // OR neither (RangeIndex).  Both null (0) = RangeIndex.  See
+        // LANGUAGE_GUIDE §5 M41/M44 additions and STRICTPY_SPEC §9.tabular.
         self.class_layouts.insert(m37_df_cid, ClassLayout {
             id: m37_df_cid, name: "DataFrame".into(), base: None,
             is_open: false, is_sealed: false,
@@ -4640,9 +4644,12 @@ impl Resolver {
                 FieldInfo { name: "names".into(),      ty: m37_list_str.clone(),     offset: 0 },
                 FieldInfo { name: "columns".into(),    ty: m37_list_col_ty.clone(),  offset: 8 },
                 FieldInfo { name: "nrows".into(),      ty: m37_i64.clone(),          offset: 16 },
-                // M41: optional index — null pointer means RangeIndex.
+                // M41: optional single-column index — null pointer means RangeIndex.
                 FieldInfo { name: "index".into(),      ty: Ty::Nullable(Box::new(m37_col_ty.clone())), offset: 24 },
                 FieldInfo { name: "index_name".into(), ty: Ty::Nullable(Box::new(m37_str.clone())),    offset: 32 },
+                // M44: optional MultiIndex — null pointer = no MultiIndex.
+                FieldInfo { name: "index_levels".into(), ty: Ty::Nullable(Box::new(m37_list_col_ty.clone())), offset: 40 },
+                FieldInfo { name: "index_names".into(),  ty: Ty::Nullable(Box::new(m37_list_str.clone())),    offset: 48 },
             ],
             methods: vec![
                 MethodSig { name: "length".into(),     params: vec![], ret: m37_i64.clone() },
@@ -4855,9 +4862,40 @@ impl Resolver {
                     ],
                     ret: m37_df_ty.clone(),
                 },
+                // ── M44 Phase A: MultiIndex storage + accessors + sort_index_multi ──
+                MethodSig {
+                    name: "set_index_multi".into(),
+                    params: vec![m37_list_str.clone()],
+                    ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "reset_index_multi".into(),
+                    params: vec![],
+                    ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "index_nlevels".into(),
+                    params: vec![],
+                    ret: m37_i64.clone(),
+                },
+                MethodSig {
+                    name: "index_level".into(),
+                    params: vec![m37_i64.clone()],
+                    ret: Ty::Nullable(Box::new(m37_col_ty.clone())),
+                },
+                MethodSig {
+                    name: "index_level_name".into(),
+                    params: vec![m37_i64.clone()],
+                    ret: Ty::Nullable(Box::new(m37_str.clone())),
+                },
+                MethodSig {
+                    name: "sort_index_multi".into(),
+                    params: vec![m37_bool.clone()],
+                    ret: m37_df_ty.clone(),
+                },
             ],
             generics: vec![], generic_tvars: vec![],
-            is_native: false, payload_size: 40,
+            is_native: false, payload_size: 56,
         });
 
         // ── GroupedDataFrame layout — payload carries (parent, group_keys, slot, group_count).

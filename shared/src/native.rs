@@ -1114,6 +1114,40 @@ pub enum NativeFn {
     /// index propagation in v1).
     M41TabDfPivotTable         = 1026,
 
+    // ── M44: tabular MultiIndex (Phase A — storage + accessors) ─────────
+    // The DataFrame payload grows 40 → 56 bytes to carry an optional
+    // MultiIndex (List[Column] of level columns + List[str] of level
+    // names).  The single-col index (M41) and the MultiIndex are
+    // mutually exclusive at any moment.  Multi-column group_by now
+    // promotes ALL group-key columns to a MultiIndex (Phase B).  Minimal
+    // propagation through filter / head / tail / iloc (Phase C); other
+    // ops drop the MultiIndex back to RangeIndex in M44a (M44b anchor).
+    /// `DataFrame.set_index_multi(self, cols: List[str]) -> DataFrame`.
+    /// Removes the named columns and promotes them to a MultiIndex.
+    /// Raises ValueError if any column is missing, if cols is empty, or
+    /// if df already has any index (single-col or multi).
+    M44TabDfSetIndexMulti      = 1027,
+    /// `DataFrame.reset_index_multi(self) -> DataFrame`.  Drops the
+    /// MultiIndex, re-inserts each level as a regular column at the
+    /// start (named by index_names[i]).  No-op if no MultiIndex.
+    M44TabDfResetIndexMulti    = 1028,
+    /// `DataFrame.index_nlevels(self) -> i64`.  0 = RangeIndex, 1 =
+    /// single-col index (M41), N = MultiIndex with N levels.
+    M44TabDfIndexNlevels       = 1029,
+    /// `DataFrame.index_level(self, i: i64) -> Column?`.  Returns the
+    /// i-th index level as a Column.  None if i is out of range or df
+    /// has no index.  For a single-col index, level(0) returns the
+    /// same column as index().
+    M44TabDfIndexLevel         = 1030,
+    /// `DataFrame.index_level_name(self, i: i64) -> str?`.  Returns
+    /// the i-th level's name.  None if out of range or no index.
+    M44TabDfIndexLevelName     = 1031,
+    /// `DataFrame.sort_index_multi(self, ascending: bool) -> DataFrame`.
+    /// Stable lexicographic sort by level 0, then level 1, etc.
+    /// ascending=false reverses the lexicographic order.  Raises
+    /// ValueError if df has no MultiIndex.
+    M44TabDfSortIndexMulti     = 1032,
+
     // ── 250–289: M22 P2A (argparse + collections + csv) ─────────────────
     // Phase 2 starts here.  P2A's job is to bring three high-ROI stdlib
     // modules online on top of the M19 stdlib-module-table:
@@ -2659,6 +2693,12 @@ impl NativeFn {
             1024 => Some(Self::M41TabDfSelectByLabelStr),
             1025 => Some(Self::M41TabDfSelectByLabelDateTime),
             1026 => Some(Self::M41TabDfPivotTable),
+            1027 => Some(Self::M44TabDfSetIndexMulti),
+            1028 => Some(Self::M44TabDfResetIndexMulti),
+            1029 => Some(Self::M44TabDfIndexNlevels),
+            1030 => Some(Self::M44TabDfIndexLevel),
+            1031 => Some(Self::M44TabDfIndexLevelName),
+            1032 => Some(Self::M44TabDfSortIndexMulti),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }
