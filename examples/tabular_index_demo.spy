@@ -205,9 +205,9 @@ fn main() -> i32:
         if mr5 is not none:
             println("mr5=" + str(mr5))
 
-    # 6. select_by_label_str — index a string-indexed pivot output.
-    keyed: DataFrame = pivot.set_index("symbol")
-    aapl: DataFrame? = keyed.select_by_label_str("AAPL")
+    # 6. select_by_label_str — M43 promoted "symbol" to pivot's index
+    # automatically, so no set_index call needed.
+    aapl: DataFrame? = pivot.select_by_label_str("AAPL")
     if aapl is not none:
         println("aapl_nrows=" + str(aapl.length()))
         ac: ColumnI64? = aapl.get_column_i64("buy")

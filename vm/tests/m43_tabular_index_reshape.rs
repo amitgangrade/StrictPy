@@ -376,6 +376,350 @@ fn main() -> i32:
     assert!(out.contains("iname=cat"), "got: {out:?}");
 }
 
+// ── Phase B: pivot + concat_rows + concat_cols ────────────────────────
+
+#[test]
+fn pivot_promotes_index_value_to_index() {
+    // df.pivot(index, columns, values): `index` becomes the output's
+    // index (index_name = index).  Same data, just promoted.
+    let src = "\
+from tabular import Column, ColumnI64, ColumnStr, DataFrame
+import tabular
+fn main() -> i32:
+    rg: List[str] = []
+    rg.append(\"us\")
+    rg.append(\"us\")
+    rg.append(\"uk\")
+    rg.append(\"uk\")
+    reg: ColumnStr = tabular.col_str_simple(rg)
+    mo: List[str] = []
+    mo.append(\"jan\")
+    mo.append(\"feb\")
+    mo.append(\"jan\")
+    mo.append(\"feb\")
+    month: ColumnStr = tabular.col_str_simple(mo)
+    sl: List[i64] = []
+    sl.append(10i64)
+    sl.append(20i64)
+    sl.append(30i64)
+    sl.append(40i64)
+    sales: ColumnI64 = tabular.col_i64_simple(sl)
+    cn: List[str] = []
+    cn.append(\"reg\")
+    cn.append(\"month\")
+    cn.append(\"sales\")
+    cols: List[Column] = []
+    cols.append(reg)
+    cols.append(month)
+    cols.append(sales)
+    df: DataFrame = tabular.from_columns(cn, cols)
+    p: DataFrame = df.pivot(\"reg\", \"month\", \"sales\")
+    println(\"nrows=\" + str(p.length()))
+    println(\"ncols=\" + str(p.ncols()))
+    println(\"has=\" + str(p.has_index()))
+    inm: str? = p.index_name()
+    if inm is not none:
+        println(\"iname=\" + inm)
+    return 0
+";
+    let out = run("pivot_promotes_idx", src);
+    assert!(out.contains("nrows=2"), "got: {out:?}");
+    assert!(out.contains("ncols=2"), "got: {out:?}");
+    assert!(out.contains("has=true"), "got: {out:?}");
+    assert!(out.contains("iname=reg"), "got: {out:?}");
+}
+
+#[test]
+fn concat_rows_happy_path_concatenates_shared_indexes() {
+    // Two indexed frames with same dtype + index_name: the output's
+    // index is the concatenation of both inputs' indexes.
+    let src = "\
+from tabular import Column, ColumnI64, DataFrame
+import tabular
+fn main() -> i32:
+    k1: List[i64] = []
+    k1.append(10i64)
+    k1.append(20i64)
+    k1c: ColumnI64 = tabular.col_i64_simple(k1)
+    v1: List[i64] = []
+    v1.append(1i64)
+    v1.append(2i64)
+    v1c: ColumnI64 = tabular.col_i64_simple(v1)
+    cn1: List[str] = []
+    cn1.append(\"k\")
+    cn1.append(\"v\")
+    c1: List[Column] = []
+    c1.append(k1c)
+    c1.append(v1c)
+    df1: DataFrame = tabular.from_columns(cn1, c1)
+    df1i: DataFrame = df1.set_index(\"k\")
+
+    k2: List[i64] = []
+    k2.append(30i64)
+    k2.append(40i64)
+    k2c: ColumnI64 = tabular.col_i64_simple(k2)
+    v2: List[i64] = []
+    v2.append(3i64)
+    v2.append(4i64)
+    v2c: ColumnI64 = tabular.col_i64_simple(v2)
+    cn2: List[str] = []
+    cn2.append(\"k\")
+    cn2.append(\"v\")
+    c2: List[Column] = []
+    c2.append(k2c)
+    c2.append(v2c)
+    df2: DataFrame = tabular.from_columns(cn2, c2)
+    df2i: DataFrame = df2.set_index(\"k\")
+
+    dfs: List[DataFrame] = []
+    dfs.append(df1i)
+    dfs.append(df2i)
+    out: DataFrame = tabular.concat_rows(dfs)
+    println(\"nrows=\" + str(out.length()))
+    println(\"has=\" + str(out.has_index()))
+    inm: str? = out.index_name()
+    if inm is not none:
+        println(\"iname=\" + inm)
+    sorted_out: DataFrame = out.sort_index(true)
+    flat: DataFrame = sorted_out.reset_index()
+    kc: ColumnI64? = flat.get_column_i64(\"k\")
+    if kc is not none:
+        k0: i64? = kc.get(0i64)
+        k3: i64? = kc.get(3i64)
+        if k0 is not none:
+            println(\"k0=\" + str(k0))
+        if k3 is not none:
+            println(\"k3=\" + str(k3))
+    return 0
+";
+    let out = run("concat_rows_happy", src);
+    assert!(out.contains("nrows=4"), "got: {out:?}");
+    assert!(out.contains("has=true"), "got: {out:?}");
+    assert!(out.contains("iname=k"), "got: {out:?}");
+    assert!(out.contains("k0=10"), "got: {out:?}");
+    assert!(out.contains("k3=40"), "got: {out:?}");
+}
+
+#[test]
+fn concat_rows_unindexed_input_falls_back_to_range_index() {
+    // If any input has no index, the output falls back to RangeIndex.
+    // Both frames here share schema (one regular column `v`); df1 is
+    // indexed, df2 is not.
+    let src = "\
+from tabular import Column, ColumnI64, DataFrame
+import tabular
+fn main() -> i32:
+    k1: List[i64] = []
+    k1.append(10i64)
+    k1c: ColumnI64 = tabular.col_i64_simple(k1)
+    v1: List[i64] = []
+    v1.append(1i64)
+    v1c: ColumnI64 = tabular.col_i64_simple(v1)
+    cn1: List[str] = []
+    cn1.append(\"k\")
+    cn1.append(\"v\")
+    c1: List[Column] = []
+    c1.append(k1c)
+    c1.append(v1c)
+    df1: DataFrame = tabular.from_columns(cn1, c1)
+    df1i: DataFrame = df1.set_index(\"k\")
+
+    v2: List[i64] = []
+    v2.append(2i64)
+    v2c: ColumnI64 = tabular.col_i64_simple(v2)
+    cn2: List[str] = []
+    cn2.append(\"v\")
+    c2: List[Column] = []
+    c2.append(v2c)
+    df2: DataFrame = tabular.from_columns(cn2, c2)
+
+    dfs: List[DataFrame] = []
+    dfs.append(df1i)
+    dfs.append(df2)
+    out: DataFrame = tabular.concat_rows(dfs)
+    println(\"has=\" + str(out.has_index()))
+    return 0
+";
+    let out = run("concat_rows_unindexed", src);
+    assert!(out.contains("has=false"), "got: {out:?}");
+}
+
+#[test]
+fn concat_rows_mismatched_index_dtype_falls_back() {
+    // Different index dtypes → RangeIndex fallback.
+    let src = "\
+from tabular import Column, ColumnI64, ColumnStr, DataFrame
+import tabular
+fn main() -> i32:
+    k1: List[i64] = []
+    k1.append(10i64)
+    k1c: ColumnI64 = tabular.col_i64_simple(k1)
+    cn1: List[str] = []
+    cn1.append(\"k\")
+    c1: List[Column] = []
+    c1.append(k1c)
+    df1: DataFrame = tabular.from_columns(cn1, c1)
+    df1i: DataFrame = df1.set_index(\"k\")
+
+    k2: List[str] = []
+    k2.append(\"a\")
+    k2c: ColumnStr = tabular.col_str_simple(k2)
+    cn2: List[str] = []
+    cn2.append(\"k\")
+    c2: List[Column] = []
+    c2.append(k2c)
+    df2: DataFrame = tabular.from_columns(cn2, c2)
+    df2i: DataFrame = df2.set_index(\"k\")
+
+    dfs: List[DataFrame] = []
+    dfs.append(df1i)
+    dfs.append(df2i)
+    out: DataFrame = tabular.concat_rows(dfs)
+    println(\"has=\" + str(out.has_index()))
+    return 0
+";
+    let out = run("concat_rows_dtype_mismatch", src);
+    // Note: concat_rows requires same column dtypes — but here we set k
+    // as the index in both, so the only column is k.  We deliberately
+    // wrap each in set_index BEFORE concat to avoid the column-dtype-
+    // mismatch check.  Wait — with set_index, both df1i and df2i have
+    // ZERO regular columns.  So the column-shape check passes.  But
+    // the index dtypes differ → fallback.
+    assert!(out.contains("has=false"), "got: {out:?}");
+}
+
+#[test]
+fn concat_rows_mismatched_index_name_falls_back() {
+    // Different index_names → RangeIndex fallback.
+    let src = "\
+from tabular import Column, ColumnI64, DataFrame
+import tabular
+fn main() -> i32:
+    k1: List[i64] = []
+    k1.append(10i64)
+    k1c: ColumnI64 = tabular.col_i64_simple(k1)
+    cn1: List[str] = []
+    cn1.append(\"a\")
+    c1: List[Column] = []
+    c1.append(k1c)
+    df1: DataFrame = tabular.from_columns(cn1, c1)
+    df1i: DataFrame = df1.set_index(\"a\")
+
+    k2: List[i64] = []
+    k2.append(20i64)
+    k2c: ColumnI64 = tabular.col_i64_simple(k2)
+    cn2: List[str] = []
+    cn2.append(\"b\")
+    c2: List[Column] = []
+    c2.append(k2c)
+    df2: DataFrame = tabular.from_columns(cn2, c2)
+    df2i: DataFrame = df2.set_index(\"b\")
+
+    dfs: List[DataFrame] = []
+    dfs.append(df1i)
+    dfs.append(df2i)
+    out: DataFrame = tabular.concat_rows(dfs)
+    println(\"has=\" + str(out.has_index()))
+    return 0
+";
+    let out = run("concat_rows_name_mismatch", src);
+    assert!(out.contains("has=false"), "got: {out:?}");
+}
+
+#[test]
+fn concat_cols_lhs_index_wins() {
+    // If lhs has an index, output gets that index; rhs's index is
+    // ignored (consistent with M42's merge lhs-wins policy).
+    let src = "\
+from tabular import Column, ColumnI64, DataFrame
+import tabular
+fn main() -> i32:
+    k1: List[i64] = []
+    k1.append(10i64)
+    k1.append(20i64)
+    k1c: ColumnI64 = tabular.col_i64_simple(k1)
+    a1: List[i64] = []
+    a1.append(1i64)
+    a1.append(2i64)
+    a1c: ColumnI64 = tabular.col_i64_simple(a1)
+    cn1: List[str] = []
+    cn1.append(\"k\")
+    cn1.append(\"a\")
+    c1: List[Column] = []
+    c1.append(k1c)
+    c1.append(a1c)
+    df1: DataFrame = tabular.from_columns(cn1, c1)
+    df1i: DataFrame = df1.set_index(\"k\")
+
+    b: List[i64] = []
+    b.append(3i64)
+    b.append(4i64)
+    bc: ColumnI64 = tabular.col_i64_simple(b)
+    cn2: List[str] = []
+    cn2.append(\"b\")
+    c2: List[Column] = []
+    c2.append(bc)
+    df2: DataFrame = tabular.from_columns(cn2, c2)
+
+    dfs: List[DataFrame] = []
+    dfs.append(df1i)
+    dfs.append(df2)
+    out: DataFrame = tabular.concat_cols(dfs)
+    println(\"nrows=\" + str(out.length()))
+    println(\"ncols=\" + str(out.ncols()))
+    println(\"has=\" + str(out.has_index()))
+    inm: str? = out.index_name()
+    if inm is not none:
+        println(\"iname=\" + inm)
+    return 0
+";
+    let out = run("concat_cols_lhs", src);
+    assert!(out.contains("nrows=2"), "got: {out:?}");
+    assert!(out.contains("ncols=2"), "got: {out:?}"); // a + b
+    assert!(out.contains("has=true"), "got: {out:?}");
+    assert!(out.contains("iname=k"), "got: {out:?}");
+}
+
+#[test]
+fn concat_cols_unindexed_lhs_falls_back_to_range_index() {
+    let src = "\
+from tabular import Column, ColumnI64, DataFrame
+import tabular
+fn main() -> i32:
+    a: List[i64] = []
+    a.append(1i64)
+    a.append(2i64)
+    ac: ColumnI64 = tabular.col_i64_simple(a)
+    cn1: List[str] = []
+    cn1.append(\"a\")
+    c1: List[Column] = []
+    c1.append(ac)
+    df1: DataFrame = tabular.from_columns(cn1, c1)
+
+    b: List[i64] = []
+    b.append(3i64)
+    b.append(4i64)
+    bc: ColumnI64 = tabular.col_i64_simple(b)
+    cn2: List[str] = []
+    cn2.append(\"b\")
+    c2: List[Column] = []
+    c2.append(bc)
+    df2: DataFrame = tabular.from_columns(cn2, c2)
+    df2i: DataFrame = df2.set_index(\"b\")
+
+    dfs: List[DataFrame] = []
+    dfs.append(df1)
+    dfs.append(df2i)
+    out: DataFrame = tabular.concat_cols(dfs)
+    println(\"has=\" + str(out.has_index()))
+    return 0
+";
+    let out = run("concat_cols_unindexed_lhs", src);
+    // lhs has no index, so the output uses RangeIndex even though rhs
+    // has an index.
+    assert!(out.contains("has=false"), "got: {out:?}");
+}
+
 #[test]
 fn single_col_group_by_size_promotes_to_index() {
     let src = "\

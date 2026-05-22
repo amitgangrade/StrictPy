@@ -613,10 +613,12 @@ fn main() -> i32:
 
 #[test]
 fn pivot_happy_path() {
+    // M43 flipped: pivot promotes the "region" index value to the
+    // output's index instead of inserting it as the first regular col.
     // Long: (region, month, sales)
     // R = us, jan, 10 / us, feb, 20 / uk, jan, 30 / uk, feb, 40
-    // pivot index=region columns=month values=sales => 2 rows × 3 cols
-    // (region, jan, feb) with us:10/20, uk:30/40.
+    // pivot index=region columns=month values=sales => 2 rows × 2 cols
+    // (jan, feb) with us:10/20, uk:30/40; index = ["us","uk"].
     let src = "\
 from tabular import ColumnI64, ColumnStr, DataFrame, Column
 import tabular
@@ -651,22 +653,25 @@ fn main() -> i32:
     p: DataFrame = df.pivot(\"region\", \"month\", \"sales\")
     println(\"nrows=\" + str(p.length()))
     println(\"ncols=\" + str(p.ncols()))
+    println(\"has=\" + str(p.has_index()))
     r0: List[str] = p.row(0i64)
     r1: List[str] = p.row(1i64)
-    println(\"r0=\" + r0[0i32] + \"|\" + r0[1i32] + \"|\" + r0[2i32])
-    println(\"r1=\" + r1[0i32] + \"|\" + r1[1i32] + \"|\" + r1[2i32])
+    println(\"r0=\" + r0[0i32] + \"|\" + r0[1i32])
+    println(\"r1=\" + r1[0i32] + \"|\" + r1[1i32])
     return 0
 ";
     let out = run("pivot_happy", src);
     assert!(out.contains("nrows=2"), "got: {out:?}");
-    assert!(out.contains("ncols=3"), "got: {out:?}");
-    assert!(out.contains("r0=us|10|20"), "got: {out:?}");
-    assert!(out.contains("r1=uk|30|40"), "got: {out:?}");
+    assert!(out.contains("ncols=2"), "got: {out:?}");
+    assert!(out.contains("has=true"), "got: {out:?}");
+    assert!(out.contains("r0=10|20"), "got: {out:?}");
+    assert!(out.contains("r1=30|40"), "got: {out:?}");
 }
 
 #[test]
 fn pivot_missing_cell_is_null() {
-    // (us,jan,10), (uk,feb,20) — missing (us,feb) + (uk,jan); each null.
+    // M43 flipped: pivot promotes the index column; row() shows only
+    // the value cells.
     let src = "\
 from tabular import ColumnI64, ColumnStr, DataFrame, Column
 import tabular
@@ -696,15 +701,15 @@ fn main() -> i32:
     println(\"nrows=\" + str(p.length()))
     r0: List[str] = p.row(0i64)
     r1: List[str] = p.row(1i64)
-    println(\"r0=\" + r0[0i32] + \"|\" + r0[1i32] + \"|\" + r0[2i32])
-    println(\"r1=\" + r1[0i32] + \"|\" + r1[1i32] + \"|\" + r1[2i32])
+    println(\"r0=\" + r0[0i32] + \"|\" + r0[1i32])
+    println(\"r1=\" + r1[0i32] + \"|\" + r1[1i32])
     return 0
 ";
     let out = run("pivot_null", src);
     assert!(out.contains("nrows=2"), "got: {out:?}");
     // us has jan=10, feb=null; uk has jan=null, feb=20.
-    assert!(out.contains("r0=us|10|null"), "got: {out:?}");
-    assert!(out.contains("r1=uk|null|20"), "got: {out:?}");
+    assert!(out.contains("r0=10|null"), "got: {out:?}");
+    assert!(out.contains("r1=null|20"), "got: {out:?}");
 }
 
 #[test]

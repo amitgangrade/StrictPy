@@ -123,12 +123,14 @@ fn main() -> i32:
     println("piv_nrows=" + str(piv.length()))
     println("piv_ncols=" + str(piv.ncols()))
 
-    # 5. melt the pivoted frame back.  id_vars=[region], value_vars
-    # = the per-name columns.  Result is 3 regions × 3 names = 9
-    # rows (many cells null since pivot had a sparse layout).
-    pivcols: List[str] = piv.columns()
+    # 5. melt the pivoted frame back.  Post-M43 pivot promotes "region"
+    # to the index, so we reset_index first to bring it back as a
+    # regular column for the melt's id_vars.  Result is 3 regions × 3
+    # names = 9 rows (many cells null since pivot had a sparse layout).
+    piv_flat: DataFrame = piv.reset_index()
+    pivcols: List[str] = piv_flat.columns()
     name_cols: List[str] = []
-    pc_len: i64 = piv.ncols()
+    pc_len: i64 = piv_flat.ncols()
     j: i64 = 0i64
     while j < pc_len:
         c: str = pivcols[i32(j)]
@@ -137,7 +139,7 @@ fn main() -> i32:
         j = j + 1i64
     id_vars: List[str] = []
     id_vars.append("region")
-    melted: DataFrame = piv.melt(id_vars, name_cols)
+    melted: DataFrame = piv_flat.melt(id_vars, name_cols)
     println("melted_nrows=" + str(melted.length()))
 
     # 6. concat_rows: stack the original 5-row orders on top of itself.

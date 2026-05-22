@@ -14726,7 +14726,106 @@ fn m39_concat_rows(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmErro
         };
         out_cols.push(m37_alloc_column(interp, &cls, v_lst, n_lst, n) as u64);
     }
-    Ok(m37_build_df(interp, &ref_names, &out_cols, total_nrows))
+    // M43: concatenate the input indexes when all share dtype + name;
+    // otherwise fall back to RangeIndex (today's behavior).
+    let (m43_concat_index_col, m43_concat_index_name_ptr) =
+        m43_concat_rows_index(interp, &dfs);
+    Ok(m41_build_df_with_index(
+        interp,
+        &ref_names,
+        &out_cols,
+        total_nrows,
+        m43_concat_index_col,
+        m43_concat_index_name_ptr,
+    ))
+}
+
+/// M43 helper: reconcile per-frame indexes for `tabular.concat_rows`.
+/// Returns `(index_col_ptr, index_name_ptr)` for the output frame;
+/// both `0` on fallback to RangeIndex (any missing index, mismatched
+/// dtypes, or mismatched index_names).
+fn m43_concat_rows_index(
+    interp: &mut Interpreter,
+    dfs: &[u64],
+) -> (u64, u64) {
+    // All frames must have an index.
+    let mut indexes: Vec<u64> = Vec::with_capacity(dfs.len());
+    let mut first_name_ptr: u64 = 0;
+    for (i, df) in dfs.iter().enumerate() {
+        let (idx, name) = m41_df_index_fields(*df);
+        if idx == 0 {
+            return (0, 0);
+        }
+        if i == 0 {
+            first_name_ptr = name;
+        } else {
+            // Compare names: read both strings (or both 0) and compare.
+            let lhs = if first_name_ptr == 0 {
+                String::new()
+            } else {
+                unsafe { read_str(first_name_ptr as *const StringRepr) }
+            };
+            let rhs = if name == 0 {
+                String::new()
+            } else {
+                unsafe { read_str(name as *const StringRepr) }
+            };
+            if lhs != rhs {
+                return (0, 0);
+            }
+        }
+        indexes.push(idx);
+    }
+    // All indexes must share dtype.
+    let first_cls = m38_col_class_name(indexes[0]);
+    for idx in &indexes[1..] {
+        if m38_col_class_name(*idx) != first_cls {
+            return (0, 0);
+        }
+    }
+    // Cell-by-cell concat of each input index into the output index.
+    let mut buf_i64: Vec<i64> = Vec::new();
+    let mut buf_f64: Vec<f64> = Vec::new();
+    let mut buf_str: Vec<String> = Vec::new();
+    let mut buf_bool: Vec<bool> = Vec::new();
+    let mut all_nulls: Vec<bool> = Vec::new();
+    for idx in &indexes {
+        let (vals, nulls, length) = m37_col_fields(*idx);
+        let ns = m37_read_list_bool(nulls);
+        for i in 0..length as usize {
+            all_nulls.push(ns.get(i).copied().unwrap_or(false));
+        }
+        match first_cls.as_str() {
+            "ColumnI64" | "ColumnDateTime" => {
+                let vs = m37_read_list_i64(vals);
+                buf_i64.extend(vs.into_iter().chain(std::iter::repeat(0)).take(length as usize));
+            }
+            "ColumnF64" => {
+                let vs = m37_read_list_f64(vals);
+                buf_f64.extend(vs.into_iter().chain(std::iter::repeat(0.0)).take(length as usize));
+            }
+            "ColumnStr" => {
+                let vs = m37_read_list_str_lst(vals);
+                buf_str.extend(vs.into_iter().chain(std::iter::repeat(String::new())).take(length as usize));
+            }
+            "ColumnBool" => {
+                let vs = m37_read_list_bool(vals);
+                buf_bool.extend(vs.into_iter().chain(std::iter::repeat(false)).take(length as usize));
+            }
+            _ => {}
+        }
+    }
+    let n = all_nulls.len() as i64;
+    let n_lst = m37_alloc_list_bool(interp, &all_nulls);
+    let v_lst = match first_cls.as_str() {
+        "ColumnI64" | "ColumnDateTime" => m37_alloc_list_i64(interp, &buf_i64),
+        "ColumnF64" => m37_alloc_list_f64(interp, &buf_f64),
+        "ColumnStr" => m37_alloc_list_str(interp, &buf_str),
+        "ColumnBool" => m37_alloc_list_bool(interp, &buf_bool),
+        _ => m37_alloc_list_i64(interp, &buf_i64),
+    };
+    let out_idx = m37_alloc_column(interp, &first_cls, v_lst, n_lst, n) as u64;
+    (out_idx, first_name_ptr)
 }
 
 /// `tabular.concat_cols(dfs: List[DataFrame]) -> DataFrame`.
@@ -14768,7 +14867,24 @@ fn m39_concat_cols(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmErro
             out_cols.push(cps[j]);
         }
     }
-    Ok(m37_build_df(interp, &out_names, &out_cols, ref_nrows))
+    // M43: lhs's index wins (consistent with M42's merge policy).  If
+    // the first df has an index, clone it onto the output; otherwise
+    // RangeIndex.
+    let (m43_cc_l_index, m43_cc_l_index_name) = m41_df_index_fields(dfs[0]);
+    let (m43_cc_out_index, m43_cc_out_name) = if m43_cc_l_index != 0 {
+        let cloned = m41_clone_column(interp, m43_cc_l_index);
+        (cloned, m43_cc_l_index_name)
+    } else {
+        (0u64, 0u64)
+    };
+    Ok(m41_build_df_with_index(
+        interp,
+        &out_names,
+        &out_cols,
+        ref_nrows,
+        m43_cc_out_index,
+        m43_cc_out_name,
+    ))
 }
 
 // ── M39 Phase B: merge (hash-join inner/left/right/outer) ───────────
@@ -15369,11 +15485,13 @@ fn m39_df_pivot(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> 
         }
         cell_row[i][c] = Some(r);
     }
-    // Build output columns.  First column is the index column (dtype
-    // preserved by `m37_column_take` on the source).
-    let out_index_col = m37_column_take(interp, idx_col, &index_first_row);
-    let mut out_names: Vec<String> = vec![index_name.clone()];
-    let mut out_cols: Vec<u64> = vec![out_index_col];
+    // M43: promote the index column to the output's index (instead of
+    // inserting it as the first regular column).  Pre-M43 the index
+    // column was the first regular column with a RangeIndex output.
+    let m43_pivot_index_col = m37_column_take(interp, idx_col, &index_first_row);
+    let m43_pivot_index_name_ptr = interp.alloc_string(&index_name) as u64;
+    let mut out_names: Vec<String> = Vec::new();
+    let mut out_cols: Vec<u64> = Vec::new();
     // One column per unique `cols_name` value, dtype-matched to the
     // values column.  Build each by walking the n_index rows and
     // pulling vals_col[row_or_none].
@@ -15433,7 +15551,14 @@ fn m39_df_pivot(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> 
         out_cols.push(m37_alloc_column(interp, &val_cls, v_lst, n_lst, n_index as i64) as u64);
     }
     let _ = cols_first_row;
-    Ok(m37_build_df(interp, &out_names, &out_cols, n_index as i64))
+    Ok(m41_build_df_with_index(
+        interp,
+        &out_names,
+        &out_cols,
+        n_index as i64,
+        m43_pivot_index_col,
+        m43_pivot_index_name_ptr,
+    ))
 }
 
 /// `DataFrame.melt(self, id_vars, value_vars) -> DataFrame`.  Wide-

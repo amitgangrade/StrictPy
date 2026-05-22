@@ -66,9 +66,10 @@ fn tabular_reshape_demo_runs_via_spy_exe() {
     // Inner merge: 5 rows × 4 columns (customer_id, region, qty, name).
     assert!(stdout.contains("merged_nrows=5"), "stdout:\n{stdout}");
     assert!(stdout.contains("merged_ncols=4"), "stdout:\n{stdout}");
-    // Pivot: 3 unique regions × (1 region col + 3 unique names) = 3×4.
+    // Pivot: 3 unique regions × 3 unique names = 3×3.  M43 promoted
+    // "region" to the index, so ncols dropped from 4 to 3.
     assert!(stdout.contains("piv_nrows=3"), "stdout:\n{stdout}");
-    assert!(stdout.contains("piv_ncols=4"), "stdout:\n{stdout}");
+    assert!(stdout.contains("piv_ncols=3"), "stdout:\n{stdout}");
     // Melt: 3 regions × 3 name-value-vars = 9 rows.
     assert!(stdout.contains("melted_nrows=9"), "stdout:\n{stdout}");
     // concat_rows stacking orders twice → 10 rows.
