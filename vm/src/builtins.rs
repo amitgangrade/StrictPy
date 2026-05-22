@@ -14052,30 +14052,33 @@ fn m38_gdf_size(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> 
     let (names_lst, _, _) = m37_df_fields(parent);
     let names = m37_read_list_str_lst(names_lst);
     let key_col_indices = m38_resolve_col_indices(&names, &want, "GroupedDataFrame.size")?;
-    // M43: single-column group_by promotes the key column to the index.
-    let m43_promote_to_index = key_col_indices.len() == 1;
-    let m43_key_cols = m38_build_key_columns(interp, parent, &key_col_indices, &groups);
-    let (mut out_names, mut out_cols, m43_index_col_ptr, m43_index_name_ptr): (
-        Vec<String>, Vec<u64>, u64, u64,
-    ) = if m43_promote_to_index {
-        let name_ptr = interp.alloc_string(&want[0]) as u64;
-        (Vec::new(), Vec::new(), m43_key_cols[0], name_ptr)
-    } else {
-        (want.clone(), m43_key_cols.clone(), 0, 0)
-    };
-    out_names.push("size".into());
+    let m44_key_cols = m38_build_key_columns(interp, parent, &key_col_indices, &groups);
+    // M43: single-column group_by promotes the key column to the M41 index.
+    // M44: multi-column group_by promotes ALL key columns to a MultiIndex.
+    let mut out_names: Vec<String> = Vec::new();
     let sizes: Vec<i64> = groups.iter().map(|(_, rs)| rs.len() as i64).collect();
+    out_names.push("size".into());
     let v_lst = m37_alloc_list_i64(interp, &sizes);
     let n_lst = m37_alloc_list_bool(interp, &vec![false; sizes.len()]);
-    out_cols.push(m37_alloc_column(interp, "ColumnI64", v_lst, n_lst, sizes.len() as i64) as u64);
-    Ok(m41_build_df_with_index(
-        interp,
-        &out_names,
-        &out_cols,
-        sizes.len() as i64,
-        m43_index_col_ptr,
-        m43_index_name_ptr,
-    ))
+    let out_cols: Vec<u64> = vec![
+        m37_alloc_column(interp, "ColumnI64", v_lst, n_lst, sizes.len() as i64) as u64
+    ];
+    match key_col_indices.len() {
+        1 => {
+            let name_ptr = interp.alloc_string(&want[0]) as u64;
+            Ok(m41_build_df_with_index(
+                interp, &out_names, &out_cols, sizes.len() as i64,
+                m44_key_cols[0], name_ptr,
+            ))
+        }
+        _ => {
+            // M44 multi-col promotion to MultiIndex.
+            Ok(m44_build_df_with_multiindex(
+                interp, &out_names, &out_cols, sizes.len() as i64,
+                &m44_key_cols, &want,
+            ))
+        }
+    }
 }
 
 /// Read the group_keys list back out of the GroupedDataFrame payload.
@@ -14114,24 +14117,34 @@ fn m38_gdf_keys(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> 
     let (names_lst, _, _) = m37_df_fields(parent);
     let names = m37_read_list_str_lst(names_lst);
     let key_col_indices = m38_resolve_col_indices(&names, &want, "GroupedDataFrame.keys")?;
-    let m43_key_cols = m38_build_key_columns(interp, parent, &key_col_indices, &groups);
+    let m44_key_cols = m38_build_key_columns(interp, parent, &key_col_indices, &groups);
     // M43: single-column group_by .keys() returns a 0-regular-column
-    // DataFrame whose index is the unique group keys.  Multi-column
-    // keys() retains today's behavior (each key as a regular column).
-    if key_col_indices.len() == 1 {
-        let m43_index_name_ptr = interp.alloc_string(&want[0]) as u64;
-        let empty_names: Vec<String> = Vec::new();
-        let empty_cols: Vec<u64> = Vec::new();
-        return Ok(m41_build_df_with_index(
+    // DataFrame whose index is the unique group keys.
+    // M44: multi-column .keys() returns a 0-regular-column DataFrame
+    // whose MultiIndex is the unique (col1, col2, ...) tuples.
+    let empty_names: Vec<String> = Vec::new();
+    let empty_cols: Vec<u64> = Vec::new();
+    match key_col_indices.len() {
+        1 => {
+            let m43_index_name_ptr = interp.alloc_string(&want[0]) as u64;
+            Ok(m41_build_df_with_index(
+                interp,
+                &empty_names,
+                &empty_cols,
+                groups.len() as i64,
+                m44_key_cols[0],
+                m43_index_name_ptr,
+            ))
+        }
+        _ => Ok(m44_build_df_with_multiindex(
             interp,
             &empty_names,
             &empty_cols,
             groups.len() as i64,
-            m43_key_cols[0],
-            m43_index_name_ptr,
-        ));
+            &m44_key_cols,
+            &want,
+        )),
     }
-    Ok(m37_build_df(interp, &want, &m43_key_cols, groups.len() as i64))
 }
 
 /// Apply an aggregation by name to a column subset of the source
@@ -14295,19 +14308,10 @@ fn m38_gdf_agg_shortcut(
         }
     }
     // M43: single-column group_by promotes the group-key column to the
-    // output's index instead of inserting it as a regular column.
-    // Multi-column group_by retains today's behavior (key columns remain
-    // regular columns) — MultiIndex is M44+.
-    let m43_promote_to_index = key_col_indices.len() == 1;
-    let m43_key_cols = m38_build_key_columns(interp, parent, &key_col_indices, &groups);
-    let (mut out_names, mut out_cols, m43_index_col_ptr, m43_index_name_ptr): (
-        Vec<String>, Vec<u64>, u64, u64,
-    ) = if m43_promote_to_index {
-        let name_ptr = interp.alloc_string(&key_names[0]) as u64;
-        (Vec::new(), Vec::new(), m43_key_cols[0], name_ptr)
-    } else {
-        (key_names.clone(), m43_key_cols.clone(), 0, 0)
-    };
+    // output's M41 single-col index.
+    // M44: multi-column group_by promotes ALL key columns to a MultiIndex.
+    let m44_key_cols = m38_build_key_columns(interp, parent, &key_col_indices, &groups);
+    let (mut out_names, mut out_cols): (Vec<String>, Vec<u64>) = (Vec::new(), Vec::new());
     for ai in &agg_indices {
         out_names.push(names[*ai].clone());
         let src = col_ptrs[*ai];
@@ -14349,14 +14353,19 @@ fn m38_gdf_agg_shortcut(
         };
         out_cols.push(m37_alloc_column(interp, cls_name, v_lst, n_lst, n) as u64);
     }
-    Ok(m41_build_df_with_index(
-        interp,
-        &out_names,
-        &out_cols,
-        groups.len() as i64,
-        m43_index_col_ptr,
-        m43_index_name_ptr,
-    ))
+    match key_col_indices.len() {
+        1 => {
+            let name_ptr = interp.alloc_string(&key_names[0]) as u64;
+            Ok(m41_build_df_with_index(
+                interp, &out_names, &out_cols, groups.len() as i64,
+                m44_key_cols[0], name_ptr,
+            ))
+        }
+        _ => Ok(m44_build_df_with_multiindex(
+            interp, &out_names, &out_cols, groups.len() as i64,
+            &m44_key_cols, &key_names,
+        )),
+    }
 }
 
 /// `GroupedDataFrame.agg(specs: List[Tuple[str, str]]) -> DataFrame`.
@@ -14387,18 +14396,11 @@ fn m38_gdf_agg(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
             }
         }
     }
-    // M43: single-column group_by promotes the key column to the output's
-    // index; multi-column retains the v1 "keys as regular columns" shape.
-    let m43_promote_to_index = key_col_indices.len() == 1;
-    let m43_key_cols = m38_build_key_columns(interp, parent, &key_col_indices, &groups);
-    let (mut out_names, mut out_cols, m43_index_col_ptr, m43_index_name_ptr): (
-        Vec<String>, Vec<u64>, u64, u64,
-    ) = if m43_promote_to_index {
-        let name_ptr = interp.alloc_string(&key_names[0]) as u64;
-        (Vec::new(), Vec::new(), m43_key_cols[0], name_ptr)
-    } else {
-        (key_names.clone(), m43_key_cols.clone(), 0, 0)
-    };
+    // M43: single-column group_by promotes the key column to the M41
+    // single-col index.
+    // M44: multi-column group_by promotes ALL key columns to a MultiIndex.
+    let m44_key_cols = m38_build_key_columns(interp, parent, &key_col_indices, &groups);
+    let (mut out_names, mut out_cols): (Vec<String>, Vec<u64>) = (Vec::new(), Vec::new());
     for (col_name, agg_name) in &specs {
         let idx = match names.iter().position(|n| n == col_name) {
             None => return Err(VmError::UncaughtException {
@@ -14446,14 +14448,19 @@ fn m38_gdf_agg(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
         };
         out_cols.push(m37_alloc_column(interp, cls_name, v_lst, n_lst, n) as u64);
     }
-    Ok(m41_build_df_with_index(
-        interp,
-        &out_names,
-        &out_cols,
-        groups.len() as i64,
-        m43_index_col_ptr,
-        m43_index_name_ptr,
-    ))
+    match key_col_indices.len() {
+        1 => {
+            let name_ptr = interp.alloc_string(&key_names[0]) as u64;
+            Ok(m41_build_df_with_index(
+                interp, &out_names, &out_cols, groups.len() as i64,
+                m44_key_cols[0], name_ptr,
+            ))
+        }
+        _ => Ok(m44_build_df_with_multiindex(
+            interp, &out_names, &out_cols, groups.len() as i64,
+            &m44_key_cols, &key_names,
+        )),
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════

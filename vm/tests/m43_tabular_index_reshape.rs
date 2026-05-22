@@ -286,9 +286,10 @@ fn main() -> i32:
 }
 
 #[test]
-fn multi_col_group_by_does_not_promote_to_index() {
-    // M43 contract: multi-column group_by KEEPS the keys as regular
-    // columns and uses RangeIndex.  MultiIndex is M44+.
+fn multi_col_group_by_promotes_to_multiindex_m44() {
+    // Renamed in M44 (was `multi_col_group_by_does_not_promote_to_index`
+    // in M43).  M43 left multi-col group_by emitting keys-as-regular-columns
+    // with RangeIndex; M44 promotes ALL group-key columns to a MultiIndex.
     let src = "\
 from tabular import Column, ColumnI64, ColumnStr, GroupedDataFrame, DataFrame
 import tabular
@@ -323,13 +324,14 @@ fn main() -> i32:
     gdf: GroupedDataFrame = df.group_by(keys)
     s: DataFrame = gdf.sum()
     println(\"ncols=\" + str(s.ncols()))
-    println(\"has=\" + str(s.has_index()))
+    println(\"nlev=\" + str(s.index_nlevels()))
     return 0
 ";
-    let out = run("gby_multi_no_promote", src);
-    // 3 cols: cat + reg + qty.  Multi-col group_by retains v1 shape.
-    assert!(out.contains("ncols=3"), "got: {out:?}");
-    assert!(out.contains("has=false"), "got: {out:?}");
+    let out = run("gby_multi_promote_m44", src);
+    // M44: cat + reg are now MultiIndex levels; only qty remains as a
+    // regular column.  ncols=1; nlev=2.
+    assert!(out.contains("ncols=1"), "got: {out:?}");
+    assert!(out.contains("nlev=2"), "got: {out:?}");
 }
 
 #[test]

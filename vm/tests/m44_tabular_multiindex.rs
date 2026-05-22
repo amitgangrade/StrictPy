@@ -197,3 +197,142 @@ fn sort_index_multi_without_multiindex_raises() {
     let out = run("sort_index_multi_no_mi", &src);
     assert!(out.contains("got-valueerror"), "got: {out:?}");
 }
+
+// ───────────────────────────────────────────────────────────────────────
+// Phase B: multi-column group_by promotion
+// ───────────────────────────────────────────────────────────────────────
+
+#[test]
+fn two_level_group_by_sum_promotes_to_multiindex() {
+    let src = format!(
+        "{MULTI_FRAME_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"reg\")\n    keys.append(\"cat\")\n    gdf: GroupedDataFrame = df.group_by(keys)\n    s: DataFrame = gdf.sum()\n    println(\"rows=\" + str(s.length()))\n    println(\"cols=\" + str(s.ncols()))\n    println(\"nlev=\" + str(s.index_nlevels()))\n    cnames: List[str] = s.columns()\n    println(\"col0=\" + cnames[0i32])\n    n0: str? = s.index_level_name(0i64)\n    n1: str? = s.index_level_name(1i64)\n    if n0 is not none:\n        println(\"n0=\" + n0)\n    if n1 is not none:\n        println(\"n1=\" + n1)\n    return 0\n"
+    );
+    let out = run("two_lvl_sum_promotes", &src);
+    // Groups: east-a (10+50=60), east-b (20), west-a (30), west-b (40) = 4 rows.
+    assert!(out.contains("rows=4"), "got: {out:?}");
+    assert!(out.contains("cols=1"), "got: {out:?}");
+    assert!(out.contains("nlev=2"), "got: {out:?}");
+    assert!(out.contains("col0=qty"), "got: {out:?}");
+    assert!(out.contains("n0=reg"), "got: {out:?}");
+    assert!(out.contains("n1=cat"), "got: {out:?}");
+}
+
+#[test]
+fn two_level_group_by_mean_emits_columnf64_with_multiindex() {
+    let src = format!(
+        "{MULTI_FRAME_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"reg\")\n    keys.append(\"cat\")\n    gdf: GroupedDataFrame = df.group_by(keys)\n    m: DataFrame = gdf.mean()\n    println(\"cols=\" + str(m.ncols()))\n    println(\"nlev=\" + str(m.index_nlevels()))\n    qcol: ColumnF64? = m.get_column_f64(\"qty\")\n    if qcol is not none:\n        println(\"q_dt=\" + qcol.dtype())\n    return 0\n"
+    );
+    let out = run("two_lvl_mean", &src);
+    assert!(out.contains("cols=1"), "got: {out:?}");
+    assert!(out.contains("nlev=2"), "got: {out:?}");
+    assert!(out.contains("q_dt=f64"), "got: {out:?}");
+}
+
+#[test]
+fn three_level_group_by_size_three_levels() {
+    let src = "\
+from tabular import Column, ColumnI64, ColumnStr, GroupedDataFrame, DataFrame
+import tabular
+fn main() -> i32:
+    a_v: List[str] = []
+    a_v.append(\"x\")
+    a_v.append(\"x\")
+    a_v.append(\"y\")
+    a_v.append(\"y\")
+    av: ColumnStr = tabular.col_str_simple(a_v)
+    b_v: List[str] = []
+    b_v.append(\"p\")
+    b_v.append(\"p\")
+    b_v.append(\"q\")
+    b_v.append(\"q\")
+    bv: ColumnStr = tabular.col_str_simple(b_v)
+    c_v: List[str] = []
+    c_v.append(\"l\")
+    c_v.append(\"m\")
+    c_v.append(\"l\")
+    c_v.append(\"m\")
+    cv: ColumnStr = tabular.col_str_simple(c_v)
+    qty_v: List[i64] = []
+    qty_v.append(1i64)
+    qty_v.append(2i64)
+    qty_v.append(3i64)
+    qty_v.append(4i64)
+    qty: ColumnI64 = tabular.col_i64_simple(qty_v)
+    n: List[str] = []
+    n.append(\"a\")
+    n.append(\"b\")
+    n.append(\"c\")
+    n.append(\"qty\")
+    cols: List[Column] = []
+    cols.append(av)
+    cols.append(bv)
+    cols.append(cv)
+    cols.append(qty)
+    df: DataFrame = tabular.from_columns(n, cols)
+    keys: List[str] = []
+    keys.append(\"a\")
+    keys.append(\"b\")
+    keys.append(\"c\")
+    gdf: GroupedDataFrame = df.group_by(keys)
+    sz: DataFrame = gdf.size()
+    println(\"rows=\" + str(sz.length()))
+    println(\"cols=\" + str(sz.ncols()))
+    println(\"nlev=\" + str(sz.index_nlevels()))
+    return 0
+";
+    let out = run("three_lvl_size", src);
+    // 4 unique (a, b, c) tuples.
+    assert!(out.contains("rows=4"), "got: {out:?}");
+    // size adds 1 column ("size").
+    assert!(out.contains("cols=1"), "got: {out:?}");
+    assert!(out.contains("nlev=3"), "got: {out:?}");
+}
+
+#[test]
+fn two_level_group_by_agg_specs_promotes() {
+    let src = format!(
+        "{MULTI_FRAME_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"reg\")\n    keys.append(\"cat\")\n    gdf: GroupedDataFrame = df.group_by(keys)\n    specs: List[Tuple[str, str]] = []\n    specs.append((\"qty\", \"sum\"))\n    specs.append((\"qty\", \"max\"))\n    a: DataFrame = gdf.agg(specs)\n    println(\"cols=\" + str(a.ncols()))\n    println(\"nlev=\" + str(a.index_nlevels()))\n    onames: List[str] = a.columns()\n    println(\"col0=\" + onames[0i32])\n    println(\"col1=\" + onames[1i32])\n    return 0\n"
+    );
+    let out = run("two_lvl_agg_specs", &src);
+    assert!(out.contains("cols=2"), "got: {out:?}");
+    assert!(out.contains("nlev=2"), "got: {out:?}");
+    assert!(out.contains("col0=qty_sum"), "got: {out:?}");
+    assert!(out.contains("col1=qty_max"), "got: {out:?}");
+}
+
+#[test]
+fn two_level_group_by_keys_returns_zero_cols_with_multiindex() {
+    let src = format!(
+        "{MULTI_FRAME_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"reg\")\n    keys.append(\"cat\")\n    gdf: GroupedDataFrame = df.group_by(keys)\n    k: DataFrame = gdf.keys()\n    println(\"rows=\" + str(k.length()))\n    println(\"cols=\" + str(k.ncols()))\n    println(\"nlev=\" + str(k.index_nlevels()))\n    return 0\n"
+    );
+    let out = run("two_lvl_keys", &src);
+    // 4 unique (reg, cat) tuples; 0 regular columns; nlev=2.
+    assert!(out.contains("rows=4"), "got: {out:?}");
+    assert!(out.contains("cols=0"), "got: {out:?}");
+    assert!(out.contains("nlev=2"), "got: {out:?}");
+}
+
+#[test]
+fn two_level_group_by_size_has_size_column() {
+    let src = format!(
+        "{MULTI_FRAME_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"reg\")\n    keys.append(\"cat\")\n    gdf: GroupedDataFrame = df.group_by(keys)\n    sz: DataFrame = gdf.size()\n    println(\"cols=\" + str(sz.ncols()))\n    println(\"nlev=\" + str(sz.index_nlevels()))\n    cn: List[str] = sz.columns()\n    println(\"col0=\" + cn[0i32])\n    return 0\n"
+    );
+    let out = run("two_lvl_size_col", &src);
+    assert!(out.contains("cols=1"), "got: {out:?}");
+    assert!(out.contains("nlev=2"), "got: {out:?}");
+    assert!(out.contains("col0=size"), "got: {out:?}");
+}
+
+#[test]
+fn multi_col_group_by_no_longer_keeps_keys_as_columns() {
+    // The M43→M44 contract flip — the keys are now levels, NOT regular columns.
+    // We assert that the result has only qty as a regular column (cat and
+    // reg are now MultiIndex levels), so the column list length is 1 and
+    // its sole entry is "qty".
+    let src = format!(
+        "{MULTI_FRAME_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"reg\")\n    keys.append(\"cat\")\n    gdf: GroupedDataFrame = df.group_by(keys)\n    s: DataFrame = gdf.sum()\n    cnames: List[str] = s.columns()\n    println(\"ncols=\" + str(s.ncols()))\n    println(\"only=\" + cnames[0i32])\n    return 0\n"
+    );
+    let out = run("multi_no_keys_as_cols", &src);
+    assert!(out.contains("ncols=1"), "got: {out:?}");
+    assert!(out.contains("only=qty"), "got: {out:?}");
+}
