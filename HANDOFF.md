@@ -1,4 +1,4 @@
-# Session handoff — 2026-05-22 (post-M38)
+# Session handoff — 2026-05-22 (post-M39)
 
 ## Read this FIRST in the next session
 
@@ -17,22 +17,43 @@ Everything you need to resume is in:
 ## Current head
 
 - Branch: `main`
-- Latest commit: `ec9d9d0` (M38 E: tabular round-out — group-by demo + LANGUAGE_GUIDE update + agent report)
+- Latest commit: `0d73905` (M39 D: tabular reshape — tests + demo + LANGUAGE_GUIDE update + agent report)
 - Tag: `v0.2.0` (commit `121483f`, pushed)
-- Tests passing on main: **769** (+25 over M37)
+- Tests passing on main: **794** (+25 over M38)
 
 ## Status snapshot
 
 | Metric | Value |
 |---|---:|
-| Milestones complete on main | M0–M38 |
+| Milestones complete on main | M0–M39 |
 | **v0.2.0 release** | **Tagged at M30 (commit 121483f)** |
-| Tests | 769 / 0 fail / 1 ignored |
+| Tests | 794 / 0 fail / 1 ignored |
 | Bugs | 35 / 35 / **0 deferred** |
 | Stdlib modules | 38 |
-| Stdlib classes | 17 from M34/M35/M37 + **1 from M38** (`GroupedDataFrame`) = **18 total**. M37/M38 classes registered module-scoped via the post-M36 `StdlibItemKind::Class` path (no prelude binding). |
-| Example programs | **102** (+1 in M38: `tabular_groupby_demo.spy`) |
-| Lesson 1 streak | **20 consecutive clean-commit agents** (M28 → M38 — M38 agent shipped all 5 phases clean with no STOP CRITERIA cuts) |
+| Stdlib classes | 18 (unchanged — M39 ships reshape ops as DataFrame methods, no new classes) |
+| Example programs | **103** (+1 in M39: `tabular_reshape_demo.spy`) |
+| Lesson 1 streak | **21 consecutive clean-commit agents** (M28 → M39 — M39 agent shipped all 4 phases clean with no STOP CRITERIA cuts) |
+
+## M39 — completed (single agent, 4 phases, no STOP CRITERIA cuts)
+
+| Agent | Scope | Var prefix | NativeFn IDs | Commits |
+|---|---|---|---|---|
+| **M39 reshape** | `tabular` Phase 4 — reshape ops | `m39_` | 935-984 (11 used: 935-942, 945, 950-951) | `5411a9f` (A), `e4f2ed7` (B), `24859c1` (C), `0d73905` (D) |
+
+### What shipped
+
+- **Phase A**: 5 typed `df.unique_*` accessors (i64/f64/str/bool/datetime — mirrors M38 `get_column_*` pattern); `df.value_counts(col)` returns 2-col DataFrame sorted by count desc; module-level `tabular.concat_rows(dfs)` (vertical, schema-strict) and `tabular.concat_cols(dfs)` (horizontal, row-count-strict + unique col names).
+- **Phase B**: `df.merge(other, on, how)` — hash-join inner/left/right/outer reusing M38's `\x01`-joined key encoding. Output column order = lhs cols + rhs non-`on` cols (no duplicates). Null cells in `on` columns never match (pandas/SQL `null != null`). Merged `on` columns inherit rhs values on right-only outer rows (matches `pd.merge` behavior).
+- **Phase C**: `df.pivot(index, columns, values)` — long→wide; raises ValueError on duplicate (index, columns) pairs; missing pairs → null cells. `df.melt(id_vars, value_vars)` — wide→long; all `value_vars` must share a dtype.
+- **Phase D**: 23 VM tests + 2 demo-runs; `examples/tabular_reshape_demo.spy` (~150 LOC, orders+customers workflow); LANGUAGE_GUIDE.md §5 / §11.20 / §11.21 updates.
+
+### Five findings worth knowing
+
+1. **f64 `unique` keys on `to_bits()`** — `HashSet<f64>` doesn't compile (`f64: !Hash`); bit-pattern keying distinguishes ±0.0 and lets multiple NaN payloads be distinct. Canonical workaround.
+2. **`m39_join_key` returns `None` for any-null-cell rows** — different from M38's `m38_row_key` which encoded nulls as `\x02null` for grouping. For merge's `null != null` semantics, `None` shortcut is cleaner than a never-matching key.
+3. **Merge `on` columns inherit rhs values on right-only outer rows** — matches pandas's "merged key column" behavior so the join key never goes null in outer/right outputs.
+4. **Melt machinery is bulky** — each dtype needs per-value-var read + per-output-row write. Pre-read all `value_vars` into Vec<>s up front to avoid virtual-call-per-cell overhead.
+5. **Edit-tool worktree leak recurred ~5 times in M39** — same as M37+M38. The agent caught each via `git status` after substantial edits and `cp`-recovered from project root to worktree. **This is now a confirmed-recurring harness issue across 3 consecutive milestones**; orchestrator integration workaround (checkout-and-merge-ff) is reliable.
 
 ## M38 — completed (single big agent, 5 phases, no STOP CRITERIA cuts)
 
@@ -151,36 +172,45 @@ Per the THESIS §8.4 next-pass priority list + M34/M35 deferred items:
 
 ### Highest leverage (in order)
 
-1. **THESIS + BLOG_POST refresh to M35-M38** (small writing task, ~30-60 min).
+1. **THESIS + BLOG_POST refresh to M35-M39** (small writing task, ~30-60 min).
    Both are frozen at M34. Concrete deltas to fold in:
-   - Tests: 690 → 769 (M35 +33; M36 pure refactor; M37 +21; M38 +25)
+   - Tests: 690 → 794 (M35 +33; M36 pure refactor; M37 +21; M38 +25; M39 +25)
    - Stdlib classes: 7 → 18 (M35 +4; M36 promoted via `StdlibItemKind::Class`;
      M37 added 6 module-scoped; M38 added 1 GroupedDataFrame)
-   - Stdlib modules: 37 → 38 (M37 added `tabular`; M38 extended it)
-   - Demo programs: 97 → 102
-   - Lesson 1 streak: 14 → 20
+   - Stdlib modules: 37 → 38 (M37 added `tabular`; M38+M39 extended it)
+   - Demo programs: 97 → 103
+   - Lesson 1 streak: 14 → 21
    - **New thesis chapter**: "Pandas-shaped data package as v0.3 stdlib growth"
-     — M37 ships Phase 1+2 (Column/DataFrame/IO/filter/sort), M38 ships
-     Phase 3 (aggregations + group-by). Phase 4 (pivot/melt/join) is M39.
+     — M37 ships Phase 1+2; M38 ships Phase 3 (aggregations + group-by);
+     M39 ships Phase 4 (reshape). `tabular` now covers the common-80%
+     of pandas workflows. Phase 5 (time series) is M40.
 
-2. **M39 — tabular Phase 4: pivot / melt / join** (the natural M38 follow-up).
-   Concrete punch list per the original Pandas plan:
-   - `df.pivot(index, columns, values) -> DataFrame` — wide reshape
-   - `df.melt(id_vars, value_vars) -> DataFrame` — long reshape
-   - `df.merge(other, on, how) -> DataFrame` — inner/left/right/outer joins
-   - `df.concat([dfs]) -> DataFrame` — row- and column-wise
-   - `df.unique(col) -> Column` + `df.value_counts(col) -> DataFrame`
-   - Estimated ~1500-2000 LOC. Group-by infrastructure from M38 is reusable.
+2. **M40 — tabular Phase 5: time series + cumulative ops** (the natural M39 follow-up).
+   Per the original Pandas plan + M39's agent report follow-up list:
+   - `DatetimeIndex` / index-aware operations on top of `ColumnDateTime`
+   - `df.rolling(window).mean() / sum() / std()` — rolling-window aggregates
+   - `df.resample("1H") / "1D" / etc.` — time-based resampling
+   - `df.asof_merge(other, on)` — asof joins
+   - `Column.cumsum / cumprod / cummax / cummin` — running aggregates
+   - `df.dropna() / df.dropna(subset=cols)` — drop null-bearing rows
+   - `df.fillna(value)` — whole-frame fill
+   - `df.iloc(start, stop)` — explicit range slicing
+   - Estimated ~1500-2000 LOC.
 
 3. **M36 follow-up — flip M34/M35 tests to explicit imports + delete
-   the legacy "prelude wins" branch.** The infrastructure is in place;
-   migration is mechanical. ~39 test files plus a handful of examples
-   need `from json import JsonValue` (etc.) added. After the flip, the
-   "still load-bearing" comment Phase D added in `resolver.rs` becomes
-   removable. M37 + M38 confirmed the canonical path works — now
-   mechanical migration of legacy callers.
+   the legacy "prelude wins" branch.** Mechanical migration; ~39 test
+   files. M37+M38+M39 all confirmed the canonical path works.
 
-4. **Real Cranelift safepoints** (replaces M33 shadow stack):
+4. **Edit-tool worktree leak — investigate or work around at harness level.**
+   Confirmed-recurring across M37 + M38 + M39 (3 consecutive milestones).
+   Each time the agent's Edit/Write tool writes to project-root copies
+   instead of the worktree. Current orchestrator-side workaround
+   (checkout-and-merge-ff against worktree HEAD) is reliable but should
+   not be permanent. Worth a focused investigation — does this happen
+   with the harness's git-worktree path resolution? Is there a setup
+   step missing? Single, no-coding session probably.
+
+5. **Real Cranelift safepoints** (replaces M33 shadow stack):
    `cranelift-jit 0.115` doesn't stably expose PC ranges; check if
    a newer cranelift-jit (0.116+ or trunk) exposes
    `MachBufferFinalized::pc_range_for_inst` or similar. If yes,
@@ -251,11 +281,11 @@ After v0.4 language/stdlib work, update:
 Document these in any new agent brief:
 
 1. **"FIRST commit before 60% of your time budget"** with explicit
-   20%/40%/60%/80% checkpoint discipline. **20 consecutive clean
-   agents** (M28 → M38) — the streak is the strongest empirical
-   data point in the project. M37 + M38 each ran 5 phase-commits
-   across ~2800 + ~2530 LOC milestones without breaking the streak.
-   Don't soften this language.
+   20%/40%/60%/80% checkpoint discipline. **21 consecutive clean
+   agents** (M28 → M39) — the streak is the strongest empirical
+   data point in the project. M37 + M38 + M39 each ran 4-5 phase
+   commits across ~2400-2800 LOC milestones without breaking the
+   streak. Don't soften this language.
 
 2. **Distinctive variable prefixes per agent** in shared files
    (resolver.rs, builtins.rs, interp.rs) — `p3b_a_` / `p3b_b_` /

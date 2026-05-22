@@ -1117,6 +1117,108 @@ No language/compiler changes; new pure-bench infrastructure only.
 
 ---
 
+## M39 — `tabular` Phase 4: reshape ops (2026-05-22)
+
+Phase 4 of the Pandas plan. After M37+M38 shipped core types + IO +
+filter + sort + aggregations + group-by, M39 ships reshape: unique
+per dtype, value_counts, concat (rows + cols), merge with all four
+hash-join modes, pivot, and melt. **Zero STOP CRITERIA cuts** —
+every brief item shipped. After M39 the `tabular` module covers the
+common-80% of pandas workflows.
+
+Single agent, 4 phase commits (one fewer than M37/M38's 5 — combined
+tests + demo + docs into the final Phase D).
+
+### Surface (extends `tabular` module)
+
+- **Phase A**: 5 typed `df.unique_*` accessors (i64/f64/str/bool/datetime)
+  mirroring the M38 `get_column_*` shape; `df.value_counts(col) -> DataFrame`
+  (2-col: value + count, sorted by count desc); module-level
+  `tabular.concat_rows(dfs)` (vertical, schema-strict) and
+  `tabular.concat_cols(dfs)` (horizontal, row-count-strict +
+  unique-column-name-strict).
+- **Phase B**: `df.merge(other, on, how)` — hash-join with all 4
+  modes (`inner` / `left` / `right` / `outer`). Reuses M38's
+  `\x01`-joined per-cell key encoding. Output columns = lhs cols +
+  rhs non-`on` cols (no duplicates). Null cells in `on` columns
+  never match (pandas/SQL `null != null`).
+- **Phase C**: `df.pivot(index, columns, values)` (long→wide; raises
+  on duplicate (index, columns) pairs; missing pairs → null cells);
+  `df.melt(id_vars, value_vars)` (wide→long; all `value_vars` must
+  share a dtype).
+- **Phase D**: 23 VM tests + 2 demo-runs tests; `examples/tabular_
+  reshape_demo.spy` (~150 LOC orders+customers workflow);
+  LANGUAGE_GUIDE.md §5 + §11.20 + §11.21 updates.
+
+### Five findings worth recording
+
+1. **f64 `unique` keys on `to_bits()`** — `HashSet<f64>` doesn't
+   compile (`f64: !Hash`); bit-pattern keying distinguishes ±0.0
+   and lets multiple NaN payloads be distinct. Canonical workaround
+   and also gives bitwise-identical first-occurrence semantics.
+2. **`m39_join_key` returns `None` for any-null-cell rows** —
+   different from M38's `m38_row_key` which encoded nulls as
+   `\x02null` for grouping. For merge's `null != null` semantics,
+   short-circuiting to None is cleaner than emitting a key that
+   can never match anything.
+3. **Merge `on` columns inherit rhs values on right-only outer rows**
+   — pandas's "merged key column" behavior. The `rhs_fallback_idx`
+   path in `m39_pluck_column` fills the `on` column from the rhs
+   cell when the lhs side is None, so the key column never goes
+   null in outer/right outputs.
+4. **Melt's column-buffer machinery is bulky** — each dtype needs
+   per-value-var read + per-output-row write. Pre-read all
+   `value_vars` columns into per-var `Vec<>`s up front; do the
+   `(row, var)` emit in one loop. Less elegant than a closure
+   approach but avoids virtual-call-per-cell overhead.
+5. **Edit-tool worktree leak recurred ~5 times in M39** — same as
+   M37+M38. Agent caught each via `git status` showing no diff
+   after substantial edits; `cp`-recovered from project root to
+   worktree. **This is now confirmed-recurring across 3 consecutive
+   milestones** — methodology note: parallel-worktree agents are
+   reliable on commit discipline but unreliable on file-write-target
+   discipline. Orchestrator integration workaround (checkout-and-
+   merge-ff against worktree HEAD) is reliable and documented in
+   HANDOFF.md.
+
+### Tests + size
+
+- Tests: 769 → 794 (+25: 23 in `vm/tests/m39_tabular_reshape.rs`,
+  2 in `compiler/tests/tabular_reshape_demo_runs.rs`).
+- Examples: 102 → 103 (`examples/tabular_reshape_demo.spy` ~150 LOC).
+- Stdlib classes: unchanged at 18 (M39 adds methods, not classes —
+  all reshape ops return existing `DataFrame` or `Column<T>`).
+- LOC: `vm/src/builtins.rs` +1101, `compiler/src/resolver.rs` +67,
+  `shared/src/native.rs` +61, `compiler/src/ir.rs` +43, plus new
+  tests / example / report. Total ~2430 LOC.
+- NativeFn IDs: 935-942 (Phase A) + 945 (Phase B) + 950-951
+  (Phase C). 39 of the 50 reserved slots remain for v0.4.
+
+### Lesson 1 streak: 21 consecutive clean agents
+
+(M28 + M28.5 + M29 + M29.5 + M30×2 + M31 + M32 + M33 + M34 + M35×3 +
+M36 + M37 + M38 + M39). Three consecutive Pandas-package agents
+shipped clean.
+
+### After M39: the `tabular` package landscape
+
+The `tabular` module is now feature-comparable to a v0.0.1 pandas:
+
+- **M37**: 6 classes (sealed Column + 5 subclasses + DataFrame),
+  factories, IO (CSV + SQL), filter/select/drop/head/tail, sort_by
+- **M38**: typed `get_column_*`, restored cmp ops, aggregations
+  (sum/mean/min/max/count/std/var/median), `describe`, `fill_null`,
+  `from_dict`, `GroupedDataFrame` + group-by + agg shortcuts
+- **M39**: `unique_*`, `value_counts`, `concat_rows`/`concat_cols`,
+  `merge` (inner/left/right/outer hash-join), `pivot`, `melt`
+
+M40 picks up Phase 5 (DatetimeIndex / rolling / resample / asof_merge
+/ cumsum/cumprod/cummax/cummin / dropna / fillna / iloc range
+slicing). Phase 6 (desktop UI — webview-served or Tauri/wry hybrid)
+follows after Phase 5 lands.
+
+---
+
 ## M38 — `tabular` round-out: aggregations + group-by (2026-05-22)
 
 Round-out of the M37 `tabular` module. Picks up the M37 STOP CRITERIA
