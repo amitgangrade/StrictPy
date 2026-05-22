@@ -698,3 +698,243 @@ fn main() -> i32:
     assert!(out.contains("has=true"), "got: {out:?}");
     assert!(out.contains("nrows=3"), "got: {out:?}");
 }
+
+// ── Phase D: merge — index propagation per how ─────────────────────────
+
+fn build_merge_helpers() -> &'static str {
+    // Two small frames sharing a `tid` join column.  lhs has a string
+    // "lid" index; rhs has a string "rid" index.  Both build helpers
+    // are reused by the four how-mode tests below.
+    "fn build_lhs() -> DataFrame:
+    lkeys: List[str] = []
+    lkeys.append(\"L1\")
+    lkeys.append(\"L2\")
+    lkeys.append(\"L3\")
+    lk: ColumnStr = tabular.col_str_simple(lkeys)
+    tids: List[i64] = []
+    tids.append(1i64)
+    tids.append(2i64)
+    tids.append(3i64)
+    t: ColumnI64 = tabular.col_i64_simple(tids)
+    vs: List[i64] = []
+    vs.append(10i64)
+    vs.append(20i64)
+    vs.append(30i64)
+    v: ColumnI64 = tabular.col_i64_simple(vs)
+    cn: List[str] = []
+    cn.append(\"lid\")
+    cn.append(\"tid\")
+    cn.append(\"v\")
+    cols: List[Column] = []
+    cols.append(lk)
+    cols.append(t)
+    cols.append(v)
+    return tabular.from_columns(cn, cols).set_index(\"lid\")
+
+fn build_rhs() -> DataFrame:
+    rkeys: List[str] = []
+    rkeys.append(\"R1\")
+    rkeys.append(\"R2\")
+    rk: ColumnStr = tabular.col_str_simple(rkeys)
+    tids: List[i64] = []
+    tids.append(2i64)
+    tids.append(4i64)
+    t: ColumnI64 = tabular.col_i64_simple(tids)
+    rates: List[f64] = []
+    rates.append(0.5)
+    rates.append(0.7)
+    r: ColumnF64 = tabular.col_f64_simple(rates)
+    cn: List[str] = []
+    cn.append(\"rid\")
+    cn.append(\"tid\")
+    cn.append(\"rate\")
+    cols: List[Column] = []
+    cols.append(rk)
+    cols.append(t)
+    cols.append(r)
+    return tabular.from_columns(cn, cols).set_index(\"rid\")
+
+"
+}
+
+#[test]
+fn merge_inner_preserves_lhs_index() {
+    let src = format!(
+        "from tabular import Column, ColumnI64, ColumnF64, ColumnStr, DataFrame
+import tabular
+{}fn main() -> i32:
+    lhs: DataFrame = build_lhs()
+    rhs: DataFrame = build_rhs()
+    on: List[str] = []
+    on.append(\"tid\")
+    merged: DataFrame = lhs.merge(rhs, on, \"inner\")
+    println(\"has=\" + str(merged.has_index()))
+    println(\"nrows=\" + str(merged.length()))
+    nm: str? = merged.index_name()
+    if nm is not none:
+        println(\"name=\" + nm)
+    flat: DataFrame = merged.reset_index()
+    s: ColumnStr? = flat.get_column_str(\"lid\")
+    if s is not none:
+        a: str? = s.get(0i64)
+        if a is not none:
+            println(\"l0=\" + a)
+    return 0
+",
+        build_merge_helpers()
+    );
+    let out = run("merge_inner_preserves_lhs_index", &src);
+    // Only tid=2 matches between lhs (1,2,3) and rhs (2,4); that's
+    // lhs row 1 ("L2").
+    assert!(out.contains("has=true"), "got: {out:?}");
+    assert!(out.contains("nrows=1"), "got: {out:?}");
+    assert!(out.contains("name=lid"), "got: {out:?}");
+    assert!(out.contains("l0=L2"), "got: {out:?}");
+}
+
+#[test]
+fn merge_left_preserves_lhs_index() {
+    let src = format!(
+        "from tabular import Column, ColumnI64, ColumnF64, ColumnStr, DataFrame
+import tabular
+{}fn main() -> i32:
+    lhs: DataFrame = build_lhs()
+    rhs: DataFrame = build_rhs()
+    on: List[str] = []
+    on.append(\"tid\")
+    merged: DataFrame = lhs.merge(rhs, on, \"left\")
+    println(\"has=\" + str(merged.has_index()))
+    println(\"nrows=\" + str(merged.length()))
+    nm: str? = merged.index_name()
+    if nm is not none:
+        println(\"name=\" + nm)
+    flat: DataFrame = merged.reset_index()
+    s: ColumnStr? = flat.get_column_str(\"lid\")
+    if s is not none:
+        a: str? = s.get(0i64)
+        b: str? = s.get(1i64)
+        c: str? = s.get(2i64)
+        if a is not none:
+            println(\"l0=\" + a)
+        if b is not none:
+            println(\"l1=\" + b)
+        if c is not none:
+            println(\"l2=\" + c)
+    return 0
+",
+        build_merge_helpers()
+    );
+    let out = run("merge_left_preserves_lhs_index", &src);
+    assert!(out.contains("has=true"), "got: {out:?}");
+    assert!(out.contains("nrows=3"), "got: {out:?}");
+    assert!(out.contains("name=lid"), "got: {out:?}");
+    assert!(out.contains("l0=L1"), "got: {out:?}");
+    assert!(out.contains("l1=L2"), "got: {out:?}");
+    assert!(out.contains("l2=L3"), "got: {out:?}");
+}
+
+#[test]
+fn merge_right_preserves_rhs_index() {
+    let src = format!(
+        "from tabular import Column, ColumnI64, ColumnF64, ColumnStr, DataFrame
+import tabular
+{}fn main() -> i32:
+    lhs: DataFrame = build_lhs()
+    rhs: DataFrame = build_rhs()
+    on: List[str] = []
+    on.append(\"tid\")
+    merged: DataFrame = lhs.merge(rhs, on, \"right\")
+    println(\"has=\" + str(merged.has_index()))
+    println(\"nrows=\" + str(merged.length()))
+    nm: str? = merged.index_name()
+    if nm is not none:
+        println(\"name=\" + nm)
+    return 0
+",
+        build_merge_helpers()
+    );
+    let out = run("merge_right_preserves_rhs_index", &src);
+    // rhs has 2 rows (tid=2 matches lhs, tid=4 unmatched); right join
+    // preserves both, indexed by rhs's "rid".
+    assert!(out.contains("has=true"), "got: {out:?}");
+    assert!(out.contains("nrows=2"), "got: {out:?}");
+    assert!(out.contains("name=rid"), "got: {out:?}");
+}
+
+#[test]
+fn merge_outer_preserves_mixed_index() {
+    // outer with matching index dtypes (both ColumnStr): lhs index for
+    // matched/left-only rows, rhs index for right-only rows.
+    let src = format!(
+        "from tabular import Column, ColumnI64, ColumnF64, ColumnStr, DataFrame
+import tabular
+{}fn main() -> i32:
+    lhs: DataFrame = build_lhs()
+    rhs: DataFrame = build_rhs()
+    on: List[str] = []
+    on.append(\"tid\")
+    merged: DataFrame = lhs.merge(rhs, on, \"outer\")
+    println(\"has=\" + str(merged.has_index()))
+    println(\"nrows=\" + str(merged.length()))
+    nm: str? = merged.index_name()
+    if nm is not none:
+        println(\"name=\" + nm)
+    return 0
+",
+        build_merge_helpers()
+    );
+    let out = run("merge_outer_preserves_mixed_index", &src);
+    // 3 lhs rows (L1, L2, L3) + 1 right-only (R2 for tid=4) = 4 rows.
+    assert!(out.contains("has=true"), "got: {out:?}");
+    assert!(out.contains("nrows=4"), "got: {out:?}");
+    // lhs wins the index_name policy.
+    assert!(out.contains("name=lid"), "got: {out:?}");
+}
+
+#[test]
+fn merge_unindexed_lhs_drops_index() {
+    // If lhs has no index, an inner/left merge falls back to RangeIndex.
+    let src = "\
+from tabular import Column, ColumnI64, ColumnStr, DataFrame
+import tabular
+fn main() -> i32:
+    tids: List[i64] = []
+    tids.append(1i64)
+    tids.append(2i64)
+    t: ColumnI64 = tabular.col_i64_simple(tids)
+    vs: List[i64] = []
+    vs.append(10i64)
+    vs.append(20i64)
+    v: ColumnI64 = tabular.col_i64_simple(vs)
+    cn: List[str] = []
+    cn.append(\"tid\")
+    cn.append(\"v\")
+    cols: List[Column] = []
+    cols.append(t)
+    cols.append(v)
+    lhs: DataFrame = tabular.from_columns(cn, cols)
+    # rhs with index
+    rkeys: List[str] = []
+    rkeys.append(\"R1\")
+    rk: ColumnStr = tabular.col_str_simple(rkeys)
+    rtids: List[i64] = []
+    rtids.append(2i64)
+    rt: ColumnI64 = tabular.col_i64_simple(rtids)
+    rn: List[str] = []
+    rn.append(\"rid\")
+    rn.append(\"tid\")
+    rc: List[Column] = []
+    rc.append(rk)
+    rc.append(rt)
+    rhs: DataFrame = tabular.from_columns(rn, rc).set_index(\"rid\")
+    on: List[str] = []
+    on.append(\"tid\")
+    merged: DataFrame = lhs.merge(rhs, on, \"left\")
+    println(\"has=\" + str(merged.has_index()))
+    println(\"nrows=\" + str(merged.length()))
+    return 0
+";
+    let out = run("merge_unindexed_lhs_drops_index", src);
+    assert!(out.contains("has=false"), "got: {out:?}");
+    assert!(out.contains("nrows=2"), "got: {out:?}");
+}

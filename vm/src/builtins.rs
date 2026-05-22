@@ -14888,7 +14888,190 @@ fn m39_df_merge(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> 
         out_cols.push(col_u64);
     }
     let nrows = emit.len() as i64;
-    Ok(m37_build_df(interp, &out_names, &out_cols, nrows))
+    // M42: build the result's index per pandas join rules.
+    //
+    //   inner: lhs.index restricted to matched rows.  None if lhs lacks
+    //          an index -> RangeIndex.
+    //   left:  lhs.index (every emit pair has Some(lr)).  None if lhs
+    //          lacks an index -> RangeIndex.
+    //   right: rhs.index (every emit pair has Some(rr)).  None if rhs
+    //          lacks an index -> RangeIndex.
+    //   outer: lhs.index for Some(lr) rows + rhs.index for (None, rr)
+    //          rows.  Requires matching dtypes; on mismatch fall back
+    //          to RangeIndex (v1 simplification, documented).
+    let (m42_l_index, m42_l_index_name) = m41_df_index_fields(lhs);
+    let (m42_r_index, m42_r_index_name) = m41_df_index_fields(rhs);
+    let m42_index_col = m42_merge_build_index(
+        interp,
+        how.as_str(),
+        m42_l_index,
+        m42_r_index,
+        &emit,
+    );
+    Ok(match m42_index_col {
+        Some(idx_col) => {
+            // index_name policy: lhs wins for inner/left/outer (matches
+            // pandas "self.index.name is preserved"); rhs wins for
+            // right join.  Drop the name if the chosen side had none.
+            let idx_name = match how.as_str() {
+                "right" => m42_r_index_name,
+                _ => m42_l_index_name,
+            };
+            m41_build_df_with_index(
+                interp, &out_names, &out_cols, nrows, idx_col, idx_name,
+            )
+        }
+        None => m37_build_df(interp, &out_names, &out_cols, nrows),
+    })
+}
+
+/// M42: assemble the result-frame's index column for a merge.  Returns
+/// `Some(index_col_ptr)` when an index can be carried through per the
+/// `how` rules + dtype constraints; `None` otherwise (caller emits a
+/// RangeIndex frame via `m37_build_df`).  index_name is selected by
+/// the caller based on `how` (lhs wins for inner/left/outer; rhs wins
+/// for right).
+fn m42_merge_build_index(
+    interp: &mut Interpreter,
+    how: &str,
+    l_index: u64,
+    r_index: u64,
+    emit: &[(Option<usize>, Option<usize>)],
+) -> Option<u64> {
+    match how {
+        "inner" | "left" => {
+            if l_index == 0 {
+                return None;
+            }
+            // Every emit row has Some(lr) for inner/left.
+            let take: Vec<usize> = emit.iter().filter_map(|(l, _)| *l).collect();
+            if take.len() != emit.len() {
+                // Shouldn't happen for inner/left, but guard anyway.
+                return None;
+            }
+            Some(m37_column_take(interp, l_index, &take))
+        }
+        "right" => {
+            if r_index == 0 {
+                return None;
+            }
+            let take: Vec<usize> = emit.iter().filter_map(|(_, r)| *r).collect();
+            if take.len() != emit.len() {
+                return None;
+            }
+            Some(m37_column_take(interp, r_index, &take))
+        }
+        "outer" => {
+            if l_index == 0 || r_index == 0 {
+                return None;
+            }
+            // Require matching dtypes; otherwise fall back to RangeIndex
+            // (v1 simplification — documented in LANGUAGE_GUIDE §11.26).
+            let l_cls = m38_col_class_name(l_index);
+            let r_cls = m38_col_class_name(r_index);
+            if l_cls != r_cls {
+                return None;
+            }
+            Some(m42_merge_outer_index_column(
+                interp, &l_cls, l_index, r_index, emit,
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// M42 helper: materialize the outer-join index by interleaving cells
+/// from `l_index` (for Some(lr) rows) and `r_index` (for (None, rr)
+/// rows).  Assumes `l_index` and `r_index` share the same dtype.
+fn m42_merge_outer_index_column(
+    interp: &mut Interpreter,
+    cls: &str,
+    l_index: u64,
+    r_index: u64,
+    emit: &[(Option<usize>, Option<usize>)],
+) -> u64 {
+    let (l_vals, l_nulls, _) = m37_col_fields(l_index);
+    let (r_vals, r_nulls, _) = m37_col_fields(r_index);
+    let l_ns = m37_read_list_bool(l_nulls);
+    let r_ns = m37_read_list_bool(r_nulls);
+    let n = emit.len() as i64;
+    let mut out_nulls: Vec<bool> = Vec::with_capacity(emit.len());
+    let pick_null = |row: &(Option<usize>, Option<usize>),
+                     l_ns: &[bool],
+                     r_ns: &[bool]|
+     -> bool {
+        match row {
+            (Some(li), _) => l_ns.get(*li).copied().unwrap_or(false),
+            (None, Some(ri)) => r_ns.get(*ri).copied().unwrap_or(false),
+            _ => true,
+        }
+    };
+    for row in emit {
+        out_nulls.push(pick_null(row, &l_ns, &r_ns));
+    }
+    let n_lst = m37_alloc_list_bool(interp, &out_nulls);
+    match cls {
+        "ColumnI64" | "ColumnDateTime" => {
+            let l_vs = m37_read_list_i64(l_vals);
+            let r_vs = m37_read_list_i64(r_vals);
+            let out_vs: Vec<i64> = emit
+                .iter()
+                .map(|row| match row {
+                    (Some(li), _) => l_vs.get(*li).copied().unwrap_or(0),
+                    (None, Some(ri)) => r_vs.get(*ri).copied().unwrap_or(0),
+                    _ => 0,
+                })
+                .collect();
+            let v_lst = m37_alloc_list_i64(interp, &out_vs);
+            m37_alloc_column(interp, cls, v_lst, n_lst, n) as u64
+        }
+        "ColumnF64" => {
+            let l_vs = m37_read_list_f64(l_vals);
+            let r_vs = m37_read_list_f64(r_vals);
+            let out_vs: Vec<f64> = emit
+                .iter()
+                .map(|row| match row {
+                    (Some(li), _) => l_vs.get(*li).copied().unwrap_or(0.0),
+                    (None, Some(ri)) => r_vs.get(*ri).copied().unwrap_or(0.0),
+                    _ => 0.0,
+                })
+                .collect();
+            let v_lst = m37_alloc_list_f64(interp, &out_vs);
+            m37_alloc_column(interp, cls, v_lst, n_lst, n) as u64
+        }
+        "ColumnStr" => {
+            let l_vs = m37_read_list_str_lst(l_vals);
+            let r_vs = m37_read_list_str_lst(r_vals);
+            let out_vs: Vec<String> = emit
+                .iter()
+                .map(|row| match row {
+                    (Some(li), _) => l_vs.get(*li).cloned().unwrap_or_default(),
+                    (None, Some(ri)) => r_vs.get(*ri).cloned().unwrap_or_default(),
+                    _ => String::new(),
+                })
+                .collect();
+            let v_lst = m37_alloc_list_str(interp, &out_vs);
+            m37_alloc_column(interp, cls, v_lst, n_lst, n) as u64
+        }
+        "ColumnBool" => {
+            let l_vs = m37_read_list_bool(l_vals);
+            let r_vs = m37_read_list_bool(r_vals);
+            let out_vs: Vec<bool> = emit
+                .iter()
+                .map(|row| match row {
+                    (Some(li), _) => l_vs.get(*li).copied().unwrap_or(false),
+                    (None, Some(ri)) => r_vs.get(*ri).copied().unwrap_or(false),
+                    _ => false,
+                })
+                .collect();
+            let v_lst = m37_alloc_list_bool(interp, &out_vs);
+            m37_alloc_column(interp, cls, v_lst, n_lst, n) as u64
+        }
+        _ => {
+            let v_lst = m37_alloc_list_i64(interp, &vec![0i64; emit.len()]);
+            m37_alloc_column(interp, "ColumnI64", v_lst, n_lst, n) as u64
+        }
+    }
 }
 
 /// Build an output column for a merge.  `is_lhs` chooses which side
