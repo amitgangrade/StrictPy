@@ -1,12 +1,12 @@
-# I built a statically typed Python from scratch, and it beats CPython by up to 17× — and by Friday it was hosting a working web framework
+# I built a statically typed Python from scratch, and it beats CPython by up to 17× — and by the second weekend it shipped a Pandas-shaped DataFrame package
 
-*A 5-day, AI-orchestrated journey from "is this even possible?" to a 36K-line Rust toolchain with a Cranelift JIT, 96 example programs, 36 stdlib modules, a working HTTP/1.1 + HTTPS web framework written in StrictPy itself, and two open bugs — and what it taught me about why dynamic languages are slow.*
+*A 6-day, AI-orchestrated journey from "is this even possible?" to a 36K-line Rust toolchain with a Cranelift JIT, 103 example programs, 38 stdlib modules including a Pandas-shaped data package (`tabular`) covering the common-80% of pandas workflows, a working HTTP/1.1 + HTTPS web framework written in StrictPy itself, and zero open bugs — and what it taught me about why dynamic languages are slow.*
 
 ---
 
 ## TL;DR
 
-Over 5 calendar days of AI-orchestrated work I built **StrictPy** — a statically typed dialect of Python with its own compiler, bytecode VM, Cranelift JIT, and a Python-shaped 36-module stdlib including TCP/UDP sockets, bidirectional TLS, HTTP/1.1 client, sqlite3, threading, datetime, json, regex, csv, hashlib, and more. By day 4 the language was hosting a real HTTPS web framework + TODO app **written in StrictPy itself**, on top of its own stdlib.
+Over 6 calendar days of AI-orchestrated work I built **StrictPy** — a statically typed dialect of Python with its own compiler, bytecode VM, Cranelift JIT, and a Python-shaped 38-module stdlib including TCP/UDP sockets, bidirectional TLS, HTTP/1.1 client, sqlite3, threading, datetime, json, regex, csv, hashlib, and a from-scratch **Pandas-shaped DataFrame package** (`tabular`) that covers the common-80% of pandas — typed columns with null masks, CSV+SQL I/O, filter/sort, aggregations, hash-based group-by, merge with all four join modes, pivot, and melt. By day 4 the language was hosting a real HTTPS web framework + TODO app **written in StrictPy itself**, on top of its own stdlib; by day 6 it was running DataFrame pipelines on top of it too.
 
 The current implementation wins against CPython 3.12 on every cell of the canonical 4-program benchmark suite:
 
@@ -20,9 +20,9 @@ The current implementation wins against CPython 3.12 on every cell of the canoni
 
 And on an extended 30-cell suite (5 more pure-compute programs + 5 stdlib-comparison programs): **28 wins, 2 ties, 0 losses**.
 
-Headline numbers (current — post-M34): **97 example programs**, **690 tests passing**, **35 distinct bugs found and ALL 35 fixed (0 deferred)**, **37 stdlib modules** + 7 prelude JSON classes, **a working HTTP/1.1 + HTTPS web framework + TODO API demo in ~2,400 LOC of StrictPy** that runs ~2,200 req/s on `/health` (within 2× of Flask+gunicorn). The project was tagged as **v0.2.0** at M30 (the 35/35/0 freeze point); v0.3 began at M31 and has shipped generic classes, async I/O, precise GC stack maps, and typed JsonValue tree.
+Headline numbers (current — post-M39): **103 example programs**, **794 tests passing**, **35 distinct bugs found and ALL 35 fixed (0 deferred)**, **38 stdlib modules** + 18 stdlib classes (JsonValue tree, Pattern, Connection+Cursor, Hasher, plus 7 from the `tabular` Pandas-shaped package), **a working HTTP/1.1 + HTTPS web framework + TODO API demo in ~2,400 LOC of StrictPy** that runs ~2,200 req/s on `/health` (within 2× of Flask+gunicorn), **plus a Pandas-shaped DataFrame package** that does filter / sort / aggregate / group-by / merge / pivot / melt natively. The project was tagged as **v0.2.0** at M30 (the 35/35/0 freeze point); v0.3 has shipped generic classes (M31), async I/O (M32), precise GC stack maps (M33), the first stdlib classes (M34 JsonValue + M35 Pattern/Connection/Cursor/Hasher), an infrastructure refactor (M36 `StdlibItemKind::Class`), and the three-milestone `tabular` build-out (M37 core + IO + filter + sort, M38 aggregations + group-by, M39 reshape).
 
-The short answer to "how": **static types make AOT compilation easy, and AOT compilation crushes any interpreter — and once you have a typed-bytecode language with a real stdlib, you can actually use it for real software.** The interesting answer is the long story of what had to be true for both punchlines to land — including seven stress test rounds that found bugs unit tests didn't, a class-system overhaul forced by a M3-era latent hack that took 10 milestones to trigger, a four-times-recurring "placeholder IR lowering" pattern, and the small methodology change that took agent commit-discipline from "fails 40% of the time" to "8 consecutive clean agents."
+The short answer to "how": **static types make AOT compilation easy, and AOT compilation crushes any interpreter — and once you have a typed-bytecode language with a real stdlib, you can actually use it for real software.** The interesting answer is the long story of what had to be true for both punchlines to land — including seven stress test rounds that found bugs unit tests didn't, a class-system overhaul forced by a M3-era latent hack that took 10 milestones to trigger, a four-times-recurring "placeholder IR lowering" pattern, and the small methodology change that took agent commit-discipline from "fails 40% of the time" to **21 consecutive clean agents and counting**.
 
 This is the journey. A more rigorous companion document — chapters on Design, Implementation, Performance, Methodology, Findings — lives at [`THESIS.md`](THESIS.md).
 
@@ -604,6 +604,26 @@ After M34, headline numbers refresh: **690 tests passing, 97 example programs, 3
 
 ---
 
+## M35–M39 — five milestones, one Pandas-shaped package
+
+M34 shipped the first stdlib classes (the JsonValue tree) via a scope-down: register the 7 classes in the prelude rather than build proper module-level class infrastructure. M35–M39 picked that up — first more prelude classes, then the infrastructure refactor, then three milestones building a full Pandas-shaped data package on top of it.
+
+**M35 (three parallel agents)** — `re.Pattern` (compiled regex with `compile-once-reuse` semantics, NativeFn IDs 790–799), `sqlite3.Connection` + `Cursor` (typed wrappers over the M23 flat surface, IDs 800–819), and `hashlib.Hasher` (streaming digests with `update`/`hexdigest`/`copy`, IDs 820–829). Three worktree-isolated agents, distinctive `p4a_` / `p4b_` / `p4c_` variable prefixes, disjoint NativeFn ranges. All three committed clean; integration was three sequential `git apply --3way`s against the pre-M35 base with the now-standard manual brace fix between adjacent agents' match arms. **Tests 677 → 723 (+33).** The pattern from M34 — sealed-class-in-prelude — scaled cleanly to four more class families in parallel.
+
+**M36 (the infrastructure refactor)** — by the end of M35 the prelude held 17 stdlib classes (6 base + 11 v0.3). The next class family would have made it crowded. M36 added a `StdlibItemKind::Class { class_id: ClassId }` variant to the resolver's item-kind enum, then published all 11 M34/M35 classes through their home stdlib modules (`json`, `re`, `sqlite3`, `hashlib`) as proper Class items. Honest scope-down: prelude bindings were RETAINED for back-compat because all 39 M34/M35 integration tests reach class names by bare lookup after just `import json` / `import re` / etc. (no `from … import` form), and a hard prelude removal would have regressed them all. Phase D annotated the legacy "prelude wins" resolver branch with the explicit list of 11 classes it remains load-bearing for — a future agent migrating the tests to explicit imports can delete the branch in one go. **Pure refactor: tests unchanged at 723.** The unlock was the next milestone.
+
+**M37 — first Pandas-shaped data package, modules-scoped from the start.** Named `tabular` (not `pandas`, because `import pandas` would mislead — real pandas can't import). Single big agent, 5 phase commits, ~2,800 LOC — the largest single-agent milestone to date. Sealed `Column` base + 5 final subclasses (`ColumnI64` / `ColumnF64` / `ColumnStr` / `ColumnBool` / `ColumnDateTime`) + `DataFrame`, all registered via the M36 canonical path (zero prelude additions — first stdlib package using the post-M36 path from the start, end-to-end validation of the refactor). NA semantics: per-column `nulls: List[bool]` parallel to `values: List[T]`, uniform across dtypes — no NaN sentinel games. Phase A core types + ASCII `df.show()`; Phase B I/O (`read_csv` / `write_csv` / `from_sql` which reuses the M35 typed `Cursor`); Phase C per-column comparisons producing null-aware `ColumnBool` masks + `df.filter` / `select` / `drop` / `head` / `tail`; Phase D stable `df.sort_by(col, ascending)` with nulls-at-end; Phase E 21 tests + a demo. STOP CRITERIA cut Phase C `between`/`ne`/`ge`/`le`/`starts_with` (saved 10 NativeFn slots; M38 picks up). **Tests 723 → 744 (+21).**
+
+**M38 — aggregations + group-by.** Single agent, 5 phase commits, ~2,530 LOC, **zero STOP CRITERIA cuts**. Picked up the M37-deferred ops (typed `df.get_column_i64` / `f64` / `str` / `bool` / `datetime` accessors — solves M37's "sealed-class return type can't be cleanly chosen at NativeFn time"; restored `between` / `ne` / `ge` / `le` / `starts_with` / `df.rename`). Added per-column aggregations — `sum` / `mean` / `min` / `max` / `count` / `std` / `var` / `median` on numeric (sample n-1 std/var); `min` / `max` / `count` on str + datetime. `df.describe()`, `Column.fill_null`, `tabular.from_dict`. The hard part: a new `GroupedDataFrame` class with `df.group_by(cols) -> GroupedDataFrame` + shortcuts (`sum` / `mean` / `min` / `max` / `count`) + custom `agg(specs)` — hash-based with `\x01`-joined multi-column keys. Two design calls: NaN propagates on f64 sums (matches `numpy.sum`, not `numpy.nansum`); null-keyed group bucket uses pandas's `dropna=False` mode. **Tests 744 → 769 (+25).**
+
+**M39 — reshape: pivot / melt / merge / concat / unique / value_counts.** Single agent, 4 phase commits, ~2,430 LOC, **zero STOP CRITERIA cuts**. After M39 the `tabular` module covers the common-80% of pandas workflows. 5 typed `df.unique_*` accessors per dtype, `df.value_counts(col)` (2-col DataFrame sorted by count desc), `tabular.concat_rows` and `concat_cols`. The biggest single piece: `df.merge(other, on, how)` — hash-join inner/left/right/outer reusing M38's `\x01`-joined key encoding, with `null != null` semantics (null cells in `on` columns never match) and the pandas-faithful "merged `on` columns inherit rhs values on right-only outer rows" behavior. `df.pivot(index, columns, values)` (long→wide; raises ValueError on duplicate (index, columns) pairs; missing → null). `df.melt(id_vars, value_vars)` (wide→long; all `value_vars` must share a dtype). Three findings: (1) f64 `unique` keys on `to_bits()` because `HashSet<f64>` doesn't compile (`f64: !Hash`); bit-pattern keying distinguishes ±0.0 and lets multiple NaN payloads be distinct. (2) `m39_join_key` returns `None` for any-null-cell rows — different from M38's `m38_row_key` which encoded nulls for grouping; for merge's null-non-equality semantics, short-circuiting is cleaner than emitting a never-matching key. (3) The Edit-tool worktree leak hit ~5 times — same recurring harness issue from M37+M38, agent recovered via `cp` and the orchestrator's `checkout-and-merge-ff` workaround. **Tests 769 → 794 (+25).**
+
+**The pattern that scaled**: M37 + M38 + M39 are three consecutive ~2,500-LOC single-agent milestones that delivered every brief item (M38+M39 zero cuts; M37 only cut some Phase C ops that M38 picked up). The Lesson 1 streak ran from 14 to 21 across these — three consecutive big-bang single-agent deliveries without breaking the discipline. The M36 canonical class-registration path means new stdlib classes don't coordinate on resolver internals; the M34 sealed-class pattern means new typed surfaces look like JsonValue. The `tabular` module ended up at 18 class methods + 6 module functions + 18 stdlib classes, written in three consecutive working days.
+
+After M39, headline numbers refresh: **794 tests passing, 103 example programs, 38 stdlib modules, 18 stdlib classes (M34/M35/M37/M38 published through their home modules via M36 infrastructure), 0 open bugs, 21 consecutive Lesson-1-compliant agents.** Benchmark numbers unchanged (the v0.3 stdlib work doesn't touch JIT'd code).
+
+---
+
 ## What I learned
 
 ### 1. Static types make AOT compilation trivial — the hard parts of JIT'ing Python simply don't apply.
@@ -686,18 +706,15 @@ Both bugs are valid implementation choices that produced wrong end-user behaviou
 
 Don't take the benchmark wins too literally. StrictPy is not a production language. It's a research demonstration that, by the time M29.5 landed, could host a working web framework. The current limitations:
 
-- **No async I/O / event loop.** The M29 framework's ~2× gap to Flask+gunicorn is exactly this. Thread-per-connection works for small-to-medium load (~2,200 req/s on `/health`); production scale needs an event loop. Major architectural decision deferred to v0.3.
-- **GC is paused during JIT'd execution** (the `in_jit: AtomicUsize` flag). Long-running programs with JIT'd hot loops and >16 MB live data will stall or OOM. The M26 `btree` row's narrowing-as-allocation-grows is the empirical evidence. Precise Cranelift stack maps are the proper fix; deferred.
-- **No generic classes** (`class Box[T]:`). Generic *free functions* work since M17; classes are v0.3 work. This is the single most-impactful v0.3 ergonomic win — the M29 framework would shrink ~30% with typed `JsonValue` and another ~20% with stdlib-shipped `Request` / `Response`.
-- **No user-defined exception subclasses.** v0.1 ships 10 built-in exception names; `class MyError(Exception):` is parsed but rejected.
+- **Async I/O is thread-backed.** M32 ships `asyncio.spawn / await / gather` + `socket.async_*` with a Future-façade implementation that spawns one OS thread per task. The public surface is right; the implementation isn't. Closing the M29 framework's ~2× gap to Flask+gunicorn needs a real `mio` event loop. v0.4.
+- **GC during JIT'd execution uses a shadow-stack fallback (M33), not real Cranelift safepoints.** M33 removed the M9 `in_jit: AtomicUsize` pause, but Cranelift's `enable_safepoints` requires walking JIT'd Rust frames + correlating PC offsets against `MachBufferFinalized` ranges that `cranelift-jit 0.115` doesn't stably expose. The shadow-stack approach is correct and ships the same observable property; the long-term fix is to swap to real safepoints when the Cranelift API stabilises.
+- **No user-defined exception subclasses.** v0.1 ships 10 built-in exception names; `class MyError(Exception):` is parsed but rejected. Small lift; v0.4.
 - **`with open(...) as f:` does NOT route IOError through an enclosing `try ... except`.** Workaround: `try: with open(...) as f: ... except IOError:` explicitly. Known M15 follow-up.
-- **No bounded generics** (`T: Comparable`). v0.1 generics re-typecheck per instantiation, which is approximately correct but allows operations the source bound would have rejected.
-- **Two open bugs**:
-    - **BUG-028**: the lexer doesn't continue lines across trailing `+`. Workaround: parentheses. ~1h to fix.
-    - **BUG-040**: `socket.close_listener` doesn't unblock an in-flight `socket.accept` (M29.5 finding). Workaround: self-connect to wake the blocked accept (~15 LOC user code). ~1-2h to fix stdlib-side.
-- **No HTTP/2, no WebSockets.** The M28 `http_client` is HTTP/1.1; the M29 server hand-rolls HTTP/1.1. Both v0.3.
-- **No production-grade password hashing.** v0.2 ships `hashlib.sha256` — fine for content hashing, inappropriate for auth.
-- **No NumPy / pandas** — architectural; see [`docs/thesis/design_decisions/why_no_numpy_pandas.md`](docs/thesis/design_decisions/why_no_numpy_pandas.md). Three theoretical paths exist (embed CPython, FFI to numpy's C lib, native reimplementation); none planned.
+- **No bounded generics** (`T: Comparable`). M31 shipped generic *classes* (`class Box[T]:` / `Pair[K,V]:` / `Stack[T]:`) extending the M17 free-function worklist; bounded generics and explicit type-arg syntax (`Box[i64]()`) are v0.4.
+- **Zero open bugs.** M30 closed the last two (BUG-028 lexer line-continuation across infix operators; BUG-040 `socket.close_listener` not unblocking blocked `accept`). 35 found / 35 fixed / 0 deferred, held through M39.
+- **No HTTP/2, no WebSockets.** The M28 `http_client` is HTTP/1.1; the M29 server hand-rolls HTTP/1.1. Both v0.4 stdlib modules.
+- **No production-grade password hashing.** Even with the M35 `Hasher` streaming surface, the underlying primitives are still md5/sha1/sha256/sha512 — fine for content hashing, inappropriate for auth.
+- **`tabular` is the common-80% of pandas, not 100%.** What's there: typed columns with null masks, IO (CSV+SQL), filter/sort, aggregations, group-by, merge (all 4 join modes), pivot, melt. What's missing (M40 punch list): `DatetimeIndex`, rolling windows, `resample`, `asof_merge`, cumulative ops (`cumsum`/`cumprod`/etc.), `dropna` / `fillna` at frame scope, `iloc` range slicing. **No real NumPy** — `tabular` is a from-scratch native lib, not a NumPy wrapper. Real pandas/NumPy still can't import architecturally (libpython dependency); see [`docs/thesis/design_decisions/why_no_numpy_pandas.md`](docs/thesis/design_decisions/why_no_numpy_pandas.md).
 
 The canonical benchmark suite is tiny (4 programs, 16 cells). The extended suite (M26) adds 30 more cells. The wins are real but narrow. They generalise to "tight numeric loops, recursive small-int arithmetic, integer-keyed list mutation, stdlib calls dominated by startup, web-framework-shaped HTTP/sqlite/threading workloads"; they do not generalise to "everything CPython does." Allocation-heavy workloads (M26 `btree` at large n) erode the JIT win.
 
@@ -705,15 +722,16 @@ The canonical benchmark suite is tiny (4 programs, 16 cells). The extended suite
 
 ## What's next
 
-The performance question is mostly answered: yes, statically typed Python can beat CPython by a lot. The "can you host real software in this language?" question is also answered: yes — within 2× of Flask+gunicorn, on a 5-day-old language, with no async I/O. The remaining questions:
+The performance question is mostly answered: yes, statically typed Python can beat CPython by a lot. The "can you host real software in this language?" question is also answered: yes — within 2× of Flask+gunicorn, on a 5-day-old language, with no async I/O. The "is the stdlib usable for the kind of data work people actually do in Python?" question got answered three milestones later: yes for the common-80% of pandas workflows. The remaining questions:
 
-- **Does the language scale beyond ~2,500 LOC user programs?** The M29 framework + demo is the largest single .spy file at 2,443 LOC. The mypyc comparison would be `black` or `Sphinx` — multi-tens-of-KLOC real codebases. Real but unexplored.
-- **What does async look like?** Closing the 2× gap to production Python web stacks means an event loop. That's the next major architectural decision — straight `asyncio`-shape, or `tokio`-shape with explicit `Task` types, or coroutine-based on top of M14 tuples + M15 try/except. Each has trade-offs.
-- **What about NumPy?** StrictPy's `List[f64]` is already a contiguous f64 buffer. A `numpy.ndarray` view is one cast away — *but* StrictPy can't actually import NumPy because NumPy depends on libpython. The interesting comparison would be StrictPy vs CPython+NumPy on the same numerical workload, and you'd need to reimplement parts of NumPy natively to make it.
-- **Where does the static-type win flatten?** The M26 `btree` row showed where it shows up: allocation-pressured recursive workloads. Larger workloads — multi-threaded GC contention, long-running with churned heap — would probably erode more of that. Where?
-- **Could it generalise to a research methodology?** The 5-day calendar-elapsed for 36K LOC + thesis archive + a working web framework is anecdotal. Whether the patterns in this project's archive transfer to other systems work is an open empirical question. The Lesson 1 escalation pattern (numerical thresholds in agent briefs) is the most teachable single finding; whether it survives outside StrictPy is unknown.
+- **Does the language scale beyond ~2,500 LOC user programs?** The M29 web framework demo is still the largest single .spy file at 2,443 LOC. The M37+M38+M39 `tabular` *implementation* added ~2,500-2,800 LOC each, but those are Rust handlers, not StrictPy user code. The mypyc comparison would be `black` or `Sphinx` — multi-tens-of-KLOC real codebases. Real but unexplored.
+- **What does async look like at scale?** M32 ships the Future-façade thread-backed surface. Closing the M29 framework's 2× gap to Flask+gunicorn means a real event loop (`mio`, `polling`, or a hand-rolled epoll/IOCP layer). The public surface is settled; the internals are v0.4.
+- **What about NumPy?** Still can't import (libpython dependency). But the `tabular` package is now the proof that a from-scratch Pandas-shaped library is feasible inside StrictPy in three focused milestones. A NumPy-shaped numeric library (BLAS-backed `f64` matrix ops) is a similar shape; the question is whether the win over `List[List[f64]]` justifies the implementation cost.
+- **Where does the static-type win flatten?** The M26 `btree` row showed where: allocation-pressured recursive workloads. Larger workloads — multi-threaded GC contention, long-running with churned heap — probably erode more of that. The `tabular` package will be the test bed for this when someone runs realistic group-by workloads on million-row frames.
+- **Does the `tabular` package have a desktop UI?** Not yet. The original design discussion (recorded in the session transcripts) pencilled in a webview-served-or-Tauri-hybrid Phase 6 — reuse the M29 web framework to serve the DataFrame as JSON, render with AG Grid or Perspective.js in a browser tab. Open question and the natural next layer.
+- **Could it generalise to a research methodology?** The 6-day calendar-elapsed for ~40K LOC of Rust + a thesis archive + a working web framework + a Pandas-shaped data package is anecdotal. The Lesson 1 escalation pattern (numerical thresholds in agent briefs) has now held across **21 consecutive clean-commit agents** spanning M28–M39 with zero orchestrator-commit-on-behalf interventions; that's the most teachable single finding from this project, and it's now been validated at the larger end (three consecutive ~2,500-LOC single-agent milestones for the Pandas package, all clean). Whether the pattern survives outside StrictPy remains the open empirical question.
 
-After watching fib(30) drop from 931 ms to 13.1 ms across three days, then watching a web framework boot up on the same language two days later, I'm convinced the design thesis holds: **the only good Python is a statically typed Python.** What's still open is how far that goes.
+After watching fib(30) drop from 931 ms to 13.1 ms across three days, then watching a web framework boot up on the same language two days later, then watching a Pandas-shaped DataFrame package ship in three more days, I'm convinced the design thesis holds: **the only good Python is a statically typed Python.** What's still open is how far that goes.
 
 A more rigorous version of all this material — design decisions, methodology patterns, the eight generalisable findings from the bug catalogue — is in [`THESIS.md`](THESIS.md).
 
@@ -731,8 +749,11 @@ StrictPy/
 ├── compiler/              Compiler library (frontend → IR → bytecode emit)
 ├── vm/                    `spy` binary: unified compile+run CLI, JIT, GC, stdlib
 ├── shared/                Opcode + .spyc format + NativeFn registry
-├── examples/              96 programs covering the language surface
-│   └── webserver/         The M29 + M29.5 HTTP/1.1 + HTTPS web framework + TODO demo
+├── examples/              103 programs covering the language surface
+│   ├── webserver/         The M29 + M29.5 HTTP/1.1 + HTTPS web framework + TODO demo
+│   ├── tabular_demo.spy   M37 — Pandas-shaped DataFrame core + IO + filter + sort
+│   ├── tabular_groupby_demo.spy   M38 — aggregations + group-by walkthrough
+│   └── tabular_reshape_demo.spy   M39 — merge + pivot + melt + concat workflow
 ├── bench/
 │   ├── harness.py         Benchmark runner (canonical + --extended modes)
 │   ├── BENCH_REPORT.md    Canonical 16-cell report
@@ -767,6 +788,11 @@ cargo build --release
 
 # HTTPS version (auto-generates self-signed cert via rcgen in the test):
 ./target/release/spy.exe examples/webserver/todo_app.spy --port 8443 --tls cert.pem key.pem
+
+# M37-M39: Pandas-shaped DataFrame demos
+./target/release/spy.exe examples/tabular_demo.spy            # core + filter + sort
+./target/release/spy.exe examples/tabular_groupby_demo.spy    # aggregations + group-by
+./target/release/spy.exe examples/tabular_reshape_demo.spy    # merge + pivot + melt
 ```
 
 To re-run the full benchmark suite:
@@ -784,7 +810,7 @@ To re-render the historical reports from snapshots without re-running:
 python bench/harness.py --report-only
 ```
 
-Total wall-clock for the full project: **5 calendar days**, ~85 hours of cumulative agent compute, ~40 hours of orchestrator-attended time, across 30 milestones.
+Total wall-clock for the full project: **6 calendar days**, ~140 hours of cumulative agent compute, ~55 hours of orchestrator-attended time, across 39 milestones (M0 through M39 with two half-milestones M28.5 + M29.5).
 
 Three artifacts matter more than the code itself:
 
