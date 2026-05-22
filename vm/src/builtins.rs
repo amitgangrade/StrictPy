@@ -13040,7 +13040,8 @@ fn m37_df_filter(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError>
     let col_ptrs = m37_df_col_ptrs(recv);
     let new_cols: Vec<u64> = col_ptrs.iter().map(|cp| m37_column_take(interp, *cp, &keep)).collect();
     // M42: propagate parent's index through the same keep vector.
-    Ok(m42_permute_index_into_df(interp, recv, &names, &new_cols, keep.len() as i64, &keep))
+    // M44: also propagate a MultiIndex if present (via the new helper).
+    Ok(m44_permute_multiindex_into_df(interp, recv, &names, &new_cols, keep.len() as i64, &keep))
 }
 
 fn m37_df_select(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
@@ -13095,7 +13096,8 @@ fn m37_df_head(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let col_ptrs = m37_df_col_ptrs(recv);
     let new_cols: Vec<u64> = col_ptrs.iter().map(|cp| m37_column_take(interp, *cp, &indices)).collect();
     // M42: propagate parent's index sliced to [0, keep_n).
-    Ok(m42_permute_index_into_df(interp, recv, &names, &new_cols, keep_n as i64, &indices))
+    // M44: also propagate a MultiIndex sliced to [0, keep_n).
+    Ok(m44_permute_multiindex_into_df(interp, recv, &names, &new_cols, keep_n as i64, &indices))
 }
 
 fn m37_df_tail(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
@@ -13109,7 +13111,8 @@ fn m37_df_tail(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let col_ptrs = m37_df_col_ptrs(recv);
     let new_cols: Vec<u64> = col_ptrs.iter().map(|cp| m37_column_take(interp, *cp, &indices)).collect();
     // M42: propagate parent's index sliced to the trailing window.
-    Ok(m42_permute_index_into_df(interp, recv, &names, &new_cols, keep_n as i64, &indices))
+    // M44: also propagate a MultiIndex sliced to the trailing window.
+    Ok(m44_permute_multiindex_into_df(interp, recv, &names, &new_cols, keep_n as i64, &indices))
 }
 
 fn m37_df_row(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
@@ -16189,7 +16192,8 @@ fn m40_df_iloc(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let take: Vec<usize> = if s < e { (s..e).collect() } else { Vec::new() };
     let new_cols: Vec<u64> = col_ptrs.iter().map(|cp| m37_column_take(interp, *cp, &take)).collect();
     // M42: propagate parent's index sliced to [s, e).
-    Ok(m42_permute_index_into_df(interp, recv, &names, &new_cols, take.len() as i64, &take))
+    // M44: also propagate a MultiIndex sliced to [s, e).
+    Ok(m44_permute_multiindex_into_df(interp, recv, &names, &new_cols, take.len() as i64, &take))
 }
 
 // ── M40 Phase B: rolling-window aggregations ──────────────────────────
@@ -16898,6 +16902,41 @@ fn m42_copy_index_into_df(
         cloned_index,
         parent_index_name,
     )
+}
+
+/// M44: permute the parent DataFrame's index by `keep_indices` and emit
+/// the result, auto-dispatching on the parent's index state:
+///   - no index (RangeIndex)    → m37_build_df (RangeIndex output)
+///   - single-col index (M41)   → m42_permute_index_into_df
+///   - MultiIndex (M44)         → permute every level by keep_indices
+///                                and emit via m44_build_df_with_multiindex
+///
+/// Used by the 4 row-selection handlers in M44a scope: filter, head,
+/// tail, iloc.  Other row-transforming ops continue to call
+/// `m42_permute_index_into_df` directly, which drops a MultiIndex back
+/// to RangeIndex — explicit M44b anchor (see LANGUAGE_GUIDE §11.32).
+fn m44_permute_multiindex_into_df(
+    interp: &mut Interpreter,
+    parent_df_ptr: u64,
+    new_names: &[String],
+    new_columns: &[u64],
+    nrows: i64,
+    keep_indices: &[usize],
+) -> u64 {
+    let m44_levels = m44_read_index_levels(parent_df_ptr);
+    if !m44_levels.is_empty() {
+        // MultiIndex path — permute every level.
+        let m44_level_names = m44_read_index_level_names(parent_df_ptr);
+        let m44_new_levels: Vec<u64> = m44_levels.iter()
+            .map(|cp| m37_column_take(interp, *cp, keep_indices))
+            .collect();
+        return m44_build_df_with_multiindex(
+            interp, new_names, new_columns, nrows,
+            &m44_new_levels, &m44_level_names,
+        );
+    }
+    // Fall through to M42's single-col / RangeIndex paths.
+    m42_permute_index_into_df(interp, parent_df_ptr, new_names, new_columns, nrows, keep_indices)
 }
 
 /// `DataFrame.set_index(self, col_name: str) -> DataFrame`.  Removes

@@ -323,6 +323,201 @@ fn two_level_group_by_size_has_size_column() {
     assert!(out.contains("col0=size"), "got: {out:?}");
 }
 
+// ───────────────────────────────────────────────────────────────────────
+// Phase C: minimal MultiIndex propagation through filter/head/tail/iloc
+// ───────────────────────────────────────────────────────────────────────
+
+#[test]
+fn filter_preserves_multiindex() {
+    let src = "\
+from tabular import Column, ColumnI64, ColumnStr, ColumnBool, GroupedDataFrame, DataFrame
+import tabular
+fn main() -> i32:
+    regs_v: List[str] = []
+    regs_v.append(\"east\")
+    regs_v.append(\"east\")
+    regs_v.append(\"west\")
+    regs_v.append(\"west\")
+    regs_v.append(\"east\")
+    regs: ColumnStr = tabular.col_str_simple(regs_v)
+    cats_v: List[str] = []
+    cats_v.append(\"a\")
+    cats_v.append(\"b\")
+    cats_v.append(\"a\")
+    cats_v.append(\"b\")
+    cats_v.append(\"a\")
+    cats: ColumnStr = tabular.col_str_simple(cats_v)
+    qty_v: List[i64] = []
+    qty_v.append(10i64)
+    qty_v.append(20i64)
+    qty_v.append(30i64)
+    qty_v.append(40i64)
+    qty_v.append(50i64)
+    qty: ColumnI64 = tabular.col_i64_simple(qty_v)
+    n: List[str] = []
+    n.append(\"reg\")
+    n.append(\"cat\")
+    n.append(\"qty\")
+    cols: List[Column] = []
+    cols.append(regs)
+    cols.append(cats)
+    cols.append(qty)
+    df: DataFrame = tabular.from_columns(n, cols)
+    keys: List[str] = []
+    keys.append(\"reg\")
+    keys.append(\"cat\")
+    mi: DataFrame = df.set_index_multi(keys)
+    mask_vs: List[bool] = []
+    mask_vs.append(false)
+    mask_vs.append(false)
+    mask_vs.append(true)
+    mask_vs.append(true)
+    mask_vs.append(true)
+    mask_ns: List[bool] = []
+    mask_ns.append(false)
+    mask_ns.append(false)
+    mask_ns.append(false)
+    mask_ns.append(false)
+    mask_ns.append(false)
+    mask: ColumnBool = tabular.col_bool(mask_vs, mask_ns)
+    fdf: DataFrame = mi.filter(mask)
+    println(\"rows=\" + str(fdf.length()))
+    println(\"nlev=\" + str(fdf.index_nlevels()))
+    return 0
+";
+    let out = run("filter_keeps_mi", src);
+    // 3 rows pass the mask.
+    assert!(out.contains("rows=3"), "got: {out:?}");
+    assert!(out.contains("nlev=2"), "got: {out:?}");
+}
+
+#[test]
+fn head_preserves_multiindex() {
+    let src = format!(
+        "{MULTI_FRAME_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"reg\")\n    keys.append(\"cat\")\n    mi: DataFrame = df.set_index_multi(keys)\n    h: DataFrame = mi.head(2i64)\n    println(\"rows=\" + str(h.length()))\n    println(\"nlev=\" + str(h.index_nlevels()))\n    return 0\n"
+    );
+    let out = run("head_keeps_mi", &src);
+    assert!(out.contains("rows=2"), "got: {out:?}");
+    assert!(out.contains("nlev=2"), "got: {out:?}");
+}
+
+#[test]
+fn tail_preserves_multiindex() {
+    let src = format!(
+        "{MULTI_FRAME_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"reg\")\n    keys.append(\"cat\")\n    mi: DataFrame = df.set_index_multi(keys)\n    t: DataFrame = mi.tail(2i64)\n    println(\"rows=\" + str(t.length()))\n    println(\"nlev=\" + str(t.index_nlevels()))\n    qcol: ColumnI64? = t.get_column_i64(\"qty\")\n    if qcol is not none:\n        println(\"q0=\" + str(qcol.get(0i64)))\n        println(\"q1=\" + str(qcol.get(1i64)))\n    return 0\n"
+    );
+    let out = run("tail_keeps_mi", &src);
+    assert!(out.contains("rows=2"), "got: {out:?}");
+    assert!(out.contains("nlev=2"), "got: {out:?}");
+    // Last 2 rows: qty=40, 50
+    assert!(out.contains("q0=40"), "got: {out:?}");
+    assert!(out.contains("q1=50"), "got: {out:?}");
+}
+
+#[test]
+fn iloc_preserves_multiindex() {
+    let src = format!(
+        "{MULTI_FRAME_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"reg\")\n    keys.append(\"cat\")\n    mi: DataFrame = df.set_index_multi(keys)\n    sl: DataFrame = mi.iloc(1i64, 4i64)\n    println(\"rows=\" + str(sl.length()))\n    println(\"nlev=\" + str(sl.index_nlevels()))\n    return 0\n"
+    );
+    let out = run("iloc_keeps_mi", &src);
+    // iloc(1, 4) → 3 rows
+    assert!(out.contains("rows=3"), "got: {out:?}");
+    assert!(out.contains("nlev=2"), "got: {out:?}");
+}
+
+#[test]
+fn group_by_then_filter_keeps_multiindex() {
+    // The full "chained workflow": group_by -> sum -> filter still has MultiIndex.
+    // group_by sum on (reg,cat) yields 4 rows: east-a=60, east-b=20, west-a=30,
+    // west-b=40.  Filter to qty > 25: east-a, west-a, west-b = 3 rows.
+    let src = "\
+from tabular import Column, ColumnI64, ColumnStr, ColumnBool, GroupedDataFrame, DataFrame
+import tabular
+fn main() -> i32:
+    regs_v: List[str] = []
+    regs_v.append(\"east\")
+    regs_v.append(\"east\")
+    regs_v.append(\"west\")
+    regs_v.append(\"west\")
+    regs_v.append(\"east\")
+    regs: ColumnStr = tabular.col_str_simple(regs_v)
+    cats_v: List[str] = []
+    cats_v.append(\"a\")
+    cats_v.append(\"b\")
+    cats_v.append(\"a\")
+    cats_v.append(\"b\")
+    cats_v.append(\"a\")
+    cats: ColumnStr = tabular.col_str_simple(cats_v)
+    qty_v: List[i64] = []
+    qty_v.append(10i64)
+    qty_v.append(20i64)
+    qty_v.append(30i64)
+    qty_v.append(40i64)
+    qty_v.append(50i64)
+    qty: ColumnI64 = tabular.col_i64_simple(qty_v)
+    n: List[str] = []
+    n.append(\"reg\")
+    n.append(\"cat\")
+    n.append(\"qty\")
+    cols: List[Column] = []
+    cols.append(regs)
+    cols.append(cats)
+    cols.append(qty)
+    df: DataFrame = tabular.from_columns(n, cols)
+    keys: List[str] = []
+    keys.append(\"reg\")
+    keys.append(\"cat\")
+    gdf: GroupedDataFrame = df.group_by(keys)
+    s: DataFrame = gdf.sum()
+    qcol: ColumnI64? = s.get_column_i64(\"qty\")
+    if qcol is none:
+        return 1
+    mvs: List[bool] = []
+    mns: List[bool] = []
+    i: i64 = 0i64
+    while i < s.length():
+        ov: i64? = qcol.get(i)
+        v: i64 = 0i64
+        if ov is not none:
+            v = ov
+        if v > 25i64:
+            mvs.append(true)
+        else:
+            mvs.append(false)
+        mns.append(false)
+        i = i + 1i64
+    mask: ColumnBool = tabular.col_bool(mvs, mns)
+    fdf: DataFrame = s.filter(mask)
+    println(\"rows=\" + str(fdf.length()))
+    println(\"nlev=\" + str(fdf.index_nlevels()))
+    return 0
+";
+    let out = run("gby_then_filter_mi", src);
+    assert!(out.contains("rows=3"), "got: {out:?}");
+    assert!(out.contains("nlev=2"), "got: {out:?}");
+}
+
+#[test]
+fn sort_by_drops_multiindex_m44b_anchor() {
+    // M44a contract: any row-transforming op OTHER than filter/head/tail/iloc
+    // drops a MultiIndex back to RangeIndex.  M44b will lift this.
+    let src = format!(
+        "{MULTI_FRAME_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"reg\")\n    keys.append(\"cat\")\n    mi: DataFrame = df.set_index_multi(keys)\n    so: DataFrame = mi.sort_by(\"qty\", true)\n    println(\"nlev=\" + str(so.index_nlevels()))\n    return 0\n"
+    );
+    let out = run("sort_by_drops_mi", &src);
+    assert!(out.contains("nlev=0"), "got: {out:?}");
+}
+
+#[test]
+fn select_drops_multiindex_m44b_anchor() {
+    // M44a contract: select drops a MultiIndex (M44b lifts this).
+    let src = format!(
+        "{MULTI_FRAME_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"reg\")\n    keys.append(\"cat\")\n    mi: DataFrame = df.set_index_multi(keys)\n    want: List[str] = []\n    want.append(\"qty\")\n    se: DataFrame = mi.select(want)\n    println(\"nlev=\" + str(se.index_nlevels()))\n    return 0\n"
+    );
+    let out = run("select_drops_mi", &src);
+    assert!(out.contains("nlev=0"), "got: {out:?}");
+}
+
 #[test]
 fn multi_col_group_by_no_longer_keeps_keys_as_columns() {
     // The M43→M44 contract flip — the keys are now levels, NOT regular columns.
