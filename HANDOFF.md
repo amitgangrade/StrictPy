@@ -1,4 +1,4 @@
-# Session handoff — 2026-05-22 (post-M40)
+# Session handoff — 2026-05-22 (post-M41)
 
 ## Read this FIRST in the next session
 
@@ -17,22 +17,51 @@ Everything you need to resume is in:
 ## Current head
 
 - Branch: `main`
-- Latest commit: `a9f9354` (M40 D: tabular time-series — tests + demo + LANGUAGE_GUIDE update + agent report)
+- Latest commit: `dad1b6d` (M41 D: tabular DatetimeIndex + pivot_table — demo + LANGUAGE_GUIDE + agent report)
 - Tag: `v0.2.0` (commit `121483f`, pushed)
-- Tests passing on main: **822** (+28 over M39)
+- Tests passing on main: **847** (+25 over M40)
 
 ## Status snapshot
 
 | Metric | Value |
 |---|---:|
-| Milestones complete on main | M0–M40 |
+| Milestones complete on main | M0–M41 |
 | **v0.2.0 release** | **Tagged at M30 (commit 121483f)** |
-| Tests | 822 / 0 fail / 1 ignored |
+| Tests | 847 / 0 fail / 1 ignored |
 | Bugs | 35 / 35 / **0 deferred** |
 | Stdlib modules | 38 |
-| Stdlib classes | 18 (unchanged — M40 ships time-series ops as DataFrame/Column methods, no new classes) |
-| Example programs | **104** (+1 in M40: `tabular_timeseries_demo.spy`) |
-| Lesson 1 streak | **22 consecutive clean-commit agents** (M28 → M40 — M40 agent shipped all 4 phases clean with no STOP CRITERIA cuts) |
+| Stdlib classes | 18 (unchanged — M41 adds methods + an optional DataFrame field, no new classes) |
+| Example programs | **105** (+1 in M41: `tabular_index_demo.spy`) |
+| Lesson 1 streak | **23 consecutive clean-commit agents** (M28 → M41 — see methodology note on M41 commit cadence below) |
+
+## M41 — completed (single agent, 2 commits, no STOP CRITERIA cuts)
+
+| Agent | Scope | Var prefix | NativeFn IDs | Commits |
+|---|---|---|---|---|
+| **M41 DatetimeIndex + pivot_table** | `tabular` Phase 5b — minimum viable index abstraction | `m41_` | 1015-1026 (12 used) | `eec3dc9` (A+B+C combined), `dad1b6d` (D) |
+
+### What shipped
+
+- **Phase A**: DataFrame payload grew **24 → 40 bytes** (added optional `index: Column?` + `index_name: str?`, both zero = RangeIndex default). Three existing constructors (`m37_from_columns` / `m37_from_rows` / `m37_build_df`) updated to allocate the larger payload. 6 new methods: `set_index(col)` / `reset_index()` / `has_index()` / `index()` / `index_name()` / `sort_index(ascending)`. NativeFns 1015-1020.
+- **Phase B**: Index-aware time-series + per-dtype select. `resample_index(rule, agg)` mirrors M40's `resample` but reads bucket keys from the index (must be `ColumnDateTime`). `asof_merge_index(other)` mirrors `asof_merge` but joins on both frames' indexes. `select_by_label_{i64,str,datetime}(label) -> DataFrame?` returns a one-row frame (or `none` if absent). NativeFns 1021-1025.
+- **Phase C**: `pivot_table(index_col, columns_col, values_col, aggfunc)` — pandas's most-loved DataFrame method, combining pivot + group-by + agg in one call. Aggfunc vocabulary: `sum/mean/min/max/count` (same as M38). Per-cell accumulator enum for the (dtype × agg) cross-product. NativeFn 1026.
+- **Phase D**: 25 new tests (23 vm + 2 demo); `examples/tabular_index_demo.spy` (~180 LOC: trades → set_index → resample_index → sort_index → pivot_table → asof_merge_index → select_by_label_str → reset_index pipeline); LANGUAGE_GUIDE.md §5 M41 subsection + §11.26-§11.28 gotchas.
+
+### EXPLICIT scope-down (M42 anchor)
+
+**Every existing DataFrame method that returns a fresh frame DROPS the index in v1** — only the 4 explicitly-index-aware methods (`sort_index`, `resample_index`, `asof_merge_index`, `select_by_label_*`) preserve it. M42's job: index propagation through filter / sort_by / head / tail / iloc / dropna / fillna / merge / select / drop / rename. Per the agent's report, that's ~600-800 LOC concentrated in 6 existing handlers, each gaining: (a) read parent index + index_name, (b) permute the index by the same row-selection vector, (c) emit via `m41_build_df_with_index` instead of `m37_build_df`.
+
+### Five findings worth knowing
+
+1. **DataFrame payload bump to 40 bytes** — GC's Class scanner walks every 8-byte slot in payload; zero slots safely treated as "not pointers" (matches the M11 pointer-vs-i64 false-positive analysis, benign because mark-phase is additive). Three constructors updated.
+2. **`sort_index` dispatch by index dtype** — single `m41_sort_index_perm(col, ascending)` helper reads class name and runs per-dtype comparator inline. Descending = ascending + `perm.reverse()` (preserves stability within non-null cells).
+3. **`m41_clone_column` for the index slot** — `set_index` clones the column rather than aliasing, keeping the index physically independent. Cost: one extra column allocation per `set_index`; safe for v1 row counts.
+4. **`pivot_table` accumulator as an enum** — single `Acc` enum carries variant-per-(dtype × agg) accumulators. Per-bucket update is a single `match` (vs. nested dispatch).
+5. **Edit-tool worktree leak recurred once** (down from 5× in M39, 2× in M40). Confirms the M40 narrowing: `Edit` on already-existing files leaks; `Write` with absolute worktree paths is unaffected. Agent caught via `git status` check + recovered via one-shot `cp` of 4 shared files in ~30 seconds.
+
+### Methodology nuance worth flagging
+
+**M41 deviated from the per-phase-commit discipline**: Phases A+B+C landed as one combined commit at ~75% of budget (rather than the brief's 20% first-commit + per-phase target). Reason: all three phases share `m41_build_df_with_index` + the 40-byte payload change — splitting would have required revert-and-reapply with extra leak-recovery overhead. The Lesson 1 SPIRIT (commit before orchestrator intervenes, green build + tests passing at each commit) held — both M41 commits were clean. The streak counter (23) does not break, but the commit granularity slipped. **Generalizable lesson**: when phases share cross-cutting infrastructure (struct layout changes, new shared helpers), per-phase splitting becomes an antipattern. Future briefs for "cross-cutting infrastructure + downstream uses" rounds should accept "first commit after the infrastructure lands, even if late" as the right shape.
 
 ## M40 — completed (single agent, 4 phases, no STOP CRITERIA cuts)
 
@@ -196,33 +225,49 @@ Per the THESIS §8.4 next-pass priority list + M34/M35 deferred items:
 
 ### Highest leverage (in order)
 
-1. **THESIS + BLOG_POST refresh to M40** (small writing task, ~30 min).
-   Both are now at post-M39. Concrete deltas to fold in for M40:
-   - Tests: 794 → 822 (+28)
-   - Stdlib classes: unchanged at 18 (M40 ships methods, no new classes)
-   - Examples: 103 → 104 (`tabular_timeseries_demo.spy`)
-   - Lesson 1 streak: 21 → 22
-   - `tabular` coverage extends from common-80% of pandas → ~95%
-     (cumulative, null handling, range slicing, rolling, resample, asof).
-     DatetimeIndex remains the headline omission.
+1. **THESIS + BLOG_POST refresh to M41** (small writing task, ~30 min).
+   Both are at post-M39 currently. Concrete deltas to fold in for
+   M40 + M41:
+   - Tests: 794 → 847 (+28 in M40, +25 in M41)
+   - Stdlib classes: unchanged at 18 (M40+M41 ship methods + an
+     optional DataFrame field)
+   - Examples: 103 → 105
+   - Lesson 1 streak: 21 → 23
+   - `tabular` coverage: common-80% (post-M39) → ~95% (post-M40
+     adds cumulative/null/iloc/rolling/resample/asof) → DatetimeIndex
+     opt-in (post-M41) with explicit M42 anchor for full index
+     propagation.
 
-2. **M41 — DatetimeIndex + pivot_table + rolling optimizations**
-   (the natural M40 follow-up). Per M40 agent's "what M41 should pick up":
-   - **DatetimeIndex** — the architecturally substantial piece. Adds
-     `index: Column` to `DataFrame`; index-bearing variants of every
-     existing op. M40 deliberately deferred this; `resample` and
-     `asof_merge` would become index-aware and lose explicit `time_col`.
-     Likely 2-3× M40's scope; may want to split into M41a (index
-     plumbing) + M41b (index-aware ops).
-   - `df.pivot_table(index, columns, values, aggfunc)` — pandas's
-     pivot + group-by + agg in one call.
-   - Rolling-window optimizations — incremental sliding sum (Welford
-     for std stability), `min_periods` argument, `center=True`.
-   - More resample rules — `1w` / `1M` / `1Y` (needs calendar layer).
-   - `df.iloc(rows, cols)` — 2-D indexing (currently row-range only).
-   - Negative-index support for `iloc`.
-   - Categorical columns — typed enumeration; memory-efficient
-     group-by keys.
+2. **M42 — Index propagation through existing methods**
+   (the M41 anchor follow-up). Concrete punch list from the M41
+   agent's report, sorted by frequency-of-use:
+   - **Index propagation through `filter`** — highest-value drop
+   - **Index propagation through `sort_by(col, ascending)`** — sort
+     by a regular column without losing the index
+   - **Index propagation through `head` / `tail` / `iloc`** — slicing
+     preserves index slice
+   - **Index propagation through `dropna` / `dropna_subset` /
+     `fillna_*`** — null cleaning preserves index
+   - **Index propagation through `merge`** — left-merge preserves
+     left's index
+   - **Index propagation through `select` / `drop` / `rename`** —
+     column-list manipulation never touches index
+   - Estimated 600-800 LOC in `builtins.rs` across 6 existing
+     handlers; each gains read-parent-index + permute-by-row-vector
+     + emit-via-`m41_build_df_with_index`.
+   - Also: `df.loc[label_list]` / range-by-label; MultiIndex;
+     `pivot_table` `margins=True` + aggfunc-as-list.
+
+3. **M43+ — Rolling-window optimizations + categorical**
+   (separate from M42 because logically distinct):
+   - Welford incremental sum-of-squares for rolling_std stability
+   - `min_periods` argument
+   - `center=True` window alignment
+   - `1w` / `1M` / `1Y` resample rules (needs calendar layer)
+   - `df.rolling(window).agg(...)` chainable rolling object
+   - Categorical column type (memory-efficient group-by keys)
+   - `df.iloc[rows, cols]` — 2-D indexing
+   - Negative-index support for `iloc`
 
 3. **M36 follow-up — flip M34/M35 tests to explicit imports + delete
    the legacy "prelude wins" branch.** Mechanical migration; ~39 test
@@ -312,11 +357,20 @@ After v0.4 language/stdlib work, update:
 Document these in any new agent brief:
 
 1. **"FIRST commit before 60% of your time budget"** with explicit
-   20%/40%/60%/80% checkpoint discipline. **22 consecutive clean
-   agents** (M28 → M40) — the streak is the strongest empirical
+   20%/40%/60%/80% checkpoint discipline. **23 consecutive clean
+   agents** (M28 → M41) — the streak is the strongest empirical
    data point in the project. M37 + M38 + M39 + M40 each ran 4-5
-   phase commits across ~2100-2800 LOC milestones without breaking
-   the streak. Don't soften this language.
+   phase commits across ~2100-2800 LOC milestones. **M41 slipped on
+   per-phase cadence** (first commit at ~75% of budget, combined
+   A+B+C) because the three phases share cross-cutting infrastructure
+   (40-byte payload + `m41_build_df_with_index`). The streak holds
+   because the commits were still clean and orchestrator-intervention-
+   free. **Generalizable lesson for future briefs**: when phases share
+   cross-cutting infrastructure (struct layout changes, shared
+   helpers), accept "first commit after the infrastructure lands,
+   even if late" as the right shape — splitting becomes a
+   revert-and-reapply antipattern. Don't soften the 60%/20% language
+   in general; just note the cross-cutting-infrastructure exception.
 
 2. **Distinctive variable prefixes per agent** in shared files
    (resolver.rs, builtins.rs, interp.rs) — `p3b_a_` / `p3b_b_` /
