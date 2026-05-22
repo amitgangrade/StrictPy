@@ -1117,6 +1117,183 @@ No language/compiler changes; new pure-bench infrastructure only.
 
 ---
 
+## M44 — `tabular` MultiIndex (M44a: storage + multi-col group_by promotion + minimal propagation) (2026-05-22)
+
+The headline architectural lift after M41-M43 closed the v1
+single-index story. Adds nested indices for multi-column group_by
+results. Single agent, 4 separable per-phase commits,
+~1500-2000 LOC, **zero STOP CRITERIA cuts**. Explicitly scoped as
+M44a; full propagation + stack/unstack + outer-merge MultiIndex
+fallback + loc range stay as M44b.
+
+The cleanest tabular-package integration in the series — main was
+completely clean post-agent (no Edit-tool leaks). The agent's
+precautionary `cp` workaround eliminated the leak entirely; see
+"Methodology wins" below.
+
+### Surface (extends `tabular` module)
+
+**Phase A — MultiIndex storage + accessors + sort_index_multi**:
+- DataFrame payload bumped 40 → 56 bytes for optional
+  `index_levels: List[Column]?` + `index_names: List[str]?`
+  (mutually exclusive with M41's single-col `index` / `index_name`).
+- New constructor `m44_build_df_with_multiindex` parallels
+  `m41_build_df_with_index` for the MultiIndex case.
+- 6 new methods (NativeFns 1027-1032):
+  `set_index_multi(cols: List[str]) -> DataFrame`,
+  `reset_index_multi() -> DataFrame`,
+  `index_nlevels() -> i64` (0/1/N),
+  `index_level(i: i64) -> Column?`,
+  `index_level_name(i: i64) -> str?`,
+  `sort_index_multi(ascending: bool) -> DataFrame` (lexicographic
+  across levels, stable).
+
+**Phase B — Multi-column group_by promotion**:
+- All 8 group_by aggregation methods (`size` / `keys` / `sum` /
+  `mean` / `min` / `max` / `count` / `agg`) dispatch on
+  `group_keys.length()`:
+  - length 1 → M43's single-col promotion (today's behavior).
+  - length ≥ 2 → new M44 MultiIndex path. All keys promoted to
+    index levels; regular columns are just the aggregated values.
+
+**Phase C — Minimal MultiIndex propagation (filter / head / tail / iloc)**:
+- New helper `m44_permute_multiindex_into_df` auto-dispatches:
+  - No index → `m37_build_df` (RangeIndex, today's behavior).
+  - Single-col index → `m42_permute_index_into_df` (M42 path).
+  - MultiIndex → permute each level by `keep_indices`, emit via
+    `m44_build_df_with_multiindex`.
+- 4 row-selection handlers (filter / head / tail / iloc) call the
+  new helper at their emit site.
+
+**Phase D**: 25 VM tests + 2 demo-runs +
+`examples/tabular_multiindex_demo.spy` (~165 LOC) +
+LANGUAGE_GUIDE.md §5 M44 subsection + new §11.32 (MultiIndex
+propagation v1 scope-down) + §11.26 rewrite.
+
+### EXPLICIT v1 scope-down (M44b anchor)
+
+**MultiIndex propagation in M44a is limited to filter / head /
+tail / iloc.** Every other op drops a MultiIndex back to
+RangeIndex:
+- M42 ops: sort_by, dropna, dropna_subset, fillna_*, merge,
+  select, drop, rename
+- M43 ops: pivot, melt, concat_rows, concat_cols, pivot_table
+- M41 ops: sort_index, resample_index, asof_merge_index,
+  select_by_label_* (these are single-col-only by design)
+
+M44b's job: lift this restriction. Plus stack/unstack, `df.loc
+[label_list]` range-by-label, outer-merge MultiIndex fallback
+(replaces M42's RangeIndex fallback for dtype-mismatched indexes).
+
+### Two methodology wins worth recording
+
+**1. The precautionary `cp` workaround eliminated the Edit-tool
+worktree leak entirely.**
+
+After 7 consecutive milestones (M37-M43) seeing the leak with
+varying severity (M40 ~2 min recovery / M41 ~30s / M42 ~5s /
+**M43 ~90s across ~15 cp recoveries**), M44's brief recommended a
+**precautionary `cp` of all shared files at session start**
+syncing `vm/src/builtins.rs`, `compiler/src/resolver.rs`,
+`compiler/src/ir.rs`, `shared/src/native.rs`, `LANGUAGE_GUIDE.md`
+from project root to worktree.
+
+The agent ran the `cp` block once at session start. **Zero
+recoveries needed mid-session.** Plus, the orchestrator-side
+integration saw zero leak — main was completely clean post-agent
+(no source modifications to reset before the fast-forward
+merge). The cleanest tabular-package integration in the series.
+
+This is the standard mitigation pattern now. Future briefs that
+involve bulk Edits to shared files will include the precautionary-
+cp block. Harness-side root-cause investigation is deprioritized;
+the workaround is cheap and effective.
+
+**2. The shared-infra cadence exception worked cleanly when
+classified explicitly.**
+
+M41 was the first milestone to slip on per-phase cadence (combined
+Phase A+B+C at ~75% of budget) because all three phases shared
+`m41_build_df_with_index` + the 40-byte payload change. M44 is
+structurally similar: Phase A introduces the new payload field +
+constructor + 6 methods that every subsequent phase uses. **The
+brief explicitly classified M44 as shared-infra and predicted a
+30-50% first-commit window**.
+
+Agent landed first commit at ~35% of budget — squarely inside
+the predicted window. The M41/M42/M43/M44 quartet now confirms:
+the shared-infra/disjoint-handler classification, when made
+explicit in the brief with a first-commit threshold band, gets
+the agent to the right cadence reliably.
+
+### Tests flipped (1 total)
+
+`vm/tests/m43_tabular_index_reshape.rs::multi_col_group_by_does_not_promote_to_index`
+→ `multi_col_group_by_promotes_to_multiindex_m44`. Old:
+`ncols=3, has=false` (keys retained as regular columns). New:
+`ncols=1, nlev=2` (keys promoted to a 2-level MultiIndex).
+
+**Zero M38 tests flipped** — M38's only multi-col group_by test
+(`group_by_multi_column`) checks group count only, not column
+shape.
+
+### Tests + size
+
+- Tests: 888 → 915 (+27 net: 25 new VM in
+  `vm/tests/m44_tabular_multiindex.rs`, 2 new demo-runs in
+  `compiler/tests/tabular_multiindex_demo_runs.rs`).
+- Examples: 107 → 108
+  (`examples/tabular_multiindex_demo.spy` ~165 LOC).
+- Stdlib classes: unchanged at 18 (6 new methods, no new classes).
+- LOC: `vm/src/builtins.rs` +622 (payload bump + new constructor +
+  helpers + 6 method handlers + group_by rewrites + 4 emit-call
+  swaps), `compiler/src/resolver.rs` +50 (DataFrame layout +
+  method sigs), `compiler/src/ir.rs` +7 (dispatcher entries),
+  `shared/src/native.rs` +40 (NativeFns 1027-1032), plus new
+  tests / example / report.
+- NativeFn IDs: 1027-1032 used (6 of the 50 reserved slots from
+  the M40 era).
+
+### Lesson 1 streak: 26 consecutive clean agents
+
+(M28 → M44). **Eight consecutive `tabular` package agents shipped
+clean** — M37 / M38 / M39 / M40 / M41 / M42 / M43 / M44, spanning
+~10,000+ LOC of native Rust handler code across two architectural
+extensions (M41 single-col index, M44 MultiIndex).
+
+### After M44: what's left for `tabular`
+
+What's done (M37-M44 inclusive):
+- Sealed Column hierarchy + DataFrame core + IO + filter + sort
+- Aggregations + group-by (single-col promoted to index)
+- Reshape (unique / value_counts / concat / merge / pivot / melt /
+  pivot_table)
+- Time series (cumulative / null handling / iloc / rolling /
+  resample / asof_merge)
+- DatetimeIndex (single-col) with full propagation through 21
+  methods
+- MultiIndex with multi-col group_by promotion + minimal
+  propagation (4 ops)
+
+What's deferred to M44b:
+- Full MultiIndex propagation through M42 + M43 ops (~14 handlers)
+- `stack` / `unstack`
+- `df.loc[label_list]` range-by-label
+- Outer-merge MultiIndex fallback
+
+What's deferred to M45+:
+- Rolling-window optimizations (Welford for std, min_periods,
+  center)
+- Categorical column dtype
+- `df.iloc[rows, cols]` 2-D indexing
+- Negative-index support for iloc
+- More resample rules (1w / 1M / 1Y — needs calendar layer)
+- `pivot_table margins=True` + `aggfunc=list`
+- Desktop UI (the M37-design Phase 6 — webview-served or
+  Tauri/wry hybrid)
+
+---
+
 ## M43 — `tabular` reshape index propagation (closes v1 single-index story) (2026-05-22)
 
 Closes the v1 single-index propagation. M42 propagated the index
