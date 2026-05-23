@@ -18,6 +18,10 @@ __pycache__/
 # bench/history/*.json and the rendered .md reports.
 /bench/generated/
 
+# M48 tabular-bench CSV fixtures: deterministic but multi-MB (large) to
+# multi-GB (xl). Regenerated on demand by bench/tabular_harness.py.
+/bench/data/tabular_*.csv
+
 # Transient artifacts produced by examples/safe_open.spy when the test
 # runs the example from the compiler crate's cwd. The example creates
 # these as input data; they're not part of the source tree.
