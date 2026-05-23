@@ -531,3 +531,121 @@ fn loc_range_raises_on_multiindex() {
         "got: {out:?}"
     );
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// Phase C — outer-merge MultiIndex fallback + set_index_list + pivot_table
+// ════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn outer_merge_dtype_mismatch_produces_2level_multiindex() {
+    // lhs has ColumnI64 index "lid"; rhs has ColumnStr index "rid".
+    // Outer-merge on "tid" with mismatched index dtypes -> M46
+    // 2-level NaN-padded MultiIndex.
+    let src = "\
+from tabular import Column, ColumnI64, ColumnStr, DataFrame
+import tabular
+fn make_lhs() -> DataFrame:
+    lid: List[i64] = []
+    lid.append(10i64)
+    lid.append(20i64)
+    lic: ColumnI64 = tabular.col_i64_simple(lid)
+    tid: List[i64] = []
+    tid.append(1i64)
+    tid.append(2i64)
+    tc: ColumnI64 = tabular.col_i64_simple(tid)
+    n: List[str] = []
+    n.append(\"lid\")
+    n.append(\"tid\")
+    cs: List[Column] = []
+    cs.append(lic)
+    cs.append(tc)
+    df: DataFrame = tabular.from_columns(n, cs)
+    return df.set_index(\"lid\")
+fn make_rhs() -> DataFrame:
+    rid: List[str] = []
+    rid.append(\"R1\")
+    rid.append(\"R2\")
+    ric: ColumnStr = tabular.col_str_simple(rid)
+    tid: List[i64] = []
+    tid.append(2i64)
+    tid.append(3i64)
+    tc: ColumnI64 = tabular.col_i64_simple(tid)
+    n: List[str] = []
+    n.append(\"rid\")
+    n.append(\"tid\")
+    cs: List[Column] = []
+    cs.append(ric)
+    cs.append(tc)
+    df: DataFrame = tabular.from_columns(n, cs)
+    return df.set_index(\"rid\")
+fn main() -> i32:
+    lhs: DataFrame = make_lhs()
+    rhs: DataFrame = make_rhs()
+    on: List[str] = []
+    on.append(\"tid\")
+    mo: DataFrame = lhs.merge(rhs, on, \"outer\")
+    println(\"nlev=\" + str(mo.index_nlevels()))
+    println(\"rows=\" + str(mo.length()))
+    return 0
+";
+    let out = run("outer_merge_dtype_mismatch_mi", src);
+    assert!(out.contains("nlev=2"), "got: {out:?}");
+    // 1 left-only (tid=1) + 1 matched (tid=2) + 1 right-only (tid=3) = 3.
+    assert!(out.contains("rows=3"), "got: {out:?}");
+}
+
+#[test]
+fn set_index_list_1_element_acts_as_single_col() {
+    let src = format!(
+        "{MULTI_FRAME_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"reg\")\n    si: DataFrame = df.set_index_list(keys)\n    println(\"nlev=\" + str(si.index_nlevels()))\n    println(\"has=\" + str(si.has_index()))\n    return 0\n"
+    );
+    let out = run("set_index_list_one", &src);
+    assert!(out.contains("nlev=1"), "got: {out:?}");
+    assert!(out.contains("has=true"), "got: {out:?}");
+}
+
+#[test]
+fn set_index_list_multi_element_acts_as_multiindex() {
+    let src = format!(
+        "{MULTI_FRAME_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"reg\")\n    keys.append(\"cat\")\n    si: DataFrame = df.set_index_list(keys)\n    println(\"nlev=\" + str(si.index_nlevels()))\n    return 0\n"
+    );
+    let out = run("set_index_list_multi", &src);
+    assert!(out.contains("nlev=2"), "got: {out:?}");
+}
+
+#[test]
+fn set_index_list_empty_raises() {
+    let src = format!(
+        "{MULTI_FRAME_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    try:\n        si: DataFrame = df.set_index_list(keys)\n        println(\"no-raise\")\n    except ValueError as e:\n        println(\"raised\")\n    return 0\n"
+    );
+    let out = run_expect_err("set_index_list_empty", &src);
+    assert!(
+        out.contains("raised") || out.contains("non-empty"),
+        "got: {out:?}"
+    );
+}
+
+#[test]
+fn pivot_table_aggfunc_list_emits_twice_the_value_columns() {
+    // pivot_table_aggfunc_list with 2 aggfuncs on the 5-row frame.
+    // Vanilla pivot_table over (reg, cat, qty, "sum") yields 2 col_keys
+    // (a, b).  With ["sum", "mean"] we expect 4 output columns:
+    // a_sum, b_sum, a_mean, b_mean.
+    let src = format!(
+        "{MULTI_FRAME_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    aggs: List[str] = []\n    aggs.append(\"sum\")\n    aggs.append(\"mean\")\n    pt: DataFrame = df.pivot_table_aggfunc_list(\"reg\", \"cat\", \"qty\", aggs)\n    println(\"cols=\" + str(pt.ncols()))\n    println(\"rows=\" + str(pt.length()))\n    return 0\n"
+    );
+    let out = run("pivot_table_aggfunc_list", &src);
+    assert!(out.contains("cols=4"), "got: {out:?}");
+    assert!(out.contains("rows=2"), "got: {out:?}");
+}
+
+#[test]
+fn pivot_table_margins_adds_all_row_and_column() {
+    // Body has 2 rows × 2 cols.  Margins -> 3 rows × 3 cols.
+    let src = format!(
+        "{MULTI_FRAME_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    pt: DataFrame = df.pivot_table_margins(\"reg\", \"cat\", \"qty\", \"sum\")\n    println(\"cols=\" + str(pt.ncols()))\n    println(\"rows=\" + str(pt.length()))\n    return 0\n"
+    );
+    let out = run("pivot_table_margins", &src);
+    assert!(out.contains("cols=3"), "got: {out:?}");
+    assert!(out.contains("rows=3"), "got: {out:?}");
+}
