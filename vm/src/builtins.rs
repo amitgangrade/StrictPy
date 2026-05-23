@@ -13962,10 +13962,135 @@ fn m38_row_key(col_ptrs: &[u64], col_class: &[String], row: usize) -> String {
                 let v = m37_read_list_bool(vals).get(row).copied().unwrap_or(false);
                 out.push_str(if v { "1" } else { "0" });
             }
+            "ColumnCategorical" => {
+                // M49: when codes-hash fastpath isn't applicable (mixed
+                // dtypes / fallback), reach through the codes -> categories
+                // mapping to materialize the string for hashing.  Keeps
+                // group_by correct on mixed-dtype key sets while preserving
+                // the fast path for the pure-categorical case (see
+                // m49_groupby_codes_hash + m38_build_group_index).
+                let m49_codes = m37_read_list_i64(vals);
+                let m49_code = m49_codes.get(row).copied().unwrap_or(0);
+                let m49_cats_ptr = m47_col_cat_categories_ptr(*cp);
+                let m49_cats = m37_read_list_str_lst(m49_cats_ptr);
+                let m49_s = m49_cats.get(m49_code as usize).cloned().unwrap_or_default();
+                out.push_str(&m49_s);
+            }
             _ => out.push_str("?"),
         }
     }
     out
+}
+
+// ── M49: ColumnCategorical codes-hash fastpath ──────────────────────
+//
+// M48 measured the gap: hashing on `to_strings()` of a ColumnCategorical
+// at medium_card_5000 (10k rows × ~4k distinct values) takes ~5 s in
+// StrictPy vs ~1.1 s in pandas.  The codes are i64 indices into a
+// categories table; hashing 8-byte ints is dramatically cheaper than
+// hashing variable-length strings.
+//
+// Fast path: every key column is a ColumnCategorical.  Build group keys
+// as `Vec<i64>` of codes (one slot per key column), or for single-col
+// the bare i64 code, and hash directly.  Nulls map to a sentinel that
+// can never collide with a real code (we use `i64::MIN`).
+//
+// Mixed-dtype fallback: at least one key column is NOT a
+// ColumnCategorical — fall back to m38_row_key (the v1 string-hash
+// path, with ColumnCategorical materializing via codes->categories).
+
+/// Returns true iff every column at `key_col_indices` is a
+/// ColumnCategorical.  Used to gate the codes-hash fastpath.
+fn m49_all_keys_are_categorical(col_ptrs: &[u64], key_col_indices: &[usize]) -> bool {
+    key_col_indices.iter().all(|i| {
+        let cp = col_ptrs[*i];
+        m38_col_class_name(cp) == "ColumnCategorical"
+    })
+}
+
+/// Sentinel code used to represent NULL cells in the codes-hash key
+/// tuple.  Real codes are non-negative (0..categories.len()), so any
+/// negative value is safe; `i64::MIN` is conventional + memorable.
+const M49_NULL_CODE: i64 = i64::MIN;
+
+/// Read per-row codes for one ColumnCategorical key column.  Returns
+/// a Vec where `out[r]` is the code (or M49_NULL_CODE for nulls).
+fn m49_read_codes_with_nulls(col_ptr: u64, nrows: usize) -> Vec<i64> {
+    let (codes_lst, nulls_lst, _len) = m37_col_fields(col_ptr);
+    let m49_codes = m37_read_list_i64(codes_lst);
+    let m49_nulls = m37_read_list_bool(nulls_lst);
+    let mut out = Vec::with_capacity(nrows);
+    for r in 0..nrows {
+        if m49_nulls.get(r).copied().unwrap_or(false) {
+            out.push(M49_NULL_CODE);
+        } else {
+            out.push(m49_codes.get(r).copied().unwrap_or(0));
+        }
+    }
+    out
+}
+
+/// M49 codes-hash group index builder.  Caller has verified that all
+/// key columns are ColumnCategorical; builds a Vec<(serialized_key,
+/// rows)> identical in shape to m38_build_group_index but using a
+/// `Vec<i64>` of codes as the key.  We serialize codes to bytes (8 *
+/// nkeys per row) and stash in a HashMap<Vec<u8>, ...> — equivalent
+/// to a tuple-of-ints key without needing an extra layer.
+fn m49_build_group_index_codes(
+    df: u64,
+    key_col_indices: &[usize],
+) -> Vec<(String, Vec<usize>)> {
+    let (_, _, nrows) = m37_df_fields(df);
+    let col_ptrs = m37_df_col_ptrs(df);
+    let m49_key_cps: Vec<u64> = key_col_indices.iter().map(|i| col_ptrs[*i]).collect();
+    // Pre-materialize per-column codes (one Vec<i64> per key column).
+    let m49_codes_per_col: Vec<Vec<i64>> = m49_key_cps.iter()
+        .map(|cp| m49_read_codes_with_nulls(*cp, nrows as usize))
+        .collect();
+    // Also pre-cache categories[] so we can stringify the group key
+    // for the downstream m38_split_keys API (which expects a
+    // \x01-separated stringified key matching m38_row_key's output).
+    let m49_cats_per_col: Vec<Vec<String>> = m49_key_cps.iter()
+        .map(|cp| {
+            let p = m47_col_cat_categories_ptr(*cp);
+            m37_read_list_str_lst(p)
+        })
+        .collect();
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    // Fastpath hash table: key is Vec<i64> codes (or M49_NULL_CODE for
+    // null rows), value is the index in `groups`.
+    let mut lookup: std::collections::HashMap<Vec<i64>, usize> = std::collections::HashMap::new();
+    let nk = key_col_indices.len();
+    let mut row_codes: Vec<i64> = vec![0; nk];
+    for r in 0..nrows as usize {
+        for k in 0..nk {
+            row_codes[k] = m49_codes_per_col[k][r];
+        }
+        match lookup.get(&row_codes).copied() {
+            Some(idx) => groups[idx].1.push(r),
+            None => {
+                // Build the m38_row_key-compatible string for downstream
+                // consumers (m38_split_keys / aggregate).  This is the
+                // ONLY string materialization in the fastpath — one per
+                // distinct group, not one per row, which is where the
+                // codes-hash win comes from.
+                let mut key_s = String::new();
+                for k in 0..nk {
+                    if k > 0 { key_s.push(M38_GROUP_KEY_SEP); }
+                    let c = row_codes[k];
+                    if c == M49_NULL_CODE {
+                        key_s.push_str("\x02null");
+                    } else {
+                        let s = m49_cats_per_col[k].get(c as usize).cloned().unwrap_or_default();
+                        key_s.push_str(&s);
+                    }
+                }
+                lookup.insert(row_codes.clone(), groups.len());
+                groups.push((key_s, vec![r]));
+            }
+        }
+    }
+    groups
 }
 
 /// Build the group-index map: a `Vec<(serialized_key, row_indices)>`
@@ -13978,6 +14103,16 @@ fn m38_build_group_index(
 ) -> Result<Vec<(String, Vec<usize>)>, VmError> {
     let (_, _, nrows) = m37_df_fields(df);
     let col_ptrs = m37_df_col_ptrs(df);
+    // ── M49 fastpath: every key column is a ColumnCategorical ──
+    // Hash on i64 codes directly instead of stringifying each row.  At
+    // medium_card_5000 (10k rows × ~4k distinct categories) this drops
+    // group_by_cat_via_strings from ~5s to well under 1s (PRIMARY M49
+    // win, see docs/thesis/agent_reports/m49_tabular_codes.md).
+    if !key_col_indices.is_empty()
+        && m49_all_keys_are_categorical(&col_ptrs, key_col_indices)
+    {
+        return Ok(m49_build_group_index_codes(df, key_col_indices));
+    }
     let key_col_ptrs: Vec<u64> = key_col_indices.iter().map(|i| col_ptrs[*i]).collect();
     let key_col_class: Vec<String> = key_col_ptrs.iter().map(|cp| m38_col_class_name(*cp)).collect();
     let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
