@@ -1,6 +1,6 @@
 # StrictPy — language guide for AI coding tools
 
-**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M45 (2026-05-23).
+**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M46 (2026-05-23).
 
 **Audience**: any AI coding tool (Claude, GPT, Gemini, etc.) being asked to write a StrictPy program. This file is the single source of truth for writing idiomatic StrictPy — you should NOT need to read the compiler source (`compiler/src/`) or VM source (`vm/src/`) to write correct code.
 
@@ -1443,6 +1443,40 @@ M44a shipped MultiIndex propagation through just 4 row-selection ops (`filter`, 
 
 See `examples/tabular_multiindex_propagation_demo.spy` for an end-to-end M45 walkthrough — a 6-row sales frame's MultiIndex survives `sort_by` → `dropna_subset` → `fillna_i64` → `rename` → `set_index_multi` round-trip → `concat_cols` → `select` → `melt` end to end.
 
+#### M46 additions — stack/unstack + df.loc range + outer-merge MultiIndex + time-series MI + extensions
+
+M46 closes the M45 "what M46 should pick up" list.  After M46 the `tabular` v1 surface is **functionally complete** except for v0.4 polish items (rolling Welford std, categorical column dtype, `df.iloc[rows, cols]` 2-D indexing, negative iloc, more resample rules, desktop UI).
+
+**Phase A — `stack` / `unstack`** (pandas's MultiIndex bread-and-butter):
+
+- `df.stack() -> DataFrame` — pivots every regular column into a new innermost MultiIndex level + a single `value` column.  All regular columns must share a dtype (else `ValueError`).  Output `nlevels = input nlevels + 1` (RangeIndex input → single-col index output; single-col → 2-level MI; MI → (N+1)-level MI).
+- `df.unstack() -> DataFrame` — inverse: takes the innermost MultiIndex level and turns it into wide columns.  Input must have a MultiIndex (raises on single-col or no-index).  Output `nlevels = input nlevels - 1`; if the result has 1 level it becomes a single-col index, if 0 a RangeIndex.  Missing `(row_key, col_key)` cells become null.  v1 simplification: unstack distributes the first regular column only.
+
+**Phase B — `df.loc_range_*(start, stop)`** (extends M41's `select_by_label_*`):
+
+- `df.loc_range_i64(start: i64, stop: i64) -> DataFrame`
+- `df.loc_range_f64(start: f64, stop: f64) -> DataFrame`
+- `df.loc_range_str(start: str, stop: str) -> DataFrame`
+- `df.loc_range_bool(start: bool, stop: bool) -> DataFrame`
+- `df.loc_range_datetime(start: i64, stop: i64) -> DataFrame`
+
+Returns rows where `start <= index_label <= stop` (inclusive both ends, pandas's `.loc` semantics).  Preserves the parent's row order (does not sort).  Requires a single-col index of the matching dtype; raises on no-index, MultiIndex (M47 follow-up), or dtype mismatch.  Empty range → 0-row frame with the same column schema.
+
+**Phase C — outer-merge MultiIndex fallback + `set_index_list` + pivot_table extensions:**
+
+- **Outer-merge dtype-mismatch fallback**: M42 previously fell back to RangeIndex when outer-joining with dtype-mismatched single-col indexes (`lhs` has `ColumnI64`, `rhs` has `ColumnStr`).  M46 replaces with a **NaN-padded 2-level MultiIndex** — level 0 is the `lhs` index column (with null for right-only rows), level 1 is the `rhs` index column (with null for left-only rows).  Level names follow `lhs.index_name() / rhs.index_name()` (falling back to `"lhs" / "rhs"`).  Matches pandas's outer-merge-with-mismatched-indexes behavior.
+- `df.set_index_list(cols: List[str]) -> DataFrame` — unifies single-col + multi-col `set_index` by length dispatch.  1-element list routes to `set_index(cols[0])` (single-col index); ≥2 elements routes to `set_index_multi(cols)` (MultiIndex); empty raises `ValueError`.  Existing `set_index` / `set_index_multi` keep working unchanged.
+- `df.pivot_table_aggfunc_list(index_col, columns_col, values_col, aggfuncs: List[str]) -> DataFrame` — same as `pivot_table` but emits one set of value columns per aggfunc.  Output column shape: `"{columns_value}_{aggfunc}"` (e.g. `"north_sum"`, `"north_mean"`, ...).  Same aggfunc vocabulary as M41: `"sum"|"mean"|"min"|"max"|"count"`.
+- `df.pivot_table_margins(index_col, columns_col, values_col, aggfunc) -> DataFrame` — same as `pivot_table` but adds a trailing `"All"` row + `"All"` column with the aggfunc applied across the row/column slice.  The bottom-right intersecting cell is the aggfunc over the whole values column.
+
+**Phase D — time-series ops MultiIndex handling:**
+
+- `resample(time_col, rule, agg)` / `resample_index(rule, agg)` — **drop a MultiIndex** (they reshape the row dimension into time buckets — no clean target).  Same shape as `pivot` / `pivot_table` in M45.
+- `asof_merge(other, on_self, on_other)` — now **preserves the lhs's MultiIndex** through the left-join (every output row corresponds to one lhs row in order, so the take vector is just `0..l_nrows`).
+- `asof_merge_index(other)` — preserves the lhs single-col DateTime index.  MI-only inputs raise because the function's preamble requires a single-col DateTime index.
+
+See `examples/tabular_m46_extensions_demo.spy` for an end-to-end M46 walkthrough — a 6-row wide sales frame threads through `set_index_list(["region"])` → `stack` → `unstack` round-trip → `loc_range_str` → `pivot_table_aggfunc_list` → `pivot_table_margins` → `set_index_list(["category","month"])`.
+
 ### shutil (M27 P3c-A)
 
 ```python
@@ -2411,27 +2445,38 @@ Post-M43, `tabular.concat_rows(dfs)` reconciles per-frame indexes by these rules
 
 For `concat_cols(dfs)`, **lhs's index wins** — if the first frame has an index, the output gets it (cloned); otherwise RangeIndex. Other dfs' indexes are ignored. This mirrors M42's merge lhs-wins policy.
 
-### 11.32 `tabular` MultiIndex propagation rules (post-M45)
+### 11.32 `tabular` MultiIndex propagation rules (post-M46)
 
-M44a shipped MultiIndex storage + multi-column `group_by` promotion + minimal propagation through 4 row-selection ops; every other op dropped a MultiIndex back to RangeIndex.  **M45 lifts that scope-down** for 14 row/column-transforming and reshape handlers.
+M44a shipped MultiIndex storage + multi-column `group_by` promotion + minimal propagation through 4 row-selection ops.  M45 lifted that scope-down for 14 row/column-transforming and reshape handlers.  **M46 closes the remaining anchors**: `stack` / `unstack` ship; `asof_merge` now preserves the lhs's MultiIndex; outer-merge with dtype-mismatched single-col indexes now produces a 2-level NaN-padded MultiIndex (replacing the old RangeIndex fallback).
 
-**Preserves the MultiIndex (post-M45):**
+**Preserves the MultiIndex (post-M46):**
 
 - M44a-shipped row-selection ops: `filter(mask)`, `head(n)`, `tail(n)`, `iloc(start, stop)` — every level is permuted/sliced by the row-selection vector.
 - M45 Phase A row/column-transforming ops: `sort_by`, `dropna`, `dropna_subset`, `fillna_i64` / `fillna_f64` / `fillna_str` / `fillna_bool` / `fillna_datetime`, `select`, `drop`, `rename` — every level is permuted (row-touching ops) or cloned (pass-through ops).
-- M45 Phase A `merge(other, on, how)`: `inner` / `left` take lhs's MultiIndex (every level permuted by emit's left rows); `right` takes rhs's MultiIndex (every level permuted by emit's right rows).  **`outer` with a MultiIndex on either side falls back to RangeIndex** (M46 anchor — same shape as M42's existing dtype-mismatch outer fallback).
+- M45 Phase A `merge(other, on, how)`: `inner` / `left` take lhs's MultiIndex (every level permuted by emit's left rows); `right` takes rhs's MultiIndex.  `outer` with a MultiIndex on either side falls back to RangeIndex (still — the *index alignment* part of outer-merge can't trivially produce a MI when the carrying side's MI doesn't match the other side's index shape).
 - M45 Phase B `melt(id_vars, value_vars)` — every level repeats `len(value_vars)` times.
-- M45 Phase B `tabular.concat_rows(dfs)` — strict reconciliation: every frame must have a MultiIndex with the same `nlevels`, same per-level dtype, AND same per-level name; on success the output MultiIndex is the cell-wise concatenation per level.  Any mismatch falls back to M43's single-col concat reconciliation (which itself falls back to RangeIndex on mismatch).
-- M45 Phase B `tabular.concat_cols(dfs)` — lhs's MultiIndex wins (every level cloned); matching M42's merge lhs-wins policy.
+- M45 Phase B `tabular.concat_rows(dfs)` — strict reconciliation: every frame must have a MultiIndex with the same `nlevels`, same per-level dtype, AND same per-level name; on success the output MultiIndex is the cell-wise concatenation per level.  Any mismatch falls back to M43's single-col concat reconciliation.
+- M45 Phase B `tabular.concat_cols(dfs)` — lhs's MultiIndex wins.
+- **M46 Phase A** `stack` — adds a new innermost level (column-name MI level); output `nlevels = input nlevels + 1`.
+- **M46 Phase A** `unstack` — drops the innermost MI level (turns it into wide columns); output `nlevels = input nlevels - 1`.
+- **M46 Phase D** `asof_merge(other, on_self, on_other)` — preserves the lhs's MultiIndex (left-join semantics; every output row corresponds to one lhs row in order, so the take vector is just `0..l_nrows`).
 
-**Drops the MultiIndex back to RangeIndex (post-M45):**
+**Drops the MultiIndex back to RangeIndex (post-M46):**
 
-- `pivot(index, columns, values)` / `pivot_table(index, columns, values, aggfunc)` — both reshape the row dimension; the promoted `index_col` becomes the output's single-col index per M43.  No clean target for the input MultiIndex.
-- Time-series ops: `resample`, `asof_merge`, `resample_index`, `asof_merge_index` (these were explicitly out of M45 scope; M46 anchors).
+- `pivot(index, columns, values)` / `pivot_table(index, columns, values, aggfunc)` / `pivot_table_aggfunc_list` / `pivot_table_margins` — all reshape the row dimension; the promoted `index_col` becomes the output's single-col index per M43.  No clean target for the input MultiIndex.
+- Time-series resampling: `resample(time_col, rule, agg)`, `resample_index(rule, agg)` — both reshape the row dimension into time buckets.  Same shape as the pivot family.
 
-Within a single-column-index propagation flow (M42/M43), every M45 op still carries the M41 single-col index correctly — the new M44/M45 path is taken only when a MultiIndex is present on the relevant input.
+**Outer-merge dtype-mismatch fallback (post-M46):** when both `lhs` and `rhs` have a **single-col index** of **different dtypes** AND the merge is `how="outer"`, the result now carries a **NaN-padded 2-level MultiIndex** (level 0 = lhs's index column with null for right-only rows; level 1 = rhs's index column with null for left-only rows).  Matches pandas.  Pre-M46 this case fell back to RangeIndex.
 
-**M46 anchors:** `stack` / `unstack`, `df.loc[label_list]` / range-by-label, outer-merge MultiIndex fallback (replacing the current RangeIndex fallback for dtype-mismatched indexes), and `set_index([col])` accepting a 1-element list.
+**Still RangeIndex (post-M46):** outer-merge with a MultiIndex on either side falls back to RangeIndex (interleaving a MI level-by-level across an outer join is more design than v1 needs — M47+ if anyone hits the case).
+
+### 11.33 `tabular.stack` must-share-dtype constraint
+
+`df.stack()` pivots every regular column into a new innermost MultiIndex level + a single `value` column.  **All regular columns must share a dtype** — otherwise the output `value` column's dtype is ambiguous.  Raises `ValueError` on mixed dtypes.  Same restriction as `melt(value_vars)`.  If you have a mix of dtypes and need to stack a subset, `select` the homogeneous subset first.
+
+### 11.34 `tabular.unstack` must-have-MultiIndex constraint
+
+`df.unstack()` is the inverse of `stack` — it takes the innermost MultiIndex level and turns it into wide columns.  **Input must have a MultiIndex** (raises `ValueError` on single-col index or RangeIndex inputs).  To unstack a single-col index (i.e. wide-form pivot on the index), use `pivot_table` instead.  Output `nlevels = input nlevels - 1`; if the result has 1 level it becomes a single-col index, if 0 a RangeIndex.  Missing `(row_key, col_key)` combinations become null cells.  v1 simplification: only the first regular column's values are distributed — multi-column unstack is M47+ territory.
 
 ---
 

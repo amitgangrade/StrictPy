@@ -1,0 +1,158 @@
+"""tabular_m46_extensions_demo.spy — M46 end-to-end walkthrough.
+
+M45 closed the v1 MultiIndex propagation story.  M46 adds the
+pandas's MultiIndex bread-and-butter — stack / unstack — plus
+df.loc range-by-label per dtype, outer-merge MultiIndex fallback,
+set_index_list (1-element-list unification), and pivot_table
+extensions (aggfunc-list + margins).
+
+This demo threads a 6-row sales frame through the M46 surface:
+
+  1. Load a wide sales frame (region, month → sales).
+  2. set_index_list(["region"]) — 1-element-list unification
+     routes to set_index (single-col index).
+  3. stack() — pivots month columns into a new innermost
+     MultiIndex level + a single "value" column.
+  4. unstack() — round-trip back to the wide shape.
+  5. loc_range_str("east", "south") — filter by index range.
+  6. pivot_table_aggfunc_list — emit one column-set per aggfunc.
+  7. pivot_table_margins — adds trailing "All" row + column.
+
+Output is deterministic so the demo-runs integration test can
+assert on every checkpoint.
+"""
+
+from tabular import Column, ColumnI64, ColumnF64, ColumnStr, DataFrame
+import tabular
+
+
+fn build_wide_sales() -> DataFrame:
+    """6 sales rows — wide format: region + jan + feb sales."""
+    regs_v: List[str] = []
+    regs_v.append("east")
+    regs_v.append("east")
+    regs_v.append("north")
+    regs_v.append("south")
+    regs_v.append("south")
+    regs_v.append("west")
+    reg: ColumnStr = tabular.col_str_simple(regs_v)
+
+    jan_v: List[i64] = []
+    jan_v.append(10i64)
+    jan_v.append(20i64)
+    jan_v.append(30i64)
+    jan_v.append(40i64)
+    jan_v.append(50i64)
+    jan_v.append(60i64)
+    jan: ColumnI64 = tabular.col_i64_simple(jan_v)
+
+    feb_v: List[i64] = []
+    feb_v.append(11i64)
+    feb_v.append(22i64)
+    feb_v.append(33i64)
+    feb_v.append(44i64)
+    feb_v.append(55i64)
+    feb_v.append(66i64)
+    feb: ColumnI64 = tabular.col_i64_simple(feb_v)
+
+    cn: List[str] = []
+    cn.append("region")
+    cn.append("jan")
+    cn.append("feb")
+    cols: List[Column] = []
+    cols.append(reg)
+    cols.append(jan)
+    cols.append(feb)
+    return tabular.from_columns(cn, cols)
+
+
+fn build_long_sales() -> DataFrame:
+    """Long-form sales for pivot_table aggregations."""
+    cats_v: List[str] = []
+    cats_v.append("books")
+    cats_v.append("toys")
+    cats_v.append("books")
+    cats_v.append("toys")
+    cats_v.append("books")
+    cats_v.append("toys")
+    cat: ColumnStr = tabular.col_str_simple(cats_v)
+
+    months_v: List[str] = []
+    months_v.append("jan")
+    months_v.append("jan")
+    months_v.append("feb")
+    months_v.append("feb")
+    months_v.append("mar")
+    months_v.append("mar")
+    month: ColumnStr = tabular.col_str_simple(months_v)
+
+    total_v: List[i64] = []
+    total_v.append(10i64)
+    total_v.append(20i64)
+    total_v.append(30i64)
+    total_v.append(40i64)
+    total_v.append(50i64)
+    total_v.append(60i64)
+    total: ColumnI64 = tabular.col_i64_simple(total_v)
+
+    cn: List[str] = []
+    cn.append("category")
+    cn.append("month")
+    cn.append("total")
+    cols: List[Column] = []
+    cols.append(cat)
+    cols.append(month)
+    cols.append(total)
+    return tabular.from_columns(cn, cols)
+
+
+fn main() -> i32:
+    # ── Step 1: build the wide sales frame ──────────────────────────────
+    sales: DataFrame = build_wide_sales()
+    println("sales_nrows=" + str(sales.length()))
+    println("sales_ncols=" + str(sales.ncols()))
+
+    # ── Step 2: set_index_list(["region"]) — 1-element-list path ────────
+    keys: List[str] = []
+    keys.append("region")
+    indexed: DataFrame = sales.set_index_list(keys)
+    println("idx_nlev=" + str(indexed.index_nlevels()))
+    println("idx_has=" + str(indexed.has_index()))
+
+    # ── Step 3: stack() — wide → long with new innermost MI level ───────
+    stacked: DataFrame = indexed.stack()
+    println("stk_nrows=" + str(stacked.length()))
+    println("stk_nlev=" + str(stacked.index_nlevels()))
+    println("stk_ncols=" + str(stacked.ncols()))
+
+    # ── Step 4: unstack() — long → wide round-trip ──────────────────────
+    unstacked: DataFrame = stacked.unstack()
+    println("uns_nrows=" + str(unstacked.length()))
+    println("uns_nlev=" + str(unstacked.index_nlevels()))
+
+    # ── Step 5: loc_range_str — filter rows by index range ──────────────
+    filtered: DataFrame = indexed.loc_range_str("east", "south")
+    println("lr_nrows=" + str(filtered.length()))
+
+    # ── Step 6: pivot_table_aggfunc_list — multi-aggfunc pivot ──────────
+    long: DataFrame = build_long_sales()
+    aggs: List[str] = []
+    aggs.append("sum")
+    aggs.append("mean")
+    pt_multi: DataFrame = long.pivot_table_aggfunc_list("category", "month", "total", aggs)
+    println("ptm_ncols=" + str(pt_multi.ncols()))
+    println("ptm_nrows=" + str(pt_multi.length()))
+
+    # ── Step 7: pivot_table_margins — trailing All row + column ─────────
+    pt_marg: DataFrame = long.pivot_table_margins("category", "month", "total", "sum")
+    println("ptg_ncols=" + str(pt_marg.ncols()))
+    println("ptg_nrows=" + str(pt_marg.length()))
+
+    # ── Step 8: 2-element set_index_list — MultiIndex path ──────────────
+    keys2: List[str] = []
+    keys2.append("category")
+    keys2.append("month")
+    mi: DataFrame = long.set_index_list(keys2)
+    println("mil_nlev=" + str(mi.index_nlevels()))
+
+    return 0
