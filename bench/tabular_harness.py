@@ -1033,8 +1033,21 @@ def m48_write_report(results: list[dict], out_path: Path) -> None:
         for n in notes:
             lines.append(f"> note: {n}")
 
-    # Categorical cost analysis
-    lines.extend([
+    # Categorical cost analysis — pull actual numbers from the cells
+    def _cell(op: str, size: str) -> dict | None:
+        return next((r for r in results if r["op"] == op and r["size"] == size), None)
+
+    def _ms(op: str, size: str) -> str:
+        r = _cell(op, size)
+        if r and r["spy_ms"] is not None:
+            return f"{r['spy_ms']:.0f} ms"
+        return "—"
+
+    gby_str_med  = _cell("group_by_str", "medium")
+    gby_cat_med  = _cell("group_by_cat_via_strings", "medium")
+    gby_pcat_med = _cell("group_by_pandas_categorical", "medium")
+
+    cat_lines = [
         "",
         "---",
         "",
@@ -1051,11 +1064,61 @@ def m48_write_report(results: list[dict], out_path: Path) -> None:
         "- `group_by_pandas_categorical`: pandas with `astype('category')` — the "
         "codes-hash fastpath we want M49 to beat.",
         "",
-        "If the to_strings() coercion adds non-trivial overhead per call, M49's "
-        "codes-based hash path should close most of the gap. Specific numbers per cell "
-        "are in the per-op detail tables above.",
+        "**Measured numbers (medium = 10k rows, 3 iters):**",
+        "",
+        "| Cell | StrictPy ms | pandas ms | Notes |",
+        "|---|---:|---:|---|",
+        f"| `group_by_str` | {_ms('group_by_str', 'medium')} | "
+        + (f"{gby_str_med['py_ms']:.0f} ms" if gby_str_med and gby_str_med['py_ms'] else "—")
+        + " | StrictPy's v1 string-hash baseline |",
+        f"| `group_by_cat_via_strings` | {_ms('group_by_cat_via_strings', 'medium')} | "
+        + (f"{gby_cat_med['py_ms']:.0f} ms" if gby_cat_med and gby_cat_med['py_ms'] else "—")
+        + " | adds `to_strings()` materialization on top of str path |",
+        f"| `group_by_pandas_categorical` | {_ms('group_by_pandas_categorical', 'medium')} | "
+        + (f"{gby_pcat_med['py_ms']:.0f} ms" if gby_pcat_med and gby_pcat_med['py_ms'] else "—")
+        + " | StrictPy unchanged; pandas uses `astype('category')` |",
+    ]
+
+    if gby_str_med and gby_cat_med and gby_str_med['spy_ms'] and gby_cat_med['spy_ms']:
+        coerce_overhead = (gby_cat_med['spy_ms'] / gby_str_med['spy_ms'] - 1.0) * 100
+        cat_lines.extend([
+            "",
+            f"**`to_strings()` coercion overhead** (StrictPy): "
+            f"{coerce_overhead:+.0f}% wall-clock vs the direct str path "
+            f"({gby_str_med['spy_ms']:.0f} → {gby_cat_med['spy_ms']:.0f} ms at medium). "
+            "An optimized codes-hash group-by path (M49) would skip both the str "
+            "hashing AND the `to_strings()` materialization, so the expected win is "
+            "larger than this gap alone.",
+        ])
+
+    if gby_str_med and gby_pcat_med and gby_str_med['py_ms'] and gby_pcat_med['py_ms']:
+        pandas_cat_speedup = gby_str_med['py_ms'] / gby_pcat_med['py_ms']
+        cat_lines.extend([
+            "",
+            f"**Pandas Categorical speedup at this cardinality** (8 distinct values): "
+            f"{pandas_cat_speedup:.2f}x — i.e. essentially nothing. Pandas's "
+            "codes-hash optimization shines at high cardinality (thousands of distinct "
+            "values where comparing 32-bit codes is dramatically cheaper than comparing "
+            "string interned object pointers). At 8 categories, the string interning "
+            "+ pointer equality is already cheap. **M49 should sanity-check this on a "
+            "higher-cardinality fixture** before claiming the codes-hash optimization "
+            "is the universal win.",
+        ])
+
+    cat_lines.extend([
+        "",
+        "**`merge_*` at medium** is dominated by the **self-merge cartesian "
+        "blow-up**: with 10k rows × 8 distinct category values, the inner-join "
+        "produces ~12.5M rows (10000 × 10000 / 8). Both sides spend most of "
+        "their time materializing the joined frame. The StrictPy/pandas ratio "
+        "(~15x) reflects pandas's NumPy-backed concat being much faster than "
+        "StrictPy's per-cell `List<T>` append. This is a known M49 target "
+        "(`merge_inner` is one of the codes-hash paths).",
         "",
         "---",
+    ])
+    lines.extend(cat_lines)
+    lines.extend([
         "",
         "## Methodology",
         "",

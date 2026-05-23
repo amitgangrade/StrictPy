@@ -175,7 +175,19 @@ M47 shipped `ColumnCategorical` with codes + categories storage, but every op cu
 - `group_by_cat_via_strings`: build a `ColumnCategorical`, then materialize back via `to_strings()` and group (the v1 integration idiom).
 - `group_by_pandas_categorical`: pandas with `astype('category')` — the codes-hash fastpath we want M49 to beat.
 
-If the to_strings() coercion adds non-trivial overhead per call, M49's codes-based hash path should close most of the gap. Specific numbers per cell are in the per-op detail tables above.
+**Measured numbers (medium = 10k rows, 3 iters):**
+
+| Cell | StrictPy ms | pandas ms | Notes |
+|---|---:|---:|---|
+| `group_by_str` | 11613 ms | 1037 ms | StrictPy's v1 string-hash baseline |
+| `group_by_cat_via_strings` | 12833 ms | 1040 ms | adds `to_strings()` materialization on top of str path |
+| `group_by_pandas_categorical` | 11878 ms | 1056 ms | StrictPy unchanged; pandas uses `astype('category')` |
+
+**`to_strings()` coercion overhead** (StrictPy): +11% wall-clock vs the direct str path (11613 → 12833 ms at medium). An optimized codes-hash group-by path (M49) would skip both the str hashing AND the `to_strings()` materialization, so the expected win is larger than this gap alone.
+
+**Pandas Categorical speedup at this cardinality** (8 distinct values): 0.98x — i.e. essentially nothing. Pandas's codes-hash optimization shines at high cardinality (thousands of distinct values where comparing 32-bit codes is dramatically cheaper than comparing string interned object pointers). At 8 categories, the string interning + pointer equality is already cheap. **M49 should sanity-check this on a higher-cardinality fixture** before claiming the codes-hash optimization is the universal win.
+
+**`merge_*` at medium** is dominated by the **self-merge cartesian blow-up**: with 10k rows × 8 distinct category values, the inner-join produces ~12.5M rows (10000 × 10000 / 8). Both sides spend most of their time materializing the joined frame. The StrictPy/pandas ratio (~15x) reflects pandas's NumPy-backed concat being much faster than StrictPy's per-cell `List<T>` append. This is a known M49 target (`merge_inner` is one of the codes-hash paths).
 
 ---
 
