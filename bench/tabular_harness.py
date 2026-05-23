@@ -83,6 +83,8 @@ M48_BEST_OF_FOR_SIZE = {
     "medium": 3,
     "large":  2,
     "xl":     1,
+    # M49: same as medium (same row count, 5000 distinct categories).
+    "medium_card_5000": 2,
 }
 
 # Per-(op, size) BEST_OF override.  Some cells are slow enough on the
@@ -115,6 +117,21 @@ M48_SIZES = {
     "medium": 10_000,
     "large":  1_000_000,
     "xl":     100_000_000,
+    # ── M49 Phase A: high-cardinality variant of medium ──
+    # `medium` is 10K rows × 8 zipf-skewed category values.  At that
+    # cardinality, pandas Categorical-via-codes shows only a 0.98×
+    # speedup over the string-hash path (M48 finding).  The codes-hash
+    # win materializes at thousands of distinct values where comparing
+    # 8-byte ints dwarfs hashing variable-length strings.  This fixture
+    # is the verification gate for M49's PRIMARY optimization.
+    "medium_card_5000": 10_000,
+}
+
+# Per-size cardinality (number of distinct category values).  When
+# absent, defaults to len(M48_CATEGORIES) (= 8) — the existing zipf
+# fixture.  medium_card_5000 selects the high-cardinality generator.
+M49_CARDINALITY = {
+    "medium_card_5000": 5000,
 }
 
 # Per-op default iteration count (override per-size via M48_ITERS if needed).
@@ -170,6 +187,16 @@ M48_ITERS_OVERRIDE = {
     ("merge_cat_via_strings", "large"):      1,
     ("unique_str", "large"):                 3,
     ("unique_cat_via_strings", "large"):     3,
+    # ── M49 Phase A: medium_card_5000 ──
+    # Baseline expectation: StrictPy's string-hash group_by on 10k rows
+    # × 5000 distinct values is ~12-15s per iter; 1 iter is honest.
+    ("group_by_str", "medium_card_5000"):              1,
+    ("group_by_cat_via_strings", "medium_card_5000"):  1,
+    ("group_by_pandas_categorical", "medium_card_5000"): 1,
+    ("merge_str", "medium_card_5000"):                 1,
+    ("merge_cat_via_strings", "medium_card_5000"):     1,
+    ("unique_str", "medium_card_5000"):                3,
+    ("unique_cat_via_strings", "medium_card_5000"):    3,
 }
 
 
@@ -193,12 +220,24 @@ def m48_csv_path(size_label: str) -> Path:
     return DATA_DIR / f"tabular_{size_label}.csv"
 
 
+def m49_high_card_categories(k: int) -> list[str]:
+    """Build a list of `k` distinct category strings (deterministic).
+    Names: cat_00000 .. cat_NNNNN — zipf-skewed sampling lives at the
+    caller (m48_gen_csv switches to uniform-over-k for high-card)."""
+    return [f"cat_{i:05d}" for i in range(k)]
+
+
 def m48_gen_csv(size_label: str, n_rows: int, seed: int = M48_SEED) -> Path:
     """Generate (or reuse cached) deterministic CSV with the M48 schema:
-        id (i64), category (str / 8 values zipf-skewed), area (str / 4 uniform),
+        id (i64), category (str), area (str / 4 uniform),
         qty (i64 1..1000), price (f64 0.01..10000), ts (datetime epoch-ms,
         daily increments from 2024-01-01).  ~5% random nulls per column
         (except `id`, which stays monotonic and non-null).
+
+    Cardinality of `category`:
+      - default (small/medium/large/xl): 8 zipf-skewed M48_CATEGORIES.
+      - medium_card_5000 (M49): 5000 uniformly-sampled cat_NNNNN values
+        — the high-cardinality fixture for codes-hash verification.
     """
     path = m48_csv_path(size_label)
     if path.exists() and path.stat().st_size > 0:
@@ -207,21 +246,28 @@ def m48_gen_csv(size_label: str, n_rows: int, seed: int = M48_SEED) -> Path:
     print(f"  generating {path.name} ({n_rows:,} rows)…", flush=True)
     rng = random.Random(seed)
 
-    # Zipf-ish skew for category: weights 8,7,6,5,4,3,2,1 normalized.
-    cat_weights = [8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]
-    cat_total = sum(cat_weights)
-    cat_cum = []
-    s = 0.0
-    for w in cat_weights:
-        s += w / cat_total
-        cat_cum.append(s)
+    # ── M49: cardinality selector for `category` column ──
+    m49_card = M49_CARDINALITY.get(size_label, 0)
+    if m49_card > 0:
+        m49_high_cats = m49_high_card_categories(m49_card)
+        def pick_category() -> str:
+            return m49_high_cats[rng.randrange(m49_card)]
+    else:
+        # Zipf-ish skew for category: weights 8,7,6,5,4,3,2,1 normalized.
+        cat_weights = [8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]
+        cat_total = sum(cat_weights)
+        cat_cum = []
+        s = 0.0
+        for w in cat_weights:
+            s += w / cat_total
+            cat_cum.append(s)
 
-    def pick_category() -> str:
-        r = rng.random()
-        for i, c in enumerate(cat_cum):
-            if r <= c:
-                return M48_CATEGORIES[i]
-        return M48_CATEGORIES[-1]
+        def pick_category() -> str:
+            r = rng.random()
+            for i, c in enumerate(cat_cum):
+                if r <= c:
+                    return M48_CATEGORIES[i]
+            return M48_CATEGORIES[-1]
 
     # 2024-01-01 baseline.  tabular.read_csv's datetime dtype accepts
     # "YYYY-MM-DD" (or full ISO `YYYY-MM-DDTHH:MM:SS[Z|±HH:MM]`); we
@@ -530,7 +576,12 @@ def m48_gen_group_by_str(csv_path: Path, iters: int) -> tuple[str, str, str]:
 
 
 def m48_gen_group_by_cat_via_strings(csv_path: Path, iters: int) -> tuple[str, str, str]:
-    """Group on ColumnCategorical via the v1 to_strings() coercion path."""
+    """Group on ColumnCategorical directly.  M48 named this cell
+    "via_strings" because v1's group_by coerced any categorical to its
+    str view; M49's codes-hash fastpath skips the coercion and hashes
+    on i64 codes.  The cell name is preserved for chronological
+    continuity in the bench history JSON — the BEHAVIOR being measured
+    changed at M49 (the SAME .spy code path, faster underneath)."""
     spy = m48_spy_preamble(csv_path) + (
         '    cs: ColumnStr? = df.get_column_str("category")\n'
         '    if cs is none:\n'
@@ -556,7 +607,11 @@ def m48_gen_group_by_cat_via_strings(csv_path: Path, iters: int) -> tuple[str, s
         '        col_names: List[str] = []\n'
         '        col_names.append("cat")\n'
         '        cols2: List[Column] = []\n'
-        '        cols2.append(cat_col.to_strings())\n'
+        # M49: keep the ColumnCategorical directly; M49 group_by detects
+        # the dtype and uses the codes-hash fastpath.  M48 wrapped via
+        # to_strings() — that cell shape is now spelled by the str
+        # variant (group_by_str).
+        '        cols2.append(cat_col)\n'
         '        df2: DataFrame = tabular.from_columns(col_names, cols2)\n'
         '        gdf: GroupedDataFrame = df2.group_by(keys)\n'
         '        s: DataFrame = gdf.size()\n'
@@ -941,6 +996,11 @@ def m48_write_report(results: list[dict], out_path: Path) -> None:
         if ratio > 1.5:   return "x "   # pandas wins by >50%
         return ""
 
+    # Determine headline sizes — include medium_card_5000 only if any
+    # results use it (M49 high-cardinality fixture).
+    headline_sizes_all = ["small", "medium", "medium_card_5000", "large", "xl"]
+    has_card5k = any(r["size"] == "medium_card_5000" for r in results)
+
     lines = [
         "# StrictPy `tabular` vs pandas 3.0 — comprehensive benchmark",
         "",
@@ -970,14 +1030,16 @@ def m48_write_report(results: list[dict], out_path: Path) -> None:
         "",
         "## Headline summary",
         "",
-        "| Op | small | medium | large | xl |",
-        "|---|---:|---:|---:|---:|",
+        ("| Op | small | medium | medium_card_5000 | large | xl |" if has_card5k
+         else "| Op | small | medium | large | xl |"),
+        ("|---|---:|---:|---:|---:|---:|" if has_card5k else "|---|---:|---:|---:|---:|"),
     ]
 
     # Headline: ratio per (op, size)
-    sizes_in_use = [s for s in ("small", "medium", "large", "xl")
+    sizes_in_use = [s for s in headline_sizes_all
                     if any(r["size"] == s for r in results)]
-    headline_sizes = ["small", "medium", "large", "xl"]
+    headline_sizes = headline_sizes_all if has_card5k else \
+        ["small", "medium", "large", "xl"]
     for op in M48_CORE_OPS + M48_CATEGORICAL_OPS:
         label, _ = M48_OP_REGISTRY[op]
         row = [f"`{op}`"]
@@ -997,7 +1059,7 @@ def m48_write_report(results: list[dict], out_path: Path) -> None:
 
     lines.extend(["", "---", "", "## Per-op detail"])
 
-    size_order = {"small": 0, "medium": 1, "large": 2, "xl": 3}
+    size_order = {"small": 0, "medium": 1, "medium_card_5000": 2, "large": 3, "xl": 4}
     for op in M48_CORE_OPS + M48_CATEGORICAL_OPS:
         label, _ = M48_OP_REGISTRY[op]
         rows = sorted(
