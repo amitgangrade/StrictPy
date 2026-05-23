@@ -4189,6 +4189,11 @@ impl Resolver {
         let m37_col_str_cid = self.fresh_class();
         let m37_col_bool_cid = self.fresh_class();
         let m37_col_dt_cid = self.fresh_class();
+        // M47: ColumnCategorical — new sealed Column subclass storing
+        // {codes: List[i64], categories: List[str], nulls: List[bool],
+        // length: i64}.  Existing-op integration v1 is via to_strings()
+        // coercion.
+        let m47_col_cat_cid = self.fresh_class();
         let m37_df_cid = self.fresh_class();
 
         self.class_name_to_id.insert("Column".into(), m37_col_cid);
@@ -4197,6 +4202,7 @@ impl Resolver {
         self.class_name_to_id.insert("ColumnStr".into(), m37_col_str_cid);
         self.class_name_to_id.insert("ColumnBool".into(), m37_col_bool_cid);
         self.class_name_to_id.insert("ColumnDateTime".into(), m37_col_dt_cid);
+        self.class_name_to_id.insert("ColumnCategorical".into(), m47_col_cat_cid);
         self.class_name_to_id.insert("DataFrame".into(), m37_df_cid);
 
         // ── Type aliases ──
@@ -4219,6 +4225,8 @@ impl Resolver {
         let m37_col_str_ty = Ty::Class(m37_col_str_cid);
         let m37_col_bool_ty = Ty::Class(m37_col_bool_cid);
         let m37_col_dt_ty = Ty::Class(m37_col_dt_cid);
+        // M47: ColumnCategorical Ty alias.
+        let m47_col_cat_ty = Ty::Class(m47_col_cat_cid);
         let m37_df_ty = Ty::Class(m37_df_cid);
         let m37_list_col_ty = Ty::Generic { base: TypeCtor::List, args: vec![m37_col_ty.clone()] };
         let m37_schema_ty = Ty::Generic {
@@ -4360,6 +4368,32 @@ impl Resolver {
                     name: "rolling_std".into(), params: vec![m37_i64.clone()],
                     ret: m37_col_f64_ty.clone(),
                 });
+                // ── M47 Phase B: rolling-window with min_periods (i64) ──
+                v.push(MethodSig {
+                    name: "rolling_sum_min_periods".into(),
+                    params: vec![m37_i64.clone(), m37_i64.clone()],
+                    ret: m37_col_i64_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "rolling_mean_min_periods".into(),
+                    params: vec![m37_i64.clone(), m37_i64.clone()],
+                    ret: m37_col_f64_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "rolling_min_min_periods".into(),
+                    params: vec![m37_i64.clone(), m37_i64.clone()],
+                    ret: m37_col_i64_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "rolling_max_min_periods".into(),
+                    params: vec![m37_i64.clone(), m37_i64.clone()],
+                    ret: m37_col_i64_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "rolling_std_min_periods".into(),
+                    params: vec![m37_i64.clone(), m37_i64.clone()],
+                    ret: m37_col_f64_ty.clone(),
+                });
                 v
             },
             generics: vec![], generic_tvars: vec![],
@@ -4474,6 +4508,32 @@ impl Resolver {
                 });
                 v.push(MethodSig {
                     name: "rolling_std".into(), params: vec![m37_i64.clone()],
+                    ret: m37_col_f64_ty.clone(),
+                });
+                // ── M47 Phase B: rolling-window with min_periods (f64) ──
+                v.push(MethodSig {
+                    name: "rolling_sum_min_periods".into(),
+                    params: vec![m37_i64.clone(), m37_i64.clone()],
+                    ret: m37_col_f64_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "rolling_mean_min_periods".into(),
+                    params: vec![m37_i64.clone(), m37_i64.clone()],
+                    ret: m37_col_f64_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "rolling_min_min_periods".into(),
+                    params: vec![m37_i64.clone(), m37_i64.clone()],
+                    ret: m37_col_f64_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "rolling_max_min_periods".into(),
+                    params: vec![m37_i64.clone(), m37_i64.clone()],
+                    ret: m37_col_f64_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "rolling_std_min_periods".into(),
+                    params: vec![m37_i64.clone(), m37_i64.clone()],
                     ret: m37_col_f64_ty.clone(),
                 });
                 v
@@ -4613,6 +4673,48 @@ impl Resolver {
             },
             generics: vec![], generic_tvars: vec![],
             is_native: false, payload_size: 24,
+        });
+
+        // ── M47: ColumnCategorical — { codes: List[i64], nulls:
+        // List[bool], length: i64, categories: List[str] } (32-byte
+        // payload).  Sealed Column subclass; v1 op integration via
+        // to_strings() coercion.  Field order intentionally matches the
+        // M37 Column layout (codes, nulls, length at offsets 0/8/16) so
+        // every existing m37_col_fields() reader works — categories
+        // lives at the new offset 24.  Categorical-specific accessors:
+        // codes(), categories(), to_strings().
+        self.class_layouts.insert(m47_col_cat_cid, ClassLayout {
+            id: m47_col_cat_cid, name: "ColumnCategorical".into(), base: Some(m37_col_cid),
+            is_open: false, is_sealed: false,
+            fields: vec![
+                FieldInfo { name: "codes".into(),      ty: m37_list_i64.clone(),  offset: 0 },
+                FieldInfo { name: "nulls".into(),      ty: m37_list_bool.clone(), offset: 8 },
+                FieldInfo { name: "length".into(),     ty: m37_i64.clone(),       offset: 16 },
+                FieldInfo { name: "categories".into(), ty: m37_list_str.clone(),  offset: 24 },
+            ],
+            methods: {
+                // Shared methods on every Column subclass: length, dtype,
+                // is_null, null_count, get.  get(i) returns the category
+                // string (or none if null).
+                let mut v = m37_shared_methods(MethodSig {
+                    name: "get".into(),
+                    params: vec![m37_i64.clone()],
+                    ret: Ty::Nullable(Box::new(m37_str.clone())),
+                });
+                // Categorical-specific accessors.
+                v.push(MethodSig {
+                    name: "codes".into(), params: vec![], ret: m37_col_i64_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "categories".into(), params: vec![], ret: m37_col_str_ty.clone(),
+                });
+                v.push(MethodSig {
+                    name: "to_strings".into(), params: vec![], ret: m37_col_str_ty.clone(),
+                });
+                v
+            },
+            generics: vec![], generic_tvars: vec![],
+            is_native: false, payload_size: 32,
         });
 
         // ── M38: GroupedDataFrame class id (allocated before DataFrame
@@ -4950,6 +5052,21 @@ impl Resolver {
                     ],
                     ret: m37_df_ty.clone(),
                 },
+                // ── M47 Phase A: iloc_2d ──
+                MethodSig {
+                    name: "iloc_2d".into(),
+                    params: vec![
+                        m37_i64.clone(), m37_i64.clone(),
+                        m37_i64.clone(), m37_i64.clone(),
+                    ],
+                    ret: m37_df_ty.clone(),
+                },
+                // ── M47 Phase C: get_column_categorical ──
+                MethodSig {
+                    name: "get_column_categorical".into(),
+                    params: vec![m37_str.clone()],
+                    ret: Ty::Nullable(Box::new(m47_col_cat_ty.clone())),
+                },
             ],
             generics: vec![], generic_tvars: vec![],
             is_native: false, payload_size: 56,
@@ -5112,24 +5229,41 @@ impl Resolver {
                     ),
                     native_id: 942,
                 },
+                // ── M47: col_categorical / col_categorical_with_nulls ──
+                StdlibItem {
+                    name: "col_categorical".into(), kind: StdlibItemKind::Function,
+                    ty: m37_fn(vec![m37_list_str.clone()], m47_col_cat_ty.clone()),
+                    native_id: 1054,
+                },
+                StdlibItem {
+                    name: "col_categorical_with_nulls".into(), kind: StdlibItemKind::Function,
+                    ty: m37_fn(
+                        vec![m37_list_str.clone(), m37_list_bool.clone()],
+                        m47_col_cat_ty.clone(),
+                    ),
+                    native_id: 1055,
+                },
             ],
         };
         // Publish the 7 classes (5 Column subclasses + Column base +
         // DataFrame) as StdlibItemKind::Class items so `from tabular import
         // DataFrame, ColumnI64, ...` binds them in module_scope (M36 path).
         for (m37_name, m37_cid) in [
-            ("Column",         m37_col_cid),
-            ("ColumnI64",      m37_col_i64_cid),
-            ("ColumnF64",      m37_col_f64_cid),
-            ("ColumnStr",      m37_col_str_cid),
-            ("ColumnBool",     m37_col_bool_cid),
-            ("ColumnDateTime", m37_col_dt_cid),
-            ("DataFrame",      m37_df_cid),
+            ("Column",            m37_col_cid),
+            ("ColumnI64",         m37_col_i64_cid),
+            ("ColumnF64",         m37_col_f64_cid),
+            ("ColumnStr",         m37_col_str_cid),
+            ("ColumnBool",        m37_col_bool_cid),
+            ("ColumnDateTime",    m37_col_dt_cid),
+            // ── M47: ColumnCategorical published like the other Column
+            // subclasses so `from tabular import ColumnCategorical` works.
+            ("ColumnCategorical", m47_col_cat_cid),
+            ("DataFrame",         m37_df_cid),
             // ── M38 Phase D: GroupedDataFrame — published on the
             // tabular module so `from tabular import GroupedDataFrame`
             // works.  Users never construct it directly; `df.group_by`
             // is the only entry point.
-            ("GroupedDataFrame", m38_gdf_cid),
+            ("GroupedDataFrame",  m38_gdf_cid),
         ] {
             m37_tabular_mod.items.push(StdlibItem {
                 name: m37_name.into(),

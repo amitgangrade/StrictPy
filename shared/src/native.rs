@@ -1191,6 +1191,70 @@ pub enum NativeFn {
     /// with the aggfunc applied across the slice.
     M46TabDfPivotTableMargins  = 1042,
 
+    // ── M47: tabular polish — iloc 2-D + negative iloc + rolling
+    //   Welford/min_periods + ColumnCategorical (v0.4 polish round) ─────
+    /// `DataFrame.iloc_2d(self, row_start: i64, row_stop: i64,
+    /// col_start: i64, col_stop: i64) -> DataFrame`.  Half-open
+    /// `[row_start, row_stop) × [col_start, col_stop)` slice; negative
+    /// indices Python-style (`-1` = last).  Preserves the parent's
+    /// index (M44-style propagation).  Both axes clamped to bounds.
+    M47TabDfIloc2d                     = 1043,
+    /// `ColumnI64.rolling_sum_min_periods(self, window: i64,
+    /// min_periods: i64) -> ColumnI64`.  Emits null when the window
+    /// has fewer than `min_periods` non-null values.
+    M47TabColI64RollingSumMinPeriods   = 1044,
+    /// `ColumnI64.rolling_mean_min_periods(self, window: i64,
+    /// min_periods: i64) -> ColumnF64`.
+    M47TabColI64RollingMeanMinPeriods  = 1045,
+    /// `ColumnI64.rolling_min_min_periods(self, window: i64,
+    /// min_periods: i64) -> ColumnI64`.
+    M47TabColI64RollingMinMinPeriods   = 1046,
+    /// `ColumnI64.rolling_max_min_periods(self, window: i64,
+    /// min_periods: i64) -> ColumnI64`.
+    M47TabColI64RollingMaxMinPeriods   = 1047,
+    /// `ColumnI64.rolling_std_min_periods(self, window: i64,
+    /// min_periods: i64) -> ColumnF64`.
+    M47TabColI64RollingStdMinPeriods   = 1048,
+    /// `ColumnF64.rolling_sum_min_periods(self, window: i64,
+    /// min_periods: i64) -> ColumnF64`.
+    M47TabColF64RollingSumMinPeriods   = 1049,
+    /// `ColumnF64.rolling_mean_min_periods(self, window: i64,
+    /// min_periods: i64) -> ColumnF64`.
+    M47TabColF64RollingMeanMinPeriods  = 1050,
+    /// `ColumnF64.rolling_min_min_periods(self, window: i64,
+    /// min_periods: i64) -> ColumnF64`.
+    M47TabColF64RollingMinMinPeriods   = 1051,
+    /// `ColumnF64.rolling_max_min_periods(self, window: i64,
+    /// min_periods: i64) -> ColumnF64`.
+    M47TabColF64RollingMaxMinPeriods   = 1052,
+    /// `ColumnF64.rolling_std_min_periods(self, window: i64,
+    /// min_periods: i64) -> ColumnF64`.
+    M47TabColF64RollingStdMinPeriods   = 1053,
+    /// `tabular.col_categorical(values: List[str]) -> ColumnCategorical`.
+    /// Builds `categories` by first-appearance order; `codes[i]` indexes
+    /// into `categories`.  All inputs treated as non-null.
+    M47TabColCategorical               = 1054,
+    /// `tabular.col_categorical_with_nulls(values: List[str],
+    /// nulls: List[bool]) -> ColumnCategorical`.  Null cells get
+    /// `codes[i] = 0` (don't-care; nulls mask controls).
+    M47TabColCategoricalWithNulls      = 1055,
+    /// `ColumnCategorical.codes(self) -> ColumnI64`.
+    M47TabColCategoricalCodes          = 1056,
+    /// `ColumnCategorical.categories(self) -> ColumnStr`.  Distinct
+    /// values ordered by first appearance.
+    M47TabColCategoricalCategories     = 1057,
+    /// `ColumnCategorical.to_strings(self) -> ColumnStr`.  Full
+    /// materialization — the v1 coercion path for every op that
+    /// doesn't have a categorical-specific handler.
+    M47TabColCategoricalToStrings      = 1058,
+    /// `DataFrame.get_column_categorical(self, name: str) ->
+    /// ColumnCategorical?`.  Returns none on absent name or
+    /// non-categorical dtype.
+    M47TabDfGetColumnCategorical       = 1059,
+    /// `ColumnCategorical.get(self, i: i64) -> str?`.  Returns the
+    /// category string at row `i` (or none if the cell is null).
+    M47TabColCategoricalGet            = 1060,
+
     // ── 250–289: M22 P2A (argparse + collections + csv) ─────────────────
     // Phase 2 starts here.  P2A's job is to bring three high-ROI stdlib
     // modules online on top of the M19 stdlib-module-table:
@@ -2753,6 +2817,25 @@ impl NativeFn {
             1040 => Some(Self::M46TabDfSetIndexList),
             1041 => Some(Self::M46TabDfPivotTableAggfuncList),
             1042 => Some(Self::M46TabDfPivotTableMargins),
+            // ── M47: tabular polish — 1043-1059 ──
+            1043 => Some(Self::M47TabDfIloc2d),
+            1044 => Some(Self::M47TabColI64RollingSumMinPeriods),
+            1045 => Some(Self::M47TabColI64RollingMeanMinPeriods),
+            1046 => Some(Self::M47TabColI64RollingMinMinPeriods),
+            1047 => Some(Self::M47TabColI64RollingMaxMinPeriods),
+            1048 => Some(Self::M47TabColI64RollingStdMinPeriods),
+            1049 => Some(Self::M47TabColF64RollingSumMinPeriods),
+            1050 => Some(Self::M47TabColF64RollingMeanMinPeriods),
+            1051 => Some(Self::M47TabColF64RollingMinMinPeriods),
+            1052 => Some(Self::M47TabColF64RollingMaxMinPeriods),
+            1053 => Some(Self::M47TabColF64RollingStdMinPeriods),
+            1054 => Some(Self::M47TabColCategorical),
+            1055 => Some(Self::M47TabColCategoricalWithNulls),
+            1056 => Some(Self::M47TabColCategoricalCodes),
+            1057 => Some(Self::M47TabColCategoricalCategories),
+            1058 => Some(Self::M47TabColCategoricalToStrings),
+            1059 => Some(Self::M47TabDfGetColumnCategorical),
+            1060 => Some(Self::M47TabColCategoricalGet),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

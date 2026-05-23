@@ -384,30 +384,34 @@ fn main() -> i32:
     assert!(out.contains("len=2"), "got: {out:?}");
 }
 
+// M47 flip: iloc no longer rejects negative indices — Python-style
+// negative resolution makes `-1` = last row.  The original M40 test
+// asserted `ValueError`; M47 lifts the contract.  Renamed to reflect
+// the new behavior; assertions inverted.  See m47_round/SHARED_BRIEF.md
+// and docs/thesis/agent_reports/m47_tabular_polish.md.
 #[test]
-fn iloc_negative_start_raises() {
+fn iloc_negative_start_works_m47() {
     let src = "\
 from tabular import Column, ColumnI64, DataFrame
 import tabular
 fn main() -> i32:
     vs: List[i64] = []
-    vs.append(0i64)
-    vs.append(1i64)
+    vs.append(10i64)
+    vs.append(20i64)
+    vs.append(30i64)
     c: ColumnI64 = tabular.col_i64_simple(vs)
     cn: List[str] = []
     cn.append(\"x\")
     cs: List[Column] = []
     cs.append(c)
     df: DataFrame = tabular.from_columns(cn, cs)
-    try:
-        s: DataFrame = df.iloc(-1i64, 1i64)
-        println(\"no-raise\")
-    except ValueError:
-        println(\"got-valueerror\")
+    # iloc(-2, 3) on a 3-row frame = rows [1, 2] (last 2).
+    s: DataFrame = df.iloc(-2i64, 3i64)
+    println(\"nrows=\" + str(s.length()))
     return 0
 ";
-    let out = run("iloc_neg", src);
-    assert!(out.contains("got-valueerror"), "got: {out:?}");
+    let out = run("iloc_neg_m47", src);
+    assert!(out.contains("nrows=2"), "got: {out:?}");
 }
 
 // ── Phase B: rolling ─────────────────────────────────────────────────

@@ -7073,6 +7073,26 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         NativeFn::M46TabDfPivotTableAggfuncList  => m46_df_pivot_table_aggfunc_list(interp, args),
         NativeFn::M46TabDfPivotTableMargins      => m46_df_pivot_table_margins(interp, args),
 
+        // ── M47: tabular polish ──
+        NativeFn::M47TabDfIloc2d                     => m47_df_iloc_2d(interp, args),
+        NativeFn::M47TabColI64RollingSumMinPeriods   => m47_col_rolling_min_periods(interp, args, "i64", "sum"),
+        NativeFn::M47TabColI64RollingMeanMinPeriods  => m47_col_rolling_min_periods(interp, args, "i64", "mean"),
+        NativeFn::M47TabColI64RollingMinMinPeriods   => m47_col_rolling_min_periods(interp, args, "i64", "min"),
+        NativeFn::M47TabColI64RollingMaxMinPeriods   => m47_col_rolling_min_periods(interp, args, "i64", "max"),
+        NativeFn::M47TabColI64RollingStdMinPeriods   => m47_col_rolling_min_periods(interp, args, "i64", "std"),
+        NativeFn::M47TabColF64RollingSumMinPeriods   => m47_col_rolling_min_periods(interp, args, "f64", "sum"),
+        NativeFn::M47TabColF64RollingMeanMinPeriods  => m47_col_rolling_min_periods(interp, args, "f64", "mean"),
+        NativeFn::M47TabColF64RollingMinMinPeriods   => m47_col_rolling_min_periods(interp, args, "f64", "min"),
+        NativeFn::M47TabColF64RollingMaxMinPeriods   => m47_col_rolling_min_periods(interp, args, "f64", "max"),
+        NativeFn::M47TabColF64RollingStdMinPeriods   => m47_col_rolling_min_periods(interp, args, "f64", "std"),
+        NativeFn::M47TabColCategorical               => m47_col_categorical(interp, args),
+        NativeFn::M47TabColCategoricalWithNulls      => m47_col_categorical_with_nulls(interp, args),
+        NativeFn::M47TabColCategoricalCodes          => m47_col_cat_codes(interp, args),
+        NativeFn::M47TabColCategoricalCategories     => m47_col_cat_categories(interp, args),
+        NativeFn::M47TabColCategoricalToStrings      => m47_col_cat_to_strings(interp, args),
+        NativeFn::M47TabDfGetColumnCategorical       => m47_df_get_column_categorical(interp, args),
+        NativeFn::M47TabColCategoricalGet            => m47_col_cat_get(interp, args),
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
@@ -12017,6 +12037,10 @@ fn m37_col_dtype(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError>
         "ColumnStr" => "str",
         "ColumnBool" => "bool",
         "ColumnDateTime" => "datetime",
+        // M47: ColumnCategorical surfaces as "categorical" — paired with
+        // the v1 to_strings() coercion contract documented in
+        // LANGUAGE_GUIDE.md.
+        "ColumnCategorical" => "categorical",
         _ => "unknown",
     };
     let p = interp.alloc_string(dtype);
@@ -16419,25 +16443,79 @@ fn m40_df_iloc(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let recv = arg_u64(args, 0);
     let start = arg_i64(args, 1);
     let stop = arg_i64(args, 2);
-    if start < 0 || stop < 0 {
-        return Err(VmError::UncaughtException {
-            type_name: "ValueError".into(),
-            message: format!(
-                "DataFrame.iloc: negative indices not supported (start={}, stop={})",
-                start, stop
-            ),
-        });
-    }
     let (names_lst, _, nrows) = m37_df_fields(recv);
     let names = m37_read_list_str_lst(names_lst);
     let col_ptrs = m37_df_col_ptrs(recv);
-    let s = (start as usize).min(nrows as usize);
-    let e = (stop  as usize).min(nrows as usize);
+    // M47: Python-style negative indices on both bounds.  `-1` means
+    // `nrows - 1` (last row); `-N` means `nrows - N`.  After
+    // resolution we still clamp to [0, nrows] like M40 did.  Out-of-
+    // range positive bounds still clamp (don't raise) — only the
+    // explicit-rejection contract goes away.
+    let m47_resolve = |x: i64, n: i64| -> i64 {
+        if x < 0 { x + n } else { x }
+    };
+    let resolved_start = m47_resolve(start, nrows);
+    let resolved_stop = m47_resolve(stop, nrows);
+    let s = resolved_start.max(0).min(nrows) as usize;
+    let e = resolved_stop.max(0).min(nrows) as usize;
     let take: Vec<usize> = if s < e { (s..e).collect() } else { Vec::new() };
     let new_cols: Vec<u64> = col_ptrs.iter().map(|cp| m37_column_take(interp, *cp, &take)).collect();
     // M42: propagate parent's index sliced to [s, e).
     // M44: also propagate a MultiIndex sliced to [s, e).
     Ok(m44_permute_multiindex_into_df(interp, recv, &names, &new_cols, take.len() as i64, &take))
+}
+
+/// M47 Phase A: `DataFrame.iloc_2d(row_start, row_stop, col_start, col_stop)`.
+///
+/// Half-open `[row_start, row_stop) × [col_start, col_stop)` slice
+/// — both axes accept Python-style negative indices.  Preserves the
+/// parent's index (M44-style propagation through the row dimension).
+///
+/// Why a separate method instead of overloading `iloc`?  Distinct arity
+/// makes the resolver dispatch trivial — `iloc(start, stop)` is row-only
+/// (2-arg), `iloc_2d(row_start, row_stop, col_start, col_stop)` is both
+/// dimensions (4-arg).  Matches the M47 brief's recommendation.
+fn m47_df_iloc_2d(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let m47_recv = arg_u64(args, 0);
+    let m47_row_start = arg_i64(args, 1);
+    let m47_row_stop = arg_i64(args, 2);
+    let m47_col_start = arg_i64(args, 3);
+    let m47_col_stop = arg_i64(args, 4);
+    let (m47_names_lst, _, m47_nrows) = m37_df_fields(m47_recv);
+    let m47_names_all = m37_read_list_str_lst(m47_names_lst);
+    let m47_col_ptrs_all = m37_df_col_ptrs(m47_recv);
+    let m47_ncols = m47_col_ptrs_all.len() as i64;
+    // Python-style negative resolution on both axes.
+    let m47_resolve = |x: i64, n: i64| -> i64 {
+        if x < 0 { x + n } else { x }
+    };
+    let m47_row_s = m47_resolve(m47_row_start, m47_nrows).max(0).min(m47_nrows) as usize;
+    let m47_row_e = m47_resolve(m47_row_stop,  m47_nrows).max(0).min(m47_nrows) as usize;
+    let m47_col_s = m47_resolve(m47_col_start, m47_ncols).max(0).min(m47_ncols) as usize;
+    let m47_col_e = m47_resolve(m47_col_stop,  m47_ncols).max(0).min(m47_ncols) as usize;
+    let m47_take: Vec<usize> = if m47_row_s < m47_row_e {
+        (m47_row_s..m47_row_e).collect()
+    } else {
+        Vec::new()
+    };
+    // Slice the columns first by the column range, then take rows.
+    let m47_picked_names: Vec<String> = if m47_col_s < m47_col_e {
+        m47_names_all[m47_col_s..m47_col_e].to_vec()
+    } else {
+        Vec::new()
+    };
+    let m47_picked_cols: Vec<u64> = if m47_col_s < m47_col_e {
+        m47_col_ptrs_all[m47_col_s..m47_col_e].to_vec()
+    } else {
+        Vec::new()
+    };
+    let m47_new_cols: Vec<u64> = m47_picked_cols.iter()
+        .map(|cp| m37_column_take(interp, *cp, &m47_take))
+        .collect();
+    Ok(m44_permute_multiindex_into_df(
+        interp, m47_recv, &m47_picked_names, &m47_new_cols,
+        m47_take.len() as i64, &m47_take,
+    ))
 }
 
 // ── M40 Phase B: rolling-window aggregations ──────────────────────────
@@ -19409,6 +19487,443 @@ fn m46_outer_level_with_nulls(
         }
     }
     m46_build_column(interp, cls, &out_i64, &out_f64, &out_str, &out_bool, &out_nulls)
+}
+
+// ═════════════════════════════════════════════════════════════════════
+//  M47 — tabular polish (iloc 2-D + negative iloc + rolling
+//  Welford/min_periods + ColumnCategorical)
+//
+//  iloc 2-D + negative iloc handlers live above (`m47_df_iloc_2d` +
+//  the extended `m40_df_iloc`); the rest of the M47 surface lives
+//  below.  Variable prefix `m47_` per the brief.
+// ═════════════════════════════════════════════════════════════════════
+
+/// M47 Phase B: `Column<dtype>.rolling_<op>_min_periods(window, min_periods)`.
+///
+/// Same as M40's `rolling_<op>(window)` but emits null whenever the
+/// window has fewer than `min_periods` non-null cells.  This is the
+/// pandas `min_periods` flag — useful when the user wants partial
+/// windows to fill in (e.g. `min_periods=1` makes every position emit
+/// even on a window of mostly nulls).
+///
+/// Valid `min_periods` range: `1 <= min_periods <= window`.  Otherwise
+/// `ValueError`.
+///
+/// Numerical note for `op == "std"`: this handler uses Welford's
+/// online algorithm internally (recompute the window's M2 state from
+/// scratch each output position — Option 1 of the brief).  The M40
+/// `rolling_std` keeps using the naive sumsq formula for backwards bit-
+/// identicality; M47 promotes the Welford form for the new
+/// min_periods variant where the contract is fresh.
+fn m47_col_rolling_min_periods(
+    interp: &mut Interpreter,
+    args: &[u64],
+    dtype: &str,
+    op: &str,
+) -> Result<u64, VmError> {
+    let m47_recv = arg_u64(args, 0);
+    let m47_window = arg_i64(args, 1);
+    let m47_min_periods = arg_i64(args, 2);
+    let (m47_vals, m47_nulls, m47_length) = m37_col_fields(m47_recv);
+    let m47_n = m47_length as usize;
+    if m47_window < 1 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "Column.rolling_{}_min_periods: window must be >= 1, got {}",
+                op, m47_window
+            ),
+        });
+    }
+    if (m47_window as usize) > m47_n {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "Column.rolling_{}_min_periods: window {} exceeds column length {}",
+                op, m47_window, m47_n
+            ),
+        });
+    }
+    if m47_min_periods < 1 || m47_min_periods > m47_window {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "Column.rolling_{}_min_periods: min_periods {} out of range [1, {}]",
+                op, m47_min_periods, m47_window
+            ),
+        });
+    }
+    let m47_w = m47_window as usize;
+    let m47_mp = m47_min_periods as usize;
+    let m47_ns = m37_read_list_bool(m47_nulls);
+    // For each output position i: collect the non-null cells in the
+    // backward-looking window of size up to w that ends at i (i.e. the
+    // window is `[max(0, i-w+1), i]`).  Output is null if the count is
+    // less than min_periods.
+    let m47_out_dtype = match op {
+        "mean" | "std" => "f64",
+        _ => dtype,
+    };
+    let m47_out_cls = m40_class_name_for_dtype(m47_out_dtype);
+    let mut m47_out_nulls: Vec<bool> = vec![true; m47_n];
+    // Pre-compute per-position the indices of the non-null cells in
+    // the window — the same data feeds every per-op branch.
+    let m47_window_starts: Vec<usize> = (0..m47_n)
+        .map(|i| if i + 1 >= m47_w { i + 1 - m47_w } else { 0 })
+        .collect();
+    match (dtype, m47_out_dtype) {
+        ("i64", "i64") => {
+            let m47_vs = m37_read_list_i64(m47_vals);
+            let mut m47_out: Vec<i64> = vec![0; m47_n];
+            for i in 0..m47_n {
+                let m47_lo = m47_window_starts[i];
+                let mut m47_nn: Vec<i64> = Vec::with_capacity(m47_w);
+                for j in m47_lo..=i {
+                    if !m47_ns.get(j).copied().unwrap_or(false) {
+                        m47_nn.push(m47_vs[j]);
+                    }
+                }
+                if m47_nn.len() < m47_mp { continue; }
+                m47_out_nulls[i] = false;
+                m47_out[i] = match op {
+                    "sum" => m47_nn.iter().fold(0i64, |a, b| a.wrapping_add(*b)),
+                    "min" => *m47_nn.iter().min().unwrap_or(&0),
+                    "max" => *m47_nn.iter().max().unwrap_or(&0),
+                    _ => 0,
+                };
+            }
+            let v_lst = m37_alloc_list_i64(interp, &m47_out);
+            let n_lst = m37_alloc_list_bool(interp, &m47_out_nulls);
+            Ok(m37_alloc_column(interp, &m47_out_cls, v_lst, n_lst, m47_n as i64) as u64)
+        }
+        ("i64", "f64") => {
+            // mean / std on i64 input.
+            let m47_vs = m37_read_list_i64(m47_vals);
+            let mut m47_out: Vec<f64> = vec![0.0; m47_n];
+            for i in 0..m47_n {
+                let m47_lo = m47_window_starts[i];
+                let mut m47_nn: Vec<f64> = Vec::with_capacity(m47_w);
+                for j in m47_lo..=i {
+                    if !m47_ns.get(j).copied().unwrap_or(false) {
+                        m47_nn.push(m47_vs[j] as f64);
+                    }
+                }
+                if m47_nn.len() < m47_mp { continue; }
+                m47_out_nulls[i] = false;
+                if op == "mean" {
+                    let m47_sum: f64 = m47_nn.iter().sum();
+                    m47_out[i] = m47_sum / (m47_nn.len() as f64);
+                } else if op == "std" {
+                    m47_out[i] = m47_welford_std_sample(&m47_nn);
+                }
+            }
+            let v_lst = m37_alloc_list_f64(interp, &m47_out);
+            let n_lst = m37_alloc_list_bool(interp, &m47_out_nulls);
+            Ok(m37_alloc_column(interp, &m47_out_cls, v_lst, n_lst, m47_n as i64) as u64)
+        }
+        ("f64", _) => {
+            let m47_vs = m37_read_list_f64(m47_vals);
+            let mut m47_out: Vec<f64> = vec![0.0; m47_n];
+            for i in 0..m47_n {
+                let m47_lo = m47_window_starts[i];
+                let mut m47_nn: Vec<f64> = Vec::with_capacity(m47_w);
+                for j in m47_lo..=i {
+                    if !m47_ns.get(j).copied().unwrap_or(false) {
+                        m47_nn.push(m47_vs[j]);
+                    }
+                }
+                if m47_nn.len() < m47_mp { continue; }
+                m47_out_nulls[i] = false;
+                m47_out[i] = match op {
+                    "sum" => m47_nn.iter().sum::<f64>(),
+                    "mean" => m47_nn.iter().sum::<f64>() / (m47_nn.len() as f64),
+                    "min" => {
+                        let mut acc = m47_nn[0];
+                        for v in &m47_nn[1..] {
+                            if v.is_nan() || acc.is_nan() { acc = f64::NAN; }
+                            else if *v < acc { acc = *v; }
+                        }
+                        acc
+                    }
+                    "max" => {
+                        let mut acc = m47_nn[0];
+                        for v in &m47_nn[1..] {
+                            if v.is_nan() || acc.is_nan() { acc = f64::NAN; }
+                            else if *v > acc { acc = *v; }
+                        }
+                        acc
+                    }
+                    "std" => m47_welford_std_sample(&m47_nn),
+                    _ => 0.0,
+                };
+            }
+            let v_lst = m37_alloc_list_f64(interp, &m47_out);
+            let n_lst = m37_alloc_list_bool(interp, &m47_out_nulls);
+            Ok(m37_alloc_column(interp, &m47_out_cls, v_lst, n_lst, m47_n as i64) as u64)
+        }
+        _ => Err(VmError::Trap(format!(
+            "m47_col_rolling_min_periods: bad dtype/op ({:?}, {:?})", dtype, op
+        ))),
+    }
+}
+
+/// Welford's online algorithm for sample standard deviation
+/// (`n-1` denominator).
+///
+/// Mean and `M2` (sum of squared deviations from the running mean) are
+/// updated incrementally:
+///
+/// ```text
+/// mean_n = mean_{n-1} + (x - mean_{n-1}) / n
+/// M2_n   = M2_{n-1} + (x - mean_{n-1}) * (x - mean_n)
+/// var    = M2_n / (n - 1)   // sample
+/// ```
+///
+/// Returns `0.0` for inputs of length 0 or 1 (sample variance
+/// undefined — matches M40's behavior).  This is the Option 1 of the
+/// brief: recompute over the window each output position; the higher
+/// numerical stability vs. the naive `sumsq - n*mean^2` formula is the
+/// whole point of the refactor.
+fn m47_welford_std_sample(values: &[f64]) -> f64 {
+    let m47_n = values.len();
+    if m47_n <= 1 { return 0.0; }
+    let mut m47_mean = 0.0_f64;
+    let mut m47_m2 = 0.0_f64;
+    for (i, x) in values.iter().enumerate() {
+        let m47_k = (i + 1) as f64;
+        let m47_delta = *x - m47_mean;
+        m47_mean += m47_delta / m47_k;
+        let m47_delta2 = *x - m47_mean;
+        m47_m2 += m47_delta * m47_delta2;
+    }
+    let m47_var = m47_m2 / ((m47_n - 1) as f64);
+    if m47_var > 0.0 { m47_var.sqrt() } else { 0.0 }
+}
+
+// ── M47 Phase C: ColumnCategorical ────────────────────────────────────
+//
+// Layout (32-byte payload): codes (offset 0), nulls (offset 8), length
+// (offset 16), categories (offset 24).  The first three slots are
+// intentionally aligned with the M37 Column layout so every existing
+// `m37_col_fields` reader (length, is_null, null_count, m37_column_take
+// fallback) operates correctly on a ColumnCategorical pointer — the
+// "codes" list slots into the "values" position.
+//
+// v1 op integration: every existing op without a categorical-specific
+// branch routes through `to_strings()` to get a ColumnStr view.
+// Optimized codes-based hashing for group_by / merge equality is M48
+// follow-up (the brief's STOP CRITERIA #1 mention).
+
+/// Read the categories list pointer out of a ColumnCategorical
+/// receiver.  Mirrors `m37_col_fields` but pulls offset 24.
+fn m47_col_cat_categories_ptr(recv: u64) -> *const crate::object::ListRepr {
+    let obj = recv as *const u8;
+    if obj.is_null() { return std::ptr::null(); }
+    unsafe {
+        std::ptr::read_unaligned(obj.add(HDR + 24) as *const u64)
+            as *const crate::object::ListRepr
+    }
+}
+
+/// Allocate a fresh ColumnCategorical heap object.  Wraps
+/// `m34_alloc_class_obj` with the 32-byte payload (codes, nulls,
+/// length, categories) — the first three slots match the M37 layout.
+fn m47_alloc_col_categorical(
+    interp: &mut Interpreter,
+    codes_lst: *mut crate::object::ListRepr,
+    nulls_lst: *mut crate::object::ListRepr,
+    categories_lst: *mut crate::object::ListRepr,
+    length: i64,
+) -> *mut u8 {
+    let p = m34_alloc_class_obj(interp, "ColumnCategorical", 32);
+    unsafe {
+        let c_slot = p.add(HDR) as *mut u64;
+        let n_slot = p.add(HDR + 8) as *mut u64;
+        let l_slot = p.add(HDR + 16) as *mut i64;
+        let cats_slot = p.add(HDR + 24) as *mut u64;
+        std::ptr::write_unaligned(c_slot, codes_lst as u64);
+        std::ptr::write_unaligned(n_slot, nulls_lst as u64);
+        std::ptr::write_unaligned(l_slot, length);
+        std::ptr::write_unaligned(cats_slot, categories_lst as u64);
+    }
+    p
+}
+
+/// `tabular.col_categorical(values: List[str]) -> ColumnCategorical`.
+/// Builds `categories` by first-appearance order; `codes[i]` is the
+/// index of `values[i]` in `categories`.  All inputs treated as
+/// non-null.
+fn m47_col_categorical(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let m47_vals_lst = arg_u64(args, 0) as *const crate::object::ListRepr;
+    let m47_vs = m37_read_list_str_lst(m47_vals_lst);
+    let m47_n = m47_vs.len();
+    // Build categories by first-appearance order.
+    let mut m47_cats: Vec<String> = Vec::new();
+    let mut m47_index_of: std::collections::HashMap<String, i64> =
+        std::collections::HashMap::new();
+    let mut m47_codes: Vec<i64> = Vec::with_capacity(m47_n);
+    for v in &m47_vs {
+        let m47_code = if let Some(c) = m47_index_of.get(v) {
+            *c
+        } else {
+            let m47_c = m47_cats.len() as i64;
+            m47_cats.push(v.clone());
+            m47_index_of.insert(v.clone(), m47_c);
+            m47_c
+        };
+        m47_codes.push(m47_code);
+    }
+    let m47_nulls: Vec<bool> = vec![false; m47_n];
+    let m47_codes_lst = m37_alloc_list_i64(interp, &m47_codes);
+    let m47_nulls_lst = m37_alloc_list_bool(interp, &m47_nulls);
+    let m47_cats_lst = m37_alloc_list_str(interp, &m47_cats);
+    Ok(m47_alloc_col_categorical(
+        interp, m47_codes_lst, m47_nulls_lst, m47_cats_lst, m47_n as i64,
+    ) as u64)
+}
+
+/// `tabular.col_categorical_with_nulls(values, nulls) -> ColumnCategorical`.
+/// Same as `col_categorical` but the `nulls[i]=true` cells get
+/// `codes[i] = 0` (don't-care; the nulls mask controls).  Lengths
+/// must match.
+fn m47_col_categorical_with_nulls(
+    interp: &mut Interpreter,
+    args: &[u64],
+) -> Result<u64, VmError> {
+    let m47_vals_lst = arg_u64(args, 0) as *const crate::object::ListRepr;
+    let m47_nulls_lst = arg_u64(args, 1) as *const crate::object::ListRepr;
+    let m47_vs = m37_read_list_str_lst(m47_vals_lst);
+    let m47_ns = m37_read_list_bool(m47_nulls_lst);
+    m37_check_lengths_match(m47_vs.len(), m47_ns.len(), "tabular.col_categorical_with_nulls")?;
+    let mut m47_cats: Vec<String> = Vec::new();
+    let mut m47_index_of: std::collections::HashMap<String, i64> =
+        std::collections::HashMap::new();
+    let mut m47_codes: Vec<i64> = Vec::with_capacity(m47_vs.len());
+    for (i, v) in m47_vs.iter().enumerate() {
+        if m47_ns[i] {
+            m47_codes.push(0);
+            continue;
+        }
+        let m47_code = if let Some(c) = m47_index_of.get(v) {
+            *c
+        } else {
+            let m47_c = m47_cats.len() as i64;
+            m47_cats.push(v.clone());
+            m47_index_of.insert(v.clone(), m47_c);
+            m47_c
+        };
+        m47_codes.push(m47_code);
+    }
+    let m47_codes_lst = m37_alloc_list_i64(interp, &m47_codes);
+    let m47_nulls_lst_out = m37_alloc_list_bool(interp, &m47_ns);
+    let m47_cats_lst = m37_alloc_list_str(interp, &m47_cats);
+    Ok(m47_alloc_col_categorical(
+        interp, m47_codes_lst, m47_nulls_lst_out, m47_cats_lst, m47_vs.len() as i64,
+    ) as u64)
+}
+
+/// `ColumnCategorical.codes(self) -> ColumnI64`.  Returns the
+/// underlying code column (the codes list with a copy of the nulls
+/// mask).  Useful for users who want to do their own
+/// codes-based hashing.
+fn m47_col_cat_codes(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let m47_recv = arg_u64(args, 0);
+    let (m47_codes_lst, m47_nulls_lst, m47_len) = m37_col_fields(m47_recv);
+    let m47_codes = m37_read_list_i64(m47_codes_lst);
+    let m47_nulls = m37_read_list_bool(m47_nulls_lst);
+    let m47_v_lst = m37_alloc_list_i64(interp, &m47_codes);
+    let m47_n_lst = m37_alloc_list_bool(interp, &m47_nulls);
+    Ok(m37_alloc_column(interp, "ColumnI64", m47_v_lst, m47_n_lst, m47_len) as u64)
+}
+
+/// `ColumnCategorical.categories(self) -> ColumnStr`.  Returns the
+/// distinct-values column (first-appearance order), non-null cells
+/// only.
+fn m47_col_cat_categories(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let m47_recv = arg_u64(args, 0);
+    let m47_cats_lst_ptr = m47_col_cat_categories_ptr(m47_recv);
+    let m47_cats = m37_read_list_str_lst(m47_cats_lst_ptr);
+    let m47_k = m47_cats.len();
+    let m47_v_lst = m37_alloc_list_str(interp, &m47_cats);
+    let m47_n_lst = m37_alloc_list_bool(interp, &vec![false; m47_k]);
+    Ok(m37_alloc_column(interp, "ColumnStr", m47_v_lst, m47_n_lst, m47_k as i64) as u64)
+}
+
+/// `ColumnCategorical.to_strings(self) -> ColumnStr`.  Materializes
+/// the categorical column as a plain ColumnStr — the v1 coercion path
+/// every existing op uses internally for categorical inputs.
+fn m47_col_cat_to_strings(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let m47_recv = arg_u64(args, 0);
+    let (m47_codes_lst, m47_nulls_lst, m47_len) = m37_col_fields(m47_recv);
+    let m47_codes = m37_read_list_i64(m47_codes_lst);
+    let m47_nulls = m37_read_list_bool(m47_nulls_lst);
+    let m47_cats_ptr = m47_col_cat_categories_ptr(m47_recv);
+    let m47_cats = m37_read_list_str_lst(m47_cats_ptr);
+    let m47_out: Vec<String> = (0..m47_len as usize).map(|i| {
+        if m47_nulls.get(i).copied().unwrap_or(false) {
+            String::new()
+        } else {
+            let m47_c = m47_codes.get(i).copied().unwrap_or(0) as usize;
+            m47_cats.get(m47_c).cloned().unwrap_or_default()
+        }
+    }).collect();
+    let m47_v_lst = m37_alloc_list_str(interp, &m47_out);
+    let m47_n_lst = m37_alloc_list_bool(interp, &m47_nulls);
+    Ok(m37_alloc_column(interp, "ColumnStr", m47_v_lst, m47_n_lst, m47_len) as u64)
+}
+
+/// `ColumnCategorical.get(self, i: i64) -> str?`.  Returns the
+/// category string at row `i`, or none if the cell is null.  Mirrors
+/// `m37_col_str_get` but resolves through codes → categories.
+fn m47_col_cat_get(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let m47_recv = arg_u64(args, 0);
+    let m47_i = arg_i64(args, 1);
+    let (m47_codes_lst, m47_nulls_lst, m47_len) = m37_col_fields(m47_recv);
+    if m47_i < 0 || m47_i >= m47_len {
+        return Err(VmError::UncaughtException {
+            type_name: "IndexError".into(),
+            message: format!(
+                "ColumnCategorical.get: index {} out of range (len={})",
+                m47_i, m47_len
+            ),
+        });
+    }
+    let m47_nulls = m37_read_list_bool(m47_nulls_lst);
+    if m47_nulls.get(m47_i as usize).copied().unwrap_or(false) {
+        return Ok(NONE_SENTINEL);
+    }
+    let m47_codes = m37_read_list_i64(m47_codes_lst);
+    let m47_code = m47_codes.get(m47_i as usize).copied().unwrap_or(0);
+    let m47_cats_ptr = m47_col_cat_categories_ptr(m47_recv);
+    let m47_cats = m37_read_list_str_lst(m47_cats_ptr);
+    let m47_s = m47_cats.get(m47_code as usize).cloned().unwrap_or_default();
+    let m47_sp = interp.alloc_string(&m47_s);
+    Ok(m47_sp as u64)
+}
+
+/// `DataFrame.get_column_categorical(self, name) -> ColumnCategorical?`.
+/// Mirrors the M38 typed accessors — returns none for absent name OR
+/// wrong dtype.
+fn m47_df_get_column_categorical(
+    _interp: &mut Interpreter,
+    args: &[u64],
+) -> Result<u64, VmError> {
+    let m47_recv = arg_u64(args, 0);
+    let m47_name = arg_str(args, 1);
+    let (m47_names_lst, _, _) = m37_df_fields(m47_recv);
+    let m47_names = m37_read_list_str_lst(m47_names_lst);
+    let m47_col_ptrs = m37_df_col_ptrs(m47_recv);
+    let m47_idx = match m47_names.iter().position(|n| n == &m47_name) {
+        None => return Ok(NONE_SENTINEL),
+        Some(i) => i,
+    };
+    let m47_col = m47_col_ptrs.get(m47_idx).copied().unwrap_or(0);
+    if m47_col == 0 { return Ok(NONE_SENTINEL); }
+    let m47_cls = m38_col_class_name(m47_col);
+    if m47_cls != "ColumnCategorical" {
+        return Ok(NONE_SENTINEL);
+    }
+    Ok(m47_col)
 }
 
 #[cfg(test)]
