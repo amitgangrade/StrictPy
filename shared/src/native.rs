@@ -1297,6 +1297,40 @@ pub enum NativeFn {
     /// (epoch-ms) range filter.
     M49TabDfLocRangeMultiDateTime      = 1066,
 
+    // ── 1067-1090: M50a — `tabular.serve` HTTP transport + browser UI ──
+    //
+    // First milestone in the M50 desktop-UI sequence.  Ships a localhost
+    // HTTP/1.1 server (hand-rolled in `vm/src/builtins.rs::m50a_serve_loop`
+    // using std::net directly — no crate deps, no M28 socket stdlib, no
+    // M29 webserver framework dependency) that exposes a DataFrame as
+    // JSON + a minimal bundled HTML/JS frontend.  See LANGUAGE_GUIDE.md
+    // §11.39 for the v1 scope-down rationale.
+    //
+    // Server-side state: a `MutexedDataFrameIdRegistry` holding strong
+    // refs to the primary df (ID 0) plus derived dfs from filter/groupby
+    // operations (no LRU eviction in v1; relies on GC at the receiver-
+    // ref level — the registry holds `u64` raw pointers but the calling
+    // user code retains the receiver, so the underlying heap stays
+    // alive).
+    //
+    // Both `serve` and `serve_with_timeout` block the calling thread.
+    // Tests use `serve_with_timeout` exclusively (calling the unbounded
+    // `serve()` from a test would hang the test runner).
+    /// `tabular.serve(df: DataFrame, port: i32) -> i32`.  Boots a
+    /// localhost HTTP/1.1 server on 127.0.0.1:<port>.  Runs until
+    /// Ctrl-C or the parent process dies.  For interactive demo use
+    /// only; test infrastructure should use `serve_with_timeout`.
+    /// Returns the exit code (0 = clean shutdown, nonzero = error).
+    M50aTabServe                       = 1067,
+    /// `tabular.serve_with_timeout(df: DataFrame, port: i32,
+    /// timeout_ms: i64) -> i32`.  Same as `serve` but shuts down after
+    /// `timeout_ms` milliseconds.  Returns 0 on clean timeout, nonzero
+    /// on bind/I/O error.
+    M50aTabServeWithTimeout            = 1068,
+    // 1069-1090 reserved for v1 follow-ups (M50b/M50c — sortable
+    // headers, composite filters, virtual scroll, CSV download, pivot
+    // UI).
+
     // ── 250–289: M22 P2A (argparse + collections + csv) ─────────────────
     // Phase 2 starts here.  P2A's job is to bring three high-ROI stdlib
     // modules online on top of the M19 stdlib-module-table:
@@ -2884,6 +2918,9 @@ impl NativeFn {
             1064 => Some(Self::M49TabDfLocRangeMultiI64),
             1065 => Some(Self::M49TabDfLocRangeMultiStr),
             1066 => Some(Self::M49TabDfLocRangeMultiDateTime),
+            // ── M50a (tabular.serve HTTP transport) ──────────────
+            1067 => Some(Self::M50aTabServe),
+            1068 => Some(Self::M50aTabServeWithTimeout),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

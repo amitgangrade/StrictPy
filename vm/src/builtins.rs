@@ -7100,6 +7100,10 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         NativeFn::M49TabDfLocRangeMultiStr           => m49_df_loc_range_multi_str(interp, args),
         NativeFn::M49TabDfLocRangeMultiDateTime      => m49_df_loc_range_multi_datetime(interp, args),
 
+        // ── M50a: tabular.serve HTTP transport ──
+        NativeFn::M50aTabServe                       => m50a_serve_blocking(interp, args),
+        NativeFn::M50aTabServeWithTimeout            => m50a_serve_with_timeout(interp, args),
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
@@ -20823,6 +20827,1146 @@ fn m49_col_cat_is_ordered(_interp: &mut Interpreter, args: &[u64]) -> Result<u64
     }
     let m49_has_unused = m49_used.iter().any(|u| !u);
     Ok(if m49_has_unused { 1 } else { 0 })
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//  M50a — `tabular.serve` HTTP transport + minimal browser-tab frontend
+// ─────────────────────────────────────────────────────────────────────
+//
+// First milestone of the M50 desktop-UI sequence.  Ships a hand-rolled
+// HTTP/1.1 server (no `hyper`, no `axum`, no `tokio` — std::net is
+// sufficient for localhost low-frequency UI traffic) that exposes a
+// DataFrame as JSON + a minimal bundled HTML/JS frontend.
+//
+// Key design calls:
+//   - Server-side DataFrame ID registry lives in a function-local
+//     `Mutex<HashMap<i64, u64>>` (raw DataFrame heap pointer).  The
+//     calling user code retains the receiver so the heap object stays
+//     alive across the server's lifetime; no GC integration needed.
+//   - Timeout is implemented via TcpListener::set_nonblocking(true) +
+//     a periodic accept-poll loop that wakes every 50ms to check the
+//     deadline.  When the deadline passes the loop returns Ok(0).
+//   - Request parsing is a minimal HTTP/1.1 GET/POST request-line +
+//     header parser; we only need Content-Length for POST bodies.
+//   - No keep-alive — each connection serves one request, then closes.
+//   - Vanilla-JS frontend is bundled as a Rust string constant.
+
+use std::collections::HashMap;
+use std::io::{Read as M50aRead, Write as M50aWrite};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// Server-side state shared by the handler functions running inside a
+/// single `serve_with_timeout` invocation.
+struct M50aServerState {
+    /// Map from registry ID (0 = primary df) to DataFrame heap pointer.
+    m50a_df_registry: HashMap<i64, u64>,
+    /// Next ID to hand out for a derived (filter/groupby) DataFrame.
+    m50a_next_id: i64,
+}
+
+impl M50aServerState {
+    fn new(m50a_primary_df: u64) -> Self {
+        let mut s = Self {
+            m50a_df_registry: HashMap::new(),
+            m50a_next_id: 1,
+        };
+        s.m50a_df_registry.insert(0, m50a_primary_df);
+        s
+    }
+
+    fn lookup(&self, m50a_id: i64) -> Option<u64> {
+        self.m50a_df_registry.get(&m50a_id).copied()
+    }
+
+    fn register(&mut self, m50a_df: u64) -> i64 {
+        let m50a_id = self.m50a_next_id;
+        self.m50a_next_id += 1;
+        self.m50a_df_registry.insert(m50a_id, m50a_df);
+        m50a_id
+    }
+}
+
+/// Bundled minimal HTML+JS frontend (Phase D).  See LANGUAGE_GUIDE.md
+/// §11.39 for the v1 deliberate simplifications.
+const M50A_BUNDLED_HTML: &str = r#"<!DOCTYPE html>
+<html>
+<head>
+<title>tabular.serve</title>
+<style>
+body { font-family: monospace; margin: 8px; }
+#header { font-weight: bold; margin-bottom: 6px; }
+#filter-bar, #groupby-bar { margin-bottom: 6px; padding: 4px; border: 1px solid #ccc; }
+#filter-bar input, #groupby-bar input { font-family: monospace; }
+button { margin-left: 4px; }
+#status { margin-top: 6px; padding: 4px; background: #f4f4f4; }
+table { border-collapse: collapse; font-size: 12px; }
+th { background: #eee; padding: 2px 6px; border: 1px solid #aaa; position: sticky; top: 0; }
+td { padding: 2px 6px; border: 1px solid #ddd; }
+td.null { color: #999; font-style: italic; }
+</style>
+</head>
+<body>
+<div id="header">tabular.serve</div>
+<div id="filter-bar"></div>
+<div id="groupby-bar"></div>
+<table id="data"><thead></thead><tbody></tbody></table>
+<div id="status"></div>
+<script>
+(function() {
+  var m50aCurDf = 0;
+  var m50aSchema = null;
+  var m50aRowsLoaded = 0;
+  var m50aPageSize = 100;
+  var m50aLoading = false;
+
+  function api(path) { return fetch(path).then(function(r){ return r.json(); }); }
+  function apiPost(path, body) {
+    return fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})
+           .then(function(r){ return r.json(); });
+  }
+
+  function renderHeader() {
+    var thead = document.querySelector('#data thead');
+    thead.innerHTML = '';
+    var tr = document.createElement('tr');
+    for (var i = 0; i < m50aSchema.names.length; i++) {
+      var th = document.createElement('th');
+      th.textContent = m50aSchema.names[i] + ' (' + m50aSchema.dtypes[i] + ')';
+      tr.appendChild(th);
+    }
+    thead.appendChild(tr);
+  }
+
+  function renderRows(rows, append) {
+    var tbody = document.querySelector('#data tbody');
+    if (!append) tbody.innerHTML = '';
+    for (var i = 0; i < rows.length; i++) {
+      var tr = document.createElement('tr');
+      for (var j = 0; j < rows[i].length; j++) {
+        var td = document.createElement('td');
+        var v = rows[i][j];
+        if (v === null) { td.textContent = 'null'; td.className = 'null'; }
+        else { td.textContent = String(v); }
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+  }
+
+  function renderFilterBar() {
+    var bar = document.getElementById('filter-bar');
+    bar.innerHTML = 'Filter: ';
+    var colSel = document.createElement('select');
+    for (var i = 0; i < m50aSchema.names.length; i++) {
+      var opt = document.createElement('option');
+      opt.value = m50aSchema.names[i];
+      opt.textContent = m50aSchema.names[i];
+      colSel.appendChild(opt);
+    }
+    var opSel = document.createElement('select');
+    var ops = ['eq','ne','gt','lt','ge','le'];
+    for (var k = 0; k < ops.length; k++) {
+      var o = document.createElement('option'); o.value = ops[k]; o.textContent = ops[k]; opSel.appendChild(o);
+    }
+    var valInp = document.createElement('input'); valInp.placeholder = 'value';
+    var btn = document.createElement('button'); btn.textContent = 'Apply';
+    btn.onclick = function() { submitFilter(colSel.value, opSel.value, valInp.value); };
+    var reset = document.createElement('button'); reset.textContent = 'Reset';
+    reset.onclick = function() { m50aCurDf = 0; reload(); };
+    bar.appendChild(colSel); bar.appendChild(opSel); bar.appendChild(valInp);
+    bar.appendChild(btn); bar.appendChild(reset);
+  }
+
+  function renderGroupbyBar() {
+    var bar = document.getElementById('groupby-bar');
+    bar.innerHTML = 'Group by: ';
+    var checks = [];
+    for (var i = 0; i < m50aSchema.names.length; i++) {
+      var lbl = document.createElement('label'); lbl.style.marginRight = '6px';
+      var cb = document.createElement('input'); cb.type = 'checkbox'; cb.value = m50aSchema.names[i];
+      checks.push(cb);
+      lbl.appendChild(cb); lbl.appendChild(document.createTextNode(m50aSchema.names[i]));
+      bar.appendChild(lbl);
+    }
+    bar.appendChild(document.createTextNode(' | Agg col: '));
+    var aggCol = document.createElement('select');
+    for (var i = 0; i < m50aSchema.names.length; i++) {
+      var opt = document.createElement('option'); opt.value = m50aSchema.names[i]; opt.textContent = m50aSchema.names[i];
+      aggCol.appendChild(opt);
+    }
+    var aggOp = document.createElement('select');
+    var ops = ['sum','mean','min','max','count'];
+    for (var k = 0; k < ops.length; k++) {
+      var o = document.createElement('option'); o.value = ops[k]; o.textContent = ops[k]; aggOp.appendChild(o);
+    }
+    var btn = document.createElement('button'); btn.textContent = 'Group';
+    btn.onclick = function() {
+      var by = [];
+      for (var i = 0; i < checks.length; i++) if (checks[i].checked) by.push(checks[i].value);
+      submitGroupby(by, aggCol.value, aggOp.value);
+    };
+    bar.appendChild(aggCol); bar.appendChild(aggOp); bar.appendChild(btn);
+  }
+
+  function setStatus(text) { document.getElementById('status').textContent = text; }
+
+  function submitFilter(col, op, raw) {
+    var v = raw;
+    var idx = m50aSchema.names.indexOf(col);
+    var dt = idx >= 0 ? m50aSchema.dtypes[idx] : 'str';
+    if (dt === 'i64' || dt === 'datetime') v = parseInt(raw, 10);
+    else if (dt === 'f64') v = parseFloat(raw);
+    else if (dt === 'bool') v = (raw === 'true' || raw === '1');
+    apiPost('/api/filter', {df: m50aCurDf, column: col, op: op, value: v}).then(function(r) {
+      if (r.error) { setStatus('Filter error: ' + r.error); return; }
+      m50aCurDf = r.df;
+      reload();
+    });
+  }
+
+  function submitGroupby(by, aggCol, aggOp) {
+    if (by.length === 0) { setStatus('Pick at least one group-by column.'); return; }
+    var agg = {}; agg[aggCol] = aggOp;
+    apiPost('/api/groupby', {df: m50aCurDf, by: by, agg: agg}).then(function(r) {
+      if (r.error) { setStatus('Groupby error: ' + r.error); return; }
+      m50aCurDf = r.df;
+      reload();
+    });
+  }
+
+  function reload() {
+    api('/api/schema?df=' + m50aCurDf).then(function(s) {
+      m50aSchema = s; renderHeader(); renderFilterBar(); renderGroupbyBar();
+      m50aRowsLoaded = 0;
+      fetchMore();
+    });
+  }
+
+  function fetchMore() {
+    if (m50aLoading) return;
+    if (m50aSchema && m50aRowsLoaded >= m50aSchema.nrows) return;
+    m50aLoading = true;
+    var start = m50aRowsLoaded;
+    var stop = Math.min(m50aSchema.nrows, start + m50aPageSize);
+    api('/api/rows?df=' + m50aCurDf + '&start=' + start + '&stop=' + stop).then(function(r) {
+      renderRows(r.rows, start > 0);
+      m50aRowsLoaded = stop;
+      setStatus('df=' + m50aCurDf + ' rows=' + m50aRowsLoaded + '/' + m50aSchema.nrows);
+      m50aLoading = false;
+    });
+  }
+
+  window.addEventListener('scroll', function() {
+    if (window.scrollY + window.innerHeight > document.body.scrollHeight - 200) fetchMore();
+  });
+
+  reload();
+})();
+</script>
+</body></html>
+"#;
+
+/// `tabular.serve(df, port)` — boots the server in blocking mode,
+/// running until the process is killed.  Internally calls
+/// `m50a_serve_loop` with a sentinel "no deadline" timeout
+/// (`Duration::from_secs(u64::MAX / 2)` — effectively forever).
+fn m50a_serve_blocking(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let m50a_df = arg_u64(args, 0);
+    let m50a_port = arg_i64(args, 1) as u16;
+    // Sentinel: 24h is plenty for an interactive demo session.  Real
+    // production code wraps this in a Thread anyway.
+    let m50a_deadline = Instant::now() + Duration::from_secs(60 * 60 * 24);
+    let code = m50a_serve_loop(interp, m50a_df, m50a_port, m50a_deadline)?;
+    Ok(code as u64)
+}
+
+/// `tabular.serve_with_timeout(df, port, timeout_ms)` — the test-
+/// friendly variant.  Returns 0 on clean timeout shutdown.
+fn m50a_serve_with_timeout(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let m50a_df = arg_u64(args, 0);
+    let m50a_port = arg_i64(args, 1) as u16;
+    let m50a_timeout_ms = arg_i64(args, 2).max(0) as u64;
+    let m50a_deadline = Instant::now() + Duration::from_millis(m50a_timeout_ms);
+    let code = m50a_serve_loop(interp, m50a_df, m50a_port, m50a_deadline)?;
+    Ok(code as u64)
+}
+
+/// The HTTP/1.1 server loop.  Binds on `127.0.0.1:<port>`, accepts
+/// connections in nonblocking mode polling every 50ms, dispatches
+/// each request to `m50a_handle_request`, writes the response, closes
+/// the connection.  Stops when `Instant::now() >= deadline`.
+fn m50a_serve_loop(
+    interp: &mut Interpreter,
+    m50a_primary_df: u64,
+    m50a_port: u16,
+    m50a_deadline: Instant,
+) -> Result<i32, VmError> {
+    let m50a_listener = std::net::TcpListener::bind(("127.0.0.1", m50a_port)).map_err(|e| {
+        VmError::UncaughtException {
+            type_name: "IOError".into(),
+            message: format!("tabular.serve: bind 127.0.0.1:{}: {}", m50a_port, e),
+        }
+    })?;
+    m50a_listener.set_nonblocking(true).map_err(|e| VmError::UncaughtException {
+        type_name: "IOError".into(),
+        message: format!("tabular.serve: set_nonblocking: {}", e),
+    })?;
+
+    let mut m50a_state = M50aServerState::new(m50a_primary_df);
+
+    loop {
+        if Instant::now() >= m50a_deadline {
+            return Ok(0);
+        }
+        match m50a_listener.accept() {
+            Ok((mut m50a_stream, _peer)) => {
+                // Per-connection timeouts so a stalled client doesn't
+                // hang the loop.  500ms is plenty for localhost.
+                let _ = m50a_stream.set_read_timeout(Some(Duration::from_millis(500)));
+                let _ = m50a_stream.set_write_timeout(Some(Duration::from_millis(500)));
+                let m50a_req = match m50a_read_request(&mut m50a_stream) {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+                let m50a_resp = m50a_handle_request(interp, &mut m50a_state, &m50a_req);
+                let _ = m50a_write_response(&mut m50a_stream, &m50a_resp);
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+        }
+    }
+}
+
+/// Parsed HTTP/1.1 request the dispatcher cares about.
+struct M50aRequest {
+    m50a_method: String,
+    m50a_uri: String,
+    m50a_body: String,
+}
+
+/// Read a full HTTP/1.1 request from the stream.  Parses the request
+/// line + headers; if Content-Length is present, reads exactly that
+/// many bytes from the body.  Limits the request to 64KiB to avoid
+/// runaway memory use.
+fn m50a_read_request(m50a_stream: &mut std::net::TcpStream) -> std::io::Result<M50aRequest> {
+    const M50A_MAX_REQUEST_BYTES: usize = 64 * 1024;
+    let mut m50a_buf: Vec<u8> = Vec::with_capacity(1024);
+    let mut m50a_chunk = [0u8; 1024];
+
+    // Read until we have the full header block (\r\n\r\n).
+    let m50a_header_end_offset: usize;
+    loop {
+        if m50a_buf.len() > M50A_MAX_REQUEST_BYTES {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "request too large"));
+        }
+        // Look for \r\n\r\n in the buffer so far.
+        if let Some(pos) = m50a_find_double_crlf(&m50a_buf) {
+            m50a_header_end_offset = pos + 4;
+            break;
+        }
+        let n = m50a_stream.read(&mut m50a_chunk)?;
+        if n == 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "no header end"));
+        }
+        m50a_buf.extend_from_slice(&m50a_chunk[..n]);
+    }
+
+    // Parse request line + headers.
+    let m50a_header_str = String::from_utf8_lossy(&m50a_buf[..m50a_header_end_offset]).to_string();
+    let mut m50a_lines = m50a_header_str.split("\r\n");
+    let m50a_request_line = m50a_lines.next().unwrap_or("").to_string();
+    let mut m50a_parts = m50a_request_line.split_whitespace();
+    let m50a_method = m50a_parts.next().unwrap_or("").to_string();
+    let m50a_uri = m50a_parts.next().unwrap_or("/").to_string();
+
+    let mut m50a_content_length: usize = 0;
+    for line in m50a_lines {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            if k.trim().eq_ignore_ascii_case("content-length") {
+                m50a_content_length = v.trim().parse::<usize>().unwrap_or(0);
+            }
+        }
+    }
+
+    // Read body if present.
+    let m50a_body_already = m50a_buf.len() - m50a_header_end_offset;
+    let mut m50a_body_bytes: Vec<u8> = Vec::with_capacity(m50a_content_length);
+    m50a_body_bytes.extend_from_slice(&m50a_buf[m50a_header_end_offset..]);
+
+    let mut m50a_remaining = m50a_content_length.saturating_sub(m50a_body_already);
+    while m50a_remaining > 0 {
+        if m50a_body_bytes.len() > M50A_MAX_REQUEST_BYTES {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "body too large"));
+        }
+        let want = m50a_remaining.min(m50a_chunk.len());
+        let n = m50a_stream.read(&mut m50a_chunk[..want])?;
+        if n == 0 {
+            break;
+        }
+        m50a_body_bytes.extend_from_slice(&m50a_chunk[..n]);
+        m50a_remaining = m50a_remaining.saturating_sub(n);
+    }
+
+    Ok(M50aRequest {
+        m50a_method,
+        m50a_uri,
+        m50a_body: String::from_utf8_lossy(&m50a_body_bytes).to_string(),
+    })
+}
+
+/// Find the first index `i` in `buf` such that `buf[i..i+4]` ==
+/// "\r\n\r\n".  Naive scan is fine — request headers are small.
+fn m50a_find_double_crlf(m50a_buf: &[u8]) -> Option<usize> {
+    if m50a_buf.len() < 4 {
+        return None;
+    }
+    let needle = b"\r\n\r\n";
+    for i in 0..(m50a_buf.len() - 3) {
+        if &m50a_buf[i..i + 4] == needle {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Built response shape: status code + content-type + body bytes.
+struct M50aResponse {
+    m50a_status: u16,
+    m50a_content_type: &'static str,
+    m50a_body: String,
+}
+
+impl M50aResponse {
+    fn json(m50a_status: u16, m50a_body: String) -> Self {
+        Self { m50a_status, m50a_content_type: "application/json", m50a_body }
+    }
+    fn html(m50a_body: String) -> Self {
+        Self { m50a_status: 200, m50a_content_type: "text/html; charset=utf-8", m50a_body }
+    }
+    fn text(m50a_status: u16, m50a_body: String) -> Self {
+        Self { m50a_status, m50a_content_type: "text/plain; charset=utf-8", m50a_body }
+    }
+}
+
+/// Write the M50aResponse to the stream in HTTP/1.1 wire format.
+fn m50a_write_response(
+    m50a_stream: &mut std::net::TcpStream,
+    m50a_resp: &M50aResponse,
+) -> std::io::Result<()> {
+    let m50a_reason = match m50a_resp.m50a_status {
+        200 => "OK",
+        400 => "Bad Request",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        _ => "OK",
+    };
+    let m50a_head = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        m50a_resp.m50a_status,
+        m50a_reason,
+        m50a_resp.m50a_content_type,
+        m50a_resp.m50a_body.len(),
+    );
+    m50a_stream.write_all(m50a_head.as_bytes())?;
+    m50a_stream.write_all(m50a_resp.m50a_body.as_bytes())?;
+    Ok(())
+}
+
+/// Dispatch a parsed request to the right handler.
+fn m50a_handle_request(
+    interp: &mut Interpreter,
+    m50a_state: &mut M50aServerState,
+    m50a_req: &M50aRequest,
+) -> M50aResponse {
+    // Split URI into path + query string.
+    let (m50a_path, m50a_query) = match m50a_req.m50a_uri.split_once('?') {
+        Some((p, q)) => (p, q),
+        None => (m50a_req.m50a_uri.as_str(), ""),
+    };
+    let m50a_qs = m50a_parse_query(m50a_query);
+
+    if m50a_req.m50a_method == "GET" && m50a_path == "/" {
+        return M50aResponse::html(M50A_BUNDLED_HTML.to_string());
+    }
+    if m50a_req.m50a_method == "GET" && m50a_path == "/api/schema" {
+        let m50a_id = m50a_qs.get("df").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+        let m50a_df = match m50a_state.lookup(m50a_id) {
+            Some(d) => d,
+            None => return M50aResponse::json(404, m50a_err_json(&format!("unknown df id {}", m50a_id))),
+        };
+        return M50aResponse::json(200, m50a_serialize_schema(m50a_df));
+    }
+    if m50a_req.m50a_method == "GET" && m50a_path == "/api/rows" {
+        let m50a_id = m50a_qs.get("df").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+        let m50a_start = m50a_qs.get("start").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+        let m50a_stop = m50a_qs.get("stop").and_then(|v| v.parse::<i64>().ok()).unwrap_or(i64::MAX);
+        let m50a_df = match m50a_state.lookup(m50a_id) {
+            Some(d) => d,
+            None => return M50aResponse::json(404, m50a_err_json(&format!("unknown df id {}", m50a_id))),
+        };
+        return M50aResponse::json(200, m50a_serialize_rows(m50a_df, m50a_start, m50a_stop));
+    }
+    if m50a_req.m50a_method == "GET" && m50a_path == "/api/cell" {
+        let m50a_id = m50a_qs.get("df").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+        let m50a_row = m50a_qs.get("row").and_then(|v| v.parse::<i64>().ok());
+        let m50a_col = m50a_qs.get("col").and_then(|v| v.parse::<i64>().ok());
+        let m50a_df = match m50a_state.lookup(m50a_id) {
+            Some(d) => d,
+            None => return M50aResponse::json(404, m50a_err_json(&format!("unknown df id {}", m50a_id))),
+        };
+        let r = match m50a_row {
+            Some(v) => v,
+            None => return M50aResponse::json(400, m50a_err_json("missing or invalid row")),
+        };
+        let c = match m50a_col {
+            Some(v) => v,
+            None => return M50aResponse::json(400, m50a_err_json("missing or invalid col")),
+        };
+        return match m50a_serialize_cell(m50a_df, r, c) {
+            Ok(body) => M50aResponse::json(200, body),
+            Err(msg) => M50aResponse::json(400, m50a_err_json(&msg)),
+        };
+    }
+    if m50a_req.m50a_method == "POST" && m50a_path == "/api/filter" {
+        return m50a_handle_filter(interp, m50a_state, &m50a_req.m50a_body);
+    }
+    if m50a_req.m50a_method == "POST" && m50a_path == "/api/groupby" {
+        return m50a_handle_groupby(interp, m50a_state, &m50a_req.m50a_body);
+    }
+    M50aResponse::text(404, "not found".into())
+}
+
+/// Minimal query-string parser: `a=1&b=hello`.  No URL-decoding for v1
+/// (the bundled frontend only sends integer values; spaces aren't a
+/// concern).  Empty input → empty map.
+fn m50a_parse_query(m50a_qs: &str) -> HashMap<String, String> {
+    let mut m50a_out = HashMap::new();
+    if m50a_qs.is_empty() {
+        return m50a_out;
+    }
+    for pair in m50a_qs.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            m50a_out.insert(k.to_string(), v.to_string());
+        } else {
+            m50a_out.insert(pair.to_string(), String::new());
+        }
+    }
+    m50a_out
+}
+
+/// Build a `{"error":"..."}` JSON body.
+fn m50a_err_json(m50a_msg: &str) -> String {
+    format!("{{\"error\":{}}}", m50a_json_escape_str(m50a_msg))
+}
+
+/// JSON-escape a string and wrap in quotes.
+fn m50a_json_escape_str(m50a_s: &str) -> String {
+    let mut out = String::with_capacity(m50a_s.len() + 2);
+    out.push('"');
+    for ch in m50a_s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Inspect a column heap object to get its class name (e.g.
+/// "ColumnI64").  Mirrors the pattern m37_col_dtype uses.
+fn m50a_col_class_name(m50a_col_ptr: u64) -> String {
+    let obj = m50a_col_ptr as *const u8;
+    if obj.is_null() {
+        return "unknown".into();
+    }
+    unsafe {
+        let hdr = obj as *const crate::object::ObjectHeader;
+        let ty = (*hdr).vtable;
+        if ty.is_null() {
+            "unknown".into()
+        } else {
+            (*ty).name.clone()
+        }
+    }
+}
+
+/// Map a Column class name to its dtype string (the same vocabulary
+/// `col.dtype()` returns).
+fn m50a_dtype_for_class(m50a_class: &str) -> &'static str {
+    match m50a_class {
+        "ColumnI64" => "i64",
+        "ColumnF64" => "f64",
+        "ColumnStr" => "str",
+        "ColumnBool" => "bool",
+        "ColumnDateTime" => "datetime",
+        "ColumnCategorical" => "categorical",
+        _ => "unknown",
+    }
+}
+
+/// Serialize a DataFrame's schema as JSON.
+fn m50a_serialize_schema(m50a_df: u64) -> String {
+    let (m50a_names_lst, m50a_cols_lst, m50a_nrows) = m37_df_fields(m50a_df);
+    let m50a_names = m37_read_list_str_lst(m50a_names_lst);
+
+    let mut m50a_dtypes: Vec<String> = Vec::with_capacity(m50a_names.len());
+    if !m50a_cols_lst.is_null() {
+        unsafe {
+            let n = (*m50a_cols_lst).length;
+            let data = (*m50a_cols_lst).data as *const u64;
+            for j in 0..n {
+                let cp = std::ptr::read_unaligned(data.add(j));
+                let class_name = m50a_col_class_name(cp);
+                m50a_dtypes.push(m50a_dtype_for_class(&class_name).to_string());
+            }
+        }
+    }
+
+    // Index information.
+    let (m50a_index_ptr, m50a_index_name_ptr) = m41_df_index_fields(m50a_df);
+    let (m50a_multi_levels_ptr, _m50a_multi_names_ptr) = m44_df_multiindex_fields(m50a_df);
+
+    let m50a_has_index = m50a_index_ptr != 0 || m50a_multi_levels_ptr != 0;
+    let m50a_index_name = if m50a_index_name_ptr != 0 {
+        unsafe { read_str(m50a_index_name_ptr as *const StringRepr) }
+    } else {
+        String::new()
+    };
+    let m50a_index_nlevels = if m50a_multi_levels_ptr != 0 {
+        unsafe { (*(m50a_multi_levels_ptr as *const crate::object::ListRepr)).length as i64 }
+    } else if m50a_index_ptr != 0 {
+        1
+    } else {
+        0
+    };
+
+    let mut out = String::new();
+    out.push('{');
+    out.push_str("\"names\":[");
+    for (i, n) in m50a_names.iter().enumerate() {
+        if i > 0 { out.push(','); }
+        out.push_str(&m50a_json_escape_str(n));
+    }
+    out.push_str("],\"dtypes\":[");
+    for (i, d) in m50a_dtypes.iter().enumerate() {
+        if i > 0 { out.push(','); }
+        out.push_str(&m50a_json_escape_str(d));
+    }
+    out.push_str("],\"nrows\":");
+    out.push_str(&m50a_nrows.to_string());
+    out.push_str(",\"has_index\":");
+    out.push_str(if m50a_has_index { "true" } else { "false" });
+    out.push_str(",\"index_name\":");
+    out.push_str(&m50a_json_escape_str(&m50a_index_name));
+    out.push_str(",\"index_nlevels\":");
+    out.push_str(&m50a_index_nlevels.to_string());
+    out.push('}');
+    out
+}
+
+/// Read a single column's worth of cells as a Vec<Option<String>>-like
+/// pre-rendered JSON-cell shape.  Each entry is either the raw JSON
+/// fragment (e.g. `42`, `"hello"`, `true`) or `"null"` if the cell is
+/// null.
+fn m50a_column_cells_as_json(m50a_col_ptr: u64) -> Vec<String> {
+    let (vals, nulls, length) = m37_col_fields(m50a_col_ptr);
+    let class_name = m50a_col_class_name(m50a_col_ptr);
+    let dtype = m50a_dtype_for_class(&class_name);
+    let ns = m37_read_list_bool(nulls);
+    let mut out: Vec<String> = Vec::with_capacity(length as usize);
+    for i in 0..length as usize {
+        if ns.get(i).copied().unwrap_or(false) {
+            out.push("null".into());
+            continue;
+        }
+        let cell = match dtype {
+            "i64" | "datetime" => {
+                let vs = m37_read_list_i64(vals);
+                vs.get(i).copied().unwrap_or(0).to_string()
+            }
+            "f64" => {
+                let vs = m37_read_list_f64(vals);
+                let v = vs.get(i).copied().unwrap_or(0.0);
+                if v.is_nan() || v.is_infinite() {
+                    "null".to_string()
+                } else {
+                    format!("{}", v)
+                }
+            }
+            "bool" => {
+                let vs = m37_read_list_bool(vals);
+                if vs.get(i).copied().unwrap_or(false) { "true".into() } else { "false".into() }
+            }
+            "str" => {
+                let vs = m37_read_list_str_lst(vals);
+                m50a_json_escape_str(vs.get(i).map(|s| s.as_str()).unwrap_or(""))
+            }
+            "categorical" => {
+                // M47: ColumnCategorical has a different layout
+                // (codes + categories).  For v1 we coerce to the
+                // string representation via the existing m37_col_fields
+                // window — but the 24-byte payload doesn't match.  As
+                // a safe fallback, render as `null`.  M50b can add a
+                // proper categorical JSON encoder.
+                "null".to_string()
+            }
+            _ => "null".to_string(),
+        };
+        out.push(cell);
+    }
+    out
+}
+
+/// Serialize a row-range of a DataFrame as JSON.  `start` and `stop`
+/// are clamped to `[0, nrows]`.
+fn m50a_serialize_rows(m50a_df: u64, m50a_start: i64, m50a_stop: i64) -> String {
+    let (_, m50a_cols_lst, m50a_nrows) = m37_df_fields(m50a_df);
+    let m50a_start = m50a_start.max(0).min(m50a_nrows);
+    let m50a_stop = m50a_stop.max(m50a_start).min(m50a_nrows);
+
+    // Pre-render each column's cells once; this avoids re-reading the
+    // ListRepr per row.
+    let mut m50a_by_col: Vec<Vec<String>> = Vec::new();
+    if !m50a_cols_lst.is_null() {
+        unsafe {
+            let n = (*m50a_cols_lst).length;
+            let data = (*m50a_cols_lst).data as *const u64;
+            for j in 0..n {
+                let cp = std::ptr::read_unaligned(data.add(j));
+                m50a_by_col.push(m50a_column_cells_as_json(cp));
+            }
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str("{\"start\":");
+    out.push_str(&m50a_start.to_string());
+    out.push_str(",\"stop\":");
+    out.push_str(&m50a_stop.to_string());
+    out.push_str(",\"nrows\":");
+    out.push_str(&m50a_nrows.to_string());
+    out.push_str(",\"rows\":[");
+    let mut first_row = true;
+    for i in m50a_start..m50a_stop {
+        if !first_row { out.push(','); }
+        first_row = false;
+        out.push('[');
+        for (c, col_cells) in m50a_by_col.iter().enumerate() {
+            if c > 0 { out.push(','); }
+            out.push_str(col_cells.get(i as usize).map(|s| s.as_str()).unwrap_or("null"));
+        }
+        out.push(']');
+    }
+    out.push_str("]}");
+    out
+}
+
+/// Serialize a single cell as JSON: `{"value": <cell>}`.  Returns an
+/// `Err(message)` if the indices are out of range.
+fn m50a_serialize_cell(m50a_df: u64, m50a_row: i64, m50a_col: i64) -> Result<String, String> {
+    let (_, m50a_cols_lst, m50a_nrows) = m37_df_fields(m50a_df);
+    if m50a_row < 0 || m50a_row >= m50a_nrows {
+        return Err(format!("row {} out of range (nrows={})", m50a_row, m50a_nrows));
+    }
+    if m50a_cols_lst.is_null() {
+        return Err("dataframe has no columns".into());
+    }
+    let ncols = unsafe { (*m50a_cols_lst).length };
+    if m50a_col < 0 || m50a_col >= ncols as i64 {
+        return Err(format!("col {} out of range (ncols={})", m50a_col, ncols));
+    }
+    let cp = unsafe {
+        let data = (*m50a_cols_lst).data as *const u64;
+        std::ptr::read_unaligned(data.add(m50a_col as usize))
+    };
+    let cells = m50a_column_cells_as_json(cp);
+    let cell = cells.get(m50a_row as usize).cloned().unwrap_or_else(|| "null".into());
+    Ok(format!("{{\"value\":{}}}", cell))
+}
+
+// ── Phase C: POST /api/filter + POST /api/groupby ─────────────────────
+
+/// Minimal JSON-body parser for the request shapes M50a uses.  Returns
+/// a flat HashMap<String, String> of the top-level keys; nested objects
+/// (groupby's `agg`) are returned as the raw JSON-fragment string.
+///
+/// This is NOT a general-purpose JSON parser.  It assumes the body
+/// matches the shapes the bundled frontend sends.  Anything else
+/// returns an empty map and the handler reports an error.
+fn m50a_parse_simple_json(m50a_body: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let s = m50a_body.trim();
+    if !s.starts_with('{') {
+        return out;
+    }
+    // Strip outer braces.
+    let inner = &s[1..s.len().saturating_sub(1)];
+    let mut chars = inner.chars().peekable();
+    loop {
+        // Skip whitespace.
+        while let Some(&c) = chars.peek() { if c.is_whitespace() || c == ',' { chars.next(); } else { break; } }
+        // Read the key (quoted string).
+        if chars.peek() != Some(&'"') { break; }
+        chars.next();
+        let mut key = String::new();
+        while let Some(&c) = chars.peek() {
+            if c == '"' { chars.next(); break; }
+            if c == '\\' {
+                chars.next();
+                if let Some(esc) = chars.next() { key.push(esc); }
+            } else { key.push(c); chars.next(); }
+        }
+        // Skip colon + whitespace.
+        while let Some(&c) = chars.peek() { if c.is_whitespace() || c == ':' { chars.next(); } else { break; } }
+        // Read the value, which can be: quoted string | number | bool/null | array | object.
+        let mut val = String::new();
+        if chars.peek() == Some(&'"') {
+            chars.next();
+            while let Some(&c) = chars.peek() {
+                if c == '"' { chars.next(); break; }
+                if c == '\\' {
+                    chars.next();
+                    if let Some(esc) = chars.next() { val.push(esc); }
+                } else { val.push(c); chars.next(); }
+            }
+            // Mark string values with a leading STR: tag so the handler
+            // can distinguish "1" the string from 1 the number.
+            out.insert(key, format!("STR:{}", val));
+        } else if chars.peek() == Some(&'[') || chars.peek() == Some(&'{') {
+            // Collect a balanced sub-expression.
+            let open = *chars.peek().unwrap();
+            let close = if open == '[' { ']' } else { '}' };
+            let mut depth = 0;
+            let mut buf = String::new();
+            while let Some(&c) = chars.peek() {
+                if c == open { depth += 1; buf.push(c); chars.next(); }
+                else if c == close {
+                    depth -= 1;
+                    buf.push(c);
+                    chars.next();
+                    if depth == 0 { break; }
+                } else { buf.push(c); chars.next(); }
+            }
+            out.insert(key, buf);
+        } else {
+            // number/bool/null up to next comma or end.
+            while let Some(&c) = chars.peek() {
+                if c == ',' || c == '}' { break; }
+                val.push(c);
+                chars.next();
+            }
+            out.insert(key, val.trim().to_string());
+        }
+    }
+    out
+}
+
+/// Parse a JSON array of quoted strings, e.g. `["a","b","c"]`.
+fn m50a_parse_json_str_array(m50a_s: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let s = m50a_s.trim();
+    if !s.starts_with('[') { return out; }
+    let inner = &s[1..s.len().saturating_sub(1)];
+    let mut chars = inner.chars().peekable();
+    while chars.peek().is_some() {
+        while let Some(&c) = chars.peek() { if c.is_whitespace() || c == ',' { chars.next(); } else { break; } }
+        if chars.peek() != Some(&'"') { break; }
+        chars.next();
+        let mut item = String::new();
+        while let Some(&c) = chars.peek() {
+            if c == '"' { chars.next(); break; }
+            if c == '\\' { chars.next(); if let Some(esc) = chars.next() { item.push(esc); } }
+            else { item.push(c); chars.next(); }
+        }
+        out.push(item);
+    }
+    out
+}
+
+/// Parse a JSON object whose values are strings, e.g. `{"a":"sum","b":"mean"}`.
+fn m50a_parse_json_str_obj(m50a_s: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let s = m50a_s.trim();
+    if !s.starts_with('{') { return out; }
+    let inner = &s[1..s.len().saturating_sub(1)];
+    let mut chars = inner.chars().peekable();
+    loop {
+        while let Some(&c) = chars.peek() { if c.is_whitespace() || c == ',' { chars.next(); } else { break; } }
+        if chars.peek() != Some(&'"') { break; }
+        chars.next();
+        let mut k = String::new();
+        while let Some(&c) = chars.peek() {
+            if c == '"' { chars.next(); break; }
+            if c == '\\' { chars.next(); if let Some(esc) = chars.next() { k.push(esc); } }
+            else { k.push(c); chars.next(); }
+        }
+        while let Some(&c) = chars.peek() { if c.is_whitespace() || c == ':' { chars.next(); } else { break; } }
+        if chars.peek() != Some(&'"') { break; }
+        chars.next();
+        let mut v = String::new();
+        while let Some(&c) = chars.peek() {
+            if c == '"' { chars.next(); break; }
+            if c == '\\' { chars.next(); if let Some(esc) = chars.next() { v.push(esc); } }
+            else { v.push(c); chars.next(); }
+        }
+        out.push((k, v));
+    }
+    out
+}
+
+/// POST /api/filter handler.
+fn m50a_handle_filter(
+    interp: &mut Interpreter,
+    m50a_state: &mut M50aServerState,
+    m50a_body: &str,
+) -> M50aResponse {
+    let m50a_parsed = m50a_parse_simple_json(m50a_body);
+    let m50a_id = m50a_parsed.get("df").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+    let m50a_col_name = match m50a_parsed.get("column") {
+        Some(s) if s.starts_with("STR:") => s[4..].to_string(),
+        _ => return M50aResponse::json(400, m50a_err_json("missing column")),
+    };
+    let m50a_op = match m50a_parsed.get("op") {
+        Some(s) if s.starts_with("STR:") => s[4..].to_string(),
+        _ => return M50aResponse::json(400, m50a_err_json("missing op")),
+    };
+    let m50a_value_raw = match m50a_parsed.get("value") {
+        Some(s) => s.clone(),
+        None => return M50aResponse::json(400, m50a_err_json("missing value")),
+    };
+
+    let m50a_df = match m50a_state.lookup(m50a_id) {
+        Some(d) => d,
+        None => return M50aResponse::json(404, m50a_err_json(&format!("unknown df id {}", m50a_id))),
+    };
+    match m50a_apply_filter(interp, m50a_df, &m50a_col_name, &m50a_op, &m50a_value_raw) {
+        Ok(derived) => {
+            let new_id = m50a_state.register(derived);
+            let (_, _, nrows) = m37_df_fields(derived);
+            M50aResponse::json(200, format!("{{\"df\":{},\"nrows\":{}}}", new_id, nrows))
+        }
+        Err(msg) => M50aResponse::json(400, m50a_err_json(&msg)),
+    }
+}
+
+/// Apply a single-column filter (eq/ne/gt/lt/ge/le) to a DataFrame and
+/// return the filtered derived frame's heap pointer.  Builds the mask
+/// in-line (doesn't call out to the existing M37/M38 Column.cmp natives
+/// — those expect already-loaded receivers; doing the comparison in
+/// Rust is simpler).
+fn m50a_apply_filter(
+    interp: &mut Interpreter,
+    m50a_df: u64,
+    m50a_col_name: &str,
+    m50a_op: &str,
+    m50a_value_raw: &str,
+) -> Result<u64, String> {
+    let (names_lst, cols_lst, _nrows) = m37_df_fields(m50a_df);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_index = names.iter().position(|n| n == m50a_col_name)
+        .ok_or_else(|| format!("column {:?} not found", m50a_col_name))?;
+    let col_ptr = unsafe {
+        let data = (*cols_lst).data as *const u64;
+        std::ptr::read_unaligned(data.add(col_index))
+    };
+    let class_name = m50a_col_class_name(col_ptr);
+    let dtype = m50a_dtype_for_class(&class_name);
+
+    // Build the mask + nulls vector.
+    let (vals, nulls, length) = m37_col_fields(col_ptr);
+    let nulls_vec = m37_read_list_bool(nulls);
+    let n = length as usize;
+
+    if !["eq", "ne", "gt", "lt", "ge", "le"].contains(&m50a_op) {
+        return Err(format!("unknown op {:?}", m50a_op));
+    }
+
+    let mut mask: Vec<bool> = vec![false; n];
+    let mut out_nulls: Vec<bool> = vec![false; n];
+
+    match dtype {
+        "i64" | "datetime" => {
+            let want: i64 = if m50a_value_raw.starts_with("STR:") {
+                m50a_value_raw[4..].parse::<i64>().map_err(|_| "value not i64".to_string())?
+            } else {
+                m50a_value_raw.parse::<i64>().map_err(|_| "value not i64".to_string())?
+            };
+            let vs = m37_read_list_i64(vals);
+            for i in 0..n {
+                if nulls_vec.get(i).copied().unwrap_or(false) {
+                    out_nulls[i] = true; mask[i] = false; continue;
+                }
+                let v = vs.get(i).copied().unwrap_or(0);
+                mask[i] = match m50a_op {
+                    "eq" => v == want, "ne" => v != want,
+                    "gt" => v > want,  "lt" => v < want,
+                    "ge" => v >= want, "le" => v <= want,
+                    _ => false,
+                };
+            }
+        }
+        "f64" => {
+            let want: f64 = if m50a_value_raw.starts_with("STR:") {
+                m50a_value_raw[4..].parse::<f64>().map_err(|_| "value not f64".to_string())?
+            } else {
+                m50a_value_raw.parse::<f64>().map_err(|_| "value not f64".to_string())?
+            };
+            let vs = m37_read_list_f64(vals);
+            for i in 0..n {
+                if nulls_vec.get(i).copied().unwrap_or(false) {
+                    out_nulls[i] = true; mask[i] = false; continue;
+                }
+                let v = vs.get(i).copied().unwrap_or(0.0);
+                mask[i] = match m50a_op {
+                    "eq" => v == want, "ne" => v != want,
+                    "gt" => v > want,  "lt" => v < want,
+                    "ge" => v >= want, "le" => v <= want,
+                    _ => false,
+                };
+            }
+        }
+        "str" => {
+            let want: String = if m50a_value_raw.starts_with("STR:") {
+                m50a_value_raw[4..].to_string()
+            } else {
+                m50a_value_raw.to_string()
+            };
+            let vs = m37_read_list_str_lst(vals);
+            for i in 0..n {
+                if nulls_vec.get(i).copied().unwrap_or(false) {
+                    out_nulls[i] = true; mask[i] = false; continue;
+                }
+                let v = vs.get(i).cloned().unwrap_or_default();
+                mask[i] = match m50a_op {
+                    "eq" => v == want, "ne" => v != want,
+                    "gt" => v.as_str() > want.as_str(),  "lt" => v.as_str() < want.as_str(),
+                    "ge" => v.as_str() >= want.as_str(), "le" => v.as_str() <= want.as_str(),
+                    _ => false,
+                };
+            }
+        }
+        "bool" => {
+            let want: bool = if m50a_value_raw.starts_with("STR:") {
+                m50a_value_raw[4..].parse::<bool>().map_err(|_| "value not bool".to_string())?
+            } else {
+                m50a_value_raw.parse::<bool>().map_err(|_| "value not bool".to_string())?
+            };
+            let vs = m37_read_list_bool(vals);
+            for i in 0..n {
+                if nulls_vec.get(i).copied().unwrap_or(false) {
+                    out_nulls[i] = true; mask[i] = false; continue;
+                }
+                let v = vs.get(i).copied().unwrap_or(false);
+                mask[i] = match m50a_op {
+                    "eq" => v == want, "ne" => v != want,
+                    _ => return Err(format!("op {:?} not valid for bool column", m50a_op)),
+                };
+            }
+        }
+        _ => return Err(format!("unsupported dtype {:?}", dtype)),
+    }
+
+    // Build a ColumnBool from the mask.
+    let mask_vals_lst = m37_alloc_list_bool(interp, &mask);
+    let mask_nulls_lst = m37_alloc_list_bool(interp, &out_nulls);
+    let mask_col = m37_alloc_column(interp, "ColumnBool", mask_vals_lst, mask_nulls_lst, length);
+
+    // Call into df.filter via the existing handler.
+    let filter_args = [m50a_df, mask_col as u64];
+    let derived = m37_df_filter(interp, &filter_args).map_err(|e| format!("filter failed: {:?}", e))?;
+    Ok(derived)
+}
+
+/// POST /api/groupby handler.
+fn m50a_handle_groupby(
+    interp: &mut Interpreter,
+    m50a_state: &mut M50aServerState,
+    m50a_body: &str,
+) -> M50aResponse {
+    let m50a_parsed = m50a_parse_simple_json(m50a_body);
+    let m50a_id = m50a_parsed.get("df").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+    let m50a_by_raw = match m50a_parsed.get("by") {
+        Some(s) => s.clone(),
+        None => return M50aResponse::json(400, m50a_err_json("missing 'by'")),
+    };
+    let m50a_agg_raw = match m50a_parsed.get("agg") {
+        Some(s) => s.clone(),
+        None => return M50aResponse::json(400, m50a_err_json("missing 'agg'")),
+    };
+    let m50a_by = m50a_parse_json_str_array(&m50a_by_raw);
+    let m50a_agg = m50a_parse_json_str_obj(&m50a_agg_raw);
+    if m50a_by.is_empty() {
+        return M50aResponse::json(400, m50a_err_json("by must be non-empty"));
+    }
+    if m50a_agg.is_empty() {
+        return M50aResponse::json(400, m50a_err_json("agg must be non-empty"));
+    }
+
+    let m50a_df = match m50a_state.lookup(m50a_id) {
+        Some(d) => d,
+        None => return M50aResponse::json(404, m50a_err_json(&format!("unknown df id {}", m50a_id))),
+    };
+    match m50a_apply_groupby(interp, m50a_df, &m50a_by, &m50a_agg) {
+        Ok(derived) => {
+            let new_id = m50a_state.register(derived);
+            let (_, _, nrows) = m37_df_fields(derived);
+            M50aResponse::json(200, format!("{{\"df\":{},\"nrows\":{}}}", new_id, nrows))
+        }
+        Err(msg) => M50aResponse::json(400, m50a_err_json(&msg)),
+    }
+}
+
+/// Run df.group_by(by).agg(specs).  Reuses the M38 handlers by
+/// allocating the input lists in our process heap, then calling out.
+fn m50a_apply_groupby(
+    interp: &mut Interpreter,
+    m50a_df: u64,
+    m50a_by: &[String],
+    m50a_agg: &[(String, String)],
+) -> Result<u64, String> {
+    // Build the `by: List[str]` argument list.
+    let by_lst = m37_alloc_list_str(interp, m50a_by);
+    let gdf_args = [m50a_df, by_lst as u64];
+    let gdf = m38_df_group_by(interp, &gdf_args).map_err(|e| format!("group_by failed: {:?}", e))?;
+
+    // Build the `specs: List[Tuple[str, str]]` argument list.
+    // A tuple is two pointer-sized slots; alloc_tuple_obj is the helper.
+    let specs_lst = interp.alloc_list(m50a_agg.len().max(1));
+    for (col, op) in m50a_agg {
+        let col_sp = interp.alloc_string(col) as u64;
+        let op_sp = interp.alloc_string(op) as u64;
+        let tup = interp.alloc_tuple_obj(&[col_sp, op_sp]) as u64;
+        unsafe { interp.list_push(specs_lst, tup) };
+    }
+    let agg_args = [gdf, specs_lst as u64];
+    let derived = m38_gdf_agg(interp, &agg_args).map_err(|e| format!("agg failed: {:?}", e))?;
+    Ok(derived)
+}
+
+// Suppress dead-code warnings for the Mutex import (kept for future
+// multi-threaded extension; v1 server is single-threaded).
+#[allow(dead_code)]
+fn _m50a_unused_mutex_marker() {
+    let _: Option<Mutex<()>> = None;
 }
 
 #[cfg(test)]

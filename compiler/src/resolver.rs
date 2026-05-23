@@ -5285,6 +5285,33 @@ impl Resolver {
                     ),
                     native_id: 1062,
                 },
+                // ── M50a: tabular.serve / serve_with_timeout ──
+                // Hand-rolled localhost HTTP/1.1 server in
+                // vm/src/builtins.rs::m50a_serve_loop.  Both functions
+                // block the calling thread until the listener exits.
+                // serve_with_timeout shuts down after timeout_ms.
+                StdlibItem {
+                    name: "serve".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: m37_fn(
+                        vec![m37_df_ty.clone(), Ty::Primitive(PrimTy::I32)],
+                        Ty::Primitive(PrimTy::I32),
+                    ),
+                    native_id: 1067,
+                },
+                StdlibItem {
+                    name: "serve_with_timeout".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: m37_fn(
+                        vec![
+                            m37_df_ty.clone(),
+                            Ty::Primitive(PrimTy::I32),
+                            Ty::Primitive(PrimTy::I64),
+                        ],
+                        Ty::Primitive(PrimTy::I32),
+                    ),
+                    native_id: 1068,
+                },
             ],
         };
         // Publish the 7 classes (5 Column subclasses + Column base +
