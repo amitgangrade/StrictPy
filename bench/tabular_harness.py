@@ -72,9 +72,31 @@ def m48_find_spy() -> Path:
 SPY    = m48_find_spy()
 PYTHON = sys.executable
 
-BEST_OF      = 3       # min of this many runs per cell
+BEST_OF      = 3       # min of this many runs per cell (overridable per-size)
 POLL_MS      = 50      # psutil RSS polling interval
 SUBPROC_TIMEOUT = 1800 # seconds — generous so large/xl cells don't drop on slow hosts
+
+# Per-size BEST_OF override.  At large/xl, slow ops would consume hours
+# at BEST_OF=3; one run is honest enough for a >100x ratio.
+M48_BEST_OF_FOR_SIZE = {
+    "small":  3,
+    "medium": 3,
+    "large":  2,
+    "xl":     1,
+}
+
+# Per-(op, size) BEST_OF override.  Some cells are slow enough on the
+# StrictPy side at large that a 2-run minimum still doubles the wall.
+M48_BEST_OF_OVERRIDE = {
+    ("group_sum",   "large"): 1,
+    ("pivot_table", "large"): 1,
+    ("merge_inner", "large"): 1,
+    ("group_by_str",               "large"): 1,
+    ("group_by_cat_via_strings",   "large"): 1,
+    ("group_by_pandas_categorical","large"): 1,
+    ("merge_str",                  "large"): 1,
+    ("merge_cat_via_strings",      "large"): 1,
+}
 
 for d in (DATA_DIR, GEN_DIR, HIST_DIR):
     d.mkdir(parents=True, exist_ok=True)
@@ -116,29 +138,38 @@ M48_DEFAULT_ITERS = {
 }
 
 # Per-(op, size) overrides — drop iters at large sizes so the cell
-# completes in reasonable wall clock.
+# completes in reasonable wall clock.  group_sum/pivot_table/merge use
+# StrictPy's v1 hash-on-string-key path; at medium the per-iter cost is
+# ~7-8 s on 10k rows, so we crank iters way down for slow ops.
 M48_ITERS_OVERRIDE = {
     ("filter", "large"):       3,
     ("filter", "xl"):          1,
     ("sort_by", "large"):      2,
     ("sort_by", "xl"):         1,
-    ("group_sum", "large"):    3,
+    ("group_sum", "medium"):   3,
+    ("group_sum", "large"):    1,
     ("group_sum", "xl"):       1,
     ("merge_inner", "large"):  1,
     ("merge_inner", "xl"):     1,
-    ("pivot_table", "large"):  3,
+    ("pivot_table", "medium"): 3,
+    ("pivot_table", "large"):  1,
     ("pivot_table", "xl"):     1,
     ("rolling_mean", "large"): 1,
     ("rolling_mean", "xl"):    1,
     ("describe", "large"):     3,
     ("describe", "xl"):        1,
-    ("group_by_str", "large"):              3,
-    ("group_by_cat_via_strings", "large"):  3,
-    ("group_by_pandas_categorical", "large"): 3,
-    ("merge_str", "large"):                 1,
-    ("merge_cat_via_strings", "large"):     1,
-    ("unique_str", "large"):                3,
-    ("unique_cat_via_strings", "large"):    3,
+    ("group_by_str", "medium"):              3,
+    ("group_by_str", "large"):               1,
+    ("group_by_cat_via_strings", "medium"):  3,
+    ("group_by_cat_via_strings", "large"):   1,
+    ("group_by_pandas_categorical", "medium"): 3,
+    ("group_by_pandas_categorical", "large"):  1,
+    ("merge_str", "medium"):                 1,
+    ("merge_str", "large"):                  1,
+    ("merge_cat_via_strings", "medium"):     1,
+    ("merge_cat_via_strings", "large"):      1,
+    ("unique_str", "large"):                 3,
+    ("unique_cat_via_strings", "large"):     3,
 }
 
 
@@ -830,16 +861,19 @@ def m48_run_cell(op: str, size: str, csv_path: Path, iters: int) -> dict:
         rec["note"] = f"spy compile failed: {(res.stderr or res.stdout).strip()[-400:]}"
         return rec
 
+    n_runs = M48_BEST_OF_OVERRIDE.get((op, size),
+             M48_BEST_OF_FOR_SIZE.get(size, BEST_OF))
+
     # Run StrictPy.
     try:
-        spy_time, spy_out, spy_rss = m48_best_of([str(SPY), str(spyc_path)])
+        spy_time, spy_out, spy_rss = m48_best_of([str(SPY), str(spyc_path)], n=n_runs)
     except Exception as e:
         rec["note"] = f"spy run failed: {str(e)[-400:]}"
         return rec
 
     # Run pandas.
     try:
-        py_time, py_out, py_rss = m48_best_of([PYTHON, str(py_path)])
+        py_time, py_out, py_rss = m48_best_of([PYTHON, str(py_path)], n=n_runs)
     except Exception as e:
         rec["spy_ms"] = spy_time * 1000
         rec["spy_rss_mb"] = spy_rss / (1024 * 1024) if spy_rss else None
@@ -959,9 +993,13 @@ def m48_write_report(results: list[dict], out_path: Path) -> None:
 
     lines.extend(["", "---", "", "## Per-op detail"])
 
+    size_order = {"small": 0, "medium": 1, "large": 2, "xl": 3}
     for op in M48_CORE_OPS + M48_CATEGORICAL_OPS:
         label, _ = M48_OP_REGISTRY[op]
-        rows = [r for r in results if r["op"] == op]
+        rows = sorted(
+            [r for r in results if r["op"] == op],
+            key=lambda r: size_order.get(r["size"], 99),
+        )
         if not rows:
             continue
         lines.extend([
@@ -1164,8 +1202,26 @@ def m48_main():
             continue
         csv_paths[sz] = m48_gen_csv(sz, M48_SIZES[sz])
 
-    # Run cells.
+    # Load any pre-existing results so we incrementally accumulate cells
+    # across multiple invocations (e.g. small+medium in one run, large in
+    # another — common when a partial run is interrupted by a long cell).
+    # A cell is overwritten only when this invocation re-runs it.
     results: list[dict] = []
+    if json_path.exists():
+        try:
+            results = json.loads(json_path.read_text(encoding="utf-8"))
+        except Exception:
+            results = []
+
+    def merge_cell(rec: dict) -> None:
+        key = (rec["op"], rec["size"])
+        for i, r in enumerate(results):
+            if (r["op"], r["size"]) == key:
+                results[i] = rec
+                return
+        results.append(rec)
+
+    # Run cells.
     for op in ops:
         print(f"\n== {op} ==", flush=True)
         for sz in sizes:
@@ -1174,13 +1230,13 @@ def m48_main():
                        "spy_ms": None, "py_ms": None, "ratio": None,
                        "spy_rss_mb": None, "py_rss_mb": None, "rss_ratio": None,
                        "note": "skipped (no csv)"}
-                results.append(rec)
+                merge_cell(rec)
                 continue
             iters = m48_iters_for(op, sz)
             print(f"  {op}({sz}, iters={iters}) …", flush=True)
             rec = m48_run_cell(op, sz, csv_paths[sz], iters)
             print(f"    {m48_fmt(rec)}", flush=True)
-            results.append(rec)
+            merge_cell(rec)
             # Persist after every cell so a long run is recoverable.
             json_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
 
