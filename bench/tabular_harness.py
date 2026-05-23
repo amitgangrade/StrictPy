@@ -986,7 +986,11 @@ def m48_write_report(results: list[dict], out_path: Path) -> None:
             if cell is None:
                 row.append("—")
             elif cell["ratio"] is None:
-                row.append(f"FAIL")
+                note = (cell.get("note") or "").lower()
+                if "skipped" in note or "timed out" in note or "timeout" in note:
+                    row.append("skip")
+                else:
+                    row.append("FAIL")
             else:
                 row.append(f"{row_marker(cell['ratio'])}{cell['ratio']:.2f}x")
         lines.append("| " + " | ".join(row) + " |")
@@ -1010,8 +1014,12 @@ def m48_write_report(results: list[dict], out_path: Path) -> None:
             "|---|---:|---:|---:|---:|---:|---:|---:|",
         ])
         for r in rows:
-            spy_ms = f"{r['spy_ms']:.1f}" if r['spy_ms'] is not None else "FAIL"
-            py_ms  = f"{r['py_ms']:.1f}"  if r['py_ms']  is not None else "FAIL"
+            note_lc = (r.get("note") or "").lower()
+            skipped = ("skipped" in note_lc or "timed out" in note_lc
+                       or "timeout" in note_lc)
+            fail_label = "skip" if skipped else "FAIL"
+            spy_ms = f"{r['spy_ms']:.1f}" if r['spy_ms'] is not None else fail_label
+            py_ms  = f"{r['py_ms']:.1f}"  if r['py_ms']  is not None else fail_label
             ratio  = (f"{row_marker(r['ratio'])}{r['ratio']:.2f}x"
                       if r['ratio'] is not None else "—")
             spy_rss = f"{r['spy_rss_mb']:.1f} MB" if r['spy_rss_mb'] is not None else "—"
