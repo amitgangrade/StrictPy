@@ -1,0 +1,164 @@
+"""tabular_m47_polish_demo.spy — M47 end-to-end walkthrough.
+
+M46 closed the v1 tabular surface; M47 adds the v0.4 polish round:
+iloc 2-D, negative iloc, rolling Welford std (internal), rolling
+*_min_periods variants, and the ColumnCategorical sealed subclass.
+
+This demo threads an 8-row sales frame through the M47 surface:
+
+  1. Build a small sales DataFrame (region + qty + price).
+  2. Wrap the region column as ColumnCategorical.
+  3. Inspect the categorical surface — codes, categories, dtype.
+  4. Coerce via to_strings() and group_by(["region"]).sum() — the
+     v1 categorical integration path.
+  5. rolling_mean_min_periods(window=3, min_periods=1) on qty —
+     leading partial windows fill in (vs M40's leading nulls).
+  6. iloc_2d(-5, -1, 0, 2) — last 4 rows × first 2 columns.
+  7. iloc(-3, 8) — pandas-style negative start (lifts M40's
+     reject-negative contract).
+  8. Print index_nlevels checks throughout to confirm shape.
+
+Output is deterministic so the demo-runs integration test asserts
+on every checkpoint.
+"""
+
+from tabular import Column, ColumnI64, ColumnF64, ColumnStr, ColumnCategorical
+from tabular import DataFrame, GroupedDataFrame
+import tabular
+
+
+fn build_sales() -> DataFrame:
+    """8-row sales frame: region + qty + price."""
+    regs_v: List[str] = []
+    regs_v.append("east")
+    regs_v.append("north")
+    regs_v.append("east")
+    regs_v.append("west")
+    regs_v.append("south")
+    regs_v.append("east")
+    regs_v.append("west")
+    regs_v.append("north")
+    reg_col: ColumnStr = tabular.col_str_simple(regs_v)
+
+    qty_v: List[i64] = []
+    qty_v.append(10i64)
+    qty_v.append(20i64)
+    qty_v.append(30i64)
+    qty_v.append(40i64)
+    qty_v.append(50i64)
+    qty_v.append(60i64)
+    qty_v.append(70i64)
+    qty_v.append(80i64)
+    qty: ColumnI64 = tabular.col_i64_simple(qty_v)
+
+    price_v: List[f64] = []
+    price_v.append(1.5)
+    price_v.append(2.5)
+    price_v.append(3.5)
+    price_v.append(4.5)
+    price_v.append(5.5)
+    price_v.append(6.5)
+    price_v.append(7.5)
+    price_v.append(8.5)
+    price: ColumnF64 = tabular.col_f64_simple(price_v)
+
+    cn: List[str] = []
+    cn.append("region")
+    cn.append("qty")
+    cn.append("price")
+    cols: List[Column] = []
+    cols.append(reg_col)
+    cols.append(qty)
+    cols.append(price)
+    return tabular.from_columns(cn, cols)
+
+
+fn main() -> i32:
+    sales: DataFrame = build_sales()
+    println("sales_nrows=" + str(sales.length()))
+    println("sales_ncols=" + str(sales.ncols()))
+
+    # ── Step 2: build a ColumnCategorical from the region values ────────
+    regs_for_cat: List[str] = []
+    regs_for_cat.append("east")
+    regs_for_cat.append("north")
+    regs_for_cat.append("east")
+    regs_for_cat.append("west")
+    regs_for_cat.append("south")
+    regs_for_cat.append("east")
+    regs_for_cat.append("west")
+    regs_for_cat.append("north")
+    reg_cat: ColumnCategorical = tabular.col_categorical(regs_for_cat)
+    println("cat_len=" + str(reg_cat.length()))
+    println("cat_dt=" + reg_cat.dtype())
+
+    # ── Step 3: inspect categories + codes ──────────────────────────────
+    cats: ColumnStr = reg_cat.categories()
+    println("cat_k=" + str(cats.length()))
+    cat0: str? = cats.get(0i64)
+    if cat0 is not none:
+        println("cat0=" + cat0)
+    codes: ColumnI64 = reg_cat.codes()
+    println("codes_len=" + str(codes.length()))
+
+    # ── Step 4: to_strings() coercion → group_by works on categorical
+    # via the v1 string-coerced path.
+    cat_as_str: ColumnStr = reg_cat.to_strings()
+    cn2: List[str] = []
+    cn2.append("region")
+    cn2.append("qty")
+    cn2.append("price")
+    cs2: List[Column] = []
+    cs2.append(cat_as_str)
+    qty_col: ColumnI64? = sales.get_column_i64("qty")
+    price_col: ColumnF64? = sales.get_column_f64("price")
+    if qty_col is not none:
+        cs2.append(qty_col)
+    if price_col is not none:
+        cs2.append(price_col)
+    sales_coerced: DataFrame = tabular.from_columns(cn2, cs2)
+    keys: List[str] = []
+    keys.append("region")
+    g: GroupedDataFrame = sales_coerced.group_by(keys)
+    summed: DataFrame = g.sum()
+    println("g_nrows=" + str(summed.length()))
+    println("g_nlev=" + str(summed.index_nlevels()))
+
+    # ── Step 5: rolling_mean_min_periods(3, 1) on qty ───────────────────
+    qty_again: ColumnI64? = sales.get_column_i64("qty")
+    if qty_again is not none:
+        r: ColumnF64 = qty_again.rolling_mean_min_periods(3i64, 1i64)
+        println("r_len=" + str(r.length()))
+        println("r_nc=" + str(r.null_count()))
+        # min_periods=1 → position 0 emits (mean of just [10]) = 10.0
+        r0: f64? = r.get(0i64)
+        if r0 is not none:
+            println("r0=" + str(r0))
+
+    # ── Step 6: iloc_2d(-5, -1, 0, 2) — last 4 rows × first 2 cols ──────
+    s2d: DataFrame = sales.iloc_2d(-5i64, -1i64, 0i64, 2i64)
+    println("s2d_nrows=" + str(s2d.length()))
+    println("s2d_ncols=" + str(s2d.ncols()))
+
+    # ── Step 7: iloc(-3, 8) — pandas-style negative start, lifts the M40
+    # v1 reject-negative contract.
+    s_neg: DataFrame = sales.iloc(-3i64, 8i64)
+    println("sneg_nrows=" + str(s_neg.length()))
+
+    # ── Step 8: df.get_column_categorical hit / miss ───────────────────
+    cn3: List[str] = []
+    cn3.append("region")
+    cn3.append("qty")
+    cs3: List[Column] = []
+    cs3.append(reg_cat)
+    if qty_col is not none:
+        cs3.append(qty_col)
+    sales_with_cat: DataFrame = tabular.from_columns(cn3, cs3)
+    got: ColumnCategorical? = sales_with_cat.get_column_categorical("region")
+    if got is not none:
+        println("got_cat_len=" + str(got.length()))
+    miss: ColumnCategorical? = sales_with_cat.get_column_categorical("qty")
+    if miss is none:
+        println("miss-none")
+
+    return 0

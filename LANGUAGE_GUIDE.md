@@ -1,6 +1,6 @@
 # StrictPy — language guide for AI coding tools
 
-**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M46 (2026-05-23).
+**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M47 (2026-05-23).
 
 **Audience**: any AI coding tool (Claude, GPT, Gemini, etc.) being asked to write a StrictPy program. This file is the single source of truth for writing idiomatic StrictPy — you should NOT need to read the compiler source (`compiler/src/`) or VM source (`vm/src/`) to write correct code.
 
@@ -1477,6 +1477,48 @@ Returns rows where `start <= index_label <= stop` (inclusive both ends, pandas's
 
 See `examples/tabular_m46_extensions_demo.spy` for an end-to-end M46 walkthrough — a 6-row wide sales frame threads through `set_index_list(["region"])` → `stack` → `unstack` round-trip → `loc_range_str` → `pivot_table_aggfunc_list` → `pivot_table_margins` → `set_index_list(["category","month"])`.
 
+#### M47 additions — iloc 2-D + negative iloc + rolling Welford/min_periods + ColumnCategorical
+
+M47 is the v0.4 polish round after M46 closed the v1 surface.  Smaller items that didn't fit M46's scope.
+
+**Phase A — `df.iloc_2d` + negative iloc**:
+
+- `df.iloc_2d(row_start: i64, row_stop: i64, col_start: i64, col_stop: i64) -> DataFrame` — half-open `[row_start, row_stop) × [col_start, col_stop)` slice.  Both axes clamped to bounds.  Both accept Python-style negative indices (`-1` = last row / column).  Preserves the parent's index (M44-style propagation through the row dimension).
+- `df.iloc(start, stop)` extended to accept negative indices: `df.iloc(-3, -1)` returns the second-to-last 2 rows.  v1's reject-negative contract is lifted.  See §11.35.
+
+**Phase B — rolling Welford std + `*_min_periods` variants**:
+
+- 10 new `Column.rolling_<op>_min_periods(window: i64, min_periods: i64)` methods (sum / mean / min / max / std on `ColumnI64` + `ColumnF64`).  At each output position the handler counts non-null cells in the window `[i-window+1, i]` (or `[0, i]` for incomplete leading windows); emits the aggregate if the count is `>= min_periods` else null.  Valid `min_periods` range: `1 <= min_periods <= window` (else `ValueError`).
+- `rolling_std_min_periods` (and `rolling_<op>` indirectly via this code path) uses Welford's online algorithm internally for numerical stability on large values / windows (vs M40's `sumsq - n*mean²` formula which loses precision via catastrophic cancellation).  Tip: on small / well-conditioned inputs Welford produces bit-identical results to M40's naive formula.
+- The original `rolling_std(window)` keeps M40's formula for backwards bit-identicality — pin the Welford variant via `rolling_std_min_periods(window, window)` if you need the new code path.
+
+**Phase C — `ColumnCategorical` sealed subclass**:
+
+A new sealed `Column` subclass storing `codes: List[i64]` (per-cell category index) + `categories: List[str]` (distinct values in first-appearance order) + the standard `nulls: List[bool]` mask + `length: i64`.
+
+Constructors:
+
+- `tabular.col_categorical(values: List[str]) -> ColumnCategorical` — categories built by first-appearance order; all inputs non-null.
+- `tabular.col_categorical_with_nulls(values: List[str], nulls: List[bool]) -> ColumnCategorical` — null cells get `codes[i] = 0` (don't-care; the nulls mask controls).
+
+Surface:
+
+- Shared `Column` methods (`length`, `dtype`, `is_null`, `null_count`, `get`) — `dtype()` returns `"categorical"`, `get(i)` returns the category string (or none).
+- `cc.codes() -> ColumnI64` — the underlying code column (inherits the null mask).
+- `cc.categories() -> ColumnStr` — the distinct values, ordered by first appearance.
+- `cc.to_strings() -> ColumnStr` — full materialization to a string column.  **This is the v1 integration idiom**: any op that doesn't have a categorical-specific handler should be invoked on `cc.to_strings()` instead.  Examples: `group_by`, `merge`, `filter` (build a `ColumnBool` mask off `cc.to_strings().eq(...)`), `sort_by` (string ordering — see §11.36).
+- `df.get_column_categorical(name: str) -> ColumnCategorical?` — typed accessor; returns none on absent name or wrong dtype.
+
+What's NOT in v1 (M48 follow-up):
+
+- Optimized codes-based hashing for `group_by` / `merge` — v1 coerces via `to_strings()` (slow but correct).
+- Ordered categorical (where `sort_by` follows the `categories[]` order rather than alphabetical strings).
+- `pandas.Categorical.from_codes` reverse constructor.
+
+See `examples/tabular_m47_polish_demo.spy` for an end-to-end M47 walkthrough — an 8-row sales frame threads through `col_categorical(...)` → `categories()` / `codes()` inspection → `to_strings()` + `group_by` → `rolling_mean_min_periods(3, 1)` → `iloc_2d(-5, -1, 0, 2)` → `iloc(-3, 8)` → `get_column_categorical`.
+
+After M47 the `tabular` polish list is largely complete.  Remaining v0.4 items: categorical optimized codes paths (M48), more resample rules (`1w` / `1M` / `1Y` — needs a calendar layer), `df.rolling` chainable, desktop UI (its own milestone).
+
 ### shutil (M27 P3c-A)
 
 ```python
@@ -2477,6 +2519,14 @@ M44a shipped MultiIndex storage + multi-column `group_by` promotion + minimal pr
 ### 11.34 `tabular.unstack` must-have-MultiIndex constraint
 
 `df.unstack()` is the inverse of `stack` — it takes the innermost MultiIndex level and turns it into wide columns.  **Input must have a MultiIndex** (raises `ValueError` on single-col index or RangeIndex inputs).  To unstack a single-col index (i.e. wide-form pivot on the index), use `pivot_table` instead.  Output `nlevels = input nlevels - 1`; if the result has 1 level it becomes a single-col index, if 0 a RangeIndex.  Missing `(row_key, col_key)` combinations become null cells.  v1 simplification: only the first regular column's values are distributed — multi-column unstack is M47+ territory.
+
+### 11.35 `tabular.iloc` negative-index semantics (post-M47)
+
+M40 shipped `df.iloc(start, stop)` with an explicit "negative indices raise `ValueError`" contract.  **M47 lifts that contract**: `iloc` now accepts Python-style negative indices on both bounds (`-1` = last row, `-N` = `nrows - N`).  Mixed positive + negative is fine (`iloc(-3, nrows)` = last 3 rows; `iloc(-5, -1)` = rows `[nrows-5, nrows-1)`).  Out-of-range positive bounds still clamp silently to `[0, nrows]` — only the explicit-rejection contract changed.  The same semantics apply to both bounds of `df.iloc_2d(row_start, row_stop, col_start, col_stop)` on both axes.
+
+### 11.36 `tabular.ColumnCategorical` sort uses alphabetical string ordering (v1)
+
+`ColumnCategorical` ships in M47 with a v1 limitation: any op that needs to compare two categorical cells (e.g. `sort_by` on a frame whose key column is categorical) compares **the materialized strings alphabetically**, NOT the `categories[]` declaration order.  This matches the v1 to_strings() coercion contract — every op without a categorical-specific handler routes through `to_strings()` internally.  Pandas's "ordered categorical" semantics (where the order of `categories[]` is meaningful for comparison) is an M48 follow-up.  Workaround: build a small `Dict[str, i64]` mapping each category to its desired ordinal and replace the categorical column with the i64 column for sorting.
 
 ---
 
