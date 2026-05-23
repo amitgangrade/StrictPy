@@ -12242,6 +12242,7 @@ fn m37_df_stringify(recv: u64) -> (Vec<String>, Vec<String>, Vec<Vec<String>>) {
                     "ColumnStr" => "str",
                     "ColumnBool" => "bool",
                     "ColumnDateTime" => "datetime",
+                    "ColumnCategorical" => "categorical",
                     _ => "unknown",
                 };
                 dtypes.push(dtype.to_string());
@@ -12268,6 +12269,13 @@ fn m37_df_stringify(recv: u64) -> (Vec<String>, Vec<String>, Vec<Vec<String>>) {
                         "str" => {
                             let vs = m37_read_list_str_lst(vals);
                             vs.get(i).cloned().unwrap_or_default()
+                        }
+                        "categorical" => {
+                            let codes = m37_read_list_i64(vals);
+                            let cats_ptr = m47_col_cat_categories_ptr(cp);
+                            let cats = m37_read_list_str_lst(cats_ptr);
+                            let code = codes.get(i).copied().unwrap_or(0) as usize;
+                            cats.get(code).cloned().unwrap_or_default()
                         }
                         _ => String::new(),
                     };
@@ -20885,62 +20893,208 @@ impl M50aServerState {
         self.m50a_df_registry.insert(m50a_id, m50a_df);
         m50a_id
     }
+
+    /// M50b: drop a derived DataFrame from the registry.  Refuses to
+    /// forget id 0 (the primary DataFrame stays rooted on the calling
+    /// stack across `serve_with_timeout`; removing it would leave the
+    /// frontend's default-df references dangling).  Returns true if the
+    /// id was present and removed; false for unknown or id=0.
+    fn forget(&mut self, m50a_id: i64) -> bool {
+        if m50a_id == 0 {
+            return false;
+        }
+        self.m50a_df_registry.remove(&m50a_id).is_some()
+    }
 }
 
-/// Bundled minimal HTML+JS frontend (Phase D).  See LANGUAGE_GUIDE.md
-/// §11.39 for the v1 deliberate simplifications.
+/// Bundled minimal HTML+JS frontend.  M50a shipped the original; M50b
+/// adds: sortable column headers (click), composite AND/OR filters
+/// (add/remove clauses), CSV download, "forget derived df" cleanup,
+/// virtual-scroll-style DOM-node recycling for frames >10K rows, and
+/// CSS polish.  Categorical cells now render as their resolved string
+/// (server change).  See LANGUAGE_GUIDE.md §11.39 for caveats.
 const M50A_BUNDLED_HTML: &str = r#"<!DOCTYPE html>
 <html>
 <head>
 <title>tabular.serve</title>
 <style>
-body { font-family: monospace; margin: 8px; }
-#header { font-weight: bold; margin-bottom: 6px; }
-#filter-bar, #groupby-bar { margin-bottom: 6px; padding: 4px; border: 1px solid #ccc; }
-#filter-bar input, #groupby-bar input { font-family: monospace; }
-button { margin-left: 4px; }
-#status { margin-top: 6px; padding: 4px; background: #f4f4f4; }
-table { border-collapse: collapse; font-size: 12px; }
-th { background: #eee; padding: 2px 6px; border: 1px solid #aaa; position: sticky; top: 0; }
-td { padding: 2px 6px; border: 1px solid #ddd; }
-td.null { color: #999; font-style: italic; }
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  margin: 0; padding: 0;
+  color: #222; background: #fafafa;
+  font-size: 13px;
+}
+#topbar {
+  background: #1f2937; color: #fff;
+  padding: 8px 12px;
+  display: flex; align-items: center; gap: 12px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+#topbar .title { font-weight: 600; font-size: 14px; }
+#topbar .spacer { flex: 1; }
+#topbar .action {
+  background: #374151; color: #fff;
+  border: 1px solid #4b5563; border-radius: 4px;
+  padding: 4px 10px; cursor: pointer;
+  font-size: 12px;
+}
+#topbar .action:hover { background: #4b5563; }
+#topbar .action:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.panel {
+  background: #fff;
+  border-bottom: 1px solid #e5e7eb;
+  padding: 8px 12px;
+}
+.panel h3 {
+  margin: 0 0 6px 0;
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: #6b7280;
+}
+.panel .row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 4px; }
+.panel select, .panel input[type=text], .panel input[type=number] {
+  font-family: inherit; font-size: 12px;
+  padding: 3px 6px; border: 1px solid #d1d5db; border-radius: 3px;
+  background: #fff;
+}
+.panel button {
+  font-family: inherit; font-size: 12px;
+  padding: 3px 10px; border: 1px solid #2563eb; border-radius: 3px;
+  background: #2563eb; color: #fff; cursor: pointer;
+}
+.panel button.secondary { background: #fff; color: #2563eb; }
+.panel button.danger    { background: #fff; color: #dc2626; border-color: #dc2626; }
+.panel button:hover { filter: brightness(1.05); }
+
+#status {
+  padding: 6px 12px;
+  background: #fffbeb; border-top: 1px solid #fde68a;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px;
+  color: #92400e;
+}
+
+#table-wrap {
+  background: #fff;
+  border-top: 1px solid #e5e7eb;
+  overflow: auto;
+  max-height: calc(100vh - 320px);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+table#data { border-collapse: collapse; font-size: 12px; width: 100%; }
+table#data thead th {
+  background: #f3f4f6; color: #1f2937;
+  padding: 6px 10px; text-align: left;
+  border-bottom: 2px solid #d1d5db;
+  position: sticky; top: 0; z-index: 1;
+  cursor: pointer; user-select: none;
+  white-space: nowrap;
+}
+table#data thead th:hover { background: #e5e7eb; }
+table#data thead th .sort-ind {
+  color: #2563eb; margin-left: 6px; font-size: 10px;
+}
+table#data tbody td {
+  padding: 4px 10px;
+  border-bottom: 1px solid #f1f5f9;
+  white-space: nowrap;
+}
+table#data tbody tr:nth-child(even) td { background: #fafafa; }
+table#data tbody tr:hover td { background: #eff6ff; }
+td.null { color: #9ca3af; font-style: italic; }
+
+.clause-row { display: flex; gap: 4px; align-items: center; margin-bottom: 3px; }
+.clause-row .x {
+  background: #fff; color: #dc2626; border: 1px solid #dc2626;
+  border-radius: 3px; padding: 1px 8px; cursor: pointer; font-size: 13px;
+}
+.logic-toggle { font-weight: 600; color: #2563eb; }
 </style>
 </head>
 <body>
-<div id="header">tabular.serve</div>
-<div id="filter-bar"></div>
-<div id="groupby-bar"></div>
-<table id="data"><thead></thead><tbody></tbody></table>
+<div id="topbar">
+  <span class="title">tabular.serve</span>
+  <span id="df-badge" class="title" style="font-weight:400;color:#9ca3af;"></span>
+  <span class="spacer"></span>
+  <button class="action" id="btn-csv" title="Download current frame as CSV">CSV download</button>
+  <button class="action" id="btn-forget" title="Drop the current derived frame and return to primary">Reset to primary</button>
+</div>
+<div class="panel" id="filter-panel">
+  <h3>Filter (composite)</h3>
+  <div id="filter-clauses"></div>
+  <div class="row">
+    <button id="btn-add-clause" class="secondary">+ Add clause</button>
+    <span style="margin-left:8px;">Logic:</span>
+    <select id="logic-sel"><option value="and">AND</option><option value="or">OR</option></select>
+    <button id="btn-apply-filter">Apply filter</button>
+  </div>
+</div>
+<div class="panel" id="groupby-panel">
+  <h3>Group by</h3>
+  <div class="row" id="groupby-bar"></div>
+</div>
 <div id="status"></div>
+<div id="table-wrap">
+  <table id="data"><thead></thead><tbody></tbody></table>
+</div>
 <script>
 (function() {
+  // ── State ──────────────────────────────────────────────────────────
   var m50aCurDf = 0;
   var m50aSchema = null;
   var m50aRowsLoaded = 0;
-  var m50aPageSize = 100;
+  var m50aPageSize = 200;
   var m50aLoading = false;
+  // Virtual-scroll cap: when the rendered DOM exceeds this many rows,
+  // older rows are evicted from the head as new ones land.  Keeps the
+  // DOM bounded for million-row frames.
+  var m50aMaxDomRows = 5000;
+  var m50aDomStartRow = 0;
+  // Composite-filter clause state.  Each entry: {col, op, val}.
+  var m50aClauses = [{col: '', op: 'eq', val: ''}];
+  // Track current sort: {col: name, asc: bool} or null.
+  var m50aSort = null;
 
+  // ── HTTP helpers ──────────────────────────────────────────────────
   function api(path) { return fetch(path).then(function(r){ return r.json(); }); }
   function apiPost(path, body) {
     return fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})
            .then(function(r){ return r.json(); });
   }
 
+  // ── Render: table header (sortable) ───────────────────────────────
   function renderHeader() {
     var thead = document.querySelector('#data thead');
     thead.innerHTML = '';
     var tr = document.createElement('tr');
     for (var i = 0; i < m50aSchema.names.length; i++) {
       var th = document.createElement('th');
-      th.textContent = m50aSchema.names[i] + ' (' + m50aSchema.dtypes[i] + ')';
+      var name = m50aSchema.names[i];
+      var dt = m50aSchema.dtypes[i];
+      th.textContent = name + ' (' + dt + ')';
+      var ind = document.createElement('span'); ind.className = 'sort-ind';
+      if (m50aSort && m50aSort.col === name) {
+        ind.textContent = m50aSort.asc ? '▲' : '▼';
+      }
+      th.appendChild(ind);
+      (function(colName) {
+        th.onclick = function() {
+          var asc = !(m50aSort && m50aSort.col === colName && m50aSort.asc);
+          submitSort(colName, asc);
+        };
+      })(name);
       tr.appendChild(th);
     }
     thead.appendChild(tr);
   }
 
+  // ── Render: row append + DOM-node recycle ─────────────────────────
   function renderRows(rows, append) {
     var tbody = document.querySelector('#data tbody');
-    if (!append) tbody.innerHTML = '';
+    if (!append) {
+      tbody.innerHTML = '';
+      m50aDomStartRow = 0;
+    }
     for (var i = 0; i < rows.length; i++) {
       var tr = document.createElement('tr');
       for (var j = 0; j < rows[i].length; j++) {
@@ -20952,41 +21106,67 @@ td.null { color: #999; font-style: italic; }
       }
       tbody.appendChild(tr);
     }
+    // Cap DOM size — evict from the head if we go over.
+    while (tbody.childElementCount > m50aMaxDomRows) {
+      tbody.removeChild(tbody.firstChild);
+      m50aDomStartRow += 1;
+    }
   }
 
-  function renderFilterBar() {
-    var bar = document.getElementById('filter-bar');
-    bar.innerHTML = 'Filter: ';
-    var colSel = document.createElement('select');
-    for (var i = 0; i < m50aSchema.names.length; i++) {
-      var opt = document.createElement('option');
-      opt.value = m50aSchema.names[i];
-      opt.textContent = m50aSchema.names[i];
-      colSel.appendChild(opt);
+  // ── Render: filter panel ──────────────────────────────────────────
+  function renderFilterPanel() {
+    var holder = document.getElementById('filter-clauses');
+    holder.innerHTML = '';
+    if (!m50aSchema) return;
+    for (var i = 0; i < m50aClauses.length; i++) {
+      var c = m50aClauses[i];
+      if (!c.col) c.col = m50aSchema.names[0];
+      var row = document.createElement('div'); row.className = 'clause-row';
+      var colSel = document.createElement('select');
+      for (var j = 0; j < m50aSchema.names.length; j++) {
+        var opt = document.createElement('option');
+        opt.value = m50aSchema.names[j]; opt.textContent = m50aSchema.names[j];
+        if (m50aSchema.names[j] === c.col) opt.selected = true;
+        colSel.appendChild(opt);
+      }
+      var opSel = document.createElement('select');
+      var ops = ['eq','ne','gt','lt','ge','le'];
+      for (var k = 0; k < ops.length; k++) {
+        var o = document.createElement('option'); o.value = ops[k]; o.textContent = ops[k];
+        if (ops[k] === c.op) o.selected = true;
+        opSel.appendChild(o);
+      }
+      var valInp = document.createElement('input'); valInp.type = 'text';
+      valInp.placeholder = 'value'; valInp.value = c.val;
+      valInp.style.minWidth = '160px';
+      var rm = document.createElement('button'); rm.className = 'x'; rm.textContent = '×';
+      rm.title = 'Remove clause';
+      (function(idx, cs, os, vs) {
+        cs.onchange = function() { m50aClauses[idx].col = cs.value; };
+        os.onchange = function() { m50aClauses[idx].op = os.value; };
+        vs.oninput  = function() { m50aClauses[idx].val = vs.value; };
+        rm.onclick  = function() {
+          m50aClauses.splice(idx, 1);
+          if (m50aClauses.length === 0) m50aClauses.push({col:'',op:'eq',val:''});
+          renderFilterPanel();
+        };
+      })(i, colSel, opSel, valInp);
+      row.appendChild(colSel); row.appendChild(opSel); row.appendChild(valInp); row.appendChild(rm);
+      holder.appendChild(row);
     }
-    var opSel = document.createElement('select');
-    var ops = ['eq','ne','gt','lt','ge','le'];
-    for (var k = 0; k < ops.length; k++) {
-      var o = document.createElement('option'); o.value = ops[k]; o.textContent = ops[k]; opSel.appendChild(o);
-    }
-    var valInp = document.createElement('input'); valInp.placeholder = 'value';
-    var btn = document.createElement('button'); btn.textContent = 'Apply';
-    btn.onclick = function() { submitFilter(colSel.value, opSel.value, valInp.value); };
-    var reset = document.createElement('button'); reset.textContent = 'Reset';
-    reset.onclick = function() { m50aCurDf = 0; reload(); };
-    bar.appendChild(colSel); bar.appendChild(opSel); bar.appendChild(valInp);
-    bar.appendChild(btn); bar.appendChild(reset);
   }
 
+  // ── Render: groupby panel ─────────────────────────────────────────
   function renderGroupbyBar() {
     var bar = document.getElementById('groupby-bar');
-    bar.innerHTML = 'Group by: ';
+    bar.innerHTML = '';
+    bar.appendChild(document.createTextNode('By: '));
     var checks = [];
     for (var i = 0; i < m50aSchema.names.length; i++) {
-      var lbl = document.createElement('label'); lbl.style.marginRight = '6px';
+      var lbl = document.createElement('label'); lbl.style.marginRight = '8px';
       var cb = document.createElement('input'); cb.type = 'checkbox'; cb.value = m50aSchema.names[i];
       checks.push(cb);
-      lbl.appendChild(cb); lbl.appendChild(document.createTextNode(m50aSchema.names[i]));
+      lbl.appendChild(cb); lbl.appendChild(document.createTextNode(' ' + m50aSchema.names[i]));
       bar.appendChild(lbl);
     }
     bar.appendChild(document.createTextNode(' | Agg col: '));
@@ -21011,16 +21191,27 @@ td.null { color: #999; font-style: italic; }
 
   function setStatus(text) { document.getElementById('status').textContent = text; }
 
-  function submitFilter(col, op, raw) {
-    var v = raw;
-    var idx = m50aSchema.names.indexOf(col);
-    var dt = idx >= 0 ? m50aSchema.dtypes[idx] : 'str';
-    if (dt === 'i64' || dt === 'datetime') v = parseInt(raw, 10);
-    else if (dt === 'f64') v = parseFloat(raw);
-    else if (dt === 'bool') v = (raw === 'true' || raw === '1');
-    apiPost('/api/filter', {df: m50aCurDf, column: col, op: op, value: v}).then(function(r) {
+  // ── Submit: composite filter ──────────────────────────────────────
+  function submitFilter() {
+    if (!m50aSchema) return;
+    var clauses = [];
+    for (var i = 0; i < m50aClauses.length; i++) {
+      var c = m50aClauses[i];
+      if (!c.col) continue;
+      var idx = m50aSchema.names.indexOf(c.col);
+      var dt = idx >= 0 ? m50aSchema.dtypes[idx] : 'str';
+      var v = c.val;
+      if (dt === 'i64' || dt === 'datetime') v = parseInt(c.val, 10);
+      else if (dt === 'f64') v = parseFloat(c.val);
+      else if (dt === 'bool') v = (c.val === 'true' || c.val === '1');
+      clauses.push({column: c.col, op: c.op, value: v});
+    }
+    if (clauses.length === 0) { setStatus('No clauses to apply.'); return; }
+    var logic = document.getElementById('logic-sel').value;
+    apiPost('/api/filter_multi', {df: m50aCurDf, logic: logic, clauses: clauses}).then(function(r) {
       if (r.error) { setStatus('Filter error: ' + r.error); return; }
       m50aCurDf = r.df;
+      m50aSort = null;
       reload();
     });
   }
@@ -21031,35 +21222,85 @@ td.null { color: #999; font-style: italic; }
     apiPost('/api/groupby', {df: m50aCurDf, by: by, agg: agg}).then(function(r) {
       if (r.error) { setStatus('Groupby error: ' + r.error); return; }
       m50aCurDf = r.df;
+      m50aSort = null;
       reload();
     });
   }
 
+  function submitSort(col, asc) {
+    apiPost('/api/sort', {df: m50aCurDf, column: col, ascending: asc}).then(function(r) {
+      if (r.error) { setStatus('Sort error: ' + r.error); return; }
+      m50aCurDf = r.df;
+      m50aSort = {col: col, asc: asc};
+      reload();
+    });
+  }
+
+  // ── Top-bar actions ───────────────────────────────────────────────
+  function downloadCsv() {
+    var a = document.createElement('a');
+    a.href = '/api/csv?df=' + m50aCurDf;
+    a.download = 'tabular_df' + m50aCurDf + '.csv';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
+  function resetToPrimary() {
+    if (m50aCurDf === 0) {
+      // Nothing to forget; just reload from primary.
+      reload();
+      return;
+    }
+    var prev = m50aCurDf;
+    apiPost('/api/forget', {df: prev}).then(function(_) {
+      m50aCurDf = 0;
+      m50aSort = null;
+      reload();
+    });
+  }
+
+  // ── Schema reload + lazy row pagination ───────────────────────────
   function reload() {
     api('/api/schema?df=' + m50aCurDf).then(function(s) {
-      m50aSchema = s; renderHeader(); renderFilterBar(); renderGroupbyBar();
+      m50aSchema = s; renderHeader(); renderFilterPanel(); renderGroupbyBar();
       m50aRowsLoaded = 0;
+      document.querySelector('#data tbody').innerHTML = '';
+      document.getElementById('df-badge').textContent = '· df=' + m50aCurDf;
       fetchMore();
     });
   }
 
   function fetchMore() {
     if (m50aLoading) return;
-    if (m50aSchema && m50aRowsLoaded >= m50aSchema.nrows) return;
+    if (!m50aSchema) return;
+    if (m50aRowsLoaded >= m50aSchema.nrows) return;
     m50aLoading = true;
     var start = m50aRowsLoaded;
     var stop = Math.min(m50aSchema.nrows, start + m50aPageSize);
     api('/api/rows?df=' + m50aCurDf + '&start=' + start + '&stop=' + stop).then(function(r) {
       renderRows(r.rows, start > 0);
       m50aRowsLoaded = stop;
-      setStatus('df=' + m50aCurDf + ' rows=' + m50aRowsLoaded + '/' + m50aSchema.nrows);
+      setStatus('df=' + m50aCurDf + ' rows=' + m50aRowsLoaded + '/' + m50aSchema.nrows
+                + (m50aDomStartRow > 0 ? ' (DOM[' + m50aDomStartRow + ':' + m50aRowsLoaded + '])' : ''));
       m50aLoading = false;
     });
   }
 
-  window.addEventListener('scroll', function() {
-    if (window.scrollY + window.innerHeight > document.body.scrollHeight - 200) fetchMore();
+  // ── Scroll handler — scope to the table wrapper, not window ───────
+  document.getElementById('table-wrap').addEventListener('scroll', function(e) {
+    var w = e.target;
+    if (w.scrollTop + w.clientHeight > w.scrollHeight - 200) fetchMore();
   });
+
+  // ── Wire top-bar + filter-panel buttons ───────────────────────────
+  document.getElementById('btn-csv').onclick = downloadCsv;
+  document.getElementById('btn-forget').onclick = resetToPrimary;
+  document.getElementById('btn-add-clause').onclick = function() {
+    m50aClauses.push({col: m50aSchema ? m50aSchema.names[0] : '', op: 'eq', val: ''});
+    renderFilterPanel();
+  };
+  document.getElementById('btn-apply-filter').onclick = submitFilter;
 
   reload();
 })();
@@ -21256,6 +21497,11 @@ impl M50aResponse {
     fn text(m50a_status: u16, m50a_body: String) -> Self {
         Self { m50a_status, m50a_content_type: "text/plain; charset=utf-8", m50a_body }
     }
+    /// M50b: CSV download response.  Sent as `text/csv` so browsers
+    /// recognize the type when the user clicks the download link.
+    fn csv(m50a_body: String) -> Self {
+        Self { m50a_status: 200, m50a_content_type: "text/csv; charset=utf-8", m50a_body }
+    }
 }
 
 /// Write the M50aResponse to the stream in HTTP/1.1 wire format.
@@ -21342,6 +21588,24 @@ fn m50a_handle_request(
     }
     if m50a_req.m50a_method == "POST" && m50a_path == "/api/groupby" {
         return m50a_handle_groupby(interp, m50a_state, &m50a_req.m50a_body);
+    }
+    // ── M50b: sort, composite filter, CSV download, forget ────────────
+    if m50a_req.m50a_method == "POST" && m50a_path == "/api/sort" {
+        return m50a_handle_sort(interp, m50a_state, &m50a_req.m50a_body);
+    }
+    if m50a_req.m50a_method == "POST" && m50a_path == "/api/filter_multi" {
+        return m50a_handle_filter_multi(interp, m50a_state, &m50a_req.m50a_body);
+    }
+    if m50a_req.m50a_method == "GET" && m50a_path == "/api/csv" {
+        let m50a_id = m50a_qs.get("df").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+        let m50a_df = match m50a_state.lookup(m50a_id) {
+            Some(d) => d,
+            None => return M50aResponse::json(404, m50a_err_json(&format!("unknown df id {}", m50a_id))),
+        };
+        return M50aResponse::csv(m50a_serialize_csv(m50a_df));
+    }
+    if m50a_req.m50a_method == "POST" && m50a_path == "/api/forget" {
+        return m50a_handle_forget(m50a_state, &m50a_req.m50a_body);
     }
     M50aResponse::text(404, "not found".into())
 }
@@ -21521,13 +21785,17 @@ fn m50a_column_cells_as_json(m50a_col_ptr: u64) -> Vec<String> {
                 m50a_json_escape_str(vs.get(i).map(|s| s.as_str()).unwrap_or(""))
             }
             "categorical" => {
-                // M47: ColumnCategorical has a different layout
-                // (codes + categories).  For v1 we coerce to the
-                // string representation via the existing m37_col_fields
-                // window — but the 24-byte payload doesn't match.  As
-                // a safe fallback, render as `null`.  M50b can add a
-                // proper categorical JSON encoder.
-                "null".to_string()
+                // M50b: resolve through codes -> categories.  The
+                // ColumnCategorical layout reuses the M37 "values"
+                // slot for codes (i64), so `vals` here is the codes
+                // ListRepr; categories live in the 32-byte payload's
+                // 4th slot, read via m47_col_cat_categories_ptr.
+                let codes = m37_read_list_i64(vals);
+                let cats_ptr = m47_col_cat_categories_ptr(m50a_col_ptr);
+                let cats = m37_read_list_str_lst(cats_ptr);
+                let code = codes.get(i).copied().unwrap_or(0) as usize;
+                let s = cats.get(code).map(|s| s.as_str()).unwrap_or("");
+                m50a_json_escape_str(s)
             }
             _ => "null".to_string(),
         };
@@ -21960,6 +22228,390 @@ fn m50a_apply_groupby(
     let agg_args = [gdf, specs_lst as u64];
     let derived = m38_gdf_agg(interp, &agg_args).map_err(|e| format!("agg failed: {:?}", e))?;
     Ok(derived)
+}
+
+// ── M50b: CSV download + forget + sort + composite filter ────────────
+//
+// All four endpoints are server-side additions to the M50a transport.
+// Their wire shapes:
+//   GET  /api/csv?df=N          → text/csv body (full frame)
+//   POST /api/forget {"df":N}   → {"ok":true|false} ; refuses id=0
+//   POST /api/sort   {"df":N,"column":"X","ascending":true}
+//                               → {"df":new_id,"nrows":N}
+//   POST /api/filter_multi
+//        {"df":N,"logic":"and"|"or","clauses":[{column,op,value},...]}
+//                               → {"df":new_id,"nrows":N}
+//
+// The composite-filter handler builds a mask per clause via the same
+// per-dtype comparator used by /api/filter, then ANDs/ORs the masks
+// together before calling df.filter once.
+
+/// Serialize a DataFrame as a CSV string (UTF-8).  Mirrors
+/// `m37_write_csv` minus the file I/O: produces a header row + one row
+/// per data row.  Null cells become empty fields (round-trips through
+/// `tabular.read_csv`); datetime cells are ISO-8601; categorical cells
+/// resolve through codes → category strings (m37_df_stringify now
+/// handles this directly).
+fn m50a_serialize_csv(m50a_df: u64) -> String {
+    let (names, dtypes, rows) = m37_df_stringify(m50a_df);
+    let mut buf = String::new();
+    for (i, name) in names.iter().enumerate() {
+        if i > 0 { buf.push(','); }
+        buf.push_str(&csv_escape_field(name));
+    }
+    buf.push('\n');
+    for row in &rows {
+        for (j, cell) in row.iter().enumerate() {
+            if j > 0 { buf.push(','); }
+            let is_null = cell == "null";
+            let out_cell = if is_null {
+                String::new()
+            } else if dtypes.get(j).map(|d| d == "datetime").unwrap_or(false) {
+                let ms: i64 = cell.parse::<i64>().unwrap_or(0);
+                format_epoch_iso((ms / 1000) as f64)
+            } else {
+                cell.clone()
+            };
+            buf.push_str(&csv_escape_field(&out_cell));
+        }
+        buf.push('\n');
+    }
+    buf
+}
+
+/// POST /api/forget handler.  Removes a derived DataFrame from the
+/// registry.  Returns `{"ok":true}` on success, `{"ok":false}` if the
+/// id was unknown or refers to the primary frame (id=0).
+fn m50a_handle_forget(
+    m50a_state: &mut M50aServerState,
+    m50a_body: &str,
+) -> M50aResponse {
+    let m50a_parsed = m50a_parse_simple_json(m50a_body);
+    let m50a_id = match m50a_parsed.get("df").and_then(|v| v.parse::<i64>().ok()) {
+        Some(v) => v,
+        None => return M50aResponse::json(400, m50a_err_json("missing or invalid df")),
+    };
+    let ok = m50a_state.forget(m50a_id);
+    M50aResponse::json(200, format!("{{\"ok\":{}}}", if ok { "true" } else { "false" }))
+}
+
+/// POST /api/sort handler.  Body shape:
+///   `{"df":N, "column":"X", "ascending":true|false}`
+/// Calls into the existing `m37_df_sort_by` to produce a derived frame,
+/// registers it, and returns `{"df":new_id, "nrows":N}`.
+fn m50a_handle_sort(
+    interp: &mut Interpreter,
+    m50a_state: &mut M50aServerState,
+    m50a_body: &str,
+) -> M50aResponse {
+    let m50a_parsed = m50a_parse_simple_json(m50a_body);
+    let m50a_id = m50a_parsed.get("df").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+    let m50a_col_name = match m50a_parsed.get("column") {
+        Some(s) if s.starts_with("STR:") => s[4..].to_string(),
+        _ => return M50aResponse::json(400, m50a_err_json("missing column")),
+    };
+    // ascending defaults to true if omitted.
+    let m50a_ascending: bool = match m50a_parsed.get("ascending") {
+        Some(v) if v.starts_with("STR:") => &v[4..] == "true",
+        Some(v) => v == "true" || v == "1",
+        None => true,
+    };
+    let m50a_df = match m50a_state.lookup(m50a_id) {
+        Some(d) => d,
+        None => return M50aResponse::json(404, m50a_err_json(&format!("unknown df id {}", m50a_id))),
+    };
+    // Validate column exists up front; sort_by also checks but its
+    // error path returns a VmError we'd have to re-stringify.
+    let (names_lst, _, _) = m37_df_fields(m50a_df);
+    let names = m37_read_list_str_lst(names_lst);
+    if !names.iter().any(|n| n == &m50a_col_name) {
+        return M50aResponse::json(400, m50a_err_json(&format!("column {:?} not found", m50a_col_name)));
+    }
+    let col_sp = interp.alloc_string(&m50a_col_name) as u64;
+    let asc_u: u64 = if m50a_ascending { 1 } else { 0 };
+    let sort_args = [m50a_df, col_sp, asc_u];
+    match m37_df_sort_by(interp, &sort_args) {
+        Ok(derived) => {
+            let new_id = m50a_state.register(derived);
+            let (_, _, nrows) = m37_df_fields(derived);
+            M50aResponse::json(200, format!("{{\"df\":{},\"nrows\":{}}}", new_id, nrows))
+        }
+        Err(e) => M50aResponse::json(400, m50a_err_json(&format!("sort failed: {:?}", e))),
+    }
+}
+
+/// Parse a JSON array of objects, e.g. `[{"a":1},{"b":2}]`.  Each
+/// element is reparsed via `m50a_parse_simple_json` so callers can use
+/// the same STR:-tagged value vocabulary as top-level POST bodies.
+fn m50a_parse_json_obj_array(m50a_s: &str) -> Vec<HashMap<String, String>> {
+    let mut out: Vec<HashMap<String, String>> = Vec::new();
+    let s = m50a_s.trim();
+    if !s.starts_with('[') { return out; }
+    let inner = &s[1..s.len().saturating_sub(1)];
+    let bytes = inner.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        // Skip whitespace + commas.
+        while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b',' || bytes[i] == b'\n' || bytes[i] == b'\t' || bytes[i] == b'\r') {
+            i += 1;
+        }
+        if i >= bytes.len() { break; }
+        if bytes[i] != b'{' { break; }
+        // Balanced read of the next object.
+        let start = i;
+        let mut depth = 0i32;
+        let mut in_str = false;
+        let mut esc = false;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if esc {
+                esc = false;
+                i += 1;
+                continue;
+            }
+            if c == b'\\' && in_str {
+                esc = true;
+                i += 1;
+                continue;
+            }
+            if c == b'"' {
+                in_str = !in_str;
+                i += 1;
+                continue;
+            }
+            if !in_str {
+                if c == b'{' { depth += 1; }
+                else if c == b'}' {
+                    depth -= 1;
+                    if depth == 0 {
+                        i += 1;
+                        break;
+                    }
+                }
+            }
+            i += 1;
+        }
+        let obj_str = &inner[start..i];
+        out.push(m50a_parse_simple_json(obj_str));
+    }
+    out
+}
+
+/// Build a bool mask for one filter clause.  Extracted from the body
+/// of `m50a_apply_filter` so the composite-filter handler can reuse it
+/// without re-emitting the ColumnBool / df.filter machinery per clause.
+fn m50a_build_filter_mask(
+    m50a_df: u64,
+    m50a_col_name: &str,
+    m50a_op: &str,
+    m50a_value_raw: &str,
+) -> Result<Vec<bool>, String> {
+    let (names_lst, cols_lst, _nrows) = m37_df_fields(m50a_df);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_index = names.iter().position(|n| n == m50a_col_name)
+        .ok_or_else(|| format!("column {:?} not found", m50a_col_name))?;
+    let col_ptr = unsafe {
+        let data = (*cols_lst).data as *const u64;
+        std::ptr::read_unaligned(data.add(col_index))
+    };
+    let class_name = m50a_col_class_name(col_ptr);
+    let dtype = m50a_dtype_for_class(&class_name);
+    let (vals, nulls, length) = m37_col_fields(col_ptr);
+    let nulls_vec = m37_read_list_bool(nulls);
+    let n = length as usize;
+
+    if !["eq", "ne", "gt", "lt", "ge", "le"].contains(&m50a_op) {
+        return Err(format!("unknown op {:?}", m50a_op));
+    }
+
+    let mut mask: Vec<bool> = vec![false; n];
+
+    match dtype {
+        "i64" | "datetime" => {
+            let want: i64 = if m50a_value_raw.starts_with("STR:") {
+                m50a_value_raw[4..].parse::<i64>().map_err(|_| "value not i64".to_string())?
+            } else {
+                m50a_value_raw.parse::<i64>().map_err(|_| "value not i64".to_string())?
+            };
+            let vs = m37_read_list_i64(vals);
+            for i in 0..n {
+                if nulls_vec.get(i).copied().unwrap_or(false) { continue; }
+                let v = vs.get(i).copied().unwrap_or(0);
+                mask[i] = match m50a_op {
+                    "eq" => v == want, "ne" => v != want,
+                    "gt" => v > want,  "lt" => v < want,
+                    "ge" => v >= want, "le" => v <= want,
+                    _ => false,
+                };
+            }
+        }
+        "f64" => {
+            let want: f64 = if m50a_value_raw.starts_with("STR:") {
+                m50a_value_raw[4..].parse::<f64>().map_err(|_| "value not f64".to_string())?
+            } else {
+                m50a_value_raw.parse::<f64>().map_err(|_| "value not f64".to_string())?
+            };
+            let vs = m37_read_list_f64(vals);
+            for i in 0..n {
+                if nulls_vec.get(i).copied().unwrap_or(false) { continue; }
+                let v = vs.get(i).copied().unwrap_or(0.0);
+                mask[i] = match m50a_op {
+                    "eq" => v == want, "ne" => v != want,
+                    "gt" => v > want,  "lt" => v < want,
+                    "ge" => v >= want, "le" => v <= want,
+                    _ => false,
+                };
+            }
+        }
+        "str" => {
+            let want: String = if m50a_value_raw.starts_with("STR:") {
+                m50a_value_raw[4..].to_string()
+            } else {
+                m50a_value_raw.to_string()
+            };
+            let vs = m37_read_list_str_lst(vals);
+            for i in 0..n {
+                if nulls_vec.get(i).copied().unwrap_or(false) { continue; }
+                let v = vs.get(i).cloned().unwrap_or_default();
+                mask[i] = match m50a_op {
+                    "eq" => v == want, "ne" => v != want,
+                    "gt" => v.as_str() > want.as_str(),  "lt" => v.as_str() < want.as_str(),
+                    "ge" => v.as_str() >= want.as_str(), "le" => v.as_str() <= want.as_str(),
+                    _ => false,
+                };
+            }
+        }
+        "bool" => {
+            let want: bool = if m50a_value_raw.starts_with("STR:") {
+                m50a_value_raw[4..].parse::<bool>().map_err(|_| "value not bool".to_string())?
+            } else {
+                m50a_value_raw.parse::<bool>().map_err(|_| "value not bool".to_string())?
+            };
+            let vs = m37_read_list_bool(vals);
+            for i in 0..n {
+                if nulls_vec.get(i).copied().unwrap_or(false) { continue; }
+                let v = vs.get(i).copied().unwrap_or(false);
+                mask[i] = match m50a_op {
+                    "eq" => v == want, "ne" => v != want,
+                    _ => return Err(format!("op {:?} not valid for bool column", m50a_op)),
+                };
+            }
+        }
+        "categorical" => {
+            // Compare against the resolved category string.  All ops
+            // valid for str are valid here.
+            let want: String = if m50a_value_raw.starts_with("STR:") {
+                m50a_value_raw[4..].to_string()
+            } else {
+                m50a_value_raw.to_string()
+            };
+            let codes = m37_read_list_i64(vals);
+            let cats_ptr = m47_col_cat_categories_ptr(col_ptr);
+            let cats = m37_read_list_str_lst(cats_ptr);
+            for i in 0..n {
+                if nulls_vec.get(i).copied().unwrap_or(false) { continue; }
+                let code = codes.get(i).copied().unwrap_or(0) as usize;
+                let v = cats.get(code).map(|s| s.as_str()).unwrap_or("");
+                mask[i] = match m50a_op {
+                    "eq" => v == want, "ne" => v != want,
+                    "gt" => v > want.as_str(),  "lt" => v < want.as_str(),
+                    "ge" => v >= want.as_str(), "le" => v <= want.as_str(),
+                    _ => false,
+                };
+            }
+        }
+        _ => return Err(format!("unsupported dtype {:?}", dtype)),
+    }
+    Ok(mask)
+}
+
+/// Apply a pre-built bool mask via `df.filter`.  Wraps the mask in a
+/// ColumnBool with an all-false nulls list (mask already encodes the
+/// null-skip semantics by leaving null rows at `false`).
+fn m50a_filter_with_mask(
+    interp: &mut Interpreter,
+    m50a_df: u64,
+    m50a_mask: &[bool],
+) -> Result<u64, String> {
+    let length = m50a_mask.len() as i64;
+    let out_nulls: Vec<bool> = vec![false; m50a_mask.len()];
+    let mask_vals_lst = m37_alloc_list_bool(interp, m50a_mask);
+    let mask_nulls_lst = m37_alloc_list_bool(interp, &out_nulls);
+    let mask_col = m37_alloc_column(interp, "ColumnBool", mask_vals_lst, mask_nulls_lst, length);
+    let filter_args = [m50a_df, mask_col as u64];
+    m37_df_filter(interp, &filter_args).map_err(|e| format!("filter failed: {:?}", e))
+}
+
+/// POST /api/filter_multi handler.  Combines N clauses via AND or OR.
+fn m50a_handle_filter_multi(
+    interp: &mut Interpreter,
+    m50a_state: &mut M50aServerState,
+    m50a_body: &str,
+) -> M50aResponse {
+    let m50a_parsed = m50a_parse_simple_json(m50a_body);
+    let m50a_id = m50a_parsed.get("df").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+    let m50a_logic = match m50a_parsed.get("logic") {
+        Some(s) if s.starts_with("STR:") => s[4..].to_lowercase(),
+        _ => "and".to_string(),
+    };
+    if m50a_logic != "and" && m50a_logic != "or" {
+        return M50aResponse::json(400, m50a_err_json(&format!("logic must be 'and' or 'or', got {:?}", m50a_logic)));
+    }
+    let m50a_clauses_raw = match m50a_parsed.get("clauses") {
+        Some(s) => s.clone(),
+        None => return M50aResponse::json(400, m50a_err_json("missing 'clauses'")),
+    };
+    let m50a_clauses = m50a_parse_json_obj_array(&m50a_clauses_raw);
+    if m50a_clauses.is_empty() {
+        return M50aResponse::json(400, m50a_err_json("clauses must be non-empty"));
+    }
+    let m50a_df = match m50a_state.lookup(m50a_id) {
+        Some(d) => d,
+        None => return M50aResponse::json(404, m50a_err_json(&format!("unknown df id {}", m50a_id))),
+    };
+    let (_, _, nrows_input) = m37_df_fields(m50a_df);
+    let n = nrows_input as usize;
+
+    // Identity element depends on the combiner: AND starts true (any
+    // mismatch flips to false), OR starts false (any match flips to
+    // true).
+    let mut combined: Vec<bool> = vec![m50a_logic == "and"; n];
+
+    for clause in &m50a_clauses {
+        let col_name = match clause.get("column") {
+            Some(s) if s.starts_with("STR:") => s[4..].to_string(),
+            _ => return M50aResponse::json(400, m50a_err_json("clause missing column")),
+        };
+        let op = match clause.get("op") {
+            Some(s) if s.starts_with("STR:") => s[4..].to_string(),
+            _ => return M50aResponse::json(400, m50a_err_json("clause missing op")),
+        };
+        let value_raw = match clause.get("value") {
+            Some(s) => s.clone(),
+            None => return M50aResponse::json(400, m50a_err_json("clause missing value")),
+        };
+        let mask = match m50a_build_filter_mask(m50a_df, &col_name, &op, &value_raw) {
+            Ok(m) => m,
+            Err(msg) => return M50aResponse::json(400, m50a_err_json(&msg)),
+        };
+        if mask.len() != n {
+            return M50aResponse::json(500, m50a_err_json("clause mask length mismatch"));
+        }
+        if m50a_logic == "and" {
+            for i in 0..n { combined[i] = combined[i] && mask[i]; }
+        } else {
+            for i in 0..n { combined[i] = combined[i] || mask[i]; }
+        }
+    }
+
+    match m50a_filter_with_mask(interp, m50a_df, &combined) {
+        Ok(derived) => {
+            let new_id = m50a_state.register(derived);
+            let (_, _, nrows) = m37_df_fields(derived);
+            M50aResponse::json(200, format!("{{\"df\":{},\"nrows\":{}}}", new_id, nrows))
+        }
+        Err(msg) => M50aResponse::json(400, m50a_err_json(&msg)),
+    }
 }
 
 // Suppress dead-code warnings for the Mutex import (kept for future
