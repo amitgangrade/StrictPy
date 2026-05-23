@@ -1148,6 +1148,49 @@ pub enum NativeFn {
     /// ValueError if df has no MultiIndex.
     M44TabDfSortIndexMulti     = 1032,
 
+    // ── M46: stack/unstack + df.loc range + set_index_list + pivot_table ─
+    // M46 closes the v1 tabular surface (except v0.4 polish — rolling
+    // Welford std, categorical, df.iloc 2-D).  Five disjoint feature
+    // groups; see SHARED_BRIEF (m46_round) for the brief and
+    // LANGUAGE_GUIDE §11.33/§11.34/§11.32-rewrite for the surface.
+    /// `DataFrame.stack(self) -> DataFrame`.  Pivots every regular
+    /// column into a new innermost MultiIndex level + a single "value"
+    /// column.  Constraints: all regular columns must share a dtype.
+    /// Output nlevels = input nlevels + 1.
+    M46TabDfStack              = 1033,
+    /// `DataFrame.unstack(self) -> DataFrame`.  Inverse of stack: takes
+    /// the innermost MultiIndex level and turns it into wide columns.
+    /// Requires a MultiIndex on input.  Output nlevels = input nlevels - 1
+    /// (single-col index if result has nlevels=1; RangeIndex if 0).
+    M46TabDfUnstack            = 1034,
+    /// `DataFrame.loc_range_i64(self, start: i64, stop: i64) -> DataFrame`.
+    /// Returns rows where `start <= index_label <= stop` (inclusive both
+    /// ends, pandas semantics).  Requires a single-col ColumnI64 index.
+    M46TabDfLocRangeI64        = 1035,
+    /// `DataFrame.loc_range_f64(self, start: f64, stop: f64) -> DataFrame`.
+    M46TabDfLocRangeF64        = 1036,
+    /// `DataFrame.loc_range_str(self, start: str, stop: str) -> DataFrame`.
+    M46TabDfLocRangeStr        = 1037,
+    /// `DataFrame.loc_range_bool(self, start: bool, stop: bool) -> DataFrame`.
+    M46TabDfLocRangeBool       = 1038,
+    /// `DataFrame.loc_range_datetime(self, start: i64, stop: i64) -> DataFrame`.
+    /// `start`/`stop` are epoch-ms; index must be ColumnDateTime.
+    M46TabDfLocRangeDateTime   = 1039,
+    /// `DataFrame.set_index_list(self, cols: List[str]) -> DataFrame`.
+    /// 1-element list dispatches to set_index (single-col index); ≥2
+    /// elements dispatches to set_index_multi (MultiIndex); empty raises.
+    M46TabDfSetIndexList       = 1040,
+    /// `DataFrame.pivot_table_aggfunc_list(self, index_col: str,
+    /// columns_col: str, values_col: str, aggfuncs: List[str]) -> DataFrame`.
+    /// Same as pivot_table but emits one set of value columns per
+    /// aggfunc.  Output column shape: `{columns_value}_{aggfunc}`.
+    M46TabDfPivotTableAggfuncList = 1041,
+    /// `DataFrame.pivot_table_margins(self, index_col: str,
+    /// columns_col: str, values_col: str, aggfunc: str) -> DataFrame`.
+    /// Same as pivot_table but adds a trailing "All" row + "All" column
+    /// with the aggfunc applied across the slice.
+    M46TabDfPivotTableMargins  = 1042,
+
     // ── 250–289: M22 P2A (argparse + collections + csv) ─────────────────
     // Phase 2 starts here.  P2A's job is to bring three high-ROI stdlib
     // modules online on top of the M19 stdlib-module-table:
@@ -2699,6 +2742,17 @@ impl NativeFn {
             1030 => Some(Self::M44TabDfIndexLevel),
             1031 => Some(Self::M44TabDfIndexLevelName),
             1032 => Some(Self::M44TabDfSortIndexMulti),
+            // ── M46 ──
+            1033 => Some(Self::M46TabDfStack),
+            1034 => Some(Self::M46TabDfUnstack),
+            1035 => Some(Self::M46TabDfLocRangeI64),
+            1036 => Some(Self::M46TabDfLocRangeF64),
+            1037 => Some(Self::M46TabDfLocRangeStr),
+            1038 => Some(Self::M46TabDfLocRangeBool),
+            1039 => Some(Self::M46TabDfLocRangeDateTime),
+            1040 => Some(Self::M46TabDfSetIndexList),
+            1041 => Some(Self::M46TabDfPivotTableAggfuncList),
+            1042 => Some(Self::M46TabDfPivotTableMargins),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

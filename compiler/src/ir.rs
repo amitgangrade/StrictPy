@@ -4794,6 +4794,17 @@ fn m41_tabular_class_method_native_id_by_name(
         ("DataFrame", "index_level")        => NativeFn::M44TabDfIndexLevel       as u32,
         ("DataFrame", "index_level_name")   => NativeFn::M44TabDfIndexLevelName   as u32,
         ("DataFrame", "sort_index_multi")   => NativeFn::M44TabDfSortIndexMulti   as u32,
+        // ── M46: stack/unstack + loc_range + set_index_list + pivot_table extras ──
+        ("DataFrame", "stack")                  => NativeFn::M46TabDfStack                  as u32,
+        ("DataFrame", "unstack")                => NativeFn::M46TabDfUnstack                as u32,
+        ("DataFrame", "loc_range_i64")          => NativeFn::M46TabDfLocRangeI64            as u32,
+        ("DataFrame", "loc_range_f64")          => NativeFn::M46TabDfLocRangeF64            as u32,
+        ("DataFrame", "loc_range_str")          => NativeFn::M46TabDfLocRangeStr            as u32,
+        ("DataFrame", "loc_range_bool")         => NativeFn::M46TabDfLocRangeBool           as u32,
+        ("DataFrame", "loc_range_datetime")     => NativeFn::M46TabDfLocRangeDateTime       as u32,
+        ("DataFrame", "set_index_list")         => NativeFn::M46TabDfSetIndexList           as u32,
+        ("DataFrame", "pivot_table_aggfunc_list") => NativeFn::M46TabDfPivotTableAggfuncList as u32,
+        ("DataFrame", "pivot_table_margins")    => NativeFn::M46TabDfPivotTableMargins      as u32,
         _ => return None,
     })
 }

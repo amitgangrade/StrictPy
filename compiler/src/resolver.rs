@@ -4893,6 +4893,63 @@ impl Resolver {
                     params: vec![m37_bool.clone()],
                     ret: m37_df_ty.clone(),
                 },
+                // ── M46: stack/unstack + loc_range + set_index_list + pivot_table extras ──
+                MethodSig {
+                    name: "stack".into(),
+                    params: vec![],
+                    ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "unstack".into(),
+                    params: vec![],
+                    ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "loc_range_i64".into(),
+                    params: vec![m37_i64.clone(), m37_i64.clone()],
+                    ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "loc_range_f64".into(),
+                    params: vec![m37_f64.clone(), m37_f64.clone()],
+                    ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "loc_range_str".into(),
+                    params: vec![m37_str.clone(), m37_str.clone()],
+                    ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "loc_range_bool".into(),
+                    params: vec![m37_bool.clone(), m37_bool.clone()],
+                    ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "loc_range_datetime".into(),
+                    params: vec![m37_i64.clone(), m37_i64.clone()],
+                    ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "set_index_list".into(),
+                    params: vec![m37_list_str.clone()],
+                    ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "pivot_table_aggfunc_list".into(),
+                    params: vec![
+                        m37_str.clone(), m37_str.clone(),
+                        m37_str.clone(), m37_list_str.clone(),
+                    ],
+                    ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "pivot_table_margins".into(),
+                    params: vec![
+                        m37_str.clone(), m37_str.clone(),
+                        m37_str.clone(), m37_str.clone(),
+                    ],
+                    ret: m37_df_ty.clone(),
+                },
             ],
             generics: vec![], generic_tvars: vec![],
             is_native: false, payload_size: 56,

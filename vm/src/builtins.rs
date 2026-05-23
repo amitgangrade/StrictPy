@@ -7061,6 +7061,18 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         NativeFn::M44TabDfIndexLevelName   => m44_df_index_level_name(interp, args),
         NativeFn::M44TabDfSortIndexMulti   => m44_df_sort_index_multi(interp, args),
 
+        // ── M46: stack/unstack + loc_range + set_index_list + pivot_table extras ──
+        NativeFn::M46TabDfStack                  => m46_df_stack(interp, args),
+        NativeFn::M46TabDfUnstack                => m46_df_unstack(interp, args),
+        NativeFn::M46TabDfLocRangeI64            => m46_df_loc_range_i64(interp, args),
+        NativeFn::M46TabDfLocRangeF64            => m46_df_loc_range_f64(interp, args),
+        NativeFn::M46TabDfLocRangeStr            => m46_df_loc_range_str(interp, args),
+        NativeFn::M46TabDfLocRangeBool           => m46_df_loc_range_bool(interp, args),
+        NativeFn::M46TabDfLocRangeDateTime       => m46_df_loc_range_datetime(interp, args),
+        NativeFn::M46TabDfSetIndexList           => m46_df_set_index_list(interp, args),
+        NativeFn::M46TabDfPivotTableAggfuncList  => m46_df_pivot_table_aggfunc_list(interp, args),
+        NativeFn::M46TabDfPivotTableMargins      => m46_df_pivot_table_margins(interp, args),
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
@@ -15351,6 +15363,16 @@ fn m39_df_merge(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> 
             interp, &out_names, &out_cols, nrows, &m45_levels, &m45_names,
         ));
     }
+    // M46: outer-merge with dtype-mismatched single-col indexes now
+    // emits a NaN-padded 2-level MultiIndex (replaces M42's RangeIndex
+    // fallback).  Only fires when both sides have a single-col index of
+    // different dtypes; otherwise falls through.
+    let m46_mi = m46_merge_outer_dtype_mismatch_multiindex(interp, how.as_str(), lhs, rhs, &emit);
+    if let Some((m46_levels, m46_names)) = m46_mi {
+        return Ok(m44_build_df_with_multiindex(
+            interp, &out_names, &out_cols, nrows, &m46_levels, &m46_names,
+        ));
+    }
     // M42: build the result's index per pandas join rules.
     //
     //   inner: lhs.index restricted to matched rows.  None if lhs lacks
@@ -18401,6 +18423,955 @@ fn m41_df_pivot_table(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmE
         m43_index_col_ptr,
         m43_index_name_ptr,
     ))
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// ── M46 Phase A — stack / unstack ────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════
+//
+// `stack` pivots every regular column into a new innermost MultiIndex
+// level + a single "value" column.  Output's MultiIndex has one more
+// level than the input.  The new innermost level's values are the
+// original column names (always ColumnStr).
+//
+// `unstack` is the inverse: takes the innermost MultiIndex level and
+// turns it into wide columns.  Input must have a MultiIndex (≥2 levels
+// is the common case; nlevels=1 case behaves like a no-op "unstack of
+// single-col index" — we currently raise for that and let users pop
+// the level via reset_index).
+//
+// Variable prefix `m46_` for every new local + helper.
+
+/// Helper: pluck a single cell from a column as either a String label
+/// (for the column-name MultiIndex level, where index labels need to be
+/// stringified) or a typed value depending on dtype.  Mirrors
+/// `m46_cell_to_value_at`.
+fn m46_cell_to_string(col_ptr: u64, row: usize) -> Option<String> {
+    let (vals, nulls, _) = m37_col_fields(col_ptr);
+    let ns = m37_read_list_bool(nulls);
+    if ns.get(row).copied().unwrap_or(false) {
+        return None;
+    }
+    let cls = m38_col_class_name(col_ptr);
+    Some(match cls.as_str() {
+        "ColumnI64" | "ColumnDateTime" => m37_read_list_i64(vals).get(row).copied().unwrap_or(0).to_string(),
+        "ColumnF64" => m37_read_list_f64(vals).get(row).copied().unwrap_or(0.0).to_string(),
+        "ColumnStr" => m37_read_list_str_lst(vals).get(row).cloned().unwrap_or_default(),
+        "ColumnBool" => if m37_read_list_bool(vals).get(row).copied().unwrap_or(false) { "true".into() } else { "false".into() },
+        _ => "?".into(),
+    })
+}
+
+/// Helper: build a Column of the given dtype from per-row (value, null) pairs.
+/// `cls` is the target ColumnXxx name.  For i64-shaped, `i64s` is used; for
+/// f64-shaped, `f64s`; for str-shaped, `strs`; for bool-shaped, `bools`.
+/// Unused vectors should be empty.
+fn m46_build_column(
+    interp: &mut Interpreter,
+    cls: &str,
+    i64s: &[i64],
+    f64s: &[f64],
+    strs: &[String],
+    bools: &[bool],
+    nulls: &[bool],
+) -> u64 {
+    let n = nulls.len() as i64;
+    let n_lst = m37_alloc_list_bool(interp, nulls);
+    let v_lst = match cls {
+        "ColumnI64" | "ColumnDateTime" => m37_alloc_list_i64(interp, i64s),
+        "ColumnF64" => m37_alloc_list_f64(interp, f64s),
+        "ColumnStr" => m37_alloc_list_str(interp, strs),
+        "ColumnBool" => m37_alloc_list_bool(interp, bools),
+        _ => m37_alloc_list_i64(interp, i64s),
+    };
+    m37_alloc_column(interp, cls, v_lst, n_lst, n) as u64
+}
+
+/// `DataFrame.stack(self) -> DataFrame`.  Pivots every regular column
+/// into a new innermost MultiIndex level + a single "value" column.
+/// All regular columns must share a dtype (else raises ValueError).
+///
+/// Behavior on input index:
+///   - No index: output has a single-col index with the column-name
+///     level (the row dimension is left as a RangeIndex implicit in the
+///     row order — caller can reset_index to restore it).
+///   - Single-col index: output has a 2-level MultiIndex (parent's
+///     index → original row label; innermost → column name).
+///   - MultiIndex: output has (N+1)-level MultiIndex.
+fn m46_df_stack(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let (m46_names_lst, _, m46_nrows) = m37_df_fields(recv);
+    let m46_names = m37_read_list_str_lst(m46_names_lst);
+    let m46_col_ptrs = m37_df_col_ptrs(recv);
+    if m46_names.is_empty() {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "DataFrame.stack: frame has no regular columns to stack".into(),
+        });
+    }
+    // Constraint: all regular columns must share a dtype.
+    let m46_dtype = m38_col_class_name(m46_col_ptrs[0]);
+    for cp in &m46_col_ptrs[1..] {
+        let m46_other = m38_col_class_name(*cp);
+        if m46_other != m46_dtype {
+            return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!(
+                    "DataFrame.stack: all regular columns must share a dtype; got {} and {}",
+                    m46_dtype, m46_other
+                ),
+            });
+        }
+    }
+    let m46_ncols = m46_names.len();
+    let m46_out_nrows = (m46_nrows as usize) * m46_ncols;
+    // Build the per-cell value vector + null mask in row-major order:
+    // for each input row r, emit ncols cells (one per column).
+    let mut m46_out_i64: Vec<i64> = Vec::new();
+    let mut m46_out_f64: Vec<f64> = Vec::new();
+    let mut m46_out_str: Vec<String> = Vec::new();
+    let mut m46_out_bool: Vec<bool> = Vec::new();
+    let mut m46_out_nulls: Vec<bool> = Vec::with_capacity(m46_out_nrows);
+    // For each column, snapshot vals + nulls once.
+    let mut m46_per_col: Vec<(Vec<i64>, Vec<f64>, Vec<String>, Vec<bool>, Vec<bool>)> =
+        Vec::with_capacity(m46_ncols);
+    for cp in &m46_col_ptrs {
+        let (vals, nulls, _) = m37_col_fields(*cp);
+        let ns = m37_read_list_bool(nulls);
+        let i64s = if m46_dtype == "ColumnI64" || m46_dtype == "ColumnDateTime" { m37_read_list_i64(vals) } else { Vec::new() };
+        let f64s = if m46_dtype == "ColumnF64" { m37_read_list_f64(vals) } else { Vec::new() };
+        let strs = if m46_dtype == "ColumnStr" { m37_read_list_str_lst(vals) } else { Vec::new() };
+        let bools = if m46_dtype == "ColumnBool" { m37_read_list_bool(vals) } else { Vec::new() };
+        m46_per_col.push((i64s, f64s, strs, bools, ns));
+    }
+    for r in 0..m46_nrows as usize {
+        for ci in 0..m46_ncols {
+            let (i64s, f64s, strs, bools, ns) = &m46_per_col[ci];
+            let null = ns.get(r).copied().unwrap_or(false);
+            m46_out_nulls.push(null);
+            match m46_dtype.as_str() {
+                "ColumnI64" | "ColumnDateTime" => m46_out_i64.push(i64s.get(r).copied().unwrap_or(0)),
+                "ColumnF64" => m46_out_f64.push(f64s.get(r).copied().unwrap_or(0.0)),
+                "ColumnStr" => m46_out_str.push(strs.get(r).cloned().unwrap_or_default()),
+                "ColumnBool" => m46_out_bool.push(bools.get(r).copied().unwrap_or(false)),
+                _ => m46_out_i64.push(0),
+            }
+        }
+    }
+    let m46_value_col = m46_build_column(
+        interp, &m46_dtype,
+        &m46_out_i64, &m46_out_f64, &m46_out_str, &m46_out_bool,
+        &m46_out_nulls,
+    );
+    // Build the innermost MultiIndex level (ColumnStr — column names).
+    let mut m46_colname_vals: Vec<String> = Vec::with_capacity(m46_out_nrows);
+    for _r in 0..m46_nrows as usize {
+        for ci in 0..m46_ncols {
+            m46_colname_vals.push(m46_names[ci].clone());
+        }
+    }
+    let m46_colname_nulls: Vec<bool> = vec![false; m46_out_nrows];
+    let m46_inner_level = m46_build_column(
+        interp, "ColumnStr",
+        &[], &[], &m46_colname_vals, &[],
+        &m46_colname_nulls,
+    );
+    // Inherit / build the outer levels per input-index shape.
+    let m46_outer_levels: Vec<u64>;
+    let m46_outer_names: Vec<String>;
+    let m46_in_mi_levels = m44_read_index_levels(recv);
+    let (m46_in_idx, m46_in_idx_name) = m41_df_index_fields(recv);
+    if !m46_in_mi_levels.is_empty() {
+        // MultiIndex on input: each level repeats per ncols.
+        let m46_in_names = m44_read_index_level_names(recv);
+        let mut m46_levels_out: Vec<u64> = Vec::with_capacity(m46_in_mi_levels.len());
+        for lvl in &m46_in_mi_levels {
+            let mut take_idx: Vec<usize> = Vec::with_capacity(m46_out_nrows);
+            for r in 0..m46_nrows as usize {
+                for _ in 0..m46_ncols { take_idx.push(r); }
+            }
+            m46_levels_out.push(m37_column_take(interp, *lvl, &take_idx));
+        }
+        m46_outer_levels = m46_levels_out;
+        m46_outer_names = m46_in_names;
+    } else if m46_in_idx != 0 {
+        // Single-col index on input: it becomes the outer level.
+        let mut take_idx: Vec<usize> = Vec::with_capacity(m46_out_nrows);
+        for r in 0..m46_nrows as usize {
+            for _ in 0..m46_ncols { take_idx.push(r); }
+        }
+        let m46_repeated = m37_column_take(interp, m46_in_idx, &take_idx);
+        m46_outer_levels = vec![m46_repeated];
+        let m46_name = if m46_in_idx_name == 0 { String::new() } else {
+            unsafe { read_str(m46_in_idx_name as *const StringRepr) }
+        };
+        m46_outer_names = vec![m46_name];
+    } else {
+        // No input index: output gets only the inner (column-name) level.
+        m46_outer_levels = vec![];
+        m46_outer_names = vec![];
+    }
+    // Compose output names + columns.
+    let m46_out_names: Vec<String> = vec!["value".into()];
+    let m46_out_cols: Vec<u64> = vec![m46_value_col];
+    // Build the output: depending on combined level count, route to
+    // the single-col or multi-col constructor.
+    let mut m46_all_levels: Vec<u64> = m46_outer_levels.clone();
+    m46_all_levels.push(m46_inner_level);
+    let mut m46_all_level_names: Vec<String> = m46_outer_names.clone();
+    m46_all_level_names.push(String::new());
+    if m46_all_levels.len() == 1 {
+        // Single-col index: use M41 constructor.
+        let m46_name_ptr = if m46_all_level_names[0].is_empty() {
+            0u64
+        } else {
+            interp.alloc_string(&m46_all_level_names[0]) as u64
+        };
+        return Ok(m41_build_df_with_index(
+            interp, &m46_out_names, &m46_out_cols,
+            m46_out_nrows as i64, m46_all_levels[0], m46_name_ptr,
+        ));
+    }
+    Ok(m44_build_df_with_multiindex(
+        interp, &m46_out_names, &m46_out_cols,
+        m46_out_nrows as i64, &m46_all_levels, &m46_all_level_names,
+    ))
+}
+
+/// `DataFrame.unstack(self) -> DataFrame`.  Inverse of stack: takes the
+/// innermost MultiIndex level and turns it into wide columns.  Input
+/// must have a MultiIndex (raises on single-col or no-index).  Output
+/// has nlevels-1 levels (single-col index if result has 1 level;
+/// RangeIndex if 0).
+///
+/// The single regular column's values get distributed across new
+/// columns named by the popped level's unique values.  Missing
+/// combinations become null.  For multi-column input, only the first
+/// regular column is unstacked (v1 simplification — pandas requires
+/// scalar values per cell).
+fn m46_df_unstack(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let m46_in_levels = m44_read_index_levels(recv);
+    if m46_in_levels.is_empty() {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "DataFrame.unstack: input must have a MultiIndex".into(),
+        });
+    }
+    let (_m46_names_lst, _, m46_nrows) = m37_df_fields(recv);
+    let m46_col_ptrs = m37_df_col_ptrs(recv);
+    if m46_col_ptrs.is_empty() {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "DataFrame.unstack: frame has no value column to distribute".into(),
+        });
+    }
+    let m46_in_level_names = m44_read_index_level_names(recv);
+    let m46_nlevels_in = m46_in_levels.len();
+    // Innermost level becomes wide columns; outer levels keep their role.
+    let m46_inner_level_ptr = m46_in_levels[m46_nlevels_in - 1];
+    let m46_outer_levels: Vec<u64> = m46_in_levels[..m46_nlevels_in - 1].to_vec();
+    let m46_outer_names: Vec<String> = m46_in_level_names[..m46_nlevels_in - 1].to_vec();
+    // Build a string-key per row from the OUTER levels (the row key
+    // identity in the output), plus the inner level's row label as
+    // the column-key.  We use String keys to handle mixed dtypes
+    // uniformly — same shape as pivot_table.
+    let mut m46_row_keys: Vec<String> = Vec::new();
+    let mut m46_row_lookup: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut m46_col_keys: Vec<String> = Vec::new();
+    let mut m46_col_lookup: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut m46_row_buckets: Vec<usize> = Vec::with_capacity(m46_nrows as usize);
+    let mut m46_col_buckets: Vec<usize> = Vec::with_capacity(m46_nrows as usize);
+    for r in 0..m46_nrows as usize {
+        let mut m46_rk_parts: Vec<String> = Vec::with_capacity(m46_outer_levels.len().max(1));
+        for lvl in &m46_outer_levels {
+            m46_rk_parts.push(m46_cell_to_string(*lvl, r).unwrap_or_else(|| "<null>".into()));
+        }
+        let m46_rk = m46_rk_parts.join("\u{1f}");
+        let m46_ck = m46_cell_to_string(m46_inner_level_ptr, r).unwrap_or_else(|| "<null>".into());
+        let m46_ri = match m46_row_lookup.get(&m46_rk).copied() {
+            Some(i) => i,
+            None => {
+                m46_row_lookup.insert(m46_rk.clone(), m46_row_keys.len());
+                m46_row_keys.push(m46_rk);
+                m46_row_keys.len() - 1
+            }
+        };
+        let m46_ci = match m46_col_lookup.get(&m46_ck).copied() {
+            Some(i) => i,
+            None => {
+                m46_col_lookup.insert(m46_ck.clone(), m46_col_keys.len());
+                m46_col_keys.push(m46_ck);
+                m46_col_keys.len() - 1
+            }
+        };
+        m46_row_buckets.push(m46_ri);
+        m46_col_buckets.push(m46_ci);
+    }
+    let m46_nr = m46_row_keys.len();
+    let m46_nc = m46_col_keys.len();
+    // For each value column in the input frame, build nc output
+    // columns (one per column key).  v1 simplification: emit ONLY the
+    // first regular column's values — repeating for multi-value
+    // frames would explode the column count.
+    let m46_val_col_ptr = m46_col_ptrs[0];
+    let m46_val_cls = m38_col_class_name(m46_val_col_ptr);
+    let (m46_vals, m46_vnulls, _) = m37_col_fields(m46_val_col_ptr);
+    let m46_val_ns = m37_read_list_bool(m46_vnulls);
+    let m46_val_i64 = if m46_val_cls == "ColumnI64" || m46_val_cls == "ColumnDateTime" { m37_read_list_i64(m46_vals) } else { Vec::new() };
+    let m46_val_f64 = if m46_val_cls == "ColumnF64" { m37_read_list_f64(m46_vals) } else { Vec::new() };
+    let m46_val_str = if m46_val_cls == "ColumnStr" { m37_read_list_str_lst(m46_vals) } else { Vec::new() };
+    let m46_val_bool = if m46_val_cls == "ColumnBool" { m37_read_list_bool(m46_vals) } else { Vec::new() };
+    // out_buckets[r * nc + c] = source row index (or None if missing).
+    let mut m46_grid: Vec<Option<usize>> = vec![None; m46_nr * m46_nc];
+    for r in 0..m46_nrows as usize {
+        let ri = m46_row_buckets[r];
+        let ci = m46_col_buckets[r];
+        m46_grid[ri * m46_nc + ci] = Some(r);
+    }
+    let mut m46_out_names: Vec<String> = Vec::with_capacity(m46_nc);
+    let mut m46_out_cols: Vec<u64> = Vec::with_capacity(m46_nc);
+    for ci in 0..m46_nc {
+        m46_out_names.push(m46_col_keys[ci].clone());
+        let mut m46_i64s: Vec<i64> = Vec::new();
+        let mut m46_f64s: Vec<f64> = Vec::new();
+        let mut m46_strs: Vec<String> = Vec::new();
+        let mut m46_bools: Vec<bool> = Vec::new();
+        let mut m46_nulls: Vec<bool> = Vec::with_capacity(m46_nr);
+        for ri in 0..m46_nr {
+            match m46_grid[ri * m46_nc + ci] {
+                None => {
+                    m46_nulls.push(true);
+                    match m46_val_cls.as_str() {
+                        "ColumnI64" | "ColumnDateTime" => m46_i64s.push(0),
+                        "ColumnF64" => m46_f64s.push(0.0),
+                        "ColumnStr" => m46_strs.push(String::new()),
+                        "ColumnBool" => m46_bools.push(false),
+                        _ => m46_i64s.push(0),
+                    }
+                }
+                Some(src) => {
+                    m46_nulls.push(m46_val_ns.get(src).copied().unwrap_or(false));
+                    match m46_val_cls.as_str() {
+                        "ColumnI64" | "ColumnDateTime" => m46_i64s.push(m46_val_i64.get(src).copied().unwrap_or(0)),
+                        "ColumnF64" => m46_f64s.push(m46_val_f64.get(src).copied().unwrap_or(0.0)),
+                        "ColumnStr" => m46_strs.push(m46_val_str.get(src).cloned().unwrap_or_default()),
+                        "ColumnBool" => m46_bools.push(m46_val_bool.get(src).copied().unwrap_or(false)),
+                        _ => m46_i64s.push(0),
+                    }
+                }
+            }
+        }
+        m46_out_cols.push(m46_build_column(
+            interp, &m46_val_cls,
+            &m46_i64s, &m46_f64s, &m46_strs, &m46_bools,
+            &m46_nulls,
+        ));
+        // Drop unused vectors — already consumed by build_column.
+        let _ = (m46_i64s, m46_f64s, m46_strs, m46_bools);
+    }
+    // Build the output's index from the OUTER level rows.  Each row_key
+    // corresponds to one row in the output; the levels' values for that
+    // row come from any source row that hashed to that bucket.
+    // We pick the first source row per row-bucket as the representative.
+    let mut m46_first_src: Vec<usize> = vec![usize::MAX; m46_nr];
+    for r in 0..m46_nrows as usize {
+        let ri = m46_row_buckets[r];
+        if m46_first_src[ri] == usize::MAX {
+            m46_first_src[ri] = r;
+        }
+    }
+    let m46_take: Vec<usize> = m46_first_src.iter().copied().collect();
+    let m46_out_levels: Vec<u64> = m46_outer_levels.iter()
+        .map(|lvl| m37_column_take(interp, *lvl, &m46_take))
+        .collect();
+    let m46_out_level_count = m46_out_levels.len();
+    if m46_out_level_count == 0 {
+        // RangeIndex output.
+        return Ok(m37_build_df(interp, &m46_out_names, &m46_out_cols, m46_nr as i64));
+    }
+    if m46_out_level_count == 1 {
+        // Single-col index output (M41 shape).
+        let m46_name_ptr = if m46_outer_names[0].is_empty() {
+            0u64
+        } else {
+            interp.alloc_string(&m46_outer_names[0]) as u64
+        };
+        return Ok(m41_build_df_with_index(
+            interp, &m46_out_names, &m46_out_cols, m46_nr as i64,
+            m46_out_levels[0], m46_name_ptr,
+        ));
+    }
+    Ok(m44_build_df_with_multiindex(
+        interp, &m46_out_names, &m46_out_cols, m46_nr as i64,
+        &m46_out_levels, &m46_outer_names,
+    ))
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// ── M46 Phase B — df.loc range-by-label per dtype ────────────────────────
+// ═════════════════════════════════════════════════════════════════════════
+//
+// `loc_range_*(start, stop)` returns rows where
+//     start <= index_label <= stop
+// (inclusive both ends, pandas .loc semantics).  Per-dtype dispatch
+// mirrors M41's select_by_label_*.  Requires a single-col index of the
+// matching dtype; raises on no-index, MultiIndex, or dtype mismatch.
+
+/// Given the receiver and a boolean keep vector over the parent's
+/// index column, build the row-take vector and assemble the output
+/// frame (preserving the single-col index restricted to the kept rows).
+fn m46_assemble_loc_range(
+    interp: &mut Interpreter,
+    recv: u64,
+    m46_keep: &[bool],
+) -> u64 {
+    let (names_lst, _, _nrows) = m37_df_fields(recv);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_ptrs = m37_df_col_ptrs(recv);
+    let (index_col, index_name_ptr) = m41_df_index_fields(recv);
+    let m46_take: Vec<usize> = m46_keep.iter().enumerate()
+        .filter_map(|(i, k)| if *k { Some(i) } else { None })
+        .collect();
+    let m46_new_cols: Vec<u64> = col_ptrs.iter()
+        .map(|cp| m37_column_take(interp, *cp, &m46_take))
+        .collect();
+    let m46_new_index = m37_column_take(interp, index_col, &m46_take);
+    m41_build_df_with_index(
+        interp, &names, &m46_new_cols, m46_take.len() as i64,
+        m46_new_index, index_name_ptr,
+    )
+}
+
+/// Common preamble for loc_range_*: validate the parent has a single-col
+/// index of the expected dtype.  Returns (index_col, length) on success.
+fn m46_loc_range_check(
+    recv: u64,
+    method: &str,
+    expected_cls: &str,
+) -> Result<(u64, i64), VmError> {
+    // Reject MultiIndex.
+    if !m44_read_index_levels(recv).is_empty() {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("DataFrame.{}: MultiIndex not supported; use reset_index_multi() first", method),
+        });
+    }
+    let (index_col, _) = m41_df_index_fields(recv);
+    if index_col == 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("DataFrame.{}: frame has no index", method),
+        });
+    }
+    let cls = m38_col_class_name(index_col);
+    if cls != expected_cls {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "DataFrame.{}: index dtype is {}, expected {}",
+                method, cls, expected_cls
+            ),
+        });
+    }
+    let (_, _, length) = m37_col_fields(index_col);
+    Ok((index_col, length))
+}
+
+fn m46_df_loc_range_i64(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let start = arg_i64(args, 1);
+    let stop = arg_i64(args, 2);
+    let (index_col, length) = m46_loc_range_check(recv, "loc_range_i64", "ColumnI64")?;
+    let (vals, nulls, _) = m37_col_fields(index_col);
+    let vs = m37_read_list_i64(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut m46_keep: Vec<bool> = Vec::with_capacity(length as usize);
+    for i in 0..length as usize {
+        if ns.get(i).copied().unwrap_or(false) { m46_keep.push(false); continue; }
+        let v = vs.get(i).copied().unwrap_or(0);
+        m46_keep.push(v >= start && v <= stop);
+    }
+    Ok(m46_assemble_loc_range(interp, recv, &m46_keep))
+}
+
+fn m46_df_loc_range_f64(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let start = f64::from_bits(arg_u64(args, 1));
+    let stop = f64::from_bits(arg_u64(args, 2));
+    let (index_col, length) = m46_loc_range_check(recv, "loc_range_f64", "ColumnF64")?;
+    let (vals, nulls, _) = m37_col_fields(index_col);
+    let vs = m37_read_list_f64(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut m46_keep: Vec<bool> = Vec::with_capacity(length as usize);
+    for i in 0..length as usize {
+        if ns.get(i).copied().unwrap_or(false) { m46_keep.push(false); continue; }
+        let v = vs.get(i).copied().unwrap_or(0.0);
+        m46_keep.push(v >= start && v <= stop);
+    }
+    Ok(m46_assemble_loc_range(interp, recv, &m46_keep))
+}
+
+fn m46_df_loc_range_str(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let start = arg_str(args, 1);
+    let stop = arg_str(args, 2);
+    let (index_col, length) = m46_loc_range_check(recv, "loc_range_str", "ColumnStr")?;
+    let (vals, nulls, _) = m37_col_fields(index_col);
+    let vs = m37_read_list_str_lst(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut m46_keep: Vec<bool> = Vec::with_capacity(length as usize);
+    for i in 0..length as usize {
+        if ns.get(i).copied().unwrap_or(false) { m46_keep.push(false); continue; }
+        let v = vs.get(i).cloned().unwrap_or_default();
+        m46_keep.push(v.as_str() >= start.as_str() && v.as_str() <= stop.as_str());
+    }
+    Ok(m46_assemble_loc_range(interp, recv, &m46_keep))
+}
+
+fn m46_df_loc_range_bool(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let start = arg_u64(args, 1) != 0;
+    let stop = arg_u64(args, 2) != 0;
+    let (index_col, length) = m46_loc_range_check(recv, "loc_range_bool", "ColumnBool")?;
+    let (vals, nulls, _) = m37_col_fields(index_col);
+    let vs = m37_read_list_bool(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut m46_keep: Vec<bool> = Vec::with_capacity(length as usize);
+    // For bool, false < true.  Use u8 cast for inclusive range.
+    let s = if start { 1u8 } else { 0u8 };
+    let e = if stop { 1u8 } else { 0u8 };
+    for i in 0..length as usize {
+        if ns.get(i).copied().unwrap_or(false) { m46_keep.push(false); continue; }
+        let v = if vs.get(i).copied().unwrap_or(false) { 1u8 } else { 0u8 };
+        m46_keep.push(v >= s && v <= e);
+    }
+    Ok(m46_assemble_loc_range(interp, recv, &m46_keep))
+}
+
+fn m46_df_loc_range_datetime(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let start = arg_i64(args, 1);
+    let stop = arg_i64(args, 2);
+    let (index_col, length) = m46_loc_range_check(recv, "loc_range_datetime", "ColumnDateTime")?;
+    let (vals, nulls, _) = m37_col_fields(index_col);
+    let vs = m37_read_list_i64(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut m46_keep: Vec<bool> = Vec::with_capacity(length as usize);
+    for i in 0..length as usize {
+        if ns.get(i).copied().unwrap_or(false) { m46_keep.push(false); continue; }
+        let v = vs.get(i).copied().unwrap_or(0);
+        m46_keep.push(v >= start && v <= stop);
+    }
+    Ok(m46_assemble_loc_range(interp, recv, &m46_keep))
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// ── M46 Phase C — set_index_list + pivot_table extensions ────────────────
+// ═════════════════════════════════════════════════════════════════════════
+//
+// `set_index_list(cols)` unifies single-col + multi-col set_index by
+// length dispatch.  `pivot_table_aggfunc_list` emits one set of value
+// columns per aggfunc.  `pivot_table_margins` adds trailing "All"
+// row/col.  The outer-merge MultiIndex fallback is implemented in
+// `m46_merge_outer_dtype_mismatch_multiindex` (called from m39_df_merge).
+
+/// `DataFrame.set_index_list(self, cols: List[str]) -> DataFrame`.
+/// 1-element list -> set_index(cols[0]); ≥2 elements -> set_index_multi;
+/// empty -> ValueError.
+fn m46_df_set_index_list(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let m46_cols = read_list_str(args, 1);
+    if m46_cols.is_empty() {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "DataFrame.set_index_list: cols must be non-empty".into(),
+        });
+    }
+    if m46_cols.len() == 1 {
+        // Dispatch to set_index (single-col).
+        let m46_col_str = interp.alloc_string(&m46_cols[0]) as u64;
+        return m41_df_set_index(interp, &[recv, m46_col_str]);
+    }
+    // ≥2 elements: dispatch to set_index_multi.  Re-pass the list
+    // through args without rebuilding.
+    m44_df_set_index_multi(interp, args)
+}
+
+/// `DataFrame.pivot_table_aggfunc_list(self, index_col: str,
+///                                     columns_col: str,
+///                                     values_col: str,
+///                                     aggfuncs: List[str]) -> DataFrame`.
+/// Same as pivot_table but emits one set of value columns per aggfunc.
+/// Column naming: "{columns_value}_{aggfunc}".
+fn m46_df_pivot_table_aggfunc_list(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let index_col_name = arg_str(args, 1);
+    let columns_col_name = arg_str(args, 2);
+    let values_col_name = arg_str(args, 3);
+    let m46_aggfuncs = read_list_str(args, 4);
+    if m46_aggfuncs.is_empty() {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "DataFrame.pivot_table_aggfunc_list: aggfuncs must be non-empty".into(),
+        });
+    }
+    for f in &m46_aggfuncs {
+        if !matches!(f.as_str(), "sum" | "mean" | "min" | "max" | "count") {
+            return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!(
+                    "DataFrame.pivot_table_aggfunc_list: aggfunc must be sum|mean|min|max|count, got {:?}",
+                    f
+                ),
+            });
+        }
+    }
+    // Build one pivot_table per aggfunc, then horizontally concatenate
+    // their value columns with the suffix "_{aggfunc}".  The index
+    // column is shared across all results (same index_col name + dtype),
+    // so we take the first result's index and reuse it.
+    let m46_idx_str = interp.alloc_string(&index_col_name) as u64;
+    let m46_cols_str = interp.alloc_string(&columns_col_name) as u64;
+    let m46_vals_str = interp.alloc_string(&values_col_name) as u64;
+    // Collect (column_name, column_ptr) tuples per pivot result.
+    let mut m46_all_names: Vec<String> = Vec::new();
+    let mut m46_all_cols: Vec<u64> = Vec::new();
+    let mut m46_index_col_ptr: u64 = 0;
+    let mut m46_index_name_ptr: u64 = 0;
+    let mut m46_out_nrows: i64 = 0;
+    // A union of row keys across aggfuncs.  We need to align rows
+    // across the per-aggfunc pivots.  Strategy: build the first pivot,
+    // capture its index column + row order; assume all aggfuncs produce
+    // the same row keys (true for pivot_table — keys depend only on the
+    // input data + index_col + columns_col, not aggfunc).  This is a
+    // safe assumption per pandas semantics.
+    for (i, f) in m46_aggfuncs.iter().enumerate() {
+        let m46_agg_str = interp.alloc_string(f) as u64;
+        let m46_pt = m41_df_pivot_table(interp, &[recv, m46_idx_str, m46_cols_str, m46_vals_str, m46_agg_str])?;
+        let (n_lst, _, n_rows) = m37_df_fields(m46_pt);
+        let m46_pt_names = m37_read_list_str_lst(n_lst);
+        let m46_pt_cols = m37_df_col_ptrs(m46_pt);
+        if i == 0 {
+            // Capture the index from the first pivot.
+            let (m46_pt_idx, m46_pt_idx_name) = m41_df_index_fields(m46_pt);
+            m46_index_col_ptr = m46_pt_idx;
+            m46_index_name_ptr = m46_pt_idx_name;
+            m46_out_nrows = n_rows;
+        }
+        for (cn, cp) in m46_pt_names.iter().zip(m46_pt_cols.iter()) {
+            m46_all_names.push(format!("{}_{}", cn, f));
+            m46_all_cols.push(*cp);
+        }
+    }
+    Ok(m41_build_df_with_index(
+        interp, &m46_all_names, &m46_all_cols, m46_out_nrows,
+        m46_index_col_ptr, m46_index_name_ptr,
+    ))
+}
+
+/// `DataFrame.pivot_table_margins(self, index_col: str, columns_col: str,
+///                                values_col: str, aggfunc: str) -> DataFrame`.
+/// Same as pivot_table but adds a trailing "All" row + "All" column with
+/// the aggfunc applied to the full row/column slice.  The intersecting
+/// cell is the aggfunc over the whole values column.
+fn m46_df_pivot_table_margins(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let index_col_name = arg_str(args, 1);
+    let columns_col_name = arg_str(args, 2);
+    let values_col_name = arg_str(args, 3);
+    let aggfunc = arg_str(args, 4);
+    if !matches!(aggfunc.as_str(), "sum" | "mean" | "min" | "max" | "count") {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "DataFrame.pivot_table_margins: aggfunc must be sum|mean|min|max|count, got {:?}",
+                aggfunc
+            ),
+        });
+    }
+    // First delegate to pivot_table to get the body.
+    let m46_idx_str = interp.alloc_string(&index_col_name) as u64;
+    let m46_cols_str = interp.alloc_string(&columns_col_name) as u64;
+    let m46_vals_str = interp.alloc_string(&values_col_name) as u64;
+    let m46_agg_str = interp.alloc_string(&aggfunc) as u64;
+    let m46_body = m41_df_pivot_table(interp, &[recv, m46_idx_str, m46_cols_str, m46_vals_str, m46_agg_str])?;
+    // Inspect body shape.
+    let (m46_body_names_lst, _, m46_body_nrows) = m37_df_fields(m46_body);
+    let m46_body_names = m37_read_list_str_lst(m46_body_names_lst);
+    let m46_body_cols = m37_df_col_ptrs(m46_body);
+    let (m46_body_idx, m46_body_idx_name) = m41_df_index_fields(m46_body);
+    if m46_body_cols.is_empty() {
+        // Nothing to margin; return as-is.
+        return Ok(m46_body);
+    }
+    let m46_value_cls = m38_col_class_name(m46_body_cols[0]);
+    // Aggregate function over a slice of (i64 or f64) cells with their nulls.
+    let m46_agg_i64 = |cells: &[(i64, bool)]| -> (i64, bool, f64) {
+        // Returns (i64_result, null, f64_for_mean).
+        let mut nn: Vec<i64> = cells.iter().filter_map(|(v, n)| if *n { None } else { Some(*v) }).collect();
+        if nn.is_empty() && aggfunc.as_str() != "count" {
+            return (0, true, 0.0);
+        }
+        match aggfunc.as_str() {
+            "sum" => (nn.iter().sum::<i64>(), false, 0.0),
+            "min" => { let m = *nn.iter().min().unwrap_or(&0); (m, false, 0.0) }
+            "max" => { let m = *nn.iter().max().unwrap_or(&0); (m, false, 0.0) }
+            "mean" => {
+                let s: i64 = nn.iter().sum();
+                let c = nn.len() as i64;
+                (0, false, s as f64 / c as f64)
+            }
+            "count" => {
+                nn.clear();
+                (cells.iter().filter(|(_v, n)| !*n).count() as i64, false, 0.0)
+            }
+            _ => (0, true, 0.0),
+        }
+    };
+    let m46_agg_f64 = |cells: &[(f64, bool)]| -> (f64, bool) {
+        let nn: Vec<f64> = cells.iter().filter_map(|(v, n)| if *n { None } else { Some(*v) }).collect();
+        if nn.is_empty() && aggfunc.as_str() != "count" {
+            return (0.0, true);
+        }
+        match aggfunc.as_str() {
+            "sum" => (nn.iter().sum(), false),
+            "min" => (nn.iter().cloned().fold(f64::INFINITY, f64::min), false),
+            "max" => (nn.iter().cloned().fold(f64::NEG_INFINITY, f64::max), false),
+            "mean" => (nn.iter().sum::<f64>() / nn.len() as f64, false),
+            "count" => (cells.iter().filter(|(_v, n)| !*n).count() as f64, false),
+            _ => (0.0, true),
+        }
+    };
+    // Snapshot per-column cell vectors.
+    let mut m46_col_cells_i64: Vec<Vec<(i64, bool)>> = Vec::new();
+    let mut m46_col_cells_f64: Vec<Vec<(f64, bool)>> = Vec::new();
+    for cp in &m46_body_cols {
+        let (vals, nulls, _) = m37_col_fields(*cp);
+        let ns = m37_read_list_bool(nulls);
+        if m46_value_cls == "ColumnI64" {
+            let vs = m37_read_list_i64(vals);
+            let mut v: Vec<(i64, bool)> = Vec::with_capacity(m46_body_nrows as usize);
+            for r in 0..m46_body_nrows as usize {
+                v.push((vs.get(r).copied().unwrap_or(0), ns.get(r).copied().unwrap_or(false)));
+            }
+            m46_col_cells_i64.push(v);
+            m46_col_cells_f64.push(Vec::new());
+        } else {
+            let vs = m37_read_list_f64(vals);
+            let mut v: Vec<(f64, bool)> = Vec::with_capacity(m46_body_nrows as usize);
+            for r in 0..m46_body_nrows as usize {
+                v.push((vs.get(r).copied().unwrap_or(0.0), ns.get(r).copied().unwrap_or(false)));
+            }
+            m46_col_cells_f64.push(v);
+            m46_col_cells_i64.push(Vec::new());
+        }
+    }
+    // Build the "All" trailing column: for each row, agg across all cells
+    // in that row.
+    let mut m46_all_col_i64: Vec<i64> = Vec::new();
+    let mut m46_all_col_f64: Vec<f64> = Vec::new();
+    let mut m46_all_col_nulls: Vec<bool> = Vec::with_capacity(m46_body_nrows as usize);
+    for r in 0..m46_body_nrows as usize {
+        if m46_value_cls == "ColumnI64" {
+            let cells: Vec<(i64, bool)> = m46_col_cells_i64.iter()
+                .map(|c| c[r]).collect();
+            let (v, n, _) = m46_agg_i64(&cells);
+            m46_all_col_i64.push(v);
+            m46_all_col_nulls.push(n);
+        } else {
+            let cells: Vec<(f64, bool)> = m46_col_cells_f64.iter()
+                .map(|c| c[r]).collect();
+            let (v, n) = m46_agg_f64(&cells);
+            m46_all_col_f64.push(v);
+            m46_all_col_nulls.push(n);
+        }
+    }
+    // Build the "All" trailing row: for each column, agg across all rows.
+    let mut m46_all_row_i64: Vec<i64> = Vec::new();
+    let mut m46_all_row_f64: Vec<f64> = Vec::new();
+    let mut m46_all_row_nulls: Vec<bool> = Vec::with_capacity(m46_body_cols.len() + 1);
+    for ci in 0..m46_body_cols.len() {
+        if m46_value_cls == "ColumnI64" {
+            let (v, n, _) = m46_agg_i64(&m46_col_cells_i64[ci]);
+            m46_all_row_i64.push(v);
+            m46_all_row_nulls.push(n);
+        } else {
+            let (v, n) = m46_agg_f64(&m46_col_cells_f64[ci]);
+            m46_all_row_f64.push(v);
+            m46_all_row_nulls.push(n);
+        }
+    }
+    // Bottom-right intersecting cell: agg over ALL body cells.
+    if m46_value_cls == "ColumnI64" {
+        let mut all_cells: Vec<(i64, bool)> = Vec::new();
+        for col in &m46_col_cells_i64 { all_cells.extend(col.iter().copied()); }
+        let (v, n, _) = m46_agg_i64(&all_cells);
+        m46_all_row_i64.push(v);
+        m46_all_col_i64.push(v);
+        m46_all_row_nulls.push(n);
+        m46_all_col_nulls.push(n);
+    } else {
+        let mut all_cells: Vec<(f64, bool)> = Vec::new();
+        for col in &m46_col_cells_f64 { all_cells.extend(col.iter().copied()); }
+        let (v, n) = m46_agg_f64(&all_cells);
+        m46_all_row_f64.push(v);
+        m46_all_col_f64.push(v);
+        m46_all_row_nulls.push(n);
+        m46_all_col_nulls.push(n);
+    }
+    // Compose output: body cols (each extended with the "All" row) +
+    // a trailing "All" column.  The index needs to grow by one for the
+    // "All" row.
+    let m46_out_nrows = m46_body_nrows + 1;
+    let mut m46_out_names: Vec<String> = m46_body_names.clone();
+    m46_out_names.push("All".into());
+    let mut m46_out_cols: Vec<u64> = Vec::with_capacity(m46_out_names.len());
+    // For each original body column, append its "All" cell.
+    for ci in 0..m46_body_cols.len() {
+        let (vals, nulls, _) = m37_col_fields(m46_body_cols[ci]);
+        let ns = m37_read_list_bool(nulls);
+        let mut nu: Vec<bool> = ns;
+        if m46_value_cls == "ColumnI64" {
+            let mut vs: Vec<i64> = m37_read_list_i64(vals);
+            vs.push(m46_all_row_i64[ci]);
+            nu.push(m46_all_row_nulls[ci]);
+            m46_out_cols.push(m46_build_column(interp, "ColumnI64", &vs, &[], &[], &[], &nu));
+        } else {
+            let mut vs: Vec<f64> = m37_read_list_f64(vals);
+            vs.push(m46_all_row_f64[ci]);
+            nu.push(m46_all_row_nulls[ci]);
+            m46_out_cols.push(m46_build_column(interp, "ColumnF64", &[], &vs, &[], &[], &nu));
+        }
+    }
+    // Append the "All" trailing column itself.
+    m46_out_cols.push(if m46_value_cls == "ColumnI64" {
+        m46_build_column(interp, "ColumnI64", &m46_all_col_i64, &[], &[], &[], &m46_all_col_nulls)
+    } else {
+        m46_build_column(interp, "ColumnF64", &[], &m46_all_col_f64, &[], &[], &m46_all_col_nulls)
+    });
+    // Extend the index by one row labeled "All" (stringified).
+    let m46_new_index = if m46_body_idx != 0 {
+        let m46_idx_cls = m38_col_class_name(m46_body_idx);
+        let (i_vals, i_nulls, _) = m37_col_fields(m46_body_idx);
+        let i_ns = m37_read_list_bool(i_nulls);
+        let mut new_nu: Vec<bool> = i_ns;
+        match m46_idx_cls.as_str() {
+            "ColumnStr" => {
+                let mut vs = m37_read_list_str_lst(i_vals);
+                vs.push("All".into());
+                new_nu.push(false);
+                m46_build_column(interp, "ColumnStr", &[], &[], &vs, &[], &new_nu)
+            }
+            "ColumnI64" | "ColumnDateTime" => {
+                let mut vs = m37_read_list_i64(i_vals);
+                vs.push(0);
+                new_nu.push(true); // can't represent "All" as i64 → null
+                m46_build_column(interp, &m46_idx_cls, &vs, &[], &[], &[], &new_nu)
+            }
+            "ColumnF64" => {
+                let mut vs = m37_read_list_f64(i_vals);
+                vs.push(0.0);
+                new_nu.push(true);
+                m46_build_column(interp, "ColumnF64", &[], &vs, &[], &[], &new_nu)
+            }
+            "ColumnBool" => {
+                let mut vs = m37_read_list_bool(i_vals);
+                vs.push(false);
+                new_nu.push(true);
+                m46_build_column(interp, "ColumnBool", &[], &[], &[], &vs, &new_nu)
+            }
+            _ => 0,
+        }
+    } else {
+        0
+    };
+    Ok(m41_build_df_with_index(
+        interp, &m46_out_names, &m46_out_cols, m46_out_nrows,
+        m46_new_index, m46_body_idx_name,
+    ))
+}
+
+/// M46: outer-merge with dtype-mismatched single-col indexes.  M42
+/// previously fell back to RangeIndex; M46 emits a NaN-padded 2-level
+/// MultiIndex (level 0 = lhs index column with NaN for right-only rows;
+/// level 1 = rhs index column with NaN for left-only rows).  Returns
+/// `Some((levels, names))` when the conditions match; `None` to let
+/// the caller fall through.
+fn m46_merge_outer_dtype_mismatch_multiindex(
+    interp: &mut Interpreter,
+    how: &str,
+    lhs: u64,
+    rhs: u64,
+    emit: &[(Option<usize>, Option<usize>)],
+) -> Option<(Vec<u64>, Vec<String>)> {
+    if how != "outer" { return None; }
+    let (l_index, l_index_name) = m41_df_index_fields(lhs);
+    let (r_index, r_index_name) = m41_df_index_fields(rhs);
+    if l_index == 0 || r_index == 0 { return None; }
+    let l_cls = m38_col_class_name(l_index);
+    let r_cls = m38_col_class_name(r_index);
+    if l_cls == r_cls { return None; } // matching dtype handled by m42
+    // Build level 0: lhs index permuted with null for right-only rows.
+    let m46_lvl0 = m46_outer_level_with_nulls(interp, &l_cls, l_index, emit, true);
+    let m46_lvl1 = m46_outer_level_with_nulls(interp, &r_cls, r_index, emit, false);
+    let m46_n0 = if l_index_name == 0 { "lhs".into() } else {
+        unsafe { read_str(l_index_name as *const StringRepr) }
+    };
+    let m46_n1 = if r_index_name == 0 { "rhs".into() } else {
+        unsafe { read_str(r_index_name as *const StringRepr) }
+    };
+    Some((vec![m46_lvl0, m46_lvl1], vec![m46_n0, m46_n1]))
+}
+
+/// Helper for `m46_merge_outer_dtype_mismatch_multiindex`: build a
+/// per-side Column for an outer-merge level.  `take_lhs == true` means
+/// this level's values come from lhs (Some(lr) emit rows); false means
+/// from rhs.  Rows where the chosen side has no source become nulls.
+fn m46_outer_level_with_nulls(
+    interp: &mut Interpreter,
+    cls: &str,
+    src_col: u64,
+    emit: &[(Option<usize>, Option<usize>)],
+    take_lhs: bool,
+) -> u64 {
+    let (vals, nulls, _) = m37_col_fields(src_col);
+    let ns = m37_read_list_bool(nulls);
+    let mut out_nulls: Vec<bool> = Vec::with_capacity(emit.len());
+    let mut out_i64: Vec<i64> = Vec::new();
+    let mut out_f64: Vec<f64> = Vec::new();
+    let mut out_str: Vec<String> = Vec::new();
+    let mut out_bool: Vec<bool> = Vec::new();
+    let vs_i64 = if cls == "ColumnI64" || cls == "ColumnDateTime" { m37_read_list_i64(vals) } else { Vec::new() };
+    let vs_f64 = if cls == "ColumnF64" { m37_read_list_f64(vals) } else { Vec::new() };
+    let vs_str = if cls == "ColumnStr" { m37_read_list_str_lst(vals) } else { Vec::new() };
+    let vs_bool = if cls == "ColumnBool" { m37_read_list_bool(vals) } else { Vec::new() };
+    for (l, r) in emit {
+        let src_row: Option<usize> = if take_lhs { *l } else { *r };
+        match src_row {
+            None => {
+                out_nulls.push(true);
+                match cls {
+                    "ColumnI64" | "ColumnDateTime" => out_i64.push(0),
+                    "ColumnF64" => out_f64.push(0.0),
+                    "ColumnStr" => out_str.push(String::new()),
+                    "ColumnBool" => out_bool.push(false),
+                    _ => out_i64.push(0),
+                }
+            }
+            Some(idx) => {
+                out_nulls.push(ns.get(idx).copied().unwrap_or(false));
+                match cls {
+                    "ColumnI64" | "ColumnDateTime" => out_i64.push(vs_i64.get(idx).copied().unwrap_or(0)),
+                    "ColumnF64" => out_f64.push(vs_f64.get(idx).copied().unwrap_or(0.0)),
+                    "ColumnStr" => out_str.push(vs_str.get(idx).cloned().unwrap_or_default()),
+                    "ColumnBool" => out_bool.push(vs_bool.get(idx).copied().unwrap_or(false)),
+                    _ => out_i64.push(0),
+                }
+            }
+        }
+    }
+    m46_build_column(interp, cls, &out_i64, &out_f64, &out_str, &out_bool, &out_nulls)
 }
 
 #[cfg(test)]
