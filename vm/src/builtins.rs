@@ -17034,6 +17034,22 @@ fn m40_df_asof_merge(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmEr
         };
         out_cols.push(m37_alloc_column(interp, &cls, v_lst, n_lst, n as i64) as u64);
     }
+    // M46: propagate lhs's MultiIndex through asof_merge.  Left-join
+    // semantics mean every output row corresponds to one lhs row in
+    // the same order, so the take vector is just 0..l_nrows.  If the
+    // lhs lacks a MultiIndex, fall back to the M37 RangeIndex path.
+    let m46_lhs_levels = m44_read_index_levels(lhs);
+    if !m46_lhs_levels.is_empty() {
+        let m46_take: Vec<usize> = (0..l_nrows as usize).collect();
+        let m46_new_levels: Vec<u64> = m46_lhs_levels.iter()
+            .map(|cp| m37_column_take(interp, *cp, &m46_take))
+            .collect();
+        let m46_level_names = m44_read_index_level_names(lhs);
+        return Ok(m44_build_df_with_multiindex(
+            interp, &out_names, &out_cols, l_nrows,
+            &m46_new_levels, &m46_level_names,
+        ));
+    }
     Ok(m37_build_df(interp, &out_names, &out_cols, l_nrows))
 }
 
@@ -17996,6 +18012,27 @@ fn m41_df_asof_merge_index(interp: &mut Interpreter, args: &[u64]) -> Result<u64
             _ => m37_alloc_list_i64(interp, &out_i64),
         };
         out_cols.push(m37_alloc_column(interp, &cls, v_lst, n_lst, n as i64) as u64);
+    }
+    // M46: propagate lhs's MultiIndex through asof_merge_index.  When
+    // the lhs has both a single-col index (used for the join key) and
+    // a MultiIndex (unusual but conceivable via prior set_index_multi
+    // on a different column), the MultiIndex isn't reachable here
+    // because the single-col + multi index slots are mutually exclusive
+    // by construction.  So this branch only fires when the lhs has
+    // ONLY a MultiIndex, which contradicts the `l_index == 0` check
+    // above.  Left in for symmetry with m40_df_asof_merge; the practical
+    // path is the single-col index restoration below.
+    let m46_lhs_levels = m44_read_index_levels(lhs);
+    if !m46_lhs_levels.is_empty() {
+        let m46_take: Vec<usize> = (0..l_nrows as usize).collect();
+        let m46_new_levels: Vec<u64> = m46_lhs_levels.iter()
+            .map(|cp| m37_column_take(interp, *cp, &m46_take))
+            .collect();
+        let m46_level_names = m44_read_index_level_names(lhs);
+        return Ok(m44_build_df_with_multiindex(
+            interp, &out_names, &out_cols, l_nrows,
+            &m46_new_levels, &m46_level_names,
+        ));
     }
     // Clone the lhs index so the output owns it independently.
     let new_index = m41_clone_column(interp, l_index);

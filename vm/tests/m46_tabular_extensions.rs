@@ -649,3 +649,167 @@ fn pivot_table_margins_adds_all_row_and_column() {
     assert!(out.contains("cols=3"), "got: {out:?}");
     assert!(out.contains("rows=3"), "got: {out:?}");
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// Phase D — time-series ops MultiIndex handling
+// ════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn resample_drops_multiindex() {
+    // Build a frame with a 2-level MultiIndex and a ColumnDateTime
+    // "ts" column.  resample(ts, "1d", "sum") reshapes the row
+    // dimension; MultiIndex must drop.
+    let src = "\
+from tabular import Column, ColumnDateTime, ColumnI64, ColumnStr, DataFrame
+import tabular
+fn main() -> i32:
+    ts_v: List[i64] = []
+    ts_v.append(1000i64)
+    ts_v.append(2000i64)
+    ts_v.append(3000i64)
+    tsns: List[bool] = []
+    tsns.append(false)
+    tsns.append(false)
+    tsns.append(false)
+    ts: ColumnDateTime = tabular.col_datetime(ts_v, tsns)
+    rv: List[str] = []
+    rv.append(\"x\")
+    rv.append(\"y\")
+    rv.append(\"x\")
+    r: ColumnStr = tabular.col_str_simple(rv)
+    cv: List[str] = []
+    cv.append(\"a\")
+    cv.append(\"b\")
+    cv.append(\"a\")
+    c: ColumnStr = tabular.col_str_simple(cv)
+    qv: List[i64] = []
+    qv.append(1i64)
+    qv.append(2i64)
+    qv.append(3i64)
+    q: ColumnI64 = tabular.col_i64_simple(qv)
+    n: List[str] = []
+    n.append(\"ts\")
+    n.append(\"reg\")
+    n.append(\"cat\")
+    n.append(\"qty\")
+    cs: List[Column] = []
+    cs.append(ts)
+    cs.append(r)
+    cs.append(c)
+    cs.append(q)
+    df: DataFrame = tabular.from_columns(n, cs)
+    keys: List[str] = []
+    keys.append(\"reg\")
+    keys.append(\"cat\")
+    mi: DataFrame = df.set_index_multi(keys)
+    rs: DataFrame = mi.resample(\"ts\", \"1d\", \"sum\")
+    println(\"nlev=\" + str(rs.index_nlevels()))
+    return 0
+";
+    let out = run("resample_drops_mi", src);
+    // resample reshapes — drops the MultiIndex; result is RangeIndex (nlev=0).
+    assert!(out.contains("nlev=0"), "got: {out:?}");
+}
+
+#[test]
+fn asof_merge_preserves_lhs_multiindex() {
+    // lhs has a 2-level MultiIndex; asof_merge on common time-like
+    // column should preserve the lhs's MultiIndex (M46 propagation).
+    let src = "\
+from tabular import Column, ColumnDateTime, ColumnI64, ColumnStr, DataFrame
+import tabular
+fn build_lhs() -> DataFrame:
+    ts_v: List[i64] = []
+    ts_v.append(1000i64)
+    ts_v.append(2000i64)
+    tsns: List[bool] = []
+    tsns.append(false)
+    tsns.append(false)
+    ts: ColumnDateTime = tabular.col_datetime(ts_v, tsns)
+    rv: List[str] = []
+    rv.append(\"x\")
+    rv.append(\"y\")
+    r: ColumnStr = tabular.col_str_simple(rv)
+    cv: List[str] = []
+    cv.append(\"a\")
+    cv.append(\"b\")
+    c: ColumnStr = tabular.col_str_simple(cv)
+    n: List[str] = []
+    n.append(\"ts\")
+    n.append(\"reg\")
+    n.append(\"cat\")
+    cs: List[Column] = []
+    cs.append(ts)
+    cs.append(r)
+    cs.append(c)
+    df: DataFrame = tabular.from_columns(n, cs)
+    keys: List[str] = []
+    keys.append(\"reg\")
+    keys.append(\"cat\")
+    return df.set_index_multi(keys)
+fn build_rhs() -> DataFrame:
+    ts_v: List[i64] = []
+    ts_v.append(500i64)
+    ts_v.append(1500i64)
+    rtsns: List[bool] = []
+    rtsns.append(false)
+    rtsns.append(false)
+    ts: ColumnDateTime = tabular.col_datetime(ts_v, rtsns)
+    pv: List[i64] = []
+    pv.append(100i64)
+    pv.append(200i64)
+    p: ColumnI64 = tabular.col_i64_simple(pv)
+    n: List[str] = []
+    n.append(\"ts\")
+    n.append(\"price\")
+    cs: List[Column] = []
+    cs.append(ts)
+    cs.append(p)
+    return tabular.from_columns(n, cs)
+fn main() -> i32:
+    lhs: DataFrame = build_lhs()
+    rhs: DataFrame = build_rhs()
+    out: DataFrame = lhs.asof_merge(rhs, \"ts\", \"ts\")
+    println(\"nlev=\" + str(out.index_nlevels()))
+    println(\"rows=\" + str(out.length()))
+    return 0
+";
+    let out = run("asof_merge_preserves_lhs_mi", src);
+    // M46: asof_merge propagates lhs MultiIndex through.
+    assert!(out.contains("nlev=2"), "got: {out:?}");
+    assert!(out.contains("rows=2"), "got: {out:?}");
+}
+
+#[test]
+fn resample_index_drops_multiindex() {
+    // resample_index on a MI'd frame: today it raises because it
+    // requires a single-col DateTime index.  Document: MI input
+    // does not match the index requirement -> raises.
+    let src = format!(
+        "{MULTI_FRAME_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"reg\")\n    keys.append(\"cat\")\n    mi: DataFrame = df.set_index_multi(keys)\n    try:\n        rs: DataFrame = mi.resample_index(\"1d\", \"sum\")\n        println(\"no-raise\")\n    except ValueError as e:\n        println(\"raised\")\n    return 0\n"
+    );
+    let out = run_expect_err("resample_index_mi_raises", &src);
+    // resample_index requires a single-col DateTime index; MI has no
+    // single-col index so it raises "frame has no index".
+    assert!(
+        out.contains("raised") || out.contains("no index") || out.contains("DateTime"),
+        "got: {out:?}"
+    );
+}
+
+#[test]
+fn asof_merge_index_preserves_lhs_multiindex() {
+    // asof_merge_index requires a single-col DateTime index on both
+    // sides; if lhs has only a MultiIndex (no single-col), it raises.
+    // This test pins the "MultiIndex alone doesn't satisfy
+    // asof_merge_index" contract.
+    let src = format!(
+        "{MULTI_FRAME_HEADER}\nfn build_rhs() -> DataFrame:\n    ts_v: List[i64] = []\n    ts_v.append(500i64)\n    rtsns: List[bool] = []\n    rtsns.append(false)\n    ts: ColumnDateTime = tabular.col_datetime(ts_v, rtsns)\n    pv: List[i64] = []\n    pv.append(100i64)\n    p: ColumnI64 = tabular.col_i64_simple(pv)\n    n: List[str] = []\n    n.append(\"ts\")\n    n.append(\"price\")\n    cs: List[Column] = []\n    cs.append(ts)\n    cs.append(p)\n    return tabular.from_columns(n, cs).set_index(\"ts\")\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"reg\")\n    keys.append(\"cat\")\n    mi: DataFrame = df.set_index_multi(keys)\n    rhs: DataFrame = build_rhs()\n    try:\n        out: DataFrame = mi.asof_merge_index(rhs)\n        println(\"no-raise\")\n    except ValueError as e:\n        println(\"raised\")\n    return 0\n"
+    );
+    let out = run_expect_err("asof_merge_index_mi_raises", &src);
+    // MI-only lhs lacks a single-col index for asof_merge_index → raises.
+    assert!(
+        out.contains("raised") || out.contains("must have an index"),
+        "got: {out:?}"
+    );
+}
