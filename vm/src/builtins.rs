@@ -7096,6 +7096,9 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         NativeFn::M49TabColCategoricalOrdered        => m49_col_categorical_ordered(interp, args),
         NativeFn::M49TabColCategoricalFromCodes      => m49_col_categorical_from_codes(interp, args),
         NativeFn::M49TabColCategoricalIsOrdered      => m49_col_cat_is_ordered(interp, args),
+        NativeFn::M49TabDfLocRangeMultiI64           => m49_df_loc_range_multi_i64(interp, args),
+        NativeFn::M49TabDfLocRangeMultiStr           => m49_df_loc_range_multi_str(interp, args),
+        NativeFn::M49TabDfLocRangeMultiDateTime      => m49_df_loc_range_multi_datetime(interp, args),
 
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
@@ -16999,7 +17002,7 @@ fn m40_parse_rule_ms(rule: &str) -> Result<i64, VmError> {
     let n: i64 = num_part.parse().map_err(|_| VmError::UncaughtException {
         type_name: "ValueError".into(),
         message: format!(
-            "DataFrame.resample: invalid rule {:?} (expected <i64><m|h|d>)",
+            "DataFrame.resample: invalid rule {:?} (expected <i64><m|h|d|w|M|Y>)",
             rule
         ),
     })?;
@@ -17013,10 +17016,23 @@ fn m40_parse_rule_ms(rule: &str) -> Result<i64, VmError> {
         "m" => 60_000,
         "h" => 60 * 60_000,
         "d" => 24 * 60 * 60_000,
+        // ── M49 Phase D: weekly bucket ──
+        // 1w = 7 days = 7 * 24 * 3600 * 1000 ms.  Fixed-width — no
+        // calendar arithmetic needed; aligns naturally with the M40
+        // bucket-start-anchor scheme.
+        "w" => 7 * 24 * 60 * 60_000,
+        // ── M49 Phase D: month / year via calendar arithmetic ──
+        // 1M and 1Y aren't fixed-width.  For correctness we route
+        // through m49_resample_calendar (see m40_df_resample); the
+        // sentinel below carries the "treat as calendar" signal:
+        //   -1 -> month rule (caller multiplies by N for `NM`)
+        //   -2 -> year rule (caller multiplies by N for `NY`)
+        "M" => return Ok(-1 * n),
+        "Y" => return Ok(-2 * n),
         _ => return Err(VmError::UncaughtException {
             type_name: "ValueError".into(),
             message: format!(
-                "DataFrame.resample: unknown rule suffix in {:?} (expected m/h/d)",
+                "DataFrame.resample: unknown rule suffix in {:?} (expected m/h/d/w/M/Y)",
                 rule
             ),
         }),
@@ -17025,6 +17041,107 @@ fn m40_parse_rule_ms(rule: &str) -> Result<i64, VmError> {
         type_name: "ValueError".into(),
         message: format!("DataFrame.resample: rule {:?} overflows i64 ms", rule),
     })?)
+}
+
+// ── M49 Phase D: calendar-arithmetic bucketing for 1M / 1Y ──────────
+//
+// Fixed-width buckets (m/h/d/w) just divide elapsed ms by the rule.
+// Month/year buckets need actual calendar walks: a "1M" bucket
+// starting at e.g. 2024-01-31 ends at 2024-02-29 (end-of-month clamp);
+// a "1Y" bucket starting at 2024-02-29 ends at 2025-02-28 (Feb 29 →
+// Feb 28 in non-leap-years).
+//
+// Implementation: convert each timestamp to civil (year, month, day,
+// h, m, s, ms) via days-since-epoch arithmetic, compute the bucket
+// index = ((y - y0) * 12 + (m - m0)) / N for months or
+// (y - y0) / N for years, and the bucket start as the calendar
+// rollback.
+
+/// Days in a given (1-based) month.  Handles leap-year February.
+fn m49_days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => if m49_is_leap(year) { 29 } else { 28 },
+        _ => 30,
+    }
+}
+
+fn m49_is_leap(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+/// Epoch-ms (UTC) → (year, month, day, hour, minute, second, ms).
+/// Uses the standard civil-from-days algorithm (Howard Hinnant).
+fn m49_civil_from_epoch_ms(epoch_ms: i64) -> (i64, i64, i64, i64, i64, i64, i64) {
+    let ms = epoch_ms.rem_euclid(1000);
+    let total_secs = epoch_ms.div_euclid(1000);
+    let sec = total_secs.rem_euclid(60);
+    let total_min = total_secs.div_euclid(60);
+    let min = total_min.rem_euclid(60);
+    let total_h = total_min.div_euclid(60);
+    let h = total_h.rem_euclid(24);
+    let days = total_h.div_euclid(24);
+    // Howard Hinnant's civil_from_days for proleptic Gregorian.
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y0 = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y0 + 1 } else { y0 };
+    (y, m, d, h, min, sec, ms)
+}
+
+/// (year, month, day, h, min, sec, ms) → epoch_ms.  Inverse of
+/// m49_civil_from_epoch_ms.
+fn m49_epoch_ms_from_civil(y: i64, m: i64, d: i64, h: i64, mi: i64, s: i64, ms: i64) -> i64 {
+    // Howard Hinnant's days_from_civil.
+    let y_adj = if m <= 2 { y - 1 } else { y };
+    let era = if y_adj >= 0 { y_adj } else { y_adj - 399 } / 400;
+    let yoe = y_adj - era * 400;
+    let m_adj = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * m_adj + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    days * 86_400_000 + h * 3_600_000 + mi * 60_000 + s * 1000 + ms
+}
+
+/// Compute month/year bucket index + bucket start for a given timestamp.
+/// `rule_n` is the multiplier (1M means rule_n=1 month, 6M means
+/// rule_n=6 months).  `is_year` selects month- vs year-bucketing.
+/// Returns (bucket_idx_relative_to_anchor, bucket_start_ms).
+fn m49_calendar_bucket(
+    t: i64,
+    anchor: i64,
+    rule_n: i64,
+    is_year: bool,
+) -> (i64, i64) {
+    let (ay, am, _ad, _ah, _ami, _as, _ams) = m49_civil_from_epoch_ms(anchor);
+    let (ty, tm, _td, _th, _tmi, _ts, _tms) = m49_civil_from_epoch_ms(t);
+    let bucket_idx = if is_year {
+        (ty - ay) / rule_n
+    } else {
+        ((ty - ay) * 12 + (tm - am)) / rule_n
+    };
+    // bucket_start = anchor advanced by bucket_idx * rule_n months/years,
+    // anchored to the anchor's day-of-month / time-of-day.
+    let (start_y, start_m) = if is_year {
+        (ay + bucket_idx * rule_n, am)
+    } else {
+        let total_m = am - 1 + bucket_idx * rule_n;
+        (ay + total_m.div_euclid(12), total_m.rem_euclid(12) + 1)
+    };
+    // Clamp anchor day to month length.
+    let (_y, _m, ad, ah, ami, as_, ams) = m49_civil_from_epoch_ms(anchor);
+    let clamped_day = ad.min(m49_days_in_month(start_y, start_m));
+    let start_ms = m49_epoch_ms_from_civil(
+        start_y, start_m, clamped_day, ah, ami, as_, ams
+    );
+    (bucket_idx, start_ms)
 }
 
 /// `DataFrame.resample(self, time_col: str, rule: str, agg: str) -> DataFrame`.
@@ -17113,7 +17230,29 @@ fn m40_df_resample(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmErro
     // Using simple anchor: first bucket begins at t_min (no floor; the
     // user expects the data range to define the buckets).
     let bucket_start_anchor = t_min;
-    let num_buckets: i64 = if rule_ms == 0 {
+    // ── M49 Phase D: calendar-arithmetic dispatch ──
+    // m40_parse_rule_ms returns a negative sentinel for month/year
+    // rules:  -N  for NM,  -2N for NY (well, -1*N and -2*N; the
+    // is_year bit lives in the divisor).  Re-derive (rule_n, is_year)
+    // from the sentinel.
+    let m49_is_calendar = rule_ms < 0;
+    let (m49_rule_n, m49_is_year) = if m49_is_calendar {
+        // rule_ms = -1*n for month, -2*n for year.  We need to recover
+        // n + is_year.  Use the sign trick: stash the rule string scan
+        // separately so we don't lose info.  Re-parse the rule's
+        // suffix here (cheap — single byte).
+        let suf = rule.as_str().chars().last().unwrap_or('?');
+        let n = rule_ms.abs() / (if suf == 'Y' { 2 } else { 1 });
+        (n, suf == 'Y')
+    } else {
+        (0, false)
+    };
+    let num_buckets: i64 = if m49_is_calendar {
+        // Determine the bucket index of t_max relative to the anchor,
+        // then count buckets [0..bucket_idx_max].
+        let (bi_max, _) = m49_calendar_bucket(t_max, bucket_start_anchor, m49_rule_n, m49_is_year);
+        bi_max + 1
+    } else if rule_ms == 0 {
         1
     } else {
         ((t_max - bucket_start_anchor) / rule_ms) + 1
@@ -17126,15 +17265,40 @@ fn m40_df_resample(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmErro
             continue;
         }
         let v = ts_vs.get(r).copied().unwrap_or(0);
-        let b = ((v - bucket_start_anchor) / rule_ms) as usize;
+        let b = if m49_is_calendar {
+            let (bi, _) = m49_calendar_bucket(v, bucket_start_anchor, m49_rule_n, m49_is_year);
+            bi as usize
+        } else {
+            ((v - bucket_start_anchor) / rule_ms) as usize
+        };
         if b < num_buckets {
             bucket_rows[b].push(r);
         }
     }
     // Build output time column: one row per bucket.
-    let bucket_starts: Vec<i64> = (0..num_buckets as i64)
-        .map(|b| bucket_start_anchor + b * rule_ms)
-        .collect();
+    let bucket_starts: Vec<i64> = if m49_is_calendar {
+        // bucket_idx -> start_ms via calendar walk.  We re-use
+        // m49_calendar_bucket by feeding a synthetic timestamp at
+        // anchor + bucket_idx * rule (which lives in the same bucket
+        // by construction) — but the math is cleaner by direct
+        // calendar advance.  Anchor + b*N months/years.
+        let (ay, am, _ad, _ah, _ami, _as, _ams) = m49_civil_from_epoch_ms(bucket_start_anchor);
+        let (_, _, ad, ah, ami, as_, ams) = m49_civil_from_epoch_ms(bucket_start_anchor);
+        (0..num_buckets as i64).map(|b| {
+            let (sy, sm) = if m49_is_year {
+                (ay + b * m49_rule_n, am)
+            } else {
+                let total_m = am - 1 + b * m49_rule_n;
+                (ay + total_m.div_euclid(12), total_m.rem_euclid(12) + 1)
+            };
+            let clamped_d = ad.min(m49_days_in_month(sy, sm));
+            m49_epoch_ms_from_civil(sy, sm, clamped_d, ah, ami, as_, ams)
+        }).collect()
+    } else {
+        (0..num_buckets as i64)
+            .map(|b| bucket_start_anchor + b * rule_ms)
+            .collect()
+    };
     let mut out_names: Vec<String> = vec![time_col.clone()];
     let mut out_cols: Vec<u64> = Vec::new();
     let tv_lst = m37_alloc_list_i64(interp, &bucket_starts);
@@ -19057,7 +19221,7 @@ fn m46_df_unstack(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError
             message: "DataFrame.unstack: input must have a MultiIndex".into(),
         });
     }
-    let (_m46_names_lst, _, m46_nrows) = m37_df_fields(recv);
+    let (m46_names_lst, _, m46_nrows) = m37_df_fields(recv);
     let m46_col_ptrs = m37_df_col_ptrs(recv);
     if m46_col_ptrs.is_empty() {
         return Err(VmError::UncaughtException {
@@ -19109,18 +19273,6 @@ fn m46_df_unstack(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError
     }
     let m46_nr = m46_row_keys.len();
     let m46_nc = m46_col_keys.len();
-    // For each value column in the input frame, build nc output
-    // columns (one per column key).  v1 simplification: emit ONLY the
-    // first regular column's values — repeating for multi-value
-    // frames would explode the column count.
-    let m46_val_col_ptr = m46_col_ptrs[0];
-    let m46_val_cls = m38_col_class_name(m46_val_col_ptr);
-    let (m46_vals, m46_vnulls, _) = m37_col_fields(m46_val_col_ptr);
-    let m46_val_ns = m37_read_list_bool(m46_vnulls);
-    let m46_val_i64 = if m46_val_cls == "ColumnI64" || m46_val_cls == "ColumnDateTime" { m37_read_list_i64(m46_vals) } else { Vec::new() };
-    let m46_val_f64 = if m46_val_cls == "ColumnF64" { m37_read_list_f64(m46_vals) } else { Vec::new() };
-    let m46_val_str = if m46_val_cls == "ColumnStr" { m37_read_list_str_lst(m46_vals) } else { Vec::new() };
-    let m46_val_bool = if m46_val_cls == "ColumnBool" { m37_read_list_bool(m46_vals) } else { Vec::new() };
     // out_buckets[r * nc + c] = source row index (or None if missing).
     let mut m46_grid: Vec<Option<usize>> = vec![None; m46_nr * m46_nc];
     for r in 0..m46_nrows as usize {
@@ -19128,46 +19280,70 @@ fn m46_df_unstack(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError
         let ci = m46_col_buckets[r];
         m46_grid[ri * m46_nc + ci] = Some(r);
     }
-    let mut m46_out_names: Vec<String> = Vec::with_capacity(m46_nc);
-    let mut m46_out_cols: Vec<u64> = Vec::with_capacity(m46_nc);
-    for ci in 0..m46_nc {
-        m46_out_names.push(m46_col_keys[ci].clone());
-        let mut m46_i64s: Vec<i64> = Vec::new();
-        let mut m46_f64s: Vec<f64> = Vec::new();
-        let mut m46_strs: Vec<String> = Vec::new();
-        let mut m46_bools: Vec<bool> = Vec::new();
-        let mut m46_nulls: Vec<bool> = Vec::with_capacity(m46_nr);
-        for ri in 0..m46_nr {
-            match m46_grid[ri * m46_nc + ci] {
-                None => {
-                    m46_nulls.push(true);
-                    match m46_val_cls.as_str() {
-                        "ColumnI64" | "ColumnDateTime" => m46_i64s.push(0),
-                        "ColumnF64" => m46_f64s.push(0.0),
-                        "ColumnStr" => m46_strs.push(String::new()),
-                        "ColumnBool" => m46_bools.push(false),
-                        _ => m46_i64s.push(0),
+    // ── M49 Phase D: distribute EVERY regular column ──
+    // M46 emitted nc output columns sourced only from m46_col_ptrs[0]
+    // — pandas's unstack distributes every regular column.  M49 loops
+    // over each regular column and builds nc output columns per source.
+    // Output column names use the innermost-level value when the input
+    // frame has a single regular column (preserves M46 single-column
+    // behavior byte-for-byte); otherwise names are
+    // "{innermost_level}_{source_col_name}".
+    let m46_names_in = m37_read_list_str_lst(m46_names_lst);
+    let m46_single_regular = m46_col_ptrs.len() == 1;
+    let mut m46_out_names: Vec<String> = Vec::with_capacity(m46_nc * m46_col_ptrs.len());
+    let mut m46_out_cols: Vec<u64> = Vec::with_capacity(m46_nc * m46_col_ptrs.len());
+    for (m49_src_i, &m46_val_col_ptr) in m46_col_ptrs.iter().enumerate() {
+        let m46_val_cls = m38_col_class_name(m46_val_col_ptr);
+        let (m46_vals, m46_vnulls, _) = m37_col_fields(m46_val_col_ptr);
+        let m46_val_ns = m37_read_list_bool(m46_vnulls);
+        let m46_val_i64 = if m46_val_cls == "ColumnI64" || m46_val_cls == "ColumnDateTime" { m37_read_list_i64(m46_vals) } else { Vec::new() };
+        let m46_val_f64 = if m46_val_cls == "ColumnF64" { m37_read_list_f64(m46_vals) } else { Vec::new() };
+        let m46_val_str = if m46_val_cls == "ColumnStr" { m37_read_list_str_lst(m46_vals) } else { Vec::new() };
+        let m46_val_bool = if m46_val_cls == "ColumnBool" { m37_read_list_bool(m46_vals) } else { Vec::new() };
+        for ci in 0..m46_nc {
+            let m49_name = if m46_single_regular {
+                m46_col_keys[ci].clone()
+            } else {
+                let src_name = m46_names_in.get(m49_src_i).cloned().unwrap_or_default();
+                format!("{}_{}", m46_col_keys[ci], src_name)
+            };
+            m46_out_names.push(m49_name);
+            let mut m46_i64s: Vec<i64> = Vec::new();
+            let mut m46_f64s: Vec<f64> = Vec::new();
+            let mut m46_strs: Vec<String> = Vec::new();
+            let mut m46_bools: Vec<bool> = Vec::new();
+            let mut m46_nulls: Vec<bool> = Vec::with_capacity(m46_nr);
+            for ri in 0..m46_nr {
+                match m46_grid[ri * m46_nc + ci] {
+                    None => {
+                        m46_nulls.push(true);
+                        match m46_val_cls.as_str() {
+                            "ColumnI64" | "ColumnDateTime" => m46_i64s.push(0),
+                            "ColumnF64" => m46_f64s.push(0.0),
+                            "ColumnStr" => m46_strs.push(String::new()),
+                            "ColumnBool" => m46_bools.push(false),
+                            _ => m46_i64s.push(0),
+                        }
                     }
-                }
-                Some(src) => {
-                    m46_nulls.push(m46_val_ns.get(src).copied().unwrap_or(false));
-                    match m46_val_cls.as_str() {
-                        "ColumnI64" | "ColumnDateTime" => m46_i64s.push(m46_val_i64.get(src).copied().unwrap_or(0)),
-                        "ColumnF64" => m46_f64s.push(m46_val_f64.get(src).copied().unwrap_or(0.0)),
-                        "ColumnStr" => m46_strs.push(m46_val_str.get(src).cloned().unwrap_or_default()),
-                        "ColumnBool" => m46_bools.push(m46_val_bool.get(src).copied().unwrap_or(false)),
-                        _ => m46_i64s.push(0),
+                    Some(src) => {
+                        m46_nulls.push(m46_val_ns.get(src).copied().unwrap_or(false));
+                        match m46_val_cls.as_str() {
+                            "ColumnI64" | "ColumnDateTime" => m46_i64s.push(m46_val_i64.get(src).copied().unwrap_or(0)),
+                            "ColumnF64" => m46_f64s.push(m46_val_f64.get(src).copied().unwrap_or(0.0)),
+                            "ColumnStr" => m46_strs.push(m46_val_str.get(src).cloned().unwrap_or_default()),
+                            "ColumnBool" => m46_bools.push(m46_val_bool.get(src).copied().unwrap_or(false)),
+                            _ => m46_i64s.push(0),
+                        }
                     }
                 }
             }
+            m46_out_cols.push(m46_build_column(
+                interp, &m46_val_cls,
+                &m46_i64s, &m46_f64s, &m46_strs, &m46_bools,
+                &m46_nulls,
+            ));
+            let _ = (m46_i64s, m46_f64s, m46_strs, m46_bools);
         }
-        m46_out_cols.push(m46_build_column(
-            interp, &m46_val_cls,
-            &m46_i64s, &m46_f64s, &m46_strs, &m46_bools,
-            &m46_nulls,
-        ));
-        // Drop unused vectors — already consumed by build_column.
-        let _ = (m46_i64s, m46_f64s, m46_strs, m46_bools);
     }
     // Build the output's index from the OUTER level rows.  Each row_key
     // corresponds to one row in the output; the levels' values for that
@@ -19363,6 +19539,125 @@ fn m46_df_loc_range_datetime(interp: &mut Interpreter, args: &[u64]) -> Result<u
         m46_keep.push(v >= start && v <= stop);
     }
     Ok(m46_assemble_loc_range(interp, recv, &m46_keep))
+}
+
+// ── M49 Phase D: loc_range_multi_* on MultiIndex's innermost level ──
+//
+// M46's loc_range_* requires a single-col index.  M49 adds the
+// MultiIndex variant: the range bounds apply to the INNERMOST level
+// (last level), leaving outer levels intact.  Outer levels are
+// preserved on every kept row — the filter touches only innermost
+// values.  Range bounds on outer levels could be a v2 / M51
+// extension; the brief defers them.
+
+/// Common preamble for loc_range_multi_*: validate the frame has a
+/// MultiIndex with at least one level, and that the innermost level
+/// has the expected dtype.  Returns (innermost_level_ptr, length).
+fn m49_loc_range_multi_check(
+    recv: u64,
+    method: &str,
+    expected_cls: &str,
+) -> Result<(u64, i64), VmError> {
+    let m49_levels = m44_read_index_levels(recv);
+    if m49_levels.is_empty() {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("DataFrame.{}: frame has no MultiIndex (use {} on a single-col index instead)",
+                             method, method.replace("_multi", "")),
+        });
+    }
+    let m49_inner = *m49_levels.last().unwrap();
+    let m49_cls = m38_col_class_name(m49_inner);
+    if m49_cls != expected_cls {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "DataFrame.{}: innermost level dtype is {}, expected {}",
+                method, m49_cls, expected_cls
+            ),
+        });
+    }
+    let (_, _, length) = m37_col_fields(m49_inner);
+    Ok((m49_inner, length))
+}
+
+/// Assemble the output for loc_range_multi_*: take the kept rows from
+/// every regular column AND every MultiIndex level, preserving the
+/// MultiIndex shape.
+fn m49_assemble_loc_range_multi(
+    interp: &mut Interpreter,
+    recv: u64,
+    m49_keep: &[bool],
+) -> u64 {
+    let (names_lst, _, _) = m37_df_fields(recv);
+    let m49_names = m37_read_list_str_lst(names_lst);
+    let m49_col_ptrs = m37_df_col_ptrs(recv);
+    let m49_levels = m44_read_index_levels(recv);
+    let m49_lnames = m44_read_index_level_names(recv);
+    let m49_take: Vec<usize> = m49_keep.iter().enumerate()
+        .filter_map(|(i, k)| if *k { Some(i) } else { None })
+        .collect();
+    let m49_new_cols: Vec<u64> = m49_col_ptrs.iter()
+        .map(|cp| m37_column_take(interp, *cp, &m49_take))
+        .collect();
+    let m49_new_levels: Vec<u64> = m49_levels.iter()
+        .map(|lvl| m37_column_take(interp, *lvl, &m49_take))
+        .collect();
+    m44_build_df_with_multiindex(
+        interp, &m49_names, &m49_new_cols, m49_take.len() as i64,
+        &m49_new_levels, &m49_lnames,
+    )
+}
+
+fn m49_df_loc_range_multi_i64(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let start = arg_i64(args, 1);
+    let stop = arg_i64(args, 2);
+    let (inner, length) = m49_loc_range_multi_check(recv, "loc_range_multi_i64", "ColumnI64")?;
+    let (vals, nulls, _) = m37_col_fields(inner);
+    let vs = m37_read_list_i64(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut keep: Vec<bool> = Vec::with_capacity(length as usize);
+    for i in 0..length as usize {
+        if ns.get(i).copied().unwrap_or(false) { keep.push(false); continue; }
+        let v = vs.get(i).copied().unwrap_or(0);
+        keep.push(v >= start && v <= stop);
+    }
+    Ok(m49_assemble_loc_range_multi(interp, recv, &keep))
+}
+
+fn m49_df_loc_range_multi_str(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let start = arg_str(args, 1);
+    let stop = arg_str(args, 2);
+    let (inner, length) = m49_loc_range_multi_check(recv, "loc_range_multi_str", "ColumnStr")?;
+    let (vals, nulls, _) = m37_col_fields(inner);
+    let vs = m37_read_list_str_lst(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut keep: Vec<bool> = Vec::with_capacity(length as usize);
+    for i in 0..length as usize {
+        if ns.get(i).copied().unwrap_or(false) { keep.push(false); continue; }
+        let v = vs.get(i).cloned().unwrap_or_default();
+        keep.push(v.as_str() >= start.as_str() && v.as_str() <= stop.as_str());
+    }
+    Ok(m49_assemble_loc_range_multi(interp, recv, &keep))
+}
+
+fn m49_df_loc_range_multi_datetime(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let start = arg_i64(args, 1);
+    let stop = arg_i64(args, 2);
+    let (inner, length) = m49_loc_range_multi_check(recv, "loc_range_multi_datetime", "ColumnDateTime")?;
+    let (vals, nulls, _) = m37_col_fields(inner);
+    let vs = m37_read_list_i64(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut keep: Vec<bool> = Vec::with_capacity(length as usize);
+    for i in 0..length as usize {
+        if ns.get(i).copied().unwrap_or(false) { keep.push(false); continue; }
+        let v = vs.get(i).copied().unwrap_or(0);
+        keep.push(v >= start && v <= stop);
+    }
+    Ok(m49_assemble_loc_range_multi(interp, recv, &keep))
 }
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -19707,6 +20002,27 @@ fn m46_merge_outer_dtype_mismatch_multiindex(
     if how != "outer" { return None; }
     let (l_index, l_index_name) = m41_df_index_fields(lhs);
     let (r_index, r_index_name) = m41_df_index_fields(rhs);
+    // ── M49 Phase D: outer-merge MultiIndex on either side ──
+    // M46 only handled single-col indexes on both sides.  M49 extends
+    // to three new combinations:
+    //   (a) lhs MultiIndex + rhs single-col -> concat lhs's levels +
+    //       rhs's single-col index as the last level (NaN for
+    //       left-only rows).
+    //   (b) lhs single-col + rhs MultiIndex -> symmetric.
+    //   (c) both MultiIndex -> stitch level-by-level; same level
+    //       count, level dtypes match per index -> NaN-padded outer
+    //       on each level; mismatched level counts falls back to
+    //       RangeIndex (returns None, documented limitation).
+    let l_levels = m44_read_index_levels(lhs);
+    let r_levels = m44_read_index_levels(rhs);
+    let l_lnames = m44_read_index_level_names(lhs);
+    let r_lnames = m44_read_index_level_names(rhs);
+    if !l_levels.is_empty() || !r_levels.is_empty() {
+        return m49_outer_multiindex_either_side(
+            interp, lhs, rhs, l_index, l_index_name, r_index, r_index_name,
+            &l_levels, &l_lnames, &r_levels, &r_lnames, emit,
+        );
+    }
     if l_index == 0 || r_index == 0 { return None; }
     let l_cls = m38_col_class_name(l_index);
     let r_cls = m38_col_class_name(r_index);
@@ -19721,6 +20037,159 @@ fn m46_merge_outer_dtype_mismatch_multiindex(
         unsafe { read_str(r_index_name as *const StringRepr) }
     };
     Some((vec![m46_lvl0, m46_lvl1], vec![m46_n0, m46_n1]))
+}
+
+/// M49 outer-merge MultiIndex builder.  Handles the three cases:
+///   - lhs MultiIndex + rhs single-col
+///   - lhs single-col + rhs MultiIndex
+///   - both MultiIndex with equal level count
+/// Returns None for "both MultiIndex with different level count" (the
+/// documented v1 limitation — caller falls through to RangeIndex).
+fn m49_outer_multiindex_either_side(
+    interp: &mut Interpreter,
+    _lhs: u64,
+    _rhs: u64,
+    l_index: u64,
+    l_index_name: u64,
+    r_index: u64,
+    r_index_name: u64,
+    l_levels: &[u64],
+    l_lnames: &[String],
+    r_levels: &[u64],
+    r_lnames: &[String],
+    emit: &[(Option<usize>, Option<usize>)],
+) -> Option<(Vec<u64>, Vec<String>)> {
+    // Case (a): lhs MultiIndex, rhs single-col (rhs has no levels but
+    // has l_index == single-col index pointer).
+    if !l_levels.is_empty() && r_levels.is_empty() && r_index != 0 {
+        let mut m49_out_levels: Vec<u64> = Vec::with_capacity(l_levels.len() + 1);
+        let mut m49_out_names: Vec<String> = Vec::with_capacity(l_lnames.len() + 1);
+        for (i, lvl) in l_levels.iter().enumerate() {
+            let cls = m38_col_class_name(*lvl);
+            m49_out_levels.push(m46_outer_level_with_nulls(interp, &cls, *lvl, emit, true));
+            m49_out_names.push(l_lnames.get(i).cloned().unwrap_or_default());
+        }
+        let r_cls = m38_col_class_name(r_index);
+        m49_out_levels.push(m46_outer_level_with_nulls(interp, &r_cls, r_index, emit, false));
+        let r_name = if r_index_name == 0 { "rhs".into() } else {
+            unsafe { read_str(r_index_name as *const StringRepr) }
+        };
+        m49_out_names.push(r_name);
+        return Some((m49_out_levels, m49_out_names));
+    }
+    // Case (b): lhs single-col, rhs MultiIndex.
+    if l_levels.is_empty() && l_index != 0 && !r_levels.is_empty() {
+        let mut m49_out_levels: Vec<u64> = Vec::with_capacity(r_levels.len() + 1);
+        let mut m49_out_names: Vec<String> = Vec::with_capacity(r_lnames.len() + 1);
+        let l_cls = m38_col_class_name(l_index);
+        m49_out_levels.push(m46_outer_level_with_nulls(interp, &l_cls, l_index, emit, true));
+        let l_name = if l_index_name == 0 { "lhs".into() } else {
+            unsafe { read_str(l_index_name as *const StringRepr) }
+        };
+        m49_out_names.push(l_name);
+        for (i, lvl) in r_levels.iter().enumerate() {
+            let cls = m38_col_class_name(*lvl);
+            m49_out_levels.push(m46_outer_level_with_nulls(interp, &cls, *lvl, emit, false));
+            m49_out_names.push(r_lnames.get(i).cloned().unwrap_or_default());
+        }
+        return Some((m49_out_levels, m49_out_names));
+    }
+    // Case (c): both MultiIndex — same level count required.
+    if !l_levels.is_empty() && !r_levels.is_empty() {
+        if l_levels.len() != r_levels.len() {
+            // Different level count — fall back to RangeIndex (v1
+            // documented limitation; M51 may extend to align by name).
+            return None;
+        }
+        let mut m49_out_levels: Vec<u64> = Vec::with_capacity(l_levels.len());
+        let mut m49_out_names: Vec<String> = Vec::with_capacity(l_levels.len());
+        for i in 0..l_levels.len() {
+            let l_lvl = l_levels[i];
+            let r_lvl = r_levels[i];
+            let l_cls = m38_col_class_name(l_lvl);
+            let r_cls = m38_col_class_name(r_lvl);
+            if l_cls != r_cls {
+                // Mismatched level dtypes — fall back.
+                return None;
+            }
+            // Build a single output level by stitching:
+            //   for (l, r) in emit: lhs cell if Some(l) else rhs cell if Some(r) else null
+            let m49_lvl = m49_outer_multi_level(interp, &l_cls, l_lvl, r_lvl, emit);
+            m49_out_levels.push(m49_lvl);
+            // Name policy: prefer lhs's name (matches m45's lhs-wins
+            // policy); fall back to rhs's name if lhs is empty.
+            let m49_n = l_lnames.get(i).cloned()
+                .filter(|s| !s.is_empty())
+                .or_else(|| r_lnames.get(i).cloned())
+                .unwrap_or_default();
+            m49_out_names.push(m49_n);
+        }
+        return Some((m49_out_levels, m49_out_names));
+    }
+    None
+}
+
+/// Build a single output level for the "both MultiIndex" outer case:
+/// emit[i].0 -> lhs level value, emit[i].1 -> rhs level value, both
+/// None -> null.  When both are Some, prefer lhs (the union shape).
+fn m49_outer_multi_level(
+    interp: &mut Interpreter,
+    cls: &str,
+    l_lvl: u64,
+    r_lvl: u64,
+    emit: &[(Option<usize>, Option<usize>)],
+) -> u64 {
+    let (l_vals, l_nulls, _) = m37_col_fields(l_lvl);
+    let (r_vals, r_nulls, _) = m37_col_fields(r_lvl);
+    let l_ns = m37_read_list_bool(l_nulls);
+    let r_ns = m37_read_list_bool(r_nulls);
+    let l_i64 = if cls == "ColumnI64" || cls == "ColumnDateTime" { m37_read_list_i64(l_vals) } else { Vec::new() };
+    let r_i64 = if cls == "ColumnI64" || cls == "ColumnDateTime" { m37_read_list_i64(r_vals) } else { Vec::new() };
+    let l_f64 = if cls == "ColumnF64" { m37_read_list_f64(l_vals) } else { Vec::new() };
+    let r_f64 = if cls == "ColumnF64" { m37_read_list_f64(r_vals) } else { Vec::new() };
+    let l_str = if cls == "ColumnStr" { m37_read_list_str_lst(l_vals) } else { Vec::new() };
+    let r_str = if cls == "ColumnStr" { m37_read_list_str_lst(r_vals) } else { Vec::new() };
+    let l_bool = if cls == "ColumnBool" { m37_read_list_bool(l_vals) } else { Vec::new() };
+    let r_bool = if cls == "ColumnBool" { m37_read_list_bool(r_vals) } else { Vec::new() };
+    let mut out_nulls: Vec<bool> = Vec::with_capacity(emit.len());
+    let mut out_i64: Vec<i64> = Vec::new();
+    let mut out_f64: Vec<f64> = Vec::new();
+    let mut out_str: Vec<String> = Vec::new();
+    let mut out_bool: Vec<bool> = Vec::new();
+    for (l, r) in emit {
+        // Prefer lhs row, then rhs row, else null.
+        if let Some(li) = l {
+            let n = l_ns.get(*li).copied().unwrap_or(false);
+            out_nulls.push(n);
+            match cls {
+                "ColumnI64" | "ColumnDateTime" => out_i64.push(l_i64.get(*li).copied().unwrap_or(0)),
+                "ColumnF64" => out_f64.push(l_f64.get(*li).copied().unwrap_or(0.0)),
+                "ColumnStr" => out_str.push(l_str.get(*li).cloned().unwrap_or_default()),
+                "ColumnBool" => out_bool.push(l_bool.get(*li).copied().unwrap_or(false)),
+                _ => out_i64.push(0),
+            }
+        } else if let Some(ri) = r {
+            let n = r_ns.get(*ri).copied().unwrap_or(false);
+            out_nulls.push(n);
+            match cls {
+                "ColumnI64" | "ColumnDateTime" => out_i64.push(r_i64.get(*ri).copied().unwrap_or(0)),
+                "ColumnF64" => out_f64.push(r_f64.get(*ri).copied().unwrap_or(0.0)),
+                "ColumnStr" => out_str.push(r_str.get(*ri).cloned().unwrap_or_default()),
+                "ColumnBool" => out_bool.push(r_bool.get(*ri).copied().unwrap_or(false)),
+                _ => out_i64.push(0),
+            }
+        } else {
+            out_nulls.push(true);
+            match cls {
+                "ColumnI64" | "ColumnDateTime" => out_i64.push(0),
+                "ColumnF64" => out_f64.push(0.0),
+                "ColumnStr" => out_str.push(String::new()),
+                "ColumnBool" => out_bool.push(false),
+                _ => out_i64.push(0),
+            }
+        }
+    }
+    m46_build_column(interp, cls, &out_i64, &out_f64, &out_str, &out_bool, &out_nulls)
 }
 
 /// Helper for `m46_merge_outer_dtype_mismatch_multiindex`: build a

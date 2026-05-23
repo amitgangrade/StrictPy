@@ -1285,6 +1285,17 @@ pub enum NativeFn {
     /// true iff at least one category is unreferenced by codes —
     /// the signature of an explicit-categories constructor.
     M49TabColCategoricalIsOrdered      = 1063,
+    /// `DataFrame.loc_range_multi_i64(self, start: i64, stop: i64)
+    /// -> DataFrame`.  Like M46's loc_range_i64 but requires a
+    /// MultiIndex; applies the range filter to the INNERMOST level.
+    M49TabDfLocRangeMultiI64           = 1064,
+    /// `DataFrame.loc_range_multi_str(self, start: str, stop: str)
+    /// -> DataFrame`.  Innermost-level string range filter.
+    M49TabDfLocRangeMultiStr           = 1065,
+    /// `DataFrame.loc_range_multi_datetime(self, start: i64,
+    /// stop: i64) -> DataFrame`.  Innermost-level datetime
+    /// (epoch-ms) range filter.
+    M49TabDfLocRangeMultiDateTime      = 1066,
 
     // ── 250–289: M22 P2A (argparse + collections + csv) ─────────────────
     // Phase 2 starts here.  P2A's job is to bring three high-ROI stdlib
@@ -2870,6 +2881,9 @@ impl NativeFn {
             1061 => Some(Self::M49TabColCategoricalOrdered),
             1062 => Some(Self::M49TabColCategoricalFromCodes),
             1063 => Some(Self::M49TabColCategoricalIsOrdered),
+            1064 => Some(Self::M49TabDfLocRangeMultiI64),
+            1065 => Some(Self::M49TabDfLocRangeMultiStr),
+            1066 => Some(Self::M49TabDfLocRangeMultiDateTime),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

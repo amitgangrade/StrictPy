@@ -5039,6 +5039,23 @@ impl Resolver {
                     params: vec![m37_i64.clone(), m37_i64.clone()],
                     ret: m37_df_ty.clone(),
                 },
+                // ── M49 Phase D: loc_range_multi_* on MultiIndex's
+                // innermost level (outer levels left intact). ──
+                MethodSig {
+                    name: "loc_range_multi_i64".into(),
+                    params: vec![m37_i64.clone(), m37_i64.clone()],
+                    ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "loc_range_multi_str".into(),
+                    params: vec![m37_str.clone(), m37_str.clone()],
+                    ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "loc_range_multi_datetime".into(),
+                    params: vec![m37_i64.clone(), m37_i64.clone()],
+                    ret: m37_df_ty.clone(),
+                },
                 MethodSig {
                     name: "set_index_list".into(),
                     params: vec![m37_list_str.clone()],

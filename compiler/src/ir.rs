@@ -4833,6 +4833,10 @@ fn m41_tabular_class_method_native_id_by_name(
         ("DataFrame", "get_column_categorical") => NativeFn::M47TabDfGetColumnCategorical   as u32,
         // ── M49: ColumnCategorical.is_ordered() ──
         ("ColumnCategorical", "is_ordered")     => NativeFn::M49TabColCategoricalIsOrdered  as u32,
+        // ── M49: loc_range_multi_* on MultiIndex ──
+        ("DataFrame", "loc_range_multi_i64")      => NativeFn::M49TabDfLocRangeMultiI64       as u32,
+        ("DataFrame", "loc_range_multi_str")      => NativeFn::M49TabDfLocRangeMultiStr       as u32,
+        ("DataFrame", "loc_range_multi_datetime") => NativeFn::M49TabDfLocRangeMultiDateTime  as u32,
         _ => return None,
     })
 }
