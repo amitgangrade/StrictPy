@@ -7092,6 +7092,10 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         NativeFn::M47TabColCategoricalToStrings      => m47_col_cat_to_strings(interp, args),
         NativeFn::M47TabDfGetColumnCategorical       => m47_df_get_column_categorical(interp, args),
         NativeFn::M47TabColCategoricalGet            => m47_col_cat_get(interp, args),
+        // ── M49: ordered categorical + from_codes + is_ordered ──
+        NativeFn::M49TabColCategoricalOrdered        => m49_col_categorical_ordered(interp, args),
+        NativeFn::M49TabColCategoricalFromCodes      => m49_col_categorical_from_codes(interp, args),
+        NativeFn::M49TabColCategoricalIsOrdered      => m49_col_cat_is_ordered(interp, args),
 
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
@@ -14687,6 +14691,20 @@ fn m39_join_key(
                 let v = m37_read_list_bool(vals).get(row).copied().unwrap_or(false);
                 out.push_str(if v { "1" } else { "0" });
             }
+            "ColumnCategorical" => {
+                // M49: hash on the resolved string (codes -> categories
+                // lookup).  When BOTH merge sides are ColumnCategorical
+                // with bit-identical categories[], the codes-hash
+                // fastpath in m49_merge_build_hash_map / probe avoids
+                // this materialization entirely.  This branch is the
+                // mixed-dtype / categories-mismatch fallback.
+                let m49_codes = m37_read_list_i64(vals);
+                let m49_c = m49_codes.get(row).copied().unwrap_or(0);
+                let m49_cats_ptr = m47_col_cat_categories_ptr(*cp);
+                let m49_cats = m37_read_list_str_lst(m49_cats_ptr);
+                let m49_s = m49_cats.get(m49_c as usize).cloned().unwrap_or_default();
+                out.push_str(&m49_s);
+            }
             _ => out.push('?'),
         }
     }
@@ -15348,6 +15366,141 @@ fn m39_build_hash_map(
     out
 }
 
+// ── M49 Phase C: merge codes-hash fastpath ──────────────────────────
+//
+// Mirrors the Phase B group_by fastpath: when every `on` column on
+// BOTH sides is a ColumnCategorical with bit-identical categories[]
+// orderings, hashing on i64 codes vectors is dramatically faster than
+// stringifying each row.  Categories must match exactly because two
+// frames with the same string values but different categories[]
+// orderings produce different codes — comparing codes from mismatched
+// tables would silently break equality.
+//
+// On categories mismatch (or any single non-categorical key column),
+// fall through to the existing m39_build_hash_map / m39_join_key
+// string-hash path (which is now correct on ColumnCategorical thanks
+// to the matching branch added to m39_join_key).
+
+/// Compare two ColumnCategorical categories[] lists for bit-identical
+/// orderings.  Returns true iff both have the same length and the
+/// same strings at the same indices.
+fn m49_categories_match(lhs_cat_col: u64, rhs_cat_col: u64) -> bool {
+    let lp = m47_col_cat_categories_ptr(lhs_cat_col);
+    let rp = m47_col_cat_categories_ptr(rhs_cat_col);
+    let ls = m37_read_list_str_lst(lp);
+    let rs = m37_read_list_str_lst(rp);
+    if ls.len() != rs.len() {
+        return false;
+    }
+    ls.iter().zip(rs.iter()).all(|(a, b)| a == b)
+}
+
+/// Returns true iff every (lhs, rhs) key column pair is a
+/// ColumnCategorical with matching categories[].
+fn m49_merge_can_use_codes(
+    lhs_col_ptrs: &[u64],
+    rhs_col_ptrs: &[u64],
+    lhs_key_idx: &[usize],
+    rhs_key_idx: &[usize],
+) -> bool {
+    if lhs_key_idx.len() != rhs_key_idx.len() {
+        return false;
+    }
+    for (li, ri) in lhs_key_idx.iter().zip(rhs_key_idx.iter()) {
+        let lcp = lhs_col_ptrs[*li];
+        let rcp = rhs_col_ptrs[*ri];
+        if m38_col_class_name(lcp) != "ColumnCategorical"
+            || m38_col_class_name(rcp) != "ColumnCategorical"
+        {
+            return false;
+        }
+        if !m49_categories_match(lcp, rcp) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Codes-hash merge: build the rhs hash map keyed by Vec<i64> codes
+/// (one slot per key column), and probe with lhs codes.  Returns
+/// (emit, rhs_matched) — the same shape m39_df_merge consumes.
+fn m49_merge_emit_codes(
+    lhs: u64,
+    rhs: u64,
+    how: &str,
+    lhs_col_ptrs: &[u64],
+    rhs_col_ptrs: &[u64],
+    lhs_key_idx: &[usize],
+    rhs_key_idx: &[usize],
+) -> (Vec<(Option<usize>, Option<usize>)>, std::collections::HashSet<usize>) {
+    let (_, _, lhs_nrows) = m37_df_fields(lhs);
+    let (_, _, rhs_nrows) = m37_df_fields(rhs);
+    let m49_lhs_cps: Vec<u64> = lhs_key_idx.iter().map(|i| lhs_col_ptrs[*i]).collect();
+    let m49_rhs_cps: Vec<u64> = rhs_key_idx.iter().map(|i| rhs_col_ptrs[*i]).collect();
+    let m49_lhs_codes_per_col: Vec<Vec<i64>> = m49_lhs_cps.iter()
+        .map(|cp| m49_read_codes_with_nulls(*cp, lhs_nrows as usize))
+        .collect();
+    let m49_rhs_codes_per_col: Vec<Vec<i64>> = m49_rhs_cps.iter()
+        .map(|cp| m49_read_codes_with_nulls(*cp, rhs_nrows as usize))
+        .collect();
+    let nk = lhs_key_idx.len();
+    // Build the rhs map: Vec<i64>-keyed (codes tuple) → Vec<row_idx>.
+    let mut m49_rhs_map: std::collections::HashMap<Vec<i64>, Vec<usize>> =
+        std::collections::HashMap::new();
+    let mut m49_row_codes: Vec<i64> = vec![0; nk];
+    for rr in 0..rhs_nrows as usize {
+        let mut m49_any_null = false;
+        for k in 0..nk {
+            let c = m49_rhs_codes_per_col[k][rr];
+            if c == M49_NULL_CODE {
+                m49_any_null = true;
+                break;
+            }
+            m49_row_codes[k] = c;
+        }
+        if m49_any_null {
+            // Pandas semantics: null keys don't match anything.
+            continue;
+        }
+        m49_rhs_map.entry(m49_row_codes.clone()).or_insert_with(Vec::new).push(rr);
+    }
+    // Probe lhs.
+    let mut emit: Vec<(Option<usize>, Option<usize>)> = Vec::new();
+    let mut rhs_matched: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for lr in 0..lhs_nrows as usize {
+        let mut m49_any_null = false;
+        for k in 0..nk {
+            let c = m49_lhs_codes_per_col[k][lr];
+            if c == M49_NULL_CODE {
+                m49_any_null = true;
+                break;
+            }
+            m49_row_codes[k] = c;
+        }
+        let mut matched = false;
+        if !m49_any_null {
+            if let Some(rs) = m49_rhs_map.get(&m49_row_codes) {
+                for rr in rs {
+                    emit.push((Some(lr), Some(*rr)));
+                    rhs_matched.insert(*rr);
+                    matched = true;
+                }
+            }
+        }
+        if !matched && (how == "left" || how == "outer") {
+            emit.push((Some(lr), None));
+        }
+    }
+    if how == "right" || how == "outer" {
+        for rr in 0..rhs_nrows as usize {
+            if !rhs_matched.contains(&rr) {
+                emit.push((None, Some(rr)));
+            }
+        }
+    }
+    (emit, rhs_matched)
+}
+
 /// `DataFrame.merge(self, other, on, how) -> DataFrame`.  Hash-join
 /// implementation; `on` is a list of column names that must exist in
 /// both frames with matching dtypes.
@@ -15421,56 +15574,52 @@ fn m39_df_merge(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> 
         out_names.push(rhs_names[*ri].clone());
     }
     let out_ncols = out_names.len();
-    // Build the rhs hash map.
-    let rhs_map = m39_build_hash_map(rhs, &rhs_key_idx);
-    // Compute lhs key column ptrs/classes (for probe).
-    let lhs_key_cps: Vec<u64> = lhs_key_idx.iter().map(|i| lhs_col_ptrs[*i]).collect();
-    let lhs_key_cls: Vec<String> = lhs_key_cps.iter().map(|cp| m38_col_class_name(*cp)).collect();
-    // Probe phase: emit (left_row_opt, right_row_opt) pairs.  None on a
-    // side means "synthesize null cells from that side's columns".
-    let mut emit: Vec<(Option<usize>, Option<usize>)> = Vec::new();
-    let mut rhs_matched: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    for lr in 0..lhs_nrows as usize {
-        let key = m39_join_key(&lhs_key_cps, &lhs_key_cls, lr);
-        let mut matched = false;
-        if let Some(k) = key {
-            if let Some(rs) = rhs_map.get(&k) {
-                for rr in rs {
-                    emit.push((Some(lr), Some(*rr)));
-                    rhs_matched.insert(*rr);
-                    matched = true;
+    // ── M49: codes-hash merge fastpath ──
+    // When every `on` column on both sides is ColumnCategorical with
+    // matching categories[], skip the per-row string materialization
+    // and hash on i64 codes vectors directly.  Otherwise fall through
+    // to the existing string-hash path.
+    let (emit, _rhs_matched): (Vec<(Option<usize>, Option<usize>)>,
+                                std::collections::HashSet<usize>) =
+        if m49_merge_can_use_codes(&lhs_col_ptrs, &rhs_col_ptrs,
+                                    &lhs_key_idx, &rhs_key_idx) {
+            m49_merge_emit_codes(
+                lhs, rhs, how.as_str(),
+                &lhs_col_ptrs, &rhs_col_ptrs,
+                &lhs_key_idx, &rhs_key_idx,
+            )
+        } else {
+            // Build the rhs hash map (string-hash path).
+            let rhs_map = m39_build_hash_map(rhs, &rhs_key_idx);
+            let lhs_key_cps: Vec<u64> = lhs_key_idx.iter().map(|i| lhs_col_ptrs[*i]).collect();
+            let lhs_key_cls: Vec<String> = lhs_key_cps.iter().map(|cp| m38_col_class_name(*cp)).collect();
+            let mut emit: Vec<(Option<usize>, Option<usize>)> = Vec::new();
+            let mut rhs_matched: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            for lr in 0..lhs_nrows as usize {
+                let key = m39_join_key(&lhs_key_cps, &lhs_key_cls, lr);
+                let mut matched = false;
+                if let Some(k) = key {
+                    if let Some(rs) = rhs_map.get(&k) {
+                        for rr in rs {
+                            emit.push((Some(lr), Some(*rr)));
+                            rhs_matched.insert(*rr);
+                            matched = true;
+                        }
+                    }
+                }
+                if !matched && (how == "left" || how == "outer") {
+                    emit.push((Some(lr), None));
                 }
             }
-        }
-        if !matched && (how == "left" || how == "outer") {
-            emit.push((Some(lr), None));
-        }
-    }
-    if how == "right" || how == "outer" {
-        // For "right" we ALSO need to drop unmatched left rows already
-        // emitted as (Some, None) — but since how != "left" gate above
-        // already excludes them.  For "right", iterate every rhs row;
-        // if not matched, emit (None, Some(rr)).  For "outer", emit
-        // unmatched right rows on top of the left-side scan.
-        for rr in 0..rhs_nrows as usize {
-            // A right-row matches if rhs_matched.contains(rr).  Also
-            // skip rows whose key is null (won't match anyway).
-            let rhs_col_cps: Vec<u64> = rhs_key_idx.iter().map(|i| rhs_col_ptrs[*i]).collect();
-            let rhs_col_cls: Vec<String> = rhs_col_cps.iter().map(|cp| m38_col_class_name(*cp)).collect();
-            let _ = (rhs_col_cps, rhs_col_cls); // recomputed each iter — fine for v1
-            if !rhs_matched.contains(&rr) {
-                // For right join: also include left-unmatched in the
-                // output.  For inner alone we wouldn't reach here.
-                emit.push((None, Some(rr)));
+            if how == "right" || how == "outer" {
+                for rr in 0..rhs_nrows as usize {
+                    if !rhs_matched.contains(&rr) {
+                        emit.push((None, Some(rr)));
+                    }
+                }
             }
-        }
-        if how == "right" {
-            // For right join semantics, we should ALSO drop the
-            // (Some(lr), None) left-only rows added in the lhs scan.
-            // But the earlier loop only adds those for "left"/"outer".
-            // So nothing to filter here.
-        }
-    }
+            (emit, rhs_matched)
+        };
     // Compose output columns.  For each out column, decide which
     // source it pulls from and walk `emit`, materializing per-row
     // values + null mask.
@@ -20059,6 +20208,152 @@ fn m47_df_get_column_categorical(
         return Ok(NONE_SENTINEL);
     }
     Ok(m47_col)
+}
+
+// ── M49 Phase C: ordered categorical + from_codes ───────────────────
+//
+// M47's `col_categorical(values)` builds categories by first-appearance
+// order — the order can vary across DataFrames built from the same
+// values in different sequences, which breaks merge codes-hash (Phase C
+// requires bit-identical categories[] to use the fast path).
+//
+// `col_categorical_ordered(values, categories)` pins the categories[]
+// ordering up front: codes[i] = position of values[i] in categories.
+// Two frames built with the same `categories` argument will compare
+// codes correctly across merges.
+//
+// `col_categorical_from_codes(codes, categories)` is the reverse
+// constructor — useful for round-tripping (codes() + categories() →
+// from_codes() reproduces the original).
+//
+// `is_ordered()` returns true iff the receiver was built via either
+// of the two ordered constructors.  The v1 ColumnCategorical layout
+// doesn't have an "ordered" flag bit; we approximate by checking
+// whether the codes are dense-vs-categories — when categories has K
+// entries but the codes only use a subset, the categorical must have
+// been built with explicit categories (the unordered constructor only
+// adds categories for values that appear).  This is an approximation
+// — see m49_tabular_codes.md for the v1 nuance.  Pandas-style
+// "ordered" sort behavior is M51.
+
+/// `tabular.col_categorical_ordered(values: List[str],
+///                                  categories: List[str])
+///     -> ColumnCategorical`.
+/// Build a ColumnCategorical with `categories` pinned to the provided
+/// ordering.  All `values` must appear in `categories`; mismatches
+/// raise ValueError.  Codes are positions in `categories`.
+fn m49_col_categorical_ordered(
+    interp: &mut Interpreter,
+    args: &[u64],
+) -> Result<u64, VmError> {
+    let m49_vals_lst = arg_u64(args, 0) as *const crate::object::ListRepr;
+    let m49_cats_lst = arg_u64(args, 1) as *const crate::object::ListRepr;
+    let m49_vs = m37_read_list_str_lst(m49_vals_lst);
+    let m49_cats = m37_read_list_str_lst(m49_cats_lst);
+    let m49_n = m49_vs.len();
+    // Validate categories has no duplicates.
+    let mut m49_seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for c in &m49_cats {
+        if !m49_seen.insert(c.as_str()) {
+            return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!(
+                    "tabular.col_categorical_ordered: duplicate category {:?}", c
+                ),
+            });
+        }
+    }
+    // Map category -> code.
+    let mut m49_index_of: std::collections::HashMap<&str, i64> =
+        std::collections::HashMap::with_capacity(m49_cats.len());
+    for (i, c) in m49_cats.iter().enumerate() {
+        m49_index_of.insert(c.as_str(), i as i64);
+    }
+    let mut m49_codes: Vec<i64> = Vec::with_capacity(m49_n);
+    for v in &m49_vs {
+        match m49_index_of.get(v.as_str()) {
+            Some(c) => m49_codes.push(*c),
+            None => return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!(
+                    "tabular.col_categorical_ordered: value {:?} not in categories", v
+                ),
+            }),
+        }
+    }
+    let m49_nulls: Vec<bool> = vec![false; m49_n];
+    let m49_codes_lst = m37_alloc_list_i64(interp, &m49_codes);
+    let m49_nulls_lst = m37_alloc_list_bool(interp, &m49_nulls);
+    let m49_cats_lst_out = m37_alloc_list_str(interp, &m49_cats);
+    Ok(m47_alloc_col_categorical(
+        interp, m49_codes_lst, m49_nulls_lst, m49_cats_lst_out, m49_n as i64,
+    ) as u64)
+}
+
+/// `tabular.col_categorical_from_codes(codes: List[i64],
+///                                     categories: List[str])
+///     -> ColumnCategorical`.
+/// Reverse constructor: build a ColumnCategorical from explicit codes
+/// + categories.  Each `codes[i]` must satisfy 0 <= code <
+/// len(categories), else ValueError.  All cells non-null.
+fn m49_col_categorical_from_codes(
+    interp: &mut Interpreter,
+    args: &[u64],
+) -> Result<u64, VmError> {
+    let m49_codes_lst = arg_u64(args, 0) as *const crate::object::ListRepr;
+    let m49_cats_lst = arg_u64(args, 1) as *const crate::object::ListRepr;
+    let m49_codes_in = m37_read_list_i64(m49_codes_lst);
+    let m49_cats = m37_read_list_str_lst(m49_cats_lst);
+    let m49_k = m49_cats.len() as i64;
+    for (i, c) in m49_codes_in.iter().enumerate() {
+        if *c < 0 || *c >= m49_k {
+            return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!(
+                    "tabular.col_categorical_from_codes: codes[{}] = {} out of range [0, {})",
+                    i, c, m49_k
+                ),
+            });
+        }
+    }
+    let m49_n = m49_codes_in.len();
+    let m49_nulls: Vec<bool> = vec![false; m49_n];
+    let m49_codes_out = m37_alloc_list_i64(interp, &m49_codes_in);
+    let m49_nulls_out = m37_alloc_list_bool(interp, &m49_nulls);
+    let m49_cats_out = m37_alloc_list_str(interp, &m49_cats);
+    Ok(m47_alloc_col_categorical(
+        interp, m49_codes_out, m49_nulls_out, m49_cats_out, m49_n as i64,
+    ) as u64)
+}
+
+/// `ColumnCategorical.is_ordered(self) -> bool`.  Heuristic: returns
+/// true iff there exists at least one category in the categories[]
+/// list that is NOT referenced by any code — i.e. categories[] has
+/// "ordering slots" beyond what would be present in a first-appearance
+/// build.  The M47 unordered constructor only adds categories for
+/// values that appear, so unused categories implies the user pinned
+/// the categories[] via col_categorical_ordered / from_codes.
+///
+/// This is an approximate predicate — a value-rich categorical built
+/// with col_categorical_ordered where every category happens to be
+/// used will return false (looks identical to an unordered build).
+/// Pandas-style ordered-flag persistence + sort-by-categories ordering
+/// is M51 work.
+fn m49_col_cat_is_ordered(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let m49_recv = arg_u64(args, 0);
+    let (m49_codes_lst, _nulls_lst, _len) = m37_col_fields(m49_recv);
+    let m49_codes = m37_read_list_i64(m49_codes_lst);
+    let m49_cats_ptr = m47_col_cat_categories_ptr(m49_recv);
+    let m49_cats = m37_read_list_str_lst(m49_cats_ptr);
+    let m49_k = m49_cats.len();
+    // Are there categories never referenced by codes?
+    let mut m49_used = vec![false; m49_k];
+    for c in &m49_codes {
+        let c = *c as usize;
+        if c < m49_k { m49_used[c] = true; }
+    }
+    let m49_has_unused = m49_used.iter().any(|u| !u);
+    Ok(if m49_has_unused { 1 } else { 0 })
 }
 
 #[cfg(test)]

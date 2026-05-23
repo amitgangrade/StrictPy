@@ -4711,6 +4711,14 @@ impl Resolver {
                 v.push(MethodSig {
                     name: "to_strings".into(), params: vec![], ret: m37_col_str_ty.clone(),
                 });
+                // ── M49: is_ordered predicate ──
+                // Heuristic: true iff some category is never referenced
+                // by codes, which is the signature of an explicit-
+                // categories constructor (col_categorical_ordered /
+                // col_categorical_from_codes).
+                v.push(MethodSig {
+                    name: "is_ordered".into(), params: vec![], ret: m37_bool.clone(),
+                });
                 v
             },
             generics: vec![], generic_tvars: vec![],
@@ -5242,6 +5250,23 @@ impl Resolver {
                         m47_col_cat_ty.clone(),
                     ),
                     native_id: 1055,
+                },
+                // ── M49: ordered categorical + from_codes ──
+                StdlibItem {
+                    name: "col_categorical_ordered".into(), kind: StdlibItemKind::Function,
+                    ty: m37_fn(
+                        vec![m37_list_str.clone(), m37_list_str.clone()],
+                        m47_col_cat_ty.clone(),
+                    ),
+                    native_id: 1061,
+                },
+                StdlibItem {
+                    name: "col_categorical_from_codes".into(), kind: StdlibItemKind::Function,
+                    ty: m37_fn(
+                        vec![m37_list_i64.clone(), m37_list_str.clone()],
+                        m47_col_cat_ty.clone(),
+                    ),
+                    native_id: 1062,
                 },
             ],
         };

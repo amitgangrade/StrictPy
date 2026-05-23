@@ -1255,6 +1255,37 @@ pub enum NativeFn {
     /// category string at row `i` (or none if the cell is null).
     M47TabColCategoricalGet            = 1060,
 
+    // ── M49: tabular categorical codes optimization + ordered categorical ──
+    //
+    // M48 measured the categorical-group_by gap (StrictPy 12.8s vs
+    // pandas 1.04s on medium-cardinality).  M49 ships hash-on-codes
+    // (i64) for both group_by and merge — see builtins.rs::
+    // m49_build_group_index_codes + m49_merge_emit_codes.  Those
+    // optimizations are TRANSPARENT (no new NativeFn IDs — they're
+    // pure handler-body fastpaths gated on dtype detection).
+    //
+    // The IDs below cover the explicit new surface:
+    //   - col_categorical_ordered: pin categories[] ordering up front.
+    //   - col_categorical_from_codes: reverse constructor (codes ->
+    //     ColumnCategorical) for round-tripping + the merge-on-codes
+    //     workflow.
+    //   - is_ordered: predicate distinguishing the two constructor
+    //     shapes (heuristic — see m49_col_cat_is_ordered comment).
+    /// `tabular.col_categorical_ordered(values: List[str],
+    /// categories: List[str]) -> ColumnCategorical`.  Builds a
+    /// ColumnCategorical with categories pinned to the provided
+    /// ordering.  All values must appear in categories.
+    M49TabColCategoricalOrdered        = 1061,
+    /// `tabular.col_categorical_from_codes(codes: List[i64],
+    /// categories: List[str]) -> ColumnCategorical`.  Reverse
+    /// constructor for round-tripping.  Each code must satisfy
+    /// 0 <= code < len(categories).
+    M49TabColCategoricalFromCodes      = 1062,
+    /// `ColumnCategorical.is_ordered(self) -> bool`.  Heuristic:
+    /// true iff at least one category is unreferenced by codes —
+    /// the signature of an explicit-categories constructor.
+    M49TabColCategoricalIsOrdered      = 1063,
+
     // ── 250–289: M22 P2A (argparse + collections + csv) ─────────────────
     // Phase 2 starts here.  P2A's job is to bring three high-ROI stdlib
     // modules online on top of the M19 stdlib-module-table:
@@ -2836,6 +2867,9 @@ impl NativeFn {
             1058 => Some(Self::M47TabColCategoricalToStrings),
             1059 => Some(Self::M47TabDfGetColumnCategorical),
             1060 => Some(Self::M47TabColCategoricalGet),
+            1061 => Some(Self::M49TabColCategoricalOrdered),
+            1062 => Some(Self::M49TabColCategoricalFromCodes),
+            1063 => Some(Self::M49TabColCategoricalIsOrdered),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

@@ -4831,6 +4831,8 @@ fn m41_tabular_class_method_native_id_by_name(
         ("ColumnCategorical", "categories")     => NativeFn::M47TabColCategoricalCategories as u32,
         ("ColumnCategorical", "to_strings")     => NativeFn::M47TabColCategoricalToStrings  as u32,
         ("DataFrame", "get_column_categorical") => NativeFn::M47TabDfGetColumnCategorical   as u32,
+        // ── M49: ColumnCategorical.is_ordered() ──
+        ("ColumnCategorical", "is_ordered")     => NativeFn::M49TabColCategoricalIsOrdered  as u32,
         _ => return None,
     })
 }
