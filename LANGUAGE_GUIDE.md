@@ -1,6 +1,6 @@
 # StrictPy — language guide for AI coding tools
 
-**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M47 (2026-05-23).
+**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M49 (2026-05-23).
 
 **Audience**: any AI coding tool (Claude, GPT, Gemini, etc.) being asked to write a StrictPy program. This file is the single source of truth for writing idiomatic StrictPy — you should NOT need to read the compiler source (`compiler/src/`) or VM source (`vm/src/`) to write correct code.
 
@@ -1519,6 +1519,35 @@ See `examples/tabular_m47_polish_demo.spy` for an end-to-end M47 walkthrough —
 
 After M47 the `tabular` polish list is largely complete.  Remaining v0.4 items: categorical optimized codes paths (M48), more resample rules (`1w` / `1M` / `1Y` — needs a calendar layer), `df.rolling` chainable, desktop UI (its own milestone).
 
+#### M49 additions — categorical codes optimization + ordered categorical + small polish
+
+M49 ships the PRIMARY follow-up from M48's benchmark: `group_by` and `merge` on `ColumnCategorical` keys now hash on the i64 codes vector directly instead of routing through `to_strings()`.  No API change — the optimization is transparent.  Bench numbers vs M48 baseline (10K rows × 4266 distinct categories at `medium_card_5000`):
+
+- `group_by_cat_via_strings`: StrictPy 5446 ms → **85 ms** (~64× speedup; now ~13× faster than pandas).
+- `group_by_cat_via_strings` at low cardinality (`medium`, 8 distinct): StrictPy ~12.8 s (M48 baseline) → **66 ms** (~194× speedup).
+
+**Transparent codes-hash** (no API):
+
+- `df.group_by([col])` and `df.group_by([col1, col2, ...])` detect ColumnCategorical key columns and dispatch to `m49_build_group_index_codes`.  Mixed-dtype group_by (e.g. categorical + i64) still falls back to the string-hash path, which is now ColumnCategorical-aware so the fallback is correct.
+- `df.merge(other, on, how)` detects when every `on` column on BOTH sides is ColumnCategorical with bit-identical `categories[]` orderings (same length + same strings in same indices) and hashes on i64 codes.  Mismatched categories[] (different orderings) falls back to the string-hash path automatically.  See §11.38.
+
+**Ordered categorical surface** (3 new NativeFns: 1061-1063):
+
+- `tabular.col_categorical_ordered(values: List[str], categories: List[str]) -> ColumnCategorical` — pin the categories[] ordering up front.  All values must appear in categories (else `ValueError`).  Duplicate categories raise `ValueError`.  Codes are positions in `categories`.  The typical merge-on-codes workflow is `df1_cat = col_categorical_ordered(vals_a, cats)` + `df2_cat = col_categorical_ordered(vals_b, cats)` so both sides share categories[] and the codes-hash fastpath fires.
+- `tabular.col_categorical_from_codes(codes: List[i64], categories: List[str]) -> ColumnCategorical` — reverse constructor (useful for round-tripping `cc.codes()` + `cc.categories()` → back into a ColumnCategorical).  Each code must satisfy `0 <= code < len(categories)`.
+- `cc.is_ordered() -> bool` — heuristic predicate.  Returns true iff `categories[]` has unreferenced entries (the signature of an explicit-categories build).  See §11.36 for the v1 nuance.
+
+**Phase D small polish**:
+
+- `df.resample(time_col, "1w", agg)` — weekly buckets (fixed-width: 7 × 86_400_000 ms).  `df.resample(time_col, "1M", agg)` and `"1Y"` — monthly / yearly buckets via calendar arithmetic (Howard Hinnant's `days_from_civil` / `civil_from_days` for proleptic Gregorian).  End-of-month clamping applies: Jan 31 + 1M = Feb 29 (leap year) or Feb 28 (non-leap).  Feb 29 + 1Y in a non-leap year clamps to Feb 28.  See §11.37.
+- **Outer-merge MultiIndex on either side** — extends M46's NaN-padded 2-level fallback (which previously fired only for dtype-mismatched single-col indexes on both sides).  Now handles three new cases: lhs MultiIndex + rhs single-col (rhs becomes the last level), lhs single-col + rhs MultiIndex (lhs becomes the first level), both MultiIndex with equal level count + matching level dtypes (stitched level-by-level).  Mismatched level counts or level dtypes falls back to RangeIndex (documented v1 limitation).
+- **`df.unstack()` distributes every regular column** (M46 only used the first).  Single-regular-column input preserves M46's `"{innermost_value}"` output naming (byte-compatible); multi-regular uses `"{innermost_value}_{source_col_name}"` (pandas behavior).
+- **`df.loc_range_multi_{i64, str, datetime}(start, stop)`** — innermost-level range filter on a MultiIndex (outer levels left intact).  Raises `ValueError` if the frame has no MultiIndex.  Range filtering on outer levels is M51 work.
+
+See `examples/tabular_m49_codes_demo.spy` for an M49 walkthrough — builds a small ordered categorical, exercises codes-hash group_by + merge, runs `1w` / `1M` resample, and verifies `unstack` distributes both regular columns.
+
+After M49 the `tabular` v0.4 polish surface is essentially complete.  M51 should pick up `RollingWindow` chainable + `center=True` + pandas-style ordered-sort on `ColumnCategorical` + range filtering on outer MultiIndex levels.
+
 ### shutil (M27 P3c-A)
 
 ```python
@@ -2524,9 +2553,45 @@ M44a shipped MultiIndex storage + multi-column `group_by` promotion + minimal pr
 
 M40 shipped `df.iloc(start, stop)` with an explicit "negative indices raise `ValueError`" contract.  **M47 lifts that contract**: `iloc` now accepts Python-style negative indices on both bounds (`-1` = last row, `-N` = `nrows - N`).  Mixed positive + negative is fine (`iloc(-3, nrows)` = last 3 rows; `iloc(-5, -1)` = rows `[nrows-5, nrows-1)`).  Out-of-range positive bounds still clamp silently to `[0, nrows]` — only the explicit-rejection contract changed.  The same semantics apply to both bounds of `df.iloc_2d(row_start, row_stop, col_start, col_stop)` on both axes.
 
-### 11.36 `tabular.ColumnCategorical` sort uses alphabetical string ordering (v1)
+### 11.36 `tabular.ColumnCategorical` sort uses alphabetical string ordering (post-M49 nuance)
 
-`ColumnCategorical` ships in M47 with a v1 limitation: any op that needs to compare two categorical cells (e.g. `sort_by` on a frame whose key column is categorical) compares **the materialized strings alphabetically**, NOT the `categories[]` declaration order.  This matches the v1 to_strings() coercion contract — every op without a categorical-specific handler routes through `to_strings()` internally.  Pandas's "ordered categorical" semantics (where the order of `categories[]` is meaningful for comparison) is an M48 follow-up.  Workaround: build a small `Dict[str, i64]` mapping each category to its desired ordinal and replace the categorical column with the i64 column for sorting.
+`ColumnCategorical` ships in M47 with a v1 limitation: any op that needs to compare two categorical cells (e.g. `sort_by` on a frame whose key column is categorical) compares **the materialized strings alphabetically**, NOT the `categories[]` declaration order.  This matches the v1 to_strings() coercion contract.  M49 ships codes-hash for `group_by` and `merge` (transparent, no API change — see §11.38), and adds `cc.is_ordered() -> bool` so callers can detect explicit-categories builds, but the sort itself still uses alphabetical string ordering.  Pandas's "ordered categorical" sort semantics (where the order of `categories[]` is meaningful for comparison) is **M51 work**.
+
+**Workarounds for ordered sort in M49:**
+
+1. Build a small `Dict[str, i64]` mapping each category to its desired ordinal and replace the categorical column with the i64 column for sorting.
+2. Build the categorical via `tabular.col_categorical_ordered(values, categories)`, call `cc.codes()` to materialize the codes column, sort on that, and use the resulting permutation to reorder the rest of the frame.
+
+`cc.is_ordered()` heuristic: returns true iff `categories[]` has unreferenced entries (the signature of an explicit-categories build via `col_categorical_ordered` / `col_categorical_from_codes`).  A value-rich ordered categorical where every category happens to be used will return false (looks identical to the M47 first-appearance build).  Use `cc.categories()` directly when you need to inspect the ordering.
+
+### 11.37 `tabular.resample` calendar-arithmetic for `1M` / `1Y` (post-M49)
+
+M40 shipped fixed-width resample rules: `Nm` (minutes), `Nh` (hours), `Nd` (days).  M49 adds:
+
+- `Nw` (weeks) — fixed-width (`N × 7 × 86_400_000` ms).
+- `NM` (months) — calendar arithmetic via Howard Hinnant's `days_from_civil` / `civil_from_days`.  A `1M` bucket starting at `t` ends just before the same calendar day of month in the following month, with **end-of-month clamping**: Jan 31 + 1M = Feb 29 (leap year) or Feb 28 (non-leap), then Mar 31, Apr 30, etc.  The bucket-start anchor is `t_min` (first non-null timestamp in the time column); subsequent bucket starts are computed by advancing the anchor's calendar year/month by `N` and clamping the day to the new month's length.
+- `NY` (years) — same shape as month but stepping in calendar years.  Feb 29 + 1Y in a non-leap year clamps to Feb 28.
+
+**Anchor policy**: the first bucket starts at the data's `t_min` (no floor to calendar boundary).  This matches the existing M40 behavior for fixed-width rules — the user's data range defines the buckets, not the wall clock.  Users who want calendar-floored buckets (e.g. "the first Monday on or before t_min") can do their own floor before calling resample.
+
+**Months/years are NOT fixed-width**: each `1M` bucket may contain 28-31 days; each `1Y` bucket contains 365 or 366 days.  Aggregations (`sum`, `mean`, `min`, `max`, `count`) operate on the rows that fall in each bucket regardless of the bucket's day-count.
+
+### 11.38 `tabular.merge` codes-hash requires bit-identical `categories[]` (post-M49)
+
+When `df.merge(other, on, how)` is called and every `on` column on BOTH sides is a `ColumnCategorical`, M49 checks whether the two sides' `categories[]` are **bit-identical** (same length + same strings at the same indices).  If yes → codes-hash fastpath fires (hash on i64 codes vector).  If no (different orderings, or different category sets) → falls back to the string-hash path.
+
+**Why bit-identical, not equal-as-set**: two ColumnCategorical with the same string values but different `categories[]` orderings produce different codes — e.g. `["a","b","c"]` vs `["c","b","a"]` map `a` to code 0 vs code 2.  Comparing codes from mismatched tables would silently produce wrong join results.  Pandas has the same constraint (it requires both sides to be the same `CategoricalDtype` for the fastpath).
+
+**Workflow for fast merge**:
+
+```python
+shared_cats: List[str] = ["a", "b", "c"]
+cc1 = tabular.col_categorical_ordered(values_a, shared_cats)
+cc2 = tabular.col_categorical_ordered(values_b, shared_cats)
+# Build df1, df2 with cc1, cc2 as the `on` column; df1.merge(df2, ["k"], "inner") takes the codes-hash fastpath.
+```
+
+The fallback (string-hash) is still correct — it just doesn't get the codes-hash speedup.  At low cardinality the difference is negligible; at high cardinality (~1000+ distinct values), the fastpath is ~10-100× faster.
 
 ---
 

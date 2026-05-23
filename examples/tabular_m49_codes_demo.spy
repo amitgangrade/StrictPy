@@ -1,0 +1,230 @@
+"""tabular_m49_codes_demo.spy — M49 walkthrough of categorical codes
+optimization, ordered categorical, calendar-arithmetic resample, and
+the small Phase D polish surface.
+
+Output is deterministic so the `tabular_m49_codes_demo_runs`
+integration test can assert on it.
+
+Surface demonstrated (post-M49):
+
+  1. tabular.col_categorical_ordered(values, categories) — pin
+     categories[] ordering up front (the typical workflow for
+     codes-hash merge).
+  2. tabular.col_categorical_from_codes(codes, categories) — reverse
+     constructor for round-tripping.
+  3. ColumnCategorical.is_ordered() — heuristic predicate.
+  4. df.group_by on a categorical key — transparently uses codes-hash
+     fastpath (no API change vs M47; ~200× faster at medium
+     cardinality, see docs/thesis/agent_reports/m49_tabular_codes.md).
+  5. df.merge with matching categories[] on both sides — codes-hash
+     fastpath.
+  6. df.resample with 1w / 1M / 1Y rules — weekly + calendar-arithmetic
+     month/year buckets.
+  7. df.unstack on a multi-column frame — every regular column is
+     distributed (M46 only did the first).
+"""
+
+from tabular import Column, ColumnI64, ColumnStr, ColumnDateTime, ColumnCategorical, DataFrame, GroupedDataFrame
+import tabular
+
+
+fn build_high_card_categorical() -> ColumnCategorical:
+    """Construct a small categorical with explicit ordering."""
+    vs: List[str] = []
+    vs.append("hot")
+    vs.append("cold")
+    vs.append("hot")
+    vs.append("warm")
+    vs.append("cold")
+    vs.append("hot")
+    cats: List[str] = []
+    cats.append("cold")
+    cats.append("warm")
+    cats.append("hot")
+    cats.append("extreme")
+    return tabular.col_categorical_ordered(vs, cats)
+
+
+fn demo_codes_hash_groupby() -> None:
+    print("=== 1. codes-hash group_by ===")
+    cc: ColumnCategorical = build_high_card_categorical()
+    qs: List[i64] = []
+    qs.append(10i64)
+    qs.append(20i64)
+    qs.append(30i64)
+    qs.append(40i64)
+    qs.append(50i64)
+    qs.append(60i64)
+    cqs: ColumnI64 = tabular.col_i64_simple(qs)
+    names: List[str] = []
+    names.append("temp")
+    names.append("qty")
+    cols: List[Column] = []
+    cols.append(cc)
+    cols.append(cqs)
+    df: DataFrame = tabular.from_columns(names, cols)
+    print("df.length=" + str(df.length()))
+    keys: List[str] = []
+    keys.append("temp")
+    gdf: GroupedDataFrame = df.group_by(keys)
+    s: DataFrame = gdf.size()
+    print("ngroups=" + str(s.length()))
+
+
+fn demo_ordered_and_from_codes() -> None:
+    print("=== 2. ordered + from_codes round-trip ===")
+    cc: ColumnCategorical = build_high_card_categorical()
+    if cc.is_ordered():
+        print("is_ordered=true")
+    else:
+        print("is_ordered=false")
+    codes_col: ColumnI64 = cc.codes()
+    cats_col: ColumnStr = cc.categories()
+    # Round-trip via from_codes.
+    codes_vec: List[i64] = []
+    i: i64 = 0i64
+    while i < codes_col.length():
+        opt_c: i64? = codes_col.get(i)
+        if opt_c is not none:
+            codes_vec.append(opt_c)
+        i = i + 1i64
+    cats_vec: List[str] = []
+    j: i64 = 0i64
+    while j < cats_col.length():
+        opt_s: str? = cats_col.get(j)
+        if opt_s is not none:
+            cats_vec.append(opt_s)
+        j = j + 1i64
+    cc2: ColumnCategorical = tabular.col_categorical_from_codes(codes_vec, cats_vec)
+    print("rebuilt_len=" + str(cc2.length()))
+
+
+fn demo_merge_codes_hash() -> None:
+    print("=== 3. merge on matching categories ===")
+    cats: List[str] = []
+    cats.append("a")
+    cats.append("b")
+    cats.append("c")
+    v1: List[str] = []
+    v1.append("a")
+    v1.append("b")
+    v1.append("c")
+    v2: List[str] = []
+    v2.append("b")
+    v2.append("c")
+    cc1: ColumnCategorical = tabular.col_categorical_ordered(v1, cats)
+    cc2: ColumnCategorical = tabular.col_categorical_ordered(v2, cats)
+    x1: List[i64] = []
+    x1.append(1i64)
+    x1.append(2i64)
+    x1.append(3i64)
+    x2: List[i64] = []
+    x2.append(20i64)
+    x2.append(30i64)
+    cx1: ColumnI64 = tabular.col_i64_simple(x1)
+    cx2: ColumnI64 = tabular.col_i64_simple(x2)
+    n1: List[str] = []
+    n1.append("k")
+    n1.append("x")
+    c1: List[Column] = []
+    c1.append(cc1)
+    c1.append(cx1)
+    df1: DataFrame = tabular.from_columns(n1, c1)
+    n2: List[str] = []
+    n2.append("k")
+    n2.append("y")
+    c2: List[Column] = []
+    c2.append(cc2)
+    c2.append(cx2)
+    df2: DataFrame = tabular.from_columns(n2, c2)
+    on: List[str] = []
+    on.append("k")
+    m: DataFrame = df1.merge(df2, on, "inner")
+    print("merged_rows=" + str(m.length()))
+
+
+fn demo_resample_calendar() -> None:
+    print("=== 4. resample 1w / 1M / 1Y ===")
+    ts: List[i64] = []
+    # 14 daily timestamps from 2024-01-01.
+    base: i64 = 1704067200000i64
+    one_day: i64 = 86400000i64
+    qs: List[i64] = []
+    i: i64 = 0i64
+    while i < 14i64:
+        ts.append(base + i * one_day)
+        qs.append(1i64)
+        i = i + 1i64
+    nulls: List[bool] = []
+    j: i64 = 0i64
+    while j < 14i64:
+        nulls.append(false)
+        j = j + 1i64
+    cts: ColumnDateTime = tabular.col_datetime(ts, nulls)
+    cqs: ColumnI64 = tabular.col_i64_simple(qs)
+    names: List[str] = []
+    names.append("ts")
+    names.append("q")
+    cols: List[Column] = []
+    cols.append(cts)
+    cols.append(cqs)
+    df: DataFrame = tabular.from_columns(names, cols)
+    rw: DataFrame = df.resample("ts", "1w", "sum")
+    print("weekly_buckets=" + str(rw.length()))
+    rm: DataFrame = df.resample("ts", "1M", "sum")
+    print("monthly_buckets=" + str(rm.length()))
+
+
+fn demo_unstack_all_columns() -> None:
+    print("=== 5. unstack distributes every regular column ===")
+    outer_v: List[str] = []
+    outer_v.append("x")
+    outer_v.append("x")
+    outer_v.append("y")
+    outer_v.append("y")
+    inner_v: List[str] = []
+    inner_v.append("a")
+    inner_v.append("b")
+    inner_v.append("a")
+    inner_v.append("b")
+    v1: List[i64] = []
+    v1.append(1i64)
+    v1.append(2i64)
+    v1.append(3i64)
+    v1.append(4i64)
+    v2: List[i64] = []
+    v2.append(10i64)
+    v2.append(20i64)
+    v2.append(30i64)
+    v2.append(40i64)
+    co: ColumnStr = tabular.col_str_simple(outer_v)
+    ci: ColumnStr = tabular.col_str_simple(inner_v)
+    cv1: ColumnI64 = tabular.col_i64_simple(v1)
+    cv2: ColumnI64 = tabular.col_i64_simple(v2)
+    names: List[str] = []
+    names.append("outer")
+    names.append("inner")
+    names.append("v1")
+    names.append("v2")
+    cols: List[Column] = []
+    cols.append(co)
+    cols.append(ci)
+    cols.append(cv1)
+    cols.append(cv2)
+    df: DataFrame = tabular.from_columns(names, cols)
+    idx: List[str] = []
+    idx.append("outer")
+    idx.append("inner")
+    df2: DataFrame = df.set_index_list(idx)
+    u: DataFrame = df2.unstack()
+    print("unstack_ncols=" + str(u.ncols()))
+
+
+fn main() -> i32:
+    demo_codes_hash_groupby()
+    demo_ordered_and_from_codes()
+    demo_merge_codes_hash()
+    demo_resample_calendar()
+    demo_unstack_all_columns()
+    print("done")
+    return 0
