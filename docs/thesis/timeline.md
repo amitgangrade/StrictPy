@@ -1117,6 +1117,168 @@ No language/compiler changes; new pure-bench infrastructure only.
 
 ---
 
+## M46 — `tabular` stack/unstack + df.loc range + outer-merge MultiIndex + extensions (2026-05-23)
+
+The cleanup-and-polish milestone after M45 closed the v1
+MultiIndex propagation story. Adds stack/unstack (pandas's
+MultiIndex bread-and-butter), df.loc range-by-label per dtype,
+outer-merge MultiIndex fallback (replaces M42's RangeIndex
+fallback for dtype-mismatched outer joins), time-series ops
+MultiIndex handling, and small ergonomic extensions. After M46
+the `tabular` v1 surface is **functionally complete** except for
+v0.4 polish (rolling Welford std, categorical, df.iloc 2-D, etc.).
+
+Single agent, 5 separable per-phase commits (disjoint-handler
+cadence — first commit at ~20% of budget), ~2358 LOC,
+**zero STOP CRITERIA cuts**.
+
+### Surface
+
+- **Phase A — stack/unstack**:
+  - `df.stack() -> DataFrame`: all regular columns become an
+    innermost MultiIndex level + a single value column. Requires
+    shared-dtype across columns (same constraint as M43's `melt`).
+    Documented in §11.33.
+  - `df.unstack() -> DataFrame`: innermost MultiIndex level
+    pivots out to columns. Requires input MultiIndex; raises on
+    no-index or single-col index. Documented in §11.34.
+
+- **Phase B — `df.loc` range-by-label per dtype** (extends M41's
+  one-row `select_by_label_*` to inclusive ranges):
+  - `df.loc_range_i64(start: i64, stop: i64) -> DataFrame`
+  - `df.loc_range_f64(start: f64, stop: f64) -> DataFrame`
+  - `df.loc_range_str(start: str, stop: str) -> DataFrame`
+  - `df.loc_range_bool(start: bool, stop: bool) -> DataFrame`
+  - `df.loc_range_datetime(start: i64, stop: i64) -> DataFrame`
+    (epoch-ms)
+
+- **Phase C — outer-merge MultiIndex fallback + set_index unification +
+  pivot_table extensions**:
+  - Outer-merge dtype-mismatch now produces a NaN-padded 2-level
+    MultiIndex (level 0 = lhs key with NaN where lhs has no match;
+    level 1 = rhs key with NaN where rhs has no match). Replaces
+    M42's RangeIndex fallback. Hook `m46_merge_outer_dtype_mismatch_
+    multiindex` into existing `m39_df_merge` / `m45_merge_build_
+    multiindex`.
+  - `df.set_index_list(cols: List[str])`: unifies M41's
+    `set_index(name)` and M44's `set_index_multi(cols)` via length
+    dispatch (1 element → single-col; ≥2 → MultiIndex; empty →
+    raises). Pandas-style ergonomic.
+  - `df.pivot_table_aggfunc_list(...)`: emits one set of value
+    columns per aggfunc name in the list.
+  - `df.pivot_table_margins(...)`: adds "All" row + "All" column
+    with the aggfunc applied across the slice.
+
+- **Phase D — time-series ops MultiIndex handling**:
+  - `resample` + `resample_index`: explicitly drop MultiIndex
+    (reshape the row dimension — no clean target).
+  - `asof_merge` + `asof_merge_index`: preserve lhs MultiIndex
+    via M45's merge MultiIndex pattern.
+
+- **Phase E**: 25 VM tests + 2 demo-runs +
+  `examples/tabular_m46_extensions_demo.spy` (~160 LOC) +
+  LANGUAGE_GUIDE.md §5 M46 subsection + §11.32 rewrite +
+  §11.33/§11.34 new (stack must-share-dtype, unstack
+  must-have-MultiIndex).
+
+### NativeFn IDs (10 new)
+
+1033-1042: stack, unstack, loc_range × 5 dtypes, set_index_list,
+pivot_table_aggfunc_list, pivot_table_margins. The outer-merge
+fallback is internal to existing merge handler — no new NativeFn.
+
+### Methodology data point — Edit-tool leak hypothesis refuted
+
+M45 had proposed: "the leak only triggers when worktree state
+diverges from project root at session start." Evidence: M44 (cp
+run, no leak) and M45 (cp NOT run because Bash denied, no leak).
+
+**M46 refutes the hypothesis.** Same conditions as M45 (Bash
+denied for the cp loop form, main was sync'd post-M45-push) — but
+the leak DID recur. M45 was the lucky outlier, not a stable
+improvement.
+
+**Honest current state after M46**: cause unknown; the leak is
+intermittent or has triggers we haven't identified. The
+workaround is well-routinized — precautionary cp at session
+start if Bash available, per-file cp recovery mid-session,
+orchestrator `git checkout --` + `git merge --ff-only` against
+worktree HEAD. Harness root-cause investigation stays
+deprioritized because the workaround is reliable and cheap, but
+we should no longer claim we understand the leak's mechanism —
+only that we can survive it.
+
+The M45/M46 hypothesis-refutation cycle is itself a methodology
+data point: **don't extrapolate from one milestone of evidence**
+when the underlying phenomenon is intermittent. M45's three-data-
+point support (M40 narrowing + M44 cp-worked + M45 no-cp-still-no-leak)
+felt compelling but generalized too quickly.
+
+### Tests flipped (0)
+
+The M45 outer-merge-fallback test exercises a different case
+(same-dtype outer with one side missing) than M46's outer-merge
+MultiIndex fallback (mismatched-dtype outer). No flip required —
+M45's test continues passing alongside M46's new behavior.
+
+### Tests + size
+
+- Tests: 934 → 961 (+27 net: 25 new VM in
+  `vm/tests/m46_tabular_extensions.rs`, 2 new demo-runs in
+  `compiler/tests/tabular_m46_extensions_demo_runs.rs`).
+- Examples: 109 → 110
+  (`examples/tabular_m46_extensions_demo.spy` ~160 LOC).
+- Stdlib classes: unchanged at 18. NativeFn IDs: 1033-1042 (10
+  new).
+- LOC: `vm/src/builtins.rs` +1008 (stack/unstack handlers + 5
+  loc_range_* + 3 pivot_table extensions + set_index_list + the
+  outer-merge MultiIndex hook + asof_merge MultiIndex propagation),
+  `vm/tests/m46_tabular_extensions.rs` +815 (new), demo + demo-runs
+  +258 (new), `shared/src/native.rs` +54, `compiler/src/resolver.rs`
+  +57, `compiler/src/ir.rs` +11, `LANGUAGE_GUIDE.md` +57. Total
+  ~2358 LOC.
+
+### Lesson 1 streak: 28 consecutive clean agents
+
+(M28 → M46). **Ten consecutive `tabular` package agents shipped
+clean** — M37 / M38 / M39 / M40 / M41 / M42 / M43 / M44 / M45 /
+M46. The M41/M42/M43/M44/M45/M46 sextet validates the
+cadence-classification pattern (shared-infra vs disjoint-handler)
+across multiple milestones; M46 ran 5 clean phase commits.
+
+### After M46: `tabular` v1 surface is functionally complete
+
+What's done (M37-M46 inclusive):
+- Sealed Column hierarchy + DataFrame core + IO + filter + sort
+- Aggregations + group-by (single-col → single-col index;
+  multi-col → MultiIndex)
+- Reshape (unique/value_counts/concat/merge/pivot/melt/pivot_table)
+  with index propagation
+- Time series (cumulative/null/iloc/rolling/resample/asof_merge)
+  with index handling
+- DatetimeIndex (M41-M43) with full propagation through 21 methods
+- MultiIndex (M44-M45) with full propagation through 18 methods +
+  multi-col group_by promotion
+- **stack/unstack + df.loc range + outer-merge MultiIndex
+  fallback + set_index unification + pivot_table extensions
+  (M46)**
+
+What's deferred to M47+ (v0.4 polish):
+- Rolling-window optimizations (Welford incremental sum-of-squares
+  for rolling_std stability, `min_periods` argument, `center=True`
+  window alignment).
+- Categorical column dtype (memory-efficient group-by keys;
+  faster equality).
+- `df.iloc[rows, cols]` 2-D indexing (currently row-range only).
+- Negative-index support for `iloc`.
+- More resample rules (`1w` / `1M` / `1Y` — needs calendar
+  arithmetic layer).
+- `df.rolling(window).agg(...)` chainable fluent API.
+- Desktop UI (the M37-design Phase 6 — webview-served or
+  Tauri/wry hybrid).
+
+---
+
 ## M45 — `tabular` full MultiIndex propagation through M42 + M43 ops (2026-05-23)
 
 Lifts the M44 v1 scope-down. The 14 row/column-transforming and

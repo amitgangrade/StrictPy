@@ -1,4 +1,4 @@
-# Session handoff — 2026-05-23 (post-M45)
+# Session handoff — 2026-05-23 (post-M46)
 
 ## Read this FIRST in the next session
 
@@ -17,22 +17,48 @@ Everything you need to resume is in:
 ## Current head
 
 - Branch: `main`
-- Latest commit: `90f1def` (M45 C: tabular MultiIndex propagation — demo + LANGUAGE_GUIDE + agent report)
+- Latest commit: `d8dcbef` (M46 E: tabular M46 extensions — demo + LANGUAGE_GUIDE update + agent report)
 - Tag: `v0.2.0` (commit `121483f`, pushed)
-- Tests passing on main: **934** (+19 net over M44 — 17 new vm + 2 new demo; 2 M44 tests flipped)
+- Tests passing on main: **961** (+27 net over M45 — 25 new vm + 2 new demo; 0 M45 tests flipped)
 
 ## Status snapshot
 
 | Metric | Value |
 |---|---:|
-| Milestones complete on main | M0–M45 |
+| Milestones complete on main | M0–M46 |
 | **v0.2.0 release** | **Tagged at M30 (commit 121483f)** |
-| Tests | 934 / 0 fail / 1 ignored |
+| Tests | 961 / 0 fail / 1 ignored |
 | Bugs | 35 / 35 / **0 deferred** |
 | Stdlib modules | 38 |
-| Stdlib classes | 18 (unchanged — M45 modifies existing handlers, no new methods or NativeFns) |
-| Example programs | **109** (+1 in M45: `tabular_multiindex_propagation_demo.spy`) |
-| Lesson 1 streak | **27 consecutive clean-commit agents** (M28 → M45) |
+| Stdlib classes | 18 (unchanged — M46 adds 10 methods + extends 1 internal merge helper, no new classes) |
+| Example programs | **110** (+1 in M46: `tabular_m46_extensions_demo.spy`) |
+| Lesson 1 streak | **28 consecutive clean-commit agents** (M28 → M46) |
+
+## M46 — completed (single agent, 5 per-phase commits, no STOP CRITERIA cuts)
+
+| Agent | Scope | Var prefix | NativeFn IDs | Commits |
+|---|---|---|---|---|
+| **M46 stack/unstack + extensions** | Pandas's MultiIndex bread-and-butter + ergonomic polish | `m46_` | 1033-1042 (10 new) | `e02f08a` (A), `73616c6` (B), `b958a2b` (C), `4878426` (D), `d8dcbef` (E) |
+
+### What shipped
+
+- **Phase A**: `df.stack()` (rotates all columns into a new innermost MultiIndex level + single value column; requires shared-dtype across columns) + `df.unstack()` (takes innermost MultiIndex level, turns into columns; raises on no-MultiIndex). NativeFns 1033-1034.
+- **Phase B**: `df.loc_range_{i64,f64,str,bool,datetime}(start, stop)` — per-dtype inclusive range lookup (extends M41's one-row `select_by_label_*`). NativeFns 1035-1039.
+- **Phase C**: Outer-merge dtype-mismatch now produces a NaN-padded 2-level MultiIndex (replaces M42's RangeIndex fallback — hook `m46_merge_outer_dtype_mismatch_multiindex` into existing `m39_df_merge`). `set_index_list(cols)` unifies set_index/set_index_multi via length dispatch (NativeFn 1040). `pivot_table_aggfunc_list` (1041) emits one value-column set per aggfunc; `pivot_table_margins` (1042) adds "All" row + column.
+- **Phase D**: time-series ops MultiIndex handling — `resample` + `resample_index` explicitly drop MultiIndex (reshape row dim); `asof_merge` + `asof_merge_index` preserve lhs MultiIndex via M45's merge MultiIndex pattern. No new NativeFns.
+- **Phase E**: 25 new VM tests + 2 demo-runs + `examples/tabular_m46_extensions_demo.spy` (~160 LOC) + LANGUAGE_GUIDE.md §5 M46 subsection + §11.32 rewrite + §11.33/§11.34 new (stack must-share-dtype, unstack must-have-MultiIndex).
+
+### Methodology data point — Edit-tool leak hypothesis partially refuted
+
+M45 proposed: "leak triggers when worktree state diverges from project root at session start." M44 (cp run, no leak) and M45 (cp NOT run because Bash denied, no leak) supported this.
+
+**M46 refutes it.** The cp block was unavailable again (Bash denied for the loop form) — same as M45. But the leak **DID recur** this round, with edits landing in the project root instead of the worktree. Agent recovered via per-file `cp` recoveries.
+
+So M45 was the lucky outlier, not the new normal. The hypothesis is wrong; the leak is genuinely intermittent or has triggers we haven't identified. **The workaround stays in briefs**: precautionary `cp` at session start AND vigilance via `git status` per phase. Cause unknown — but the workaround is well-routinized at this point.
+
+### Tests flipped (0)
+
+The M45 outer-merge-fallback test exercises a different case (same-dtype outer with one side missing) than the M46 outer-merge MultiIndex fallback (mismatched-dtype outer). No flips needed.
 
 ## M45 — completed (single agent, 3 per-phase commits, no STOP CRITERIA cuts)
 
@@ -372,54 +398,53 @@ Per the THESIS §8.4 next-pass priority list + M34/M35 deferred items:
 
 ### Highest leverage (in order)
 
-1. **THESIS + BLOG_POST refresh to M45** (small writing task, ~30-45 min).
-   Both are at post-M39 currently. Concrete deltas for M40-M45:
-   - Tests: 794 → 934 (+28 M40, +25 M41, +21 M42, +20 M43, +27 M44, +19 M45)
-   - Stdlib classes: unchanged at 18 (M40-M45 ship methods + two
+1. **THESIS + BLOG_POST refresh to M46** (small writing task, ~30-45 min).
+   Both are at post-M39 currently. Concrete deltas for M40-M46:
+   - Tests: 794 → 961 (+28 M40, +25 M41, +21 M42, +20 M43, +27 M44, +19 M45, +27 M46)
+   - Stdlib classes: unchanged at 18 (M40-M46 ship methods + two
      optional DataFrame field expansions; no new classes)
-   - Examples: 103 → 109
-   - Lesson 1 streak: 21 → 27
-   - `tabular` coverage: common-80% (post-M39) → ~95% (post-M40
-     adds cumulative/null/iloc/rolling/resample/asof) → DatetimeIndex
-     opt-in (post-M41) → DatetimeIndex propagates through 11 row/col
-     methods (post-M42) → fully index-aware for single-column
-     indexes (post-M43) → MultiIndex for multi-column group_by
-     with minimal propagation (post-M44) → **fully index-aware
-     for both single-col AND MultiIndex inputs end-to-end**
-     (post-M45).
+   - Examples: 103 → 110
+   - Lesson 1 streak: 21 → 28
+   - `tabular` coverage: common-80% (post-M39) → ~95% (post-M40) →
+     single-col DatetimeIndex with full propagation (post-M43) →
+     MultiIndex with minimal propagation (post-M44) → fully
+     index-aware for both single-col AND MultiIndex (post-M45) →
+     **v1 surface functionally complete** (post-M46 with stack/
+     unstack, df.loc range, outer-merge MultiIndex fallback,
+     time-series MI handling, pivot_table extensions).
    - **Methodology notes worth flagging in BLOG**: (a) the M41/M44
-     shared-infra cadence exception; (b) the M43 9-test-flip
-     cascade lesson; (c) the M44 precautionary-cp workaround
-     eliminated the Edit-tool leak; (d) the M45 hypothesis refinement
-     — leak may trigger on **worktree-divergence-at-session-start**
-     rather than the M40/M43 narrowings; agent didn't run the cp
-     workaround at all (Bash denied) and still saw zero recurrences
-     because main was already in sync from M44's clean integration.
+     shared-infra cadence exception (per-phase vs combined commits);
+     (b) the M43 9-test-flip cascade lesson; (c) the precautionary-
+     cp workaround for the Edit-tool leak; (d) **the M45/M46
+     hypothesis-refutation cycle** — M45 found leak-might-only-
+     trigger-on-worktree-divergence; M46 disproved that hypothesis
+     by seeing the leak even though main was sync'd at session start.
+     Honest update: the leak's cause remains unknown, but the
+     workaround is well-routinized.
 
-2. **M46 — stack/unstack + loc range + outer-merge MultiIndex fallback +
-   time-series MultiIndex propagation** (the natural M45 follow-up).
-   Per M45 agent's "M46 pick-up list":
-   - **`stack` / `unstack`** — pandas's MultiIndex bread-and-butter.
-     `stack` rotates columns into a new innermost MultiIndex level
-     (requires all columns to share a dtype, like melt). `unstack`
-     takes the innermost MultiIndex level and turns it into columns.
-     Net-new code (~400-600 LOC).
-   - **`df.loc[label_list]` / range-by-label** — single-col is
-     M41's `select_by_label_*` returning one row; range support
-     would mirror pandas's `df.loc["a":"c"]`. Plus multi-key
-     lookup for MultiIndex.
-   - **Outer-merge MultiIndex fallback** — replaces M42's current
-     RangeIndex fallback for dtype-mismatched outer joins with a
-     NaN-padded MultiIndex (matches pandas).
-   - **Time-series ops MultiIndex propagation** — `resample` /
-     `asof_merge` / `resample_index` / `asof_merge_index` currently
-     handle single-col index only.
-   - **`set_index([col])` accepting 1-element list** — minor
-     ergonomic unification with `set_index_multi`.
-   - **`pivot_table(aggfunc=List)` + `margins=True`** — small
-     extensions.
-   - Estimated: ~1500-2000 LOC. Mix of net-new code (stack/unstack)
-     and recipe-pattern extensions.
+2. **M47 — v0.4 polish items for `tabular`** (the natural M46 follow-up).
+   Per M46 agent's "what M47 should pick up":
+   - **Rolling-window optimizations** — Welford incremental
+     sum-of-squares for rolling_std numerical stability; `min_periods`
+     argument; `center=True` window alignment.
+   - **Categorical column dtype** — typed enumeration of distinct
+     values; memory-efficient group-by keys; faster equality
+     comparisons.
+   - **`df.iloc[rows, cols]` 2-D indexing** — currently row-range
+     only via M40's `iloc(start, stop)`; full pandas iloc takes a
+     column slice too.
+   - **Negative-index support for `iloc`** — pandas accepts `-1`
+     to mean "last row"; v1 rejects.
+   - **More resample rules** — `1w` / `1M` / `1Y` (needs calendar
+     layer for month/year arithmetic).
+   - **`df.rolling(window).agg(...)` chainable rolling object** —
+     fluent API for multi-aggregation rolling.
+   - **Desktop UI (the M37-design Phase 6)** — webview-served or
+     Tauri/wry hybrid. The compute backend is settled; the UI is
+     the open surface.
+   - Estimated: depending on which items M47 takes, ~1000-1500 LOC
+     for the polish items, or significantly more for the desktop
+     UI (its own milestone).
 
 3. **M45+ — Rolling-window optimizations + categorical**:
    - Welford incremental sum-of-squares for rolling_std stability
@@ -436,30 +461,33 @@ Per the THESIS §8.4 next-pass priority list + M34/M35 deferred items:
    the legacy "prelude wins" branch.** Mechanical migration; ~39 test
    files. M37+M38+M39 all confirmed the canonical path works.
 
-4. **Edit-tool worktree leak — hypothesis refined in M45.**
+4. **Edit-tool worktree leak — cause still unknown; M45 hypothesis refuted by M46.**
    Recurred M37-M43 (7 consecutive milestones), narrowed in M40
    (Edit-on-existing-files), broadened in M43 (Write also affected).
-   M44 solved it operationally with a precautionary `cp` block at
-   session start. **M45 added a new data point**: the agent
-   couldn't run the `cp` block (Bash + PowerShell were denied) but
-   **still saw zero leak recurrences**. Combined with M44's
-   clean orchestrator-side integration (main was completely clean
-   post-agent, no source modifications to reset), the refined
-   hypothesis is: **the leak triggers when worktree state diverges
-   from project root at the start of an Edit session, NOT just
-   "first Edit on existing file" or "first Edit on any file"**.
+   M44 fixed it operationally with a precautionary `cp` block at
+   session start. **M45** saw zero leak recurrences even though the
+   cp wasn't run (Bash denied) — leading to the M45 hypothesis that
+   "the leak only triggers on worktree-divergence at session start."
+   **M46 REFUTED this hypothesis**: same conditions as M45 (Bash
+   denied for cp loop form, main was sync'd post-M45-push), but
+   the leak DID recur. M45 was the lucky outlier, not a stable
+   improvement.
 
-   If M44's integration left main + worktree in agreement,
-   subsequent Edits land correctly. M44's precautionary cp may
-   have been redundant for the same reason — the post-M43-push
-   state was already in agreement. **Worth confirming on M46**:
-   if M46 also starts with a sync'd worktree (which it should
-   after the M45 push), it might skip the cp block and still see
-   no leak — confirming the hypothesis.
+   **Honest current state**: cause unknown. The leak is intermittent
+   or triggered by something we haven't identified. The
+   workaround stays well-routinized:
+   - Precautionary `cp` block at session start if Bash is available.
+   - Per-file `cp` recovery when symptoms appear mid-session
+     (`git status` shows project-root diffs after Edits).
+   - Orchestrator integration via `git checkout --` (modified
+     files) + remove (untracked leaked files) + `git merge --ff-only`
+     against the worktree HEAD — works regardless of how bad the
+     leak got in-session.
 
-   Workaround remains: keep the precautionary cp in briefs as
-   a defensive measure (cheap; harmless if not needed). Harness
-   root-cause investigation is no longer urgent.
+   Harness root-cause investigation remains deprioritized because
+   the workaround is reliable and cheap. The M45/M46 hypothesis-
+   refutation cycle is recorded so future thinking doesn't claim
+   we understand the leak — only that we can survive it.
 
 5. **Real Cranelift safepoints** (replaces M33 shadow stack):
    `cranelift-jit 0.115` doesn't stably expose PC ranges; check if
@@ -532,20 +560,18 @@ After v0.4 language/stdlib work, update:
 Document these in any new agent brief:
 
 1. **"FIRST commit before 60% of your time budget"** with explicit
-   20%/40%/60%/80% checkpoint discipline. **27 consecutive clean
-   agents** (M28 → M45) — the streak is the strongest empirical
+   20%/40%/60%/80% checkpoint discipline. **28 consecutive clean
+   agents** (M28 → M46) — the streak is the strongest empirical
    data point in the project. M37-M40 each ran 4-5 phase commits
-   across ~2100-2800 LOC milestones. M41 slipped to combined Phase
-   A+B+C (cross-cutting infrastructure exception). M42 + M43 + M45
-   returned to clean per-phase commits (disjoint handlers, all 3
-   phase commits clean at ~20%). M44 was the second shared-infra
-   exception (combined Phase A landing at ~35% of budget — explicitly
-   classified in the brief). **Lesson now confirmed across the
-   M41/M42/M43/M44/M45 quintet**: brief language should classify
-   phases as "shared-infra" vs "disjoint-handler" AND set the
-   first-commit threshold band accordingly (20% disjoint, 30-50%
-   shared-infra). M44 and M45 both landed squarely in their
-   predicted windows.
+   across ~2100-2800 LOC milestones. M41 + M44 slipped to combined
+   commits (cross-cutting infrastructure exception). M42 + M43 +
+   M45 + M46 returned to clean per-phase commits (disjoint
+   handlers; M46 even ran 5 separable phase commits clean).
+   **Lesson now confirmed across the M41/M42/M43/M44/M45/M46
+   sextet**: brief language should classify phases as "shared-infra"
+   vs "disjoint-handler" AND set the first-commit threshold band
+   accordingly (20% disjoint, 30-50% shared-infra). M44/M45/M46
+   all landed squarely in their predicted windows.
 
 2. **Test-flip cascade lesson (M43)**: when a contract change is
    cross-cutting (every single-column group_by now promotes its
