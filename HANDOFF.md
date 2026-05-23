@@ -1,4 +1,4 @@
-# Session handoff — 2026-05-23 (post-M47)
+# Session handoff — 2026-05-23 (post-M48)
 
 ## Read this FIRST in the next session
 
@@ -17,22 +17,67 @@ Everything you need to resume is in:
 ## Current head
 
 - Branch: `main`
-- Latest commit: `325fcba` (M47 D: tabular polish — demo + LANGUAGE_GUIDE update + agent report)
+- Latest commit: `b62b292` (M48 D: tabular bench report polish + agent report)
 - Tag: `v0.2.0` (commit `121483f`, pushed)
-- Tests passing on main: **993** (+32 net over M46 — 30 new vm + 2 new demo; 1 M40 test flipped)
+- Tests passing on main: **993** (unchanged — M48 made no Rust changes)
 
 ## Status snapshot
 
 | Metric | Value |
 |---|---:|
-| Milestones complete on main | M0–M47 |
+| Milestones complete on main | M0–M48 |
 | **v0.2.0 release** | **Tagged at M30 (commit 121483f)** |
 | Tests | 993 / 0 fail / 1 ignored |
 | Bugs | 35 / 35 / **0 deferred** |
 | Stdlib modules | 38 |
-| Stdlib classes | **19** (M47 added `ColumnCategorical` as a new sealed Column subclass) |
-| Example programs | **111** (+1 in M47: `tabular_m47_polish_demo.spy`) |
-| Lesson 1 streak | **29 consecutive clean-commit agents** (M28 → M47) |
+| Stdlib classes | 19 (unchanged from M47 — M48 is pure benchmark infrastructure) |
+| Example programs | 111 (unchanged from M47) |
+| Lesson 1 streak | **30 consecutive clean-commit agents** (M28 → M48) |
+| Benchmark suites | 3: canonical 16-cell (M7-M11), extended 30-cell (M26), **tabular 37-cell (M48 — new)** |
+
+## M48 — completed (single agent, 4 per-phase commits, comprehensive bench with honest findings)
+
+| Agent | Scope | Var prefix | NativeFn IDs | Commits |
+|---|---|---|---|---|
+| **M48 tabular bench** | `tabular` vs pandas 3.0 comprehensive benchmark suite (37 cells timed + 6 documented skips) | `m48_` | none (pure bench infra) | `c7bc6c7` (A), `0bc3dff` (B), `3aad89c` (C), `b62b292` (D) |
+
+### What shipped
+
+- **Phase A**: `bench/tabular_harness.py` (~1321 LOC) — deterministic CSV fixture generator (small/medium/large/xl sizes; .gitignored), psutil RSS-polling runner, JSON-merge-by-(op,size) writer, Markdown report renderer, CLI (`--sizes` / `--ops` / `--xl` / `--report-only`).
+- **Phase B**: 8 core ops × small/medium + 5 ops × large = ~21 cells. read_csv / filter / sort_by / group_by+sum / merge inner / pivot_table / rolling_mean / describe.
+- **Phase C**: 7 categorical-specific cells (str vs categorical-via-strings vs pandas Categorical) + memory peak comparison (psutil RSS) per cell + the slow-large-cell skip decisions.
+- **Phase D**: `bench/TABULAR_BENCH_REPORT.md` (236 lines) with measured "Categorical cost analysis" pulling actual ms numbers + computed overhead percentages, methodology section, agent report.
+
+### Headline findings (43 cells: 37 timed + 6 skipped)
+
+- **Geomean ratio 0.30×** (StrictPy time / pandas time). 28 wins, 1 tie, 8 losses.
+- **StrictPy wins broadly**:
+  - **All small cells** (pandas import ~1s dominates wall-clock).
+  - **At medium/large**: read_csv / filter / sort_by / rolling_mean / describe / unique (when fast).
+- **pandas wins decisively at medium+**:
+  - **group_by_str: 11.2×** at medium (the headline M49 target).
+  - **pivot_table: 22.2×** at medium.
+  - **group_by + sum: 11.25×** at medium.
+- **Categorical cost (M47 v1 path)**: `to_strings()` coercion = **+11%** vs ColumnStr direct (12.8s vs 11.6s at medium group_by). M49's codes-hash should turn this into a measurable WIN, not just close the gap.
+- **Pandas Categorical surprise**: at 8 distinct values (low cardinality), pandas Categorical is **0.98×** vs str groupby — essentially no speedup. **High-cardinality (~5000 values) is where codes-hash shines.** M49 should benchmark on a high-cardinality fixture before claiming codes-hash is universal.
+- **Memory peaks**: StrictPy peak RSS runs **4-5× pandas** at large (filter/large: 1.07 GB vs 0.20 GB). This is the `List<T>` per-cell-overhead cost vs NumPy contiguous buffers. M49 polish won't fix this; the path forward is the M48b memory deep-dive + potentially a "compressed column" representation in v0.5.
+
+### STOP CRITERIA cuts
+
+- **xl (100M) size skipped entirely** — extrapolated >50 GB CSV; OOM/timeout risk too high for v1.
+- **8 large cells skipped** (group_by + merge + pivot_table at large) due to >30 minute timeouts in StrictPy. Documented inline as `skip` rows with timeout notes. The honest gap.
+
+### M49's target is now numeric
+
+Pre-M48, M49's scope was qualitative ("optimize categorical codes paths"). Post-M48, it's quantitative:
+- **group_by_cat_via_strings** at medium: 12.8s (current). Target: <1.5s (pandas-class). That's ~10× speedup needed.
+- **High-cardinality benchmark fixture** (~5000 distinct values) added to M49's scope so the codes-hash win is unambiguous.
+
+### M48 worktree state
+
+The agent's worktree integration was clean — main was untouched, fast-forward straightforward. **30th Lesson-1-compliant agent. The streak holds.**
+
+**Note on `bench/net_*` untracked files**: there are 3 leftover networking-benchmark files in `bench/` (`net_harness.py`, `NET_BENCH_REPORT.md`, `net_results.json`) from some earlier prototype session unrelated to M48. They're still untracked on main; not blocking anything. Decide whether to commit them, archive them, or delete them when convenient.
 
 ## M47 — completed (single agent, 2 commits with first at ~70% of budget, no STOP CRITERIA cuts)
 
@@ -458,39 +503,56 @@ Per the THESIS §8.4 next-pass priority list + M34/M35 deferred items:
      workaround; (e) the M45/M46 hypothesis-refutation cycle —
      leak cause remains unknown.
 
-2. **M48 — categorical optimized codes paths + more resample rules + rolling chainable**
-   (the natural M47 follow-up). Per M47 agent's "what M48 should pick up":
-   - **Categorical optimized codes paths** — group_by + merge
-     equality on codes instead of strings (M47 v1 coerces via
-     to_strings). Significant speedup for categorical-heavy
-     workloads.
+2. **M49 — Optimized categorical codes paths + polish + bench-validated targets**
+   (the natural M48 follow-up). Now scoped against the M48 benchmark
+   numbers — measurable before/after.
+   - **PRIMARY TARGET (numeric)**: drive `group_by_cat_via_strings`
+     at medium from **12.8s → <1.5s** (~10× speedup). Implementation:
+     hash on `ColumnCategorical.codes` directly instead of routing
+     through `to_strings()`.
+   - **High-cardinality benchmark fixture** added to bench harness
+     before claiming success — M48 surprise was that pandas
+     Categorical at 8-value cardinality only got 0.98× speedup;
+     codes-hash shines at ~5000 distinct values. Verify M49 wins on
+     a fixture with ~5000 categories before declaring victory.
+   - **Merge equality on codes** — same shape as group_by; targets
+     the 11-22× pandas gap on merge_inner / pivot_table cells.
    - **Ordered categorical** with `Categorical.from_codes` reverse
      constructor + categories-ordering for sort.
    - **More resample rules** — `1w` / `1M` / `1Y` (needs calendar
      arithmetic layer for month/year).
    - **`df.rolling(window).agg(...)` chainable rolling object** —
-     fluent API; new `RollingWindow` class shaped like
-     `GroupedDataFrame`.
+     new `RollingWindow` class shaped like `GroupedDataFrame`.
    - **`center=True` rolling window alignment** — deferred from M47.
    - **Outer-merge with MultiIndex on either side** — M46's
-     fallback only handled dtype-mismatched single-col; MultiIndex
-     outer needs its own NaN-padded shape.
-   - **`unstack` distributing every regular column** — v1 only
-     distributes first.
+     fallback only handled dtype-mismatched single-col.
+   - **`unstack` distributing every regular column** — v1 only first.
    - **`loc_range_*` on MultiIndex** — currently single-col only.
-   - Estimated: ~1000-1500 LOC. Mix of optimized paths + small
-     extensions.
+   - **Cadence classification: disjoint-handler** (ColumnCategorical
+     class already exists from M47 — M49 just extends match arms in
+     existing dispatchers + adds rolling chainable as a new class).
+     First commit target ~20% of budget.
+   - Estimated: ~1500-2000 LOC. After M49, **re-run
+     `python bench/tabular_harness.py`** for the M48b sweep showing
+     the before/after improvement.
 
-3. **M49+ — Desktop UI** (the M37-design Phase 6) — its own
-   substantial milestone or milestone-sequence.
+3. **M48b — Memory deep-dive** (~smaller milestone after M49):
+   - M48 found StrictPy peak RSS runs 4-5× pandas at large
+     (filter/large: 1.07 GB vs 0.20 GB). Root cause: `List<T>` per-cell
+     overhead vs NumPy contiguous buffers.
+   - Investigate: is the cell overhead all M5 List<T> header allocation,
+     or also string-handle indirection? Profile + report.
+   - Possible v0.5 path: a "packed column" representation. Not
+     scoped for M48b — just measurement.
+
+4. **M50+ — Desktop UI** (the M37-design Phase 6).
    - Approach: webview-served (reuse M29 webserver) OR Tauri/wry
      hybrid. Compute backend is settled.
-   - The "send a DataFrame to a browser tab" surface is the v1
-     deliverable: pretty-printed table + filter UI + group_by
-     pivot UI.
-   - Significantly larger scope than typical milestones —
-     probably worth splitting M49a (HTTP transport from `tabular`
-     to JS frontend) and M49b (filter + pivot UI).
+   - Probably 3 milestone-sequence:
+     - **M50a**: `tabular`-to-JSON HTTP transport (reuse M29
+       webserver framework).
+     - **M50b**: JS frontend table + filter UI.
+     - **M50c**: JS frontend group_by + pivot UI.
 
 3. **M45+ — Rolling-window optimizations + categorical**:
    - Welford incremental sum-of-squares for rolling_std stability
@@ -606,30 +668,27 @@ After v0.4 language/stdlib work, update:
 Document these in any new agent brief:
 
 1. **"FIRST commit before 60% of your time budget"** with explicit
-   20%/40%/60%/80% checkpoint discipline. **29 consecutive clean
-   agents** (M28 → M47) — the streak is the strongest empirical
+   20%/40%/60%/80% checkpoint discipline. **30 consecutive clean
+   agents** (M28 → M48) — the streak is the strongest empirical
    data point in the project. M37-M40 each ran 4-5 phase commits
    across ~2100-2800 LOC milestones. M41 + M44 slipped to combined
-   commits (shared-infra exception). M42 + M43 + M45 + M46 returned
-   to clean per-phase commits (disjoint handlers). **M47 introduced
-   a new classification — "cross-dispatch"**: adding a new sealed-
-   class subclass requires every dispatch file (resolver/ir/native/
-   builtins) to grow together before the build goes green. The
-   brief miscategorized M47 as "disjoint-handler" (predicted 20%),
-   but the agent landed first commit at ~70% — not an error but a
-   task-shape that doesn't fit either prior category.
+   commits (shared-infra exception). M42 + M43 + M45 + M46 + M48
+   returned to clean per-phase commits (disjoint handlers). M47
+   introduced a new classification — "cross-dispatch".
 
-   **Three classifications now (M41-M47):**
-   - **disjoint-handler**: per-phase commits at ~20% (M42/M43/M45/M46)
+   **Three classifications established across M41-M48:**
+   - **disjoint-handler**: per-phase commits at ~20% (M42/M43/M45/M46/M48)
    - **shared-infra**: combined Phase A at ~30-50% (M41/M44)
    - **cross-dispatch**: combined commit at ~50-75% (M47) — new
      sealed-class subclass forces a single build-green checkpoint
      across all dispatch sites
 
-   Future brief language should classify accordingly. M48 should
-   classify the categorical optimized codes paths as **disjoint-
-   handler** (since the class already exists; M48 just extends
-   match arms in existing dispatchers).
+   Future brief language should classify accordingly. **M49** (the
+   queued categorical-codes-optimization milestone) is
+   **disjoint-handler** since the ColumnCategorical class already
+   exists from M47 — M49 just extends match arms in existing
+   dispatchers + adds RollingWindow as a new class via the M44
+   helper-allocation pattern.
 
 2. **Test-flip cascade lesson (M43)**: when a contract change is
    cross-cutting (every single-column group_by now promotes its

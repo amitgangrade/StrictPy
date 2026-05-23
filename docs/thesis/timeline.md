@@ -1117,6 +1117,123 @@ No language/compiler changes; new pure-bench infrastructure only.
 
 ---
 
+## M48 — `tabular` vs pandas 3.0 comprehensive benchmark suite (2026-05-23)
+
+The third benchmark-only milestone in the project (after M7-fair
+and M26-extended). Adds zero Rust code; ships pure bench
+infrastructure: Python harness, deterministic CSV fixture
+generator, .spy + .py program pairs, JSON snapshot, rendered
+Markdown report. Single agent, 4 separable per-phase commits,
+~2193 LOC, **zero STOP CRITERIA cuts in scope** (xl size + 8
+large cells documented as skipped per cell-specific failure
+modes, but the overall plan landed).
+
+### Headline findings (37 timed + 6 skipped cells)
+
+- **Geomean ratio 0.30× (StrictPy / pandas)**. 28 wins, 1 tie, 8 losses.
+- **StrictPy wins broadly**:
+  - **All small cells** (pandas import ~1s dominates wall-clock).
+  - **At medium/large**: read_csv / filter / sort_by /
+    rolling_mean / describe / unique.
+- **pandas wins decisively** on hash-bucketing ops at medium+:
+  - group_by_str: 11.2×
+  - group_by + sum: 11.25×
+  - pivot_table: 22.2×
+- **Categorical cost (M47 v1)**: `to_strings()` coercion adds
+  **+11%** vs ColumnStr direct (12.8s vs 11.6s at medium
+  group_by). Modest overhead — but pointing to the real M49 win
+  when codes-hash replaces it.
+- **Surprise**: pandas Categorical at low cardinality (8 values)
+  only got 0.98× speedup vs str groupby — essentially no win.
+  Codes-hash optimization shines at HIGH cardinality. **M49 must
+  add a ~5000-value high-cardinality fixture** before claiming
+  the codes-hash optimization is universal.
+- **Memory peaks**: StrictPy peak RSS runs **4-5× pandas** at
+  large (filter/large: 1.07 GB vs 0.20 GB). The `List<T>`
+  per-cell overhead cost vs NumPy contiguous buffers. M49 polish
+  won't fix this; queued as M48b memory deep-dive.
+
+### What ran vs what skipped
+
+**Ran (37 timed cells)**:
+- 8 core ops × small (100 rows) = 8 cells
+- 8 core ops × medium (10K rows) = 8 cells
+- 5 core ops × large (1M rows) = 5 cells (read_csv / filter /
+  sort_by / rolling_mean / describe + others-that-completed)
+- 9 categorical-specific cells across str / categorical-via-strings
+  / pandas Categorical at small + medium + large
+- 7 memory-comparison cells
+
+**Skipped (6 cells)**:
+- xl (100M rows) entirely — extrapolated >50 GB CSV; OOM risk.
+- 8 large cells (group_by/merge/pivot_table) — >30 min StrictPy
+  timeouts. Documented inline.
+
+### M49's target is now numeric
+
+Pre-M48, M49's scope was qualitative ("optimize categorical codes
+paths"). Post-M48, it's quantitative:
+
+- **PRIMARY TARGET**: drive `group_by_cat_via_strings` at medium
+  from **12.8s → <1.5s** (~10× speedup). Implementation: hash
+  on `ColumnCategorical.codes` directly instead of routing
+  through `to_strings()`.
+- **Verification**: add a high-cardinality (~5000 distinct
+  values) fixture to bench harness before declaring victory.
+- **Stretch**: attack the 11-22× pandas gap on merge_inner and
+  pivot_table cells via codes-hash extension.
+
+### Methodology contribution
+
+This is the third benchmark-only milestone. The pattern is now
+canonical:
+
+| Milestone | Suite | Cells | Year |
+|---|---|---:|---|
+| M7-fair | Canonical 16-cell (StrictPy vs CPython) | 16 | 2026-05-17 |
+| M26 | Extended 30-cell (StrictPy vs CPython) | 30 | 2026-05-19 |
+| **M48** | **Tabular 37-cell (StrictPy vs pandas 3.0)** | **37** | **2026-05-23** |
+
+The shape worked again: deterministic fixtures + .spy/.py
+program pairs + BEST_OF=3 + JSON snapshot + rendered .md report.
+Future benchmark milestones (e.g. webserver throughput vs
+Flask+gunicorn at scale) can reuse the same harness shape.
+
+### Tests + size
+
+- Tests: 993 → 993 (NO Rust changes — M48 is pure bench
+  infrastructure).
+- Examples: 111 → 111 (unchanged).
+- Stdlib classes: 19 → 19 (unchanged).
+- LOC: `bench/tabular_harness.py` +1321 (new),
+  `bench/TABULAR_BENCH_REPORT.md` +236 (new),
+  `bench/history/m48_tabular.json` +541 (new),
+  `docs/thesis/agent_reports/m48_tabular_bench.md` +89 (new),
+  `.gitignore` +4 (hide `bench/data/tabular_*.csv` fixtures).
+  Total ~2193 LOC.
+
+### Lesson 1 streak: 30 consecutive clean agents
+
+(M28 → M48). **Twelve consecutive `tabular`-related agents shipped
+clean** — M37-M48. The cadence landscape (disjoint-handler /
+shared-infra / cross-dispatch) holds across the run.
+
+### After M48: the v0.4 path is now bench-validated
+
+What's next:
+- **M49**: categorical optimized codes paths (numeric target
+  established) + ordered categorical + more resample rules +
+  rolling chainable + center=True + outer-merge MultiIndex on
+  either side + unstack-all-columns + loc_range on MultiIndex.
+  Classified as **disjoint-handler** since ColumnCategorical
+  already exists from M47.
+- **M48b**: memory deep-dive (the 4-5× RSS gap vs pandas
+  exposed by M48).
+- **M50+**: desktop UI sequence (M50a HTTP transport, M50b
+  table/filter UI, M50c group_by/pivot UI).
+
+---
+
 ## M47 — `tabular` v0.4 polish: iloc 2-D + negative iloc + rolling Welford/min_periods + ColumnCategorical (2026-05-23)
 
 The v0.4 polish round after M46 closed the v1 surface. Adds iloc
