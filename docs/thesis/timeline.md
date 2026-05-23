@@ -1117,6 +1117,204 @@ No language/compiler changes; new pure-bench infrastructure only.
 
 ---
 
+## M47 — `tabular` v0.4 polish: iloc 2-D + negative iloc + rolling Welford/min_periods + ColumnCategorical (2026-05-23)
+
+The v0.4 polish round after M46 closed the v1 surface. Adds iloc
+2-D + negative iloc + rolling Welford std (internal numerical
+upgrade) + rolling min_periods variants + a new `ColumnCategorical`
+sealed subclass (with v1 to_strings-coercion for existing ops;
+optimized codes paths deferred to M48). Single agent, 2 commits
+(Phase A+B+C combined at ~70% of budget + Phase D), ~2309 LOC,
+**zero STOP CRITERIA cuts**.
+
+The first commit's late landing (~70% of budget) was NOT an agent
+error — it was a brief miscategorization. M47 is the first
+**"cross-dispatch"** milestone (see "Methodology" below). The
+agent committed cleanly without orchestrator intervention; the
+streak holds at 29.
+
+### Surface
+
+**Phase A — iloc 2-D + negative iloc**:
+- `df.iloc_2d(row_start, row_stop, col_start, col_stop) -> DataFrame`
+  half-open 2-D slice; Python-style negatives accepted on both
+  axes (e.g. `iloc_2d(-5, -1, 0, 3)` = last 4 rows × first 3
+  cols).
+- Existing `df.iloc(start, stop)` extended to accept negative
+  indices (lifting M40's v1 rejection — flips 1 M40 test).
+
+**Phase B — Rolling Welford + min_periods variants**:
+- Welford's online algorithm replaces M40's naive
+  sum + sum-of-squares formula for `rolling_std`, internally via
+  new `m47_welford_std_sample` helper. Option 1 (recompute over
+  window each step) for v1 — Option 2 (West & Welford windowed
+  remove) deferred. No API change; better numerical stability
+  for large windows / large values.
+- 10 new `Column.rolling_*_min_periods(window, min_periods)`
+  methods (sum/mean/min/max/std × i64+f64). Emits null only when
+  the window has fewer than `min_periods` non-null cells
+  (instead of always-null for the first `window-1` cells).
+
+**Phase C — `ColumnCategorical` dtype** (first new Column subclass
+since M37):
+- Sealed subclass: `codes: List[i64]` + `categories: List[str]`
+  + `nulls: List[bool]` + `length: i64`. 32-byte payload; first
+  3 slots aligned with the M37 Column layout so the shared
+  `length` / `is_null` / `null_count` handlers work unmodified.
+- Construction: `tabular.col_categorical(values)` builds
+  categories by first-appearance order; populates codes
+  accordingly. `col_categorical_with_nulls` for the nullable case.
+- Accessors: `cc.codes()` → ColumnI64; `cc.categories()` →
+  ColumnStr; `cc.to_strings()` → ColumnStr; `cc.get(i)` → str?
+  (or none); `df.get_column_categorical(name)` → ColumnCategorical?
+- v1 op integration via `to_strings()` coercion. Every existing
+  Column-dispatching op that hits a `ColumnCategorical` instance
+  routes through `to_strings()` internally: group_by hashes on
+  strings (M48 will optimize to codes); merge compares via
+  strings; sort_by uses alphabetical-string ordering, NOT the
+  categories[] declaration order (also M48).
+
+**Phase D**: 30 VM tests + 2 demo-runs +
+`examples/tabular_m47_polish_demo.spy` (~155 LOC) +
+LANGUAGE_GUIDE.md §5 M47 subsection + §11.35 (negative iloc) +
+§11.36 (categorical alphabetical-sort v1) + agent report.
+
+### NativeFn IDs
+
+1043-1060 (18 new):
+- 1043: `iloc_2d`
+- 1044-1053: 10 `rolling_*_min_periods` methods
+- 1054-1055: `col_categorical` + `col_categorical_with_nulls`
+- 1056-1059: `cc.codes` / `categories` / `to_strings` / `get`
+- 1060: `df.get_column_categorical`
+
+### The big methodology lesson — new cadence classification
+
+The brief classified M47 as **disjoint-handler** (predicting first
+commit at ~20%). **This was wrong**: adding a new sealed-class
+subclass (ColumnCategorical) means **every dispatch file has to
+grow together** before the build goes green:
+
+- `shared/src/native.rs` adds the new NativeFn variants.
+- `compiler/src/resolver.rs` registers the new class + method sigs.
+- `compiler/src/ir.rs` adds dispatch arms.
+- `vm/src/builtins.rs` adds the handler bodies.
+
+Any single one of these without the others = red build. The agent
+correctly recognized this and committed all four together at ~70%
+of budget. The streak holds because the agent committed cleanly
+without orchestrator intervention — the cadence slip was a
+brief-side miscategorization, not an agent-side discipline failure.
+
+**Three cadence classifications now (M41-M47):**
+
+| Classification | Examples | First-commit window | Phase splitting |
+|---|---|---|---|
+| disjoint-handler | M42, M43, M45, M46 | ~20% | Per-phase, clean |
+| shared-infra | M41, M44 | ~30-50% | Combined Phase A (shared helper/struct field) |
+| **cross-dispatch (NEW)** | **M47** | **~50-75%** | **Combined all-phases (new sealed-class subclass)** |
+
+Future brief language should classify accordingly. **M48's
+optimized categorical codes paths classify as disjoint-handler**
+(class already exists; M48 just extends match arms in existing
+dispatchers — independent per-handler edits).
+
+This is the **second new classification added to the brief
+vocabulary since the M28 Lesson 1 escalation**. The
+**M41/M42/M43/M44/M45/M46/M47 septet** is now the empirical
+backbone of the cadence-classification methodology.
+
+### Tests flipped (1)
+
+`vm/tests/m40_tabular_timeseries.rs::iloc_negative_start_raises`
+→ `iloc_negative_start_works_m47`. Old: asserted `ValueError` on
+`iloc(-1, 1)`. New: asserts `nrows=2` on `iloc(-2, 3)` (Python
+negative semantics).
+
+### Edit-tool worktree leak
+
+No recurrence this session. Precautionary `cp` block was blocked
+by Bash policy (same as M44/M46) — but `wc -l` between worktree
+and project root at session start showed identical file sizes,
+so the worktree had a clean baseline from M46's clean integration.
+Every Edit/Write landed correctly.
+
+The M45/M46/M47 alternation (no leak / leak / no leak) **confirms
+the leak is intermittent**. M45's hypothesis was refuted by M46;
+M47's no-leak-with-clean-baseline tentatively supports a worktree-
+divergence pattern but doesn't prove it (M46 also had clean
+baseline post-M45-push and still saw the leak). **Honest current
+state**: cause unknown, workaround reliable.
+
+### Tests + size
+
+- Tests: 961 → 993 (+32 net: 30 new VM in
+  `vm/tests/m47_tabular_polish.rs`, 2 new demo-runs in
+  `compiler/tests/tabular_m47_polish_demo_runs.rs`, 1 M40 test
+  flipped).
+- Examples: 110 → 111
+  (`examples/tabular_m47_polish_demo.spy` ~155 LOC).
+- **Stdlib classes: 18 → 19** (first new Column subclass since
+  M37 — `ColumnCategorical`).
+- LOC: `vm/src/builtins.rs` +537 (Welford helper + rolling
+  min_periods variants + categorical column + iloc_2d + negative
+  iloc), `vm/tests/m47_tabular_polish.rs` +933 (new),
+  `examples/tabular_m47_polish_demo.spy` +164 (new),
+  `compiler/src/resolver.rs` +150 (ColumnCategorical layout + 5
+  method sigs; rolling_*_min_periods sigs; iloc_2d +
+  get_column_categorical sigs), `shared/src/native.rs` +83,
+  `compiler/src/ir.rs` +66, `compiler/tests/tabular_m47_polish_demo_runs.rs`
+  +95, `LANGUAGE_GUIDE.md` +52, agent report +255. Total ~2309 LOC.
+
+### Lesson 1 streak: 29 consecutive clean agents
+
+(M28 → M47). **Eleven consecutive `tabular` package agents
+shipped clean** — M37 / M38 / M39 / M40 / M41 / M42 / M43 / M44 /
+M45 / M46 / M47.
+
+### After M47: what's left for `tabular`
+
+What's done (M37-M47 inclusive):
+- Sealed Column hierarchy with **6 subclasses** (M37 + M47's
+  ColumnCategorical) + DataFrame core + IO + filter + sort
+- Aggregations + group-by (single-col → single-col index;
+  multi-col → MultiIndex)
+- Reshape (full surface including stack/unstack from M46)
+- Time series (cumulative / null / iloc 1-D + 2-D /
+  rolling-with-min_periods / resample / asof_merge)
+- DatetimeIndex (M41-M43) with full propagation through 21
+  methods
+- MultiIndex (M44-M46) with full propagation through 18 methods +
+  multi-col group_by promotion + outer-merge NaN-padded fallback
+- v0.4 polish: iloc 2-D + negative iloc + rolling Welford std +
+  rolling min_periods + ColumnCategorical via to_strings coercion
+
+What's deferred to M48 (v0.4 polish round 2):
+- Categorical optimized codes paths (group_by + merge on codes
+  rather than strings).
+- Ordered categorical with `Categorical.from_codes` + sort by
+  categories-ordering.
+- More resample rules (`1w` / `1M` / `1Y` — needs calendar
+  arithmetic layer).
+- `df.rolling(window).agg(...)` chainable rolling object — new
+  `RollingWindow` class shaped like `GroupedDataFrame`.
+- `center=True` rolling-window alignment.
+- Outer-merge with MultiIndex on either side (M46 only handled
+  dtype-mismatched single-col outer).
+- `unstack` distributing every regular column (v1 only the first).
+- `loc_range_*` on MultiIndex (v1 single-col only).
+
+What's deferred to M49+ (desktop UI):
+- The M37-design Phase 6 desktop UI — webview-served or
+  Tauri/wry hybrid. Compute backend is settled; the UI is the
+  open surface. Probably 2-3 milestone-sequence:
+  - M49a: `tabular`-to-JSON HTTP transport (reuse M29 webserver
+    framework).
+  - M49b: JS frontend table + filter UI.
+  - M49c: JS frontend group_by + pivot UI.
+
+---
+
 ## M46 — `tabular` stack/unstack + df.loc range + outer-merge MultiIndex + extensions (2026-05-23)
 
 The cleanup-and-polish milestone after M45 closed the v1
