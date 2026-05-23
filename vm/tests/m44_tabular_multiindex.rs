@@ -498,24 +498,25 @@ fn main() -> i32:
 }
 
 #[test]
-fn sort_by_drops_multiindex_m44b_anchor() {
-    // M44a contract: any row-transforming op OTHER than filter/head/tail/iloc
-    // drops a MultiIndex back to RangeIndex.  M44b will lift this.
+fn sort_by_preserves_multiindex_m45() {
+    // M44a anchor flipped in M45: sort_by now propagates a MultiIndex
+    // through (per `m44_permute_multiindex_into_df`).
     let src = format!(
         "{MULTI_FRAME_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"reg\")\n    keys.append(\"cat\")\n    mi: DataFrame = df.set_index_multi(keys)\n    so: DataFrame = mi.sort_by(\"qty\", true)\n    println(\"nlev=\" + str(so.index_nlevels()))\n    return 0\n"
     );
-    let out = run("sort_by_drops_mi", &src);
-    assert!(out.contains("nlev=0"), "got: {out:?}");
+    let out = run("sort_by_preserves_mi", &src);
+    assert!(out.contains("nlev=2"), "got: {out:?}");
 }
 
 #[test]
-fn select_drops_multiindex_m44b_anchor() {
-    // M44a contract: select drops a MultiIndex (M44b lifts this).
+fn select_preserves_multiindex_m45() {
+    // M44a anchor flipped in M45: select now propagates a MultiIndex
+    // through (per `m45_copy_multiindex_into_df`).
     let src = format!(
         "{MULTI_FRAME_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"reg\")\n    keys.append(\"cat\")\n    mi: DataFrame = df.set_index_multi(keys)\n    want: List[str] = []\n    want.append(\"qty\")\n    se: DataFrame = mi.select(want)\n    println(\"nlev=\" + str(se.index_nlevels()))\n    return 0\n"
     );
-    let out = run("select_drops_mi", &src);
-    assert!(out.contains("nlev=0"), "got: {out:?}");
+    let out = run("select_preserves_mi", &src);
+    assert!(out.contains("nlev=2"), "got: {out:?}");
 }
 
 #[test]
