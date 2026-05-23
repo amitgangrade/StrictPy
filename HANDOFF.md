@@ -1,39 +1,94 @@
-# Session handoff — 2026-05-23 (post-M49)
+# Session handoff — 2026-05-24 (post-M50a)
 
 ## Read this FIRST in the next session
 
 Everything you need to resume is in:
 
 1. **This file** — current state + pending work + integration recipes
-2. **`docs/thesis/timeline.md`** — milestone-by-milestone narrative through M35
-3. **`docs/thesis/stats/per_milestone.csv`** — quantitative ground truth
-4. **`THESIS.md`** + **`BLOG_POST.md`** — synthesis documents (frozen at M34;
-   needs an M35 refresh pass — see "What comes after M35" below)
+2. **`docs/thesis/timeline.md`** — milestone-by-milestone narrative through M50a
+3. **`docs/thesis/stats/per_milestone.csv`** — quantitative ground truth (M0-M50a)
+4. **`THESIS.md`** + **`BLOG_POST.md`** — synthesis documents **(frozen at M34;
+   need an M40-M50a refresh pass — see "Priority queue" below; this is item #1)**
 5. **`RELEASE_NOTES_v0.2.md`** — v0.2.0 freeze-point summary
 6. **`LANGUAGE_GUIDE.md`** — single source of truth for AI tools writing
-   StrictPy programs (refreshed post-M35)
-7. **Memory file**: `C:\Users\AG\.claude\projects\C--Users-AG-CascadeProjects-PythonCompiler\memory\project_strictpy.md`
+   StrictPy programs (refreshed post-M50a; §11 has gotchas through §11.39)
+7. **`bench/TABULAR_BENCH_REPORT.md`** + `bench/TABULAR_BENCH_REPORT_M49.md` —
+   the StrictPy vs pandas 3.0 comparison (M48 baseline + M49 categorical
+   codes optimization rerun showing ~70-194× speedup on the targeted cell)
+8. **Memory file**: `C:\Users\AG\.claude\projects\C--Users-AG-CascadeProjects-PythonCompiler\memory\project_strictpy.md`
 
 ## Current head
 
 - Branch: `main`
-- Latest commit: `13c39a1` (M49 E: tabular codes optimization + polish — tests + bench rerun + demo + LANGUAGE_GUIDE update + agent report)
+- Latest commit: `e684608` (M50a E: tabular serve — demo + LANGUAGE_GUIDE update + agent report)
 - Tag: `v0.2.0` (commit `121483f`, pushed)
-- Tests passing on main: **1016** (+23 net over M48 — 21 new vm + 2 new demo)
+- Tests passing on main: **1034** (+18 net over M49 — 16 new vm + 2 new demo)
 
 ## Status snapshot
 
 | Metric | Value |
 |---|---:|
-| Milestones complete on main | M0–M49 |
+| Milestones complete on main | M0–M50a |
 | **v0.2.0 release** | **Tagged at M30 (commit 121483f)** |
-| Tests | 1016 / 0 fail / 1 ignored |
+| Tests | 1034 / 0 fail / 1 ignored |
 | Bugs | 35 / 35 / **0 deferred** |
 | Stdlib modules | 38 |
-| Stdlib classes | 19 (unchanged — M49 adds 3 new methods but no new classes) |
-| Example programs | **112** (+1 in M49: `tabular_m49_codes_demo.spy`) |
-| Lesson 1 streak | **31 consecutive clean-commit agents** (M28 → M49) |
-| Benchmark suites | 3: canonical 16-cell (M7-M11), extended 30-cell (M26), tabular 37-cell (M48) + **M49 codes-optimization rerun snapshot** |
+| Stdlib classes | 19 (unchanged — M50a adds 2 new functions but no new classes) |
+| Example programs | **113** (+1 in M50a: `tabular_serve_demo.spy`) |
+| Lesson 1 streak | **32 consecutive clean-commit agents** (M28 → M50a) |
+| Benchmark suites | 3 |
+
+## M50a — completed (single agent, 2 commits — Phases A-D combined + Phase E)
+
+| Agent | Scope | Var prefix | NativeFn IDs | Commits |
+|---|---|---|---|---|
+| **M50a tabular.serve** | HTTP transport + minimal browser-tab frontend | `m50a_` | 1067-1068 (2 new) | `63070ce` (A-D combined), `e684608` (E) |
+
+### What shipped
+
+The user's original Pandas-plan request from way back finally implemented: a localhost HTTP server for interactive DataFrame exploration in a browser tab.
+
+- **HTTP server**: `tabular.serve(df, port)` + `tabular.serve_with_timeout(df, port, timeout_ms)`. Hand-rolled HTTP/1.1 server in `vm/src/builtins.rs::m50a_serve_loop` using `std::net::TcpListener` directly. **No new crate deps** — std::net + a ~80-LOC custom HTTP-parser + ~80-LOC custom JSON-body parser. The brief's architectural call (don't go via M28 socket stdlib or M29 webserver framework) held: ~850 LOC of Rust in `builtins.rs` covers server loop + JSON serializers + endpoint handlers + bundled frontend.
+- **5 endpoints**: GET / (bundled HTML page), GET /api/schema, GET /api/rows, GET /api/cell, POST /api/filter, POST /api/groupby.
+- **Server-side DataFrame ID registry**: filter + groupby endpoints register derived DataFrames at fresh IDs; frontend includes `?df=ID` in subsequent rows/cell requests. No GC integration needed — the primary df stays rooted on the user's call stack across `serve_with_timeout`; derived dfs live on the call-local `M50aServerState`.
+- **Bundled frontend**: vanilla DOM (no React/Vue/jQuery), ~200 LOC JS embedded as a Rust string constant. Lazy-load-on-scroll table + one-column filter UI + groupby checkbox UI.
+
+### Methodology data point — another shared-infra-shaped milestone
+
+The brief classified M50a as **disjoint-handler** (predicting 5 per-phase commits at ~20%). The agent landed **2 commits** — Phases A-D combined + Phase E. Reasonable call: the server loop + JSON serializers + endpoint handlers + frontend are tightly interlocked in `builtins.rs` and don't go green incrementally without all four pieces.
+
+**New cadence-classification refinement**:
+
+| Classification | Examples | Phase shape |
+|---|---|---|
+| disjoint-handler | M42/M43/M45/M46/M48/M49 | Independent handlers; per-phase commits at ~20% |
+| shared-infra | M41/M44 | Shared payload/helper introduced; combined Phase A at ~30-50% |
+| cross-dispatch | M47 | New sealed-class subclass forces all dispatch files to compile together; ~50-75% |
+| **NEW: net-new-feature** | **M50a** | **Net-new feature with tightly interlocked pieces (e.g. an HTTP server with its endpoints, JSON serializer, and frontend all in one builtins.rs subsystem). Combined-commit at ~50-70%. Distinct from cross-dispatch because no new sealed-class subclass.** |
+
+Future briefs that ship a **net-new self-contained subsystem** (e.g. M50b/M50c desktop UI components, or v0.5 networking protocols) should classify as net-new-feature and not expect per-phase commits.
+
+The streak holds at **32 because the agent committed cleanly** without orchestrator intervention. Both commits had green builds + passing tests.
+
+### Five surprises worth recording
+
+1. **`TcpListener::set_nonblocking(true)` + 50ms accept-poll with `Instant`-deadline** turned out simpler than M28 P3b-A's shutdown-FD trick for clean timeout-based shutdown. The Rust idiom is to set the listener non-blocking, accept in a loop with WouldBlock-handling, and check the deadline between iterations.
+2. **DataFrame ID registry needed no GC integration** — primary df stays rooted on the calling stack across the blocking `serve_with_timeout`; derived dfs live on the call-local server state.
+3. **Hand-rolled minimal JSON-body parser (~80 LOC) was less effort than wiring serde_json's derive types** across the i64/f64/str/bool value dispatch needed for filter/groupby request bodies.
+4. **M47 ColumnCategorical serialization punted in v1** — different 32-byte layout vs the M37 24-byte Column shape; M50a renders categorical cells as `null`. Documented in §11.39 as M50b pickup.
+5. **Edit-tool worktree leak occurred consistently** this session — every Edit/Write landed at the project-root path instead of the worktree. Precautionary `cp` block was denied by the sandbox (the `for f in ... cp` shell loop was blocked). Workaround: per-file `cp` after each batch, 100% effective; ~12 recoveries across the session.
+
+### What M50b should pick up
+
+- Sortable column headers.
+- Composite (AND/OR) filters.
+- Virtual scrolling for >10K-row frames.
+- CSV download endpoint.
+- ColumnCategorical serialization (M50a punted to null).
+- Better styling.
+- LRU eviction / explicit `/api/forget?df=ID` (M50a registry is unbounded).
+
+M50c picks up the interactive pivot UI.
 
 ## M49 — completed (single agent, 5 per-phase commits, **massive bench-validated win**)
 
@@ -511,22 +566,56 @@ manual conflict resolution at adjacent prelude/match-arm sites
 (matches the M27+ pattern). The distinctive `p4a_` / `p4b_` / `p4c_`
 prefixes prevented the M27 alignment hazard cleanly.
 
-**Three unpushed commits on local main** (P4-C, P4-B, P4-A) — the
-M35 round did not push. `git push origin main` to publish.
+## `tabular` package state after M50a
 
-## What comes after M35
+The 14-milestone tabular series (M37-M50a) is now feature-complete
+for v1 + most of v0.4 polish + the desktop UI HTTP transport. What
+ships today:
 
-Per the THESIS §8.4 next-pass priority list + M34/M35 deferred items:
+- **19 stdlib classes**: sealed `Column` + 6 subclasses
+  (I64/F64/Str/Bool/DateTime/Categorical) + `DataFrame` +
+  `GroupedDataFrame` + 11 from M34/M35 (JsonValue + Pattern +
+  Connection/Cursor + Hasher) (M37 / M44 / M47).
+- **Full v1 surface**: filter / sort / head / tail / iloc / iloc 2-D /
+  iloc-negative / select / drop / rename / dropna / fillna_* / merge
+  (all 4 join modes) / pivot / melt / pivot_table / concat_rows /
+  concat_cols / unique / value_counts / read_csv / write_csv /
+  from_sql / show.
+- **Time series**: cumulative ops (cumsum/cumprod/cummax/cummin) /
+  rolling (sum/mean/min/max/std + min_periods variants + Welford std
+  internal) / resample (1m/5m/15m/1h/1d/1w/1M/1Y with calendar
+  arithmetic) / asof_merge.
+- **DatetimeIndex + MultiIndex**: full propagation through 18 single-
+  col-index methods + 14 MultiIndex methods. Multi-col `group_by`
+  promotes to MultiIndex.
+- **Aggregations + group-by**: sum/mean/min/max/count/std/var/median
+  per column; `df.describe()`; hash-based `group_by` with
+  **codes-hash optimization for ColumnCategorical** (M49's ~70-194×
+  speedup); ordered categorical with `from_codes`.
+- **Reshape**: stack / unstack (all columns distribute) / pivot_table
+  with aggfunc-list + margins.
+- **Outer-merge NaN-padded MultiIndex** for dtype-mismatched indexes
+  on either or both sides.
+- **Desktop UI HTTP transport**: `tabular.serve(df, port)` +
+  `serve_with_timeout` (M50a) with 5 endpoints + bundled vanilla-DOM
+  frontend.
 
-### Highest leverage (in order)
+**Bench reality check** (post-M49): geomean **0.30×** (StrictPy /
+pandas) across 37 cells; 28 wins / 1 tie / 8 losses. On the
+`group_by_cat_via_strings` cell M49 targeted, StrictPy is **14×
+faster than pandas's own Categorical fastpath** at high cardinality
+(77ms vs 1.04s). Memory peak runs 4-5× pandas at large (M48b memory
+deep-dive queued).
 
-1. **THESIS + BLOG_POST refresh to M49** (small writing task, ~30-45 min).
-   Both are at post-M39 currently. Concrete deltas for M40-M49:
-   - Tests: 794 → 1016 (+28 M40, +25 M41, +21 M42, +20 M43, +27 M44,
-     +19 M45, +27 M46, +32 M47, +0 M48 (bench only), +23 M49)
+## Priority queue (post-M50a)
+
+1. **THESIS + BLOG_POST refresh to M50a** (small writing task, ~30-45 min).
+   Both are at post-M39 currently. Concrete deltas for M40-M50a:
+   - Tests: 794 → 1034 (+28 M40, +25 M41, +21 M42, +20 M43, +27 M44,
+     +19 M45, +27 M46, +32 M47, +0 M48 (bench only), +23 M49, +18 M50a)
    - Stdlib classes: 18 → 19 (M47 added `ColumnCategorical`)
-   - Examples: 103 → 112
-   - Lesson 1 streak: 21 → 31
+   - Examples: 103 → 113
+   - Lesson 1 streak: 21 → 32
    - `tabular` coverage: common-80% (post-M39) → ~95% (post-M40) →
      single-col DatetimeIndex with full propagation (post-M43) →
      MultiIndex with minimal propagation (post-M44) → fully
@@ -561,29 +650,31 @@ Per the THESIS §8.4 next-pass priority list + M34/M35 deferred items:
    - Possible v0.5 path: a "packed column" representation. Not
      scoped for M48b — just measurement.
 
-4. **M50+ — Desktop UI** (the M37-design Phase 6).
-   - Approach: webview-served (reuse M29 webserver) OR Tauri/wry
-     hybrid. Compute backend is settled.
-   - Probably 3 milestone-sequence:
-     - **M50a**: `tabular`-to-JSON HTTP transport (reuse M29
-       webserver framework).
-     - **M50b**: JS frontend table + filter UI.
-     - **M50c**: JS frontend group_by + pivot UI.
+4. **M50b — Desktop UI frontend polish** (the natural M50a follow-up).
+   - ~~M50a: HTTP transport~~ **SHIPPED** (post-M50a state above).
+   - **M50b**: sortable column headers; composite (AND/OR) filters;
+     virtual scrolling for >10K-row frames; CSV download endpoint;
+     ColumnCategorical serialization (M50a punted to null);
+     better styling beyond "looks like a spreadsheet"; LRU eviction
+     or explicit `/api/forget?df=ID` (M50a registry is unbounded).
+   - **M50c**: interactive pivot UI; sortable group-by; chart
+     rendering (basic histograms / line / bar via JS canvas or a
+     small charting library bundled inline).
+   - Cadence classification: **net-new-feature** (per M50a's
+     classification refinement — net-new self-contained subsystem
+     with interlocked pieces, ~50-70% first-commit window).
 
-3. **M45+ — Rolling-window optimizations + categorical**:
-   - Welford incremental sum-of-squares for rolling_std stability
-   - `min_periods` argument
-   - `center=True` window alignment
-   - `1w` / `1M` / `1Y` resample rules (needs calendar layer)
-   - `df.rolling(window).agg(...)` chainable rolling object
-   - Categorical column type (memory-efficient group-by keys)
-   - `df.iloc[rows, cols]` — 2-D indexing
-   - Negative-index support for `iloc`
-   - `pivot_table margins=True` + `aggfunc=list`
-
-3. **M36 follow-up — flip M34/M35 tests to explicit imports + delete
+5. **M36 follow-up — flip M34/M35 tests to explicit imports + delete
    the legacy "prelude wins" branch.** Mechanical migration; ~39 test
-   files. M37+M38+M39 all confirmed the canonical path works.
+   files. M37-M50a all confirmed the canonical path works in
+   production. Low-priority cleanup; the legacy branch costs nothing
+   while it sits.
+
+*(The M45+ polish list — Welford std / min_periods / 1w-1M-1Y
+resample / Categorical / iloc 2-D / negative iloc / pivot_table
+margins+aggfunc-list — has SHIPPED across M46/M47/M49. center=True
++ df.rolling chainable are the only items remaining; both queued
+under M51 above.)*
 
 4. **Edit-tool worktree leak — cause still unknown; M45 hypothesis refuted by M46.**
    Recurred M37-M43 (7 consecutive milestones), narrowed in M40
@@ -684,29 +775,37 @@ After v0.4 language/stdlib work, update:
 Document these in any new agent brief:
 
 1. **"FIRST commit before 60% of your time budget"** with explicit
-   20%/40%/60%/80% checkpoint discipline. **31 consecutive clean
-   agents** (M28 → M49) — the streak is the strongest empirical
+   20%/40%/60%/80% checkpoint discipline. **32 consecutive clean
+   agents** (M28 → M50a) — the streak is the strongest empirical
    data point in the project. M37-M40 each ran 4-5 phase commits
    across ~2100-2800 LOC milestones. M41 + M44 slipped to combined
    commits (shared-infra exception). M42 + M43 + M45 + M46 + M48 +
    M49 returned to clean per-phase commits (disjoint handlers).
-   M47 introduced a new classification — "cross-dispatch".
+   M47 introduced "cross-dispatch". **M50a introduced a fourth
+   classification: "net-new-feature"** — combined commit at
+   ~50-70% because net-new self-contained subsystems (an HTTP
+   server with its endpoints + JSON serializer + frontend all in
+   one builtins.rs subsystem) don't go green incrementally.
 
-   **Three classifications established across M41-M49:**
+   **Four classifications established across M41-M50a:**
    - **disjoint-handler**: per-phase commits at ~20%
      (M42/M43/M45/M46/M48/M49)
    - **shared-infra**: combined Phase A at ~30-50% (M41/M44)
    - **cross-dispatch**: combined commit at ~50-75% (M47) — new
-     sealed-class subclass forces a single build-green checkpoint
-     across all dispatch sites
+     sealed-class subclass forces all dispatch files to compile
+     together
+   - **net-new-feature**: combined commit at ~50-70% (M50a) —
+     net-new self-contained subsystem with tightly interlocked
+     pieces. Distinct from cross-dispatch because no new
+     sealed-class subclass.
 
    M49 was the largest disjoint-handler milestone to date (5 clean
-   per-phase commits, ~2700 LOC modified-or-added across Rust + Python
-   + .spy + docs). Future brief language should classify accordingly.
-   **M51** (RollingWindow chainable + center=True + categorical sort)
-   is the natural shape for shared-infra or cross-dispatch depending
-   on whether RollingWindow is implemented as a sealed-class subclass
-   or a struct.
+   per-phase commits, ~2700 LOC). M50a was the first net-new-feature
+   milestone (~1580 LOC in 2 commits). Future brief language should
+   classify accordingly. **M50b** (frontend polish) and **M50c**
+   (pivot UI) are also net-new-feature shape. **M51** (RollingWindow
+   chainable + categorical sort) classifies as cross-dispatch if
+   RollingWindow is a sealed-class subclass, else shared-infra.
 
 2. **Test-flip cascade lesson (M43)**: when a contract change is
    cross-cutting (every single-column group_by now promotes its
@@ -752,11 +851,12 @@ Document these in any new agent brief:
   StrictPy code hits at depth. Investigate during the
   Cranelift-safepoints v0.4 work.
 
-- **The prelude is getting crowded**: M34 added 7 JsonValue classes,
-  M35 added 4 more (Pattern + Connection + Cursor + Hasher). The
-  prelude now hosts **17 stdlib classes** (6 base + 11 v0.3 stdlib).
-  The `StdlibItemKind::Class` refactor is now urgent. Probably
-  "before M40" rather than "before M50".
+- ~~**The prelude is getting crowded**~~ — **CLOSED in M36** with the
+  `StdlibItemKind::Class` refactor. M37-M50a all register classes
+  module-scoped from the start. The M34/M35 prelude bindings remain
+  for back-compat (the M36 honest-debt); flipping their tests to
+  explicit imports is the low-priority cleanup item #5 in the
+  priority queue above.
 
 - **Async I/O perf delta**: M32 ships Shape A (thread-backed). The
   M29 framework's ~2× gap to Flask+gunicorn was supposed to be
@@ -764,6 +864,26 @@ Document these in any new agent brief:
   still an OS thread). The real perf win requires the v0.4 mio
   event loop. Worth measuring the gap explicitly with a "rewrite
   M29 framework using async" before/after benchmark.
+
+- **`tabular` memory peak vs pandas**: M48 measured StrictPy peak
+  RSS runs **4-5× pandas at large** (filter/large: 1.07 GB vs
+  0.20 GB). Root cause: `List<T>` per-cell overhead vs NumPy
+  contiguous buffers. **M48b** memory deep-dive queued as the
+  investigation milestone; v0.5 packed-column work would be the
+  remediation.
+
+- **`tabular` large-cell timeouts**: M48 documented 8 large
+  (1M-row) group_by/merge/pivot_table cells skipped due to
+  >30 minute StrictPy timeouts. M49's codes-hash optimization
+  reduced the categorical case dramatically but did not retest
+  large; the path-not-categorical large cells likely still time
+  out. Worth re-running with the M49 build to refresh the
+  baseline.
+
+- **`tabular.serve` desktop UI v1 limitations** (M50a documented):
+  no HTTPS (localhost-only); vanilla JS frontend (no React/Vue);
+  one-column filter at a time; ColumnCategorical cells render as
+  null; unbounded derived-df registry. M50b polishes these.
 
 ## Useful one-liners
 
@@ -774,21 +894,28 @@ git log --oneline -10
 git status
 git tag --list  # should show v0.2.0
 
-# Quick smoke test (M35-specific)
+# Quick smoke test (latest tabular work — adjust per milestone)
 cargo build --workspace --release && \
-  cargo test --release -p strictpy-vm --test m35_re_pattern && \
-  cargo test --release -p strictpy-vm --test m35_sqlite_class && \
-  cargo test --release -p strictpy-vm --test m35_hashlib_streaming
+  cargo test --release -p strictpy-vm --test m50a_tabular_serve && \
+  cargo test --release -p strictpy-vm --test m49_tabular_codes && \
+  cargo test --release -p strictpy-vm --test m47_tabular_polish
 
-# Full test sweep (~5 min on Windows; reports total at end)
+# Full test sweep (~5-7 min on Windows; reports total at end)
 cargo test --workspace --release --no-fail-fast 2>&1 | grep -E "^test result:" | \
   awk '{passed+=$4; failed+=$6; ignored+=$8} END {print "passed:",passed,"failed:",failed,"ignored:",ignored}'
 
-# Pre-M35 base (kept for reference):
-PRE_M35=475ab47
+# Run the tabular vs pandas bench (~20+ min for full sweep including
+# the slow large cells; use --sizes medium for fast confidence run):
+python bench/tabular_harness.py --sizes medium
+
+# Launch the desktop UI demo (open browser at http://localhost:8765):
+./target/release/spy.exe examples/tabular_serve_demo.spy
 
 # List active worktrees:
 git worktree list
+
+# Pre-M35 base (kept for reference; the M35 round did diff against this):
+PRE_M35=475ab47
 ```
 
 ## Memory file location

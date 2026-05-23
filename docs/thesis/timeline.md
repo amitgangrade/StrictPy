@@ -1117,6 +1117,173 @@ No language/compiler changes; new pure-bench infrastructure only.
 
 ---
 
+## M50a — `tabular.serve` HTTP transport + minimal browser-tab frontend (2026-05-24)
+
+The user's original Pandas-plan request from way back finally
+implemented: localhost HTTP server for interactive DataFrame
+exploration in a browser tab. First milestone in the M50 desktop-UI
+sequence (M50b polishes the frontend; M50c adds pivot UI).
+
+Single agent, 2 commits (Phases A-D combined at ~50-70% of budget +
+Phase E), ~1580 LOC, **zero STOP CRITERIA cuts**.
+
+### Surface
+
+- `tabular.serve(df: DataFrame, port: i32) -> i32` — blocks until
+  Ctrl-C or parent process dies. For interactive demo use.
+- `tabular.serve_with_timeout(df: DataFrame, port: i32, timeout_ms: i64) -> i32`
+  — for tests + scripts that need deterministic shutdown. Tests
+  use this exclusively.
+
+Both bind `127.0.0.1:<port>` (localhost only — no HTTPS in v1).
+HTTP/1.1, no keep-alive, no Content-Encoding, no auth.
+
+### Architecture — hand-rolled in Rust
+
+Per the brief's call: implement the HTTP server **directly in Rust**
+in `vm/src/builtins.rs::m50a_serve_loop` using `std::net::TcpListener`
+— NOT via the M28 socket stdlib or M29 webserver framework. Reasons:
+DataFrame internals need direct access for fast JSON serialization;
+M29's framework is user-level StrictPy code (~2400 LOC) and putting
+that on the critical path for `tabular.serve` would force a copy
+through StrictPy's str/List/Dict surface, defeating the perf story.
+
+**No new crate deps** — std::net is in libstd; that's enough. No
+hyper / no axum / no tokio. ~850 LOC of Rust covers:
+- Server loop with `TcpListener::set_nonblocking(true)` + 50ms
+  accept-poll + `Instant`-deadline (cleaner than M28's
+  shutdown-FD trick).
+- Hand-rolled HTTP/1.1 request-line + headers parser (~120 LOC).
+- Hand-rolled minimal JSON-body parser (~80 LOC) — less effort
+  than wiring serde_json's derive types across the i64/f64/str/bool
+  value dispatch needed for filter/groupby request bodies.
+- Per-dtype DataFrame → JSON serializers (i64 → number, f64 →
+  number with NaN/Inf handling, str → JSON-escaped string, bool →
+  boolean, datetime → ISO-8601 string, null → null).
+- 6 endpoint handlers (GET /, GET /api/schema, GET /api/rows, GET
+  /api/cell, POST /api/filter, POST /api/groupby).
+- Server-side DataFrame ID registry (`HashMap<i64, *mut DataFrame>`)
+  for derived dataframes from filter/groupby. **No GC integration
+  needed** — the primary df stays rooted on the user's call stack
+  across the blocking `serve_with_timeout`; derived dfs live on
+  the call-local `M50aServerState`.
+
+### The 5 endpoints
+
+- **GET /** → returns the bundled HTML page.
+- **GET /api/schema** → `{"names":[...], "dtypes":[...], "nrows": N, "has_index": bool, "index_name": "...", "index_nlevels": N}`.
+- **GET /api/rows?start=N&stop=M&df=ID** → `{"rows": [[val, val, ...], ...]}`.
+- **GET /api/cell?row=R&col=C&df=ID** → `{"value": <typed>}`.
+- **POST /api/filter** → JSON body `{"df": ID, "column": "...", "op": "gt|lt|eq|ne|ge|le", "value": <typed>}`; returns `{"df": NEW_ID, "nrows": M}`.
+- **POST /api/groupby** → JSON body `{"df": ID, "by": ["col1", ...], "agg": {"col3": "sum", "col4": "mean"}}`; returns `{"df": NEW_ID, "nrows": N}`.
+
+### Bundled HTML+JS frontend
+
+Vanilla DOM (no React/Vue/jQuery), ~200 LOC JS embedded as a Rust
+string constant. Lazy-load-on-scroll table + one-column filter UI
++ groupby checkbox UI. Deliberately minimal — looks like a
+spreadsheet, not pretty; M50b polishes.
+
+### The cadence-classification refinement
+
+The brief classified M50a as **disjoint-handler** (predicting 5
+per-phase commits at ~20%). The agent landed **2 commits** —
+Phases A-D combined + Phase E. The reason: server loop + JSON
+serializers + endpoint handlers + frontend are tightly interlocked
+in `builtins.rs` and don't go green incrementally without all four
+pieces.
+
+This is a NEW cadence classification distinct from the prior three:
+
+| Classification | Examples | Phase shape |
+|---|---|---|
+| disjoint-handler | M42/M43/M45/M46/M48/M49 | Independent handlers; per-phase commits at ~20% |
+| shared-infra | M41/M44 | Shared payload/helper introduced; combined Phase A at ~30-50% |
+| cross-dispatch | M47 | New sealed-class subclass forces all dispatch files to compile together; ~50-75% |
+| **net-new-feature (NEW)** | **M50a** | **Net-new self-contained subsystem with tightly interlocked pieces. Combined commit at ~50-70%. Distinct from cross-dispatch because no new sealed-class subclass.** |
+
+Future briefs for net-new self-contained subsystems (M50b polish,
+M50c pivot UI, v0.5 networking protocols, etc.) should classify as
+**net-new-feature** and not expect per-phase commits.
+
+The streak holds at **32** because both M50a commits were clean
+(green builds + passing tests). The cadence slip was a brief
+miscategorization, not an agent error.
+
+### Five surprises worth recording
+
+1. **`TcpListener::set_nonblocking(true)` + 50ms accept-poll** with
+   `Instant`-deadline turned out simpler than M28 P3b-A's
+   shutdown-FD trick for clean timeout-based shutdown.
+2. **DataFrame ID registry needed no GC integration** — primary df
+   stays rooted on the calling stack across the blocking
+   `serve_with_timeout`; derived dfs live on the call-local server
+   state.
+3. **Hand-rolled minimal JSON-body parser (~80 LOC)** was less
+   effort than wiring serde_json's derive types across the
+   i64/f64/str/bool value dispatch needed for filter/groupby
+   request bodies.
+4. **M47 ColumnCategorical serialization punted in v1** —
+   different 32-byte payload vs the M37 24-byte Column shape; M50a
+   renders categorical cells as `null`. Documented in §11.39 as
+   M50b pickup.
+5. **Edit-tool worktree leak occurred consistently** — every
+   Edit/Write landed at the project-root path instead of the
+   worktree. Precautionary `cp` block was denied by the sandbox
+   (the `for f in ... cp` shell loop was blocked). Workaround:
+   per-file `cp` after each batch, 100% effective; ~12 recoveries
+   across the session. **Confirms the leak hypothesis remains
+   "intermittent + workaround-routinized"** (M45/M46/M47/M48/M49/M50a
+   alternation: no/yes/no/no/yes/yes ~12×).
+
+### Tests + size
+
+- Tests: 1016 → 1034 (+18 net: 16 new VM in
+  `vm/tests/m50a_tabular_serve.rs`, 2 new demo-runs in
+  `compiler/tests/tabular_serve_demo_runs.rs`).
+- Examples: 112 → 113 (`examples/tabular_serve_demo.spy` ~110 LOC).
+- Stdlib classes: unchanged at 19 (M50a adds 2 module functions
+  but no new classes).
+- LOC: `vm/src/builtins.rs` +1144, `vm/tests/m50a_tabular_serve.rs`
+  +432 (new), `examples/tabular_serve_demo.spy` +110 (new),
+  `docs/thesis/agent_reports/m50a_tabular_serve.md` +95 (new),
+  `compiler/tests/tabular_serve_demo_runs.rs` +77 (new),
+  `LANGUAGE_GUIDE.md` +55, `shared/src/native.rs` +37,
+  `compiler/src/resolver.rs` +27. Total ~1580 LOC.
+
+### Lesson 1 streak: 32 consecutive clean agents
+
+(M28 → M50a). **Fourteen consecutive `tabular`-related agents
+shipped clean** — M37 / M38 / M39 / M40 / M41 / M42 / M43 / M44 /
+M45 / M46 / M47 / M48 / M49 / M50a. The methodology vocabulary
+has resolved into four cadence classifications.
+
+### After M50a: M50 sequence remaining
+
+- **M50b — frontend polish**: sortable column headers; composite
+  (AND/OR) filters; virtual scrolling for >10K-row frames; CSV
+  download endpoint; ColumnCategorical serialization (M50a punted
+  to null); better styling; LRU eviction or explicit
+  `/api/forget?df=ID` (M50a registry is unbounded).
+- **M50c — pivot/groupby UI**: interactive pivot table; sortable
+  group-by; chart rendering (basic histograms / line / bar via JS
+  canvas or a small charting library bundled inline).
+
+Both M50b and M50c classify as **net-new-feature** per the new
+cadence classification.
+
+### Parallel tracks queued
+
+- **M48b**: memory deep-dive (4-5× peak RSS gap vs pandas at large
+  exposed by M48).
+- **M51**: RollingWindow chainable + center=True + pandas-style
+  ordered-sort on ColumnCategorical (M49 added `is_ordered()`;
+  M51 wires the sort path) + outer-MultiIndex-level loc_range +
+  dedicated merge codes-hash bench cell + explicit `is_ordered`
+  payload bit.
+
+---
+
 ## M49 — `tabular` categorical codes optimization + polish (massive bench-validated win) (2026-05-23)
 
 The bench-validated performance milestone. M48 measured the
