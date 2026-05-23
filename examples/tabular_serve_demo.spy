@@ -1,0 +1,110 @@
+"""tabular_serve_demo.spy — M50a walkthrough of `tabular.serve`.
+
+Builds a small DataFrame in memory, then boots a localhost HTTP/1.1
+server exposing it as a JSON API + a minimal bundled HTML/JS frontend.
+
+Surface demonstrated:
+
+  1. Same DataFrame construction as `tabular_demo.spy` (col_* + from_columns).
+  2. tabular.serve_with_timeout(df, port, timeout_ms) — boots the
+     localhost server and shuts it down after the timeout.
+  3. The bundled HTML+JS frontend at GET /, the JSON API at
+     /api/schema, /api/rows, /api/cell, /api/filter (POST),
+     /api/groupby (POST).
+
+This demo uses serve_with_timeout so it exits cleanly after a short
+interval — that lets the test harness (`compiler/tests/
+tabular_serve_demo_runs.rs`) run it deterministically.
+
+To use the server interactively, change `timeout_ms` below to a
+larger value (e.g. 600000 = 10 minutes) and open
+http://127.0.0.1:8765/ in a browser.
+"""
+
+from tabular import Column, ColumnI64, ColumnStr, ColumnF64, ColumnBool, DataFrame
+import tabular
+
+
+fn build_employees() -> DataFrame:
+    """Construct a 6-row DataFrame with id/name/score/active/dept columns."""
+    ids_v: List[i64] = []
+    ids_v.append(1i64)
+    ids_v.append(2i64)
+    ids_v.append(3i64)
+    ids_v.append(4i64)
+    ids_v.append(5i64)
+    ids_v.append(6i64)
+    names_v: List[str] = []
+    names_v.append("alice")
+    names_v.append("bob")
+    names_v.append("carol")
+    names_v.append("dave")
+    names_v.append("eve")
+    names_v.append("frank")
+    scores_v: List[f64] = []
+    scores_v.append(95.5)
+    scores_v.append(82.0)
+    scores_v.append(78.25)
+    scores_v.append(90.0)
+    scores_v.append(88.5)
+    scores_v.append(72.75)
+    active_v: List[bool] = []
+    active_v.append(true)
+    active_v.append(false)
+    active_v.append(true)
+    active_v.append(true)
+    active_v.append(true)
+    active_v.append(false)
+    depts_v: List[str] = []
+    depts_v.append("eng")
+    depts_v.append("eng")
+    depts_v.append("sales")
+    depts_v.append("eng")
+    depts_v.append("sales")
+    depts_v.append("ops")
+    nulls: List[bool] = []
+    nulls.append(false)
+    nulls.append(false)
+    nulls.append(false)
+    nulls.append(false)
+    nulls.append(false)
+    nulls.append(false)
+
+    id_col: ColumnI64 = tabular.col_i64(ids_v, nulls)
+    name_col: ColumnStr = tabular.col_str(names_v, nulls)
+    score_col: ColumnF64 = tabular.col_f64(scores_v, nulls)
+    active_col: ColumnBool = tabular.col_bool(active_v, nulls)
+    dept_col: ColumnStr = tabular.col_str(depts_v, nulls)
+
+    names: List[str] = []
+    names.append("id")
+    names.append("name")
+    names.append("score")
+    names.append("active")
+    names.append("dept")
+    cols: List[Column] = []
+    cols.append(id_col)
+    cols.append(name_col)
+    cols.append(score_col)
+    cols.append(active_col)
+    cols.append(dept_col)
+    df: DataFrame = tabular.from_columns(names, cols)
+    return df
+
+
+fn main() -> i32:
+    df: DataFrame = build_employees()
+    println("tabular_serve_demo: built DataFrame with " + str(df.length()) + " rows.")
+    println("Booting localhost HTTP server on 127.0.0.1:8765 ...")
+    println("Open http://127.0.0.1:8765/ in a browser to view it.")
+    println("Endpoints:")
+    println("  GET  /                — bundled HTML/JS frontend")
+    println("  GET  /api/schema      — column names + dtypes + nrows")
+    println("  GET  /api/rows        — paginated rows (start, stop, df)")
+    println("  GET  /api/cell        — single cell (row, col, df)")
+    println("  POST /api/filter      — one-column filter (eq/ne/gt/lt/ge/le)")
+    println("  POST /api/groupby     — group-by + aggregation")
+    println("Server timeout: 600 ms (demo mode).")
+    rc: i32 = tabular.serve_with_timeout(df, 8765i32, 600i64)
+    println("Server shut down with exit code: " + str(rc))
+    return rc

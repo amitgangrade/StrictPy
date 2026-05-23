@@ -1,6 +1,6 @@
 # StrictPy — language guide for AI coding tools
 
-**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M49 (2026-05-23).
+**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M50a (2026-05-23).
 
 **Audience**: any AI coding tool (Claude, GPT, Gemini, etc.) being asked to write a StrictPy program. This file is the single source of truth for writing idiomatic StrictPy — you should NOT need to read the compiler source (`compiler/src/`) or VM source (`vm/src/`) to write correct code.
 
@@ -996,7 +996,7 @@ cur.row_count() -> i64                            # rows the underlying query pr
 
 All cells are stringified (v0.4 will add typed cell access).
 
-### tabular (M37, extended by M38, M39, M40, M41, M42, M43, M44, M45)
+### tabular (M37, extended by M38, M39, M40, M41, M42, M43, M44, M45, M46, M47, M49, M50a)
 
 First Pandas-shaped data package — native Rust impl (real pandas can't import). Sealed `Column` hierarchy + `DataFrame` with named columns + per-column null mask. First stdlib package to register its classes module-scoped from the start (no prelude bloat — see §6.2). M38 rounds out the M37 STOP-CRITERIA debt and adds per-column aggregations, `df.describe`, `Column.fill_null`, `tabular.from_dict`, and hash-based group-by via a new `GroupedDataFrame` class. M39 adds the Phase 4 reshape surface: per-dtype `unique`, `value_counts`, `concat_rows`/`concat_cols`, `df.merge` (hash-join), `df.pivot`, and `df.melt`. M40 closes the time-series / null-handling / cumulative / range-slicing surface: per-column cumulative ops, whole-frame `dropna` / `fillna_*`, `df.iloc` range slicing, rolling-window aggregations, `df.resample` time-bucketing, and `df.asof_merge`.
 
@@ -1547,6 +1547,41 @@ M49 ships the PRIMARY follow-up from M48's benchmark: `group_by` and `merge` on 
 See `examples/tabular_m49_codes_demo.spy` for an M49 walkthrough — builds a small ordered categorical, exercises codes-hash group_by + merge, runs `1w` / `1M` resample, and verifies `unstack` distributes both regular columns.
 
 After M49 the `tabular` v0.4 polish surface is essentially complete.  M51 should pick up `RollingWindow` chainable + `center=True` + pandas-style ordered-sort on `ColumnCategorical` + range filtering on outer MultiIndex levels.
+
+#### M50a additions — `tabular.serve` HTTP transport + minimal browser-tab UI
+
+M50a starts the desktop-UI track: ship a localhost HTTP server that exposes a DataFrame as JSON + a minimal bundled HTML/JS frontend.  Implementation lives in `vm/src/builtins.rs::m50a_serve_loop` and uses `std::net::TcpListener` directly — no `hyper`, no `axum`, no `tokio`, no crate deps beyond libstd.  The M28 socket stdlib and M29 webserver framework are deliberately NOT a dependency; see §11.39.
+
+```python
+import tabular
+from tabular import DataFrame
+
+tabular.serve(df: DataFrame, port: i32) -> i32
+# Boot a localhost HTTP/1.1 server on 127.0.0.1:<port>.  Runs until
+# Ctrl-C or the parent process dies (24h hard cap as a safety net).
+# Returns the exit code (0 = clean shutdown, nonzero = bind / I/O
+# error).  Blocks the calling thread — for concurrency wrap in
+# Thread.new (M5).
+
+tabular.serve_with_timeout(df: DataFrame, port: i32,
+                            timeout_ms: i64) -> i32
+# Same as serve(...) but shuts down after timeout_ms milliseconds.
+# Use this in tests and scripts that need deterministic shutdown
+# (calling the unbounded serve() from a test would hang).
+```
+
+Endpoints exposed by both functions:
+
+- `GET /` — bundled HTML+JS frontend (vanilla DOM, ~200 LOC of JS, sticky-header table + per-column filter UI + groupby checkbox UI + infinite scroll at 100 rows/page).
+- `GET /api/schema?df=ID` — `{"names": [...], "dtypes": [...], "nrows": N, "has_index": bool, "index_name": "...", "index_nlevels": N}`.
+- `GET /api/rows?df=ID&start=N&stop=M` — `{"start": N, "stop": M, "nrows": Total, "rows": [[...], ...]}`.  Cells are typed JSON values (`i64` → number, `f64` → number or null on NaN/Inf, `str` → string, `bool` → boolean, `datetime` → epoch-ms number).  Null cells emit `null`.  Categorical columns render as null in v1 (M50b will add proper categorical encoding).
+- `GET /api/cell?df=ID&row=R&col=C` — `{"value": <cell>}` or 400 with a JSON error body on bad indices.
+- `POST /api/filter` — body `{"df": ID, "column": "name", "op": "eq|ne|gt|lt|ge|le", "value": <typed>}`; returns `{"df": NEW_ID, "nrows": N}` on success.  Server-side DataFrame ID registry holds derived dfs at fresh IDs.
+- `POST /api/groupby` — body `{"df": ID, "by": ["col1", "col2"], "agg": {"col3": "sum", "col4": "mean"}}`; returns `{"df": NEW_ID, "nrows": N}`.
+
+Missing `df` query param defaults to ID 0 (the primary df passed to `serve`).  Unknown `df` returns 404.
+
+See `examples/tabular_serve_demo.spy` for a working walkthrough.  M50b will polish the frontend (sortable headers, composite filters, virtual scrolling, CSV download, better styling); M50c will add the interactive pivot UI.
 
 ### shutil (M27 P3c-A)
 
@@ -2592,6 +2627,22 @@ cc2 = tabular.col_categorical_ordered(values_b, shared_cats)
 ```
 
 The fallback (string-hash) is still correct — it just doesn't get the codes-hash speedup.  At low cardinality the difference is negligible; at high cardinality (~1000+ distinct values), the fastpath is ~10-100× faster.
+
+### 11.39 `tabular.serve` v1 deliberate scope-down (post-M50a)
+
+`tabular.serve` (and `serve_with_timeout`) is the localhost desktop-UI for a DataFrame.  Several deliberate v1 simplifications:
+
+- **No HTTPS** — localhost-only.  M28 P3b-B's `ssl` stdlib could plumb in rustls, but in-process bind on `127.0.0.1` is a single-machine boundary; encrypted localhost adds no security and a lot of cert-handling complexity.
+- **No keep-alive** — each connection serves one request, then closes.  For low-frequency UI traffic (~1 request per scroll-bottom) this is fine; production HTTP servers route through M29's framework.
+- **One-column filter at a time** — `POST /api/filter` accepts a single column + op + value.  Composite (AND/OR) filters are M50b work.  Workaround: chain filter calls (each returns a derived df ID; pass it as `df` in the next call).
+- **No virtual scrolling** — the frontend lazy-loads 100 rows per scroll-near-bottom event.  For 10K+ row frames this still grows the DOM linearly.  M50b will add a fixed-window virtual table.
+- **No sortable column headers** — clicking a header does nothing in v1.  Workaround: sort the source df with `df.sort_by(col, ascending)` before calling `serve`.  M50b adds a `?sort=col_name&desc=true` query param.
+- **No CSV download** — there is no `GET /api/csv` in v1.  M50b adds it.  Workaround: `tabular.write_csv(path, df)` from user code.
+- **Categorical columns render as null in v1** — the M47 ColumnCategorical layout differs from the M37 Column shape; the v1 serializer doesn't yet decode it.  Workaround: `cc.to_strings()` to a ColumnStr before serving.  M50b adds proper categorical encoding.
+- **DataFrame ID registry has no LRU eviction** — every filter/groupby derived df stays in memory until the server shuts down.  For a long-running interactive session this can leak.  Workaround: restart the server periodically.  M50b may add LRU or explicit `/api/forget?df=ID`.
+- **No request-rate limiting** — a malicious client could DoS the server by spamming /api/groupby.  localhost-only mitigates this; M50b can add a token-bucket if needed.
+
+The server is **single-threaded** — one connection at a time.  Two simultaneous browser tabs hitting it will see the second tab queue behind the first.  This is fine for interactive use and tests; production-grade concurrency is M29's framework.
 
 ---
 
