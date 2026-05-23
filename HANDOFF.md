@@ -1,4 +1,4 @@
-# Session handoff — 2026-05-23 (post-M48)
+# Session handoff — 2026-05-23 (post-M49)
 
 ## Read this FIRST in the next session
 
@@ -17,23 +17,63 @@ Everything you need to resume is in:
 ## Current head
 
 - Branch: `main`
-- Latest commit: `b62b292` (M48 D: tabular bench report polish + agent report)
+- Latest commit: `13c39a1` (M49 E: tabular codes optimization + polish — tests + bench rerun + demo + LANGUAGE_GUIDE update + agent report)
 - Tag: `v0.2.0` (commit `121483f`, pushed)
-- Tests passing on main: **993** (unchanged — M48 made no Rust changes)
+- Tests passing on main: **1016** (+23 net over M48 — 21 new vm + 2 new demo)
 
 ## Status snapshot
 
 | Metric | Value |
 |---|---:|
-| Milestones complete on main | M0–M48 |
+| Milestones complete on main | M0–M49 |
 | **v0.2.0 release** | **Tagged at M30 (commit 121483f)** |
-| Tests | 993 / 0 fail / 1 ignored |
+| Tests | 1016 / 0 fail / 1 ignored |
 | Bugs | 35 / 35 / **0 deferred** |
 | Stdlib modules | 38 |
-| Stdlib classes | 19 (unchanged from M47 — M48 is pure benchmark infrastructure) |
-| Example programs | 111 (unchanged from M47) |
-| Lesson 1 streak | **30 consecutive clean-commit agents** (M28 → M48) |
-| Benchmark suites | 3: canonical 16-cell (M7-M11), extended 30-cell (M26), **tabular 37-cell (M48 — new)** |
+| Stdlib classes | 19 (unchanged — M49 adds 3 new methods but no new classes) |
+| Example programs | **112** (+1 in M49: `tabular_m49_codes_demo.spy`) |
+| Lesson 1 streak | **31 consecutive clean-commit agents** (M28 → M49) |
+| Benchmark suites | 3: canonical 16-cell (M7-M11), extended 30-cell (M26), tabular 37-cell (M48) + **M49 codes-optimization rerun snapshot** |
+
+## M49 — completed (single agent, 5 per-phase commits, **massive bench-validated win**)
+
+| Agent | Scope | Var prefix | NativeFn IDs | Commits |
+|---|---|---|---|---|
+| **M49 codes optimization** | Categorical codes-hash + ordered categorical + polish | `m49_` | 1061-1066 (6 new) | `cb6d6ef` (A), `a8184bc` (B), `7bdf3d0` (C), `767369e` (D), `13c39a1` (E) |
+
+### Headline: massive bench win
+
+The M48 brief predicted ~10× speedup. **Actual result is ~70-194× depending on cardinality.**
+
+| Cell | Size | M48 baseline | M49 | Ratio vs pandas | Speedup |
+|---|---|---:|---:|---:|---:|
+| `group_by_cat_via_strings` | medium (8 distinct) | 12.8s | **66ms** | 0.06× (16× faster than pandas) | **~194×** |
+| `group_by_cat_via_strings` | medium_card_5000 (~4k distinct) | 5.4s | **77ms** | 0.07× (14× faster than pandas) | **~70×** |
+| `group_by_str` | medium_card_5000 | 4.9s | 3.6s | 3.5× | 1.3× (incidental) |
+
+**StrictPy now beats pandas's own Categorical fastpath by ~14× at high cardinality.** This is the most dramatic single-milestone perf result in the project after the M8 JIT cliff (931ms → 14.6ms on fib(30)).
+
+### What shipped
+
+- **Phase A**: high-cardinality bench fixture (`medium_card_5000` — 10K rows × 5000 distinct category values) added to `bench/tabular_harness.py` (+85 LOC) + baseline measurement before Phase B touched anything.
+- **Phase B (PRIMARY)**: `m38_groupby_*` family detects ColumnCategorical key columns and hashes on `codes[i]` (i64) directly instead of routing through `to_strings()` materialization. Single-col + multi-col + mixed-dtype-fallback all handled. **The bench-validated win.**
+- **Phase C**: merge codes-hash via the same machinery — when both lhs.on_col and rhs.on_col are ColumnCategorical with **bit-identical `categories[]` arrays**, hash on codes; else fall back to string-hash. New constructors: `tabular.col_categorical_ordered(values, categories)` + `tabular.col_categorical_from_codes(codes, categories)` + new predicate `cc.is_ordered()`.
+- **Phase D**: more resample rules — `1w` (7 days) + `1M` + `1Y` (calendar arithmetic with end-of-month clamping for Feb/short months). Outer-merge MultiIndex on either side (extends M46's dtype-mismatch fallback to all three cases: lhs-MI / rhs-MI / both-MI). `unstack` now distributes EVERY regular column (M46 only first). `loc_range_multi_{i64,str,datetime}` (3 NativeFns) for range filtering on the innermost MultiIndex level.
+- **Phase E**: 21 VM tests + 2 demo-runs + `examples/tabular_m49_codes_demo.spy` (~230 LOC, exercises all M49 features) + `bench/TABULAR_BENCH_REPORT_M49.md` with before/after numbers + LANGUAGE_GUIDE.md §5 M49 additions + §11.37/§11.38 new + §11.36 update.
+
+### Edit-tool worktree leak
+
+Recurred ~10 times this session. Defensive `cp` block at session start + per-file `cp` recovery worked cleanly — no data loss. Same pattern as M44/M46. The M45/M46/M47/M48/M49 alternation (no/leak/no/no/leak ~10×) confirms intermittence; the workaround remains reliable.
+
+### What M51 should pick up (M49 follow-up)
+
+1. **RollingWindow chainable + center=True** — deferred per brief (cross-dispatch territory).
+2. **Pandas-style ordered-sort on `ColumnCategorical`** — currently still alphabetical; ordered-categorical-sort uses categories[] ordering.
+3. **Range filtering on outer MultiIndex levels** — M49 only handles innermost.
+4. **Dedicated merge codes-hash bench cell** — M48's cell shape doesn't exercise the M49 fast path.
+5. **ColumnCategorical payload extension for an explicit `is_ordered` bit** — replace the heuristic.
+
+(M50 sequence is desktop UI; M48b memory deep-dive also queued.)
 
 ## M48 — completed (single agent, 4 per-phase commits, comprehensive bench with honest findings)
 
@@ -480,13 +520,13 @@ Per the THESIS §8.4 next-pass priority list + M34/M35 deferred items:
 
 ### Highest leverage (in order)
 
-1. **THESIS + BLOG_POST refresh to M47** (small writing task, ~30-45 min).
-   Both are at post-M39 currently. Concrete deltas for M40-M47:
-   - Tests: 794 → 993 (+28 M40, +25 M41, +21 M42, +20 M43, +27 M44, +19 M45, +27 M46, +32 M47)
-   - Stdlib classes: 18 → 19 (M47 added `ColumnCategorical` as a
-     new sealed Column subclass)
-   - Examples: 103 → 111
-   - Lesson 1 streak: 21 → 29
+1. **THESIS + BLOG_POST refresh to M49** (small writing task, ~30-45 min).
+   Both are at post-M39 currently. Concrete deltas for M40-M49:
+   - Tests: 794 → 1016 (+28 M40, +25 M41, +21 M42, +20 M43, +27 M44,
+     +19 M45, +27 M46, +32 M47, +0 M48 (bench only), +23 M49)
+   - Stdlib classes: 18 → 19 (M47 added `ColumnCategorical`)
+   - Examples: 103 → 112
+   - Lesson 1 streak: 21 → 31
    - `tabular` coverage: common-80% (post-M39) → ~95% (post-M40) →
      single-col DatetimeIndex with full propagation (post-M43) →
      MultiIndex with minimal propagation (post-M44) → fully
@@ -503,38 +543,14 @@ Per the THESIS §8.4 next-pass priority list + M34/M35 deferred items:
      workaround; (e) the M45/M46 hypothesis-refutation cycle —
      leak cause remains unknown.
 
-2. **M49 — Optimized categorical codes paths + polish + bench-validated targets**
-   (the natural M48 follow-up). Now scoped against the M48 benchmark
-   numbers — measurable before/after.
-   - **PRIMARY TARGET (numeric)**: drive `group_by_cat_via_strings`
-     at medium from **12.8s → <1.5s** (~10× speedup). Implementation:
-     hash on `ColumnCategorical.codes` directly instead of routing
-     through `to_strings()`.
-   - **High-cardinality benchmark fixture** added to bench harness
-     before claiming success — M48 surprise was that pandas
-     Categorical at 8-value cardinality only got 0.98× speedup;
-     codes-hash shines at ~5000 distinct values. Verify M49 wins on
-     a fixture with ~5000 categories before declaring victory.
-   - **Merge equality on codes** — same shape as group_by; targets
-     the 11-22× pandas gap on merge_inner / pivot_table cells.
-   - **Ordered categorical** with `Categorical.from_codes` reverse
-     constructor + categories-ordering for sort.
-   - **More resample rules** — `1w` / `1M` / `1Y` (needs calendar
-     arithmetic layer for month/year).
-   - **`df.rolling(window).agg(...)` chainable rolling object** —
-     new `RollingWindow` class shaped like `GroupedDataFrame`.
-   - **`center=True` rolling window alignment** — deferred from M47.
-   - **Outer-merge with MultiIndex on either side** — M46's
-     fallback only handled dtype-mismatched single-col.
-   - **`unstack` distributing every regular column** — v1 only first.
-   - **`loc_range_*` on MultiIndex** — currently single-col only.
-   - **Cadence classification: disjoint-handler** (ColumnCategorical
-     class already exists from M47 — M49 just extends match arms in
-     existing dispatchers + adds rolling chainable as a new class).
-     First commit target ~20% of budget.
-   - Estimated: ~1500-2000 LOC. After M49, **re-run
-     `python bench/tabular_harness.py`** for the M48b sweep showing
-     the before/after improvement.
+2. **M51 — RollingWindow chainable + center=True + categorical sort + bench follow-ups** (the natural M49 follow-up; M50 sequence is desktop UI track in parallel).
+   - **RollingWindow chainable class** — `df.rolling(window) -> RollingWindow` shaped like M44's `GroupedDataFrame`. Methods `.mean() / .sum() / .std() / .min() / .max() / .agg(...)`. Builder methods `.center(true)` and `.min_periods(n)`. Classification: **cross-dispatch** (new sealed-class-ish — pattern depends on whether it's an actual sealed-class subclass or just a struct).
+   - **center=True rolling alignment** — currently rolling windows are trailing; center option aligns window symmetrically around the output position. M47 + M49 brief deferred.
+   - **Pandas-style ordered-sort on `ColumnCategorical`** — currently alphabetical; ordered-categorical-sort uses `categories[]` ordering (M49 added `is_ordered()` predicate; M51 wires the sort path).
+   - **Range filtering on outer MultiIndex levels** — M49 added innermost-only `loc_range_multi_*`; M51 extends to outer levels.
+   - **Dedicated merge codes-hash bench cell** — M48's `merge_cat_via_strings` cell doesn't exercise the M49 fast path; add a `merge_cat_codes` cell to TABULAR_BENCH_REPORT.
+   - **ColumnCategorical explicit `is_ordered` bit** — M49 uses a heuristic; M51 extends the payload (or adds a sidecar bool) to replace it.
+   - Estimated: ~1500-2000 LOC. Probably classified as **shared-infra** (RollingWindow is a new helper class touched by every rolling op) or possibly **cross-dispatch** if implemented as sealed subclass.
 
 3. **M48b — Memory deep-dive** (~smaller milestone after M49):
    - M48 found StrictPy peak RSS runs 4-5× pandas at large
@@ -668,27 +684,29 @@ After v0.4 language/stdlib work, update:
 Document these in any new agent brief:
 
 1. **"FIRST commit before 60% of your time budget"** with explicit
-   20%/40%/60%/80% checkpoint discipline. **30 consecutive clean
-   agents** (M28 → M48) — the streak is the strongest empirical
+   20%/40%/60%/80% checkpoint discipline. **31 consecutive clean
+   agents** (M28 → M49) — the streak is the strongest empirical
    data point in the project. M37-M40 each ran 4-5 phase commits
    across ~2100-2800 LOC milestones. M41 + M44 slipped to combined
-   commits (shared-infra exception). M42 + M43 + M45 + M46 + M48
-   returned to clean per-phase commits (disjoint handlers). M47
-   introduced a new classification — "cross-dispatch".
+   commits (shared-infra exception). M42 + M43 + M45 + M46 + M48 +
+   M49 returned to clean per-phase commits (disjoint handlers).
+   M47 introduced a new classification — "cross-dispatch".
 
-   **Three classifications established across M41-M48:**
-   - **disjoint-handler**: per-phase commits at ~20% (M42/M43/M45/M46/M48)
+   **Three classifications established across M41-M49:**
+   - **disjoint-handler**: per-phase commits at ~20%
+     (M42/M43/M45/M46/M48/M49)
    - **shared-infra**: combined Phase A at ~30-50% (M41/M44)
    - **cross-dispatch**: combined commit at ~50-75% (M47) — new
      sealed-class subclass forces a single build-green checkpoint
      across all dispatch sites
 
-   Future brief language should classify accordingly. **M49** (the
-   queued categorical-codes-optimization milestone) is
-   **disjoint-handler** since the ColumnCategorical class already
-   exists from M47 — M49 just extends match arms in existing
-   dispatchers + adds RollingWindow as a new class via the M44
-   helper-allocation pattern.
+   M49 was the largest disjoint-handler milestone to date (5 clean
+   per-phase commits, ~2700 LOC modified-or-added across Rust + Python
+   + .spy + docs). Future brief language should classify accordingly.
+   **M51** (RollingWindow chainable + center=True + categorical sort)
+   is the natural shape for shared-infra or cross-dispatch depending
+   on whether RollingWindow is implemented as a sealed-class subclass
+   or a struct.
 
 2. **Test-flip cascade lesson (M43)**: when a contract change is
    cross-cutting (every single-column group_by now promotes its

@@ -1117,6 +1117,154 @@ No language/compiler changes; new pure-bench infrastructure only.
 
 ---
 
+## M49 — `tabular` categorical codes optimization + polish (massive bench-validated win) (2026-05-23)
+
+The bench-validated performance milestone. M48 measured the
+`group_by_cat_via_strings` gap (StrictPy 12.8s vs pandas 1.04s at
+medium — 12.3× slower) and predicted M49 would close it via direct
+codes-hash. **Actual result spectacularly exceeded the prediction**:
+**12.8s → 66ms (~194× speedup)** at medium_card_8 and **5.4s →
+77ms (~70× speedup)** at the new medium_card_5000 fixture. StrictPy
+now **beats pandas's own Categorical fastpath by ~14×** at high
+cardinality.
+
+This is **the most dramatic single-milestone performance result in
+the project after the M8 JIT cliff** (931ms → 14.6ms on fib(30)).
+
+Single agent, 5 separable per-phase commits (disjoint-handler — first
+commit at ~20% of budget), ~2700 LOC, **zero STOP CRITERIA cuts**.
+
+### The bench numbers
+
+| Cell | Size | M48 baseline | M49 | Ratio vs pandas | Speedup |
+|---|---|---:|---:|---:|---:|
+| `group_by_cat_via_strings` | medium (8 distinct) | 12.8s | **66ms** | 0.06× (16× faster than pandas) | **~194×** |
+| `group_by_cat_via_strings` | medium_card_5000 (~4k distinct) | 5.4s | **77ms** | 0.07× (14× faster than pandas) | **~70×** |
+| `group_by_str` (raw ColumnStr) | medium_card_5000 | 4.9s | 3.6s | 3.5× | 1.3× (incidental) |
+
+The optimization is **targeted**: only the categorical path changes
+behavior. `group_by_str` (raw ColumnStr) and `group_by_pandas_categorical`
+(which is `group_by_str` on the StrictPy side — pandas does its own
+conversion) are unchanged.
+
+### Why the win is so large
+
+Two reasons:
+
+1. **Codes-hash beats string-hash heavily.** At 10K rows hashing
+   8-byte i64 codes (FxHash or similar) is dramatically cheaper than
+   hashing variable-length strings — the cost of the str-hash inner
+   loop dominates the M48 baseline.
+2. **The M48 baseline was measuring str-hash on 10K rows × 8
+   distinct strings repeatedly** — exactly the worst-case for
+   memoization-free string-hashing. M49's codes-hash is one i64 hash
+   per row, total. The win compounds with cardinality (more distinct
+   values → more time saved on the eliminated str-hashing).
+
+### Surface (additions)
+
+- **Phase B — codes-hash for `group_by`**: when the group key column
+  is `ColumnCategorical`, `m38_groupby_*` hashes on `codes[i]` (i64)
+  instead of routing through `to_strings()`. Single-col + multi-col
+  + mixed-dtype-fallback (where one or more keys are categorical and
+  others aren't) all handled. **Transparent — no API change.**
+- **Phase C — codes-hash for `merge`**: when both lhs.on_col and
+  rhs.on_col are `ColumnCategorical` with **bit-identical
+  `categories[]` arrays**, hash on codes; else fall back to string-
+  hash. New constructors:
+  `tabular.col_categorical_ordered(values, categories)` (builds with
+  pinned categories ordering) and
+  `tabular.col_categorical_from_codes(codes, categories)` (reverse
+  constructor). New predicate `cc.is_ordered()`.
+- **Phase D — smaller polish**:
+  - More resample rules: `1w` (7 days × 86400000ms), `1M`, `1Y` with
+    calendar arithmetic and end-of-month clamping (Feb/short months
+    handled).
+  - Outer-merge MultiIndex on either side: M46's NaN-padded fallback
+    only handled dtype-mismatched single-col; M49 extends to all
+    three cases (lhs-MI / rhs-MI / both-MI).
+  - `unstack` now distributes EVERY regular column (M46 only the
+    first). Output column names: `{innermost_level_value}_{original_col_name}`.
+  - Per-dtype `loc_range_multi_{i64,str,datetime}` for range
+    filtering on the innermost MultiIndex level (3 new NativeFns).
+
+### NativeFn IDs
+
+1061-1066 (6 new):
+- 1061: `col_categorical_ordered(values, categories)`
+- 1062: `col_categorical_from_codes(codes, categories)`
+- 1063: `cc.is_ordered()`
+- 1064-1066: `loc_range_multi_{i64, str, datetime}`
+
+The codes-hash optimization for group_by + merge is **transparent**
+(no new NativeFns — modifies existing handlers).
+
+### Bench-first methodology validated
+
+M48 + M49 establishes a new template for fixing known performance
+gaps:
+
+1. **M48**: measure the gap. Land the bench infrastructure.
+   Document the numeric target.
+2. **M49**: implement the optimization. **Bench-verification gate
+   before commit**: don't commit Phase B without re-running and
+   seeing the win materialize.
+
+The discipline worked: Phase A added the high-cardinality fixture
+(the verification gate). Phase B's bench rerun showed the 70×
+win cleanly. The remaining phases (C/D/E) layered on top with
+confidence.
+
+This is the second time the project has used a bench-first cycle
+(after M7-unfair → M7-fair → M8 in the foundations phase). The M48/M49
+shape is more rigorous because the bench infrastructure stays
+permanent (TABULAR_BENCH_REPORT.md + the JSON snapshot).
+
+### Edit-tool worktree leak
+
+Recurred ~10 times this session. Defensive `cp` block at session
+start + per-file `cp` recovery worked cleanly — no data loss. The
+M44/M45/M46/M47/M48/M49 alternation (yes/no/yes/no/no/yes ~10×)
+confirms intermittence; the workaround remains reliable.
+
+### Tests + size
+
+- Tests: 993 → 1016 (+23 net: 21 new VM in
+  `vm/tests/m49_tabular_codes.rs`, 2 new demo-runs in
+  `compiler/tests/tabular_m49_codes_demo_runs.rs`).
+- Examples: 111 → 112
+  (`examples/tabular_m49_codes_demo.spy` ~230 LOC).
+- Stdlib classes: unchanged at 19 (M49 adds 3 methods + extends
+  match arms but no new sealed-class subclass).
+- LOC: `vm/src/builtins.rs` +1103, `vm/tests/m49_tabular_codes.rs`
+  +896 (new), `examples/tabular_m49_codes_demo.spy` +230 (new),
+  `bench/tabular_harness.py` +108, `LANGUAGE_GUIDE.md` +71,
+  `compiler/tests/tabular_m49_codes_demo_runs.rs` +73 (new),
+  `bench/TABULAR_BENCH_REPORT_M49.md` +40 (new), agent report +165
+  (new), `shared/src/native.rs` +48, `compiler/src/resolver.rs`
+  +42, `compiler/src/ir.rs` +6. Total ~2700 LOC.
+
+### Lesson 1 streak: 31 consecutive clean agents
+
+(M28 → M49). **Thirteen consecutive `tabular`-related agents shipped
+clean** — M37-M49. M49 was the largest disjoint-handler milestone to
+date (5 clean per-phase commits, ~2700 LOC).
+
+### After M49: what remains
+
+What's still queued:
+- **M51**: RollingWindow chainable + center=True + categorical
+  sort-by-categories-ordering (M49 added `is_ordered()` predicate;
+  M51 wires the sort path) + dedicated merge codes-hash bench cell +
+  explicit `is_ordered` payload bit (M49 uses heuristic) + range
+  filtering on outer MultiIndex levels.
+- **M48b**: memory deep-dive (4-5× peak RSS gap vs pandas at large
+  exposed by M48 — `List<T>` per-cell overhead investigation).
+- **M50+**: desktop UI sequence (M50a HTTP transport, M50b table/
+  filter UI, M50c group_by/pivot UI).
+
+---
+
 ## M48 — `tabular` vs pandas 3.0 comprehensive benchmark suite (2026-05-23)
 
 The third benchmark-only milestone in the project (after M7-fair
