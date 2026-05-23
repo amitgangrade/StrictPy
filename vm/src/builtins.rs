@@ -14867,6 +14867,20 @@ fn m39_concat_rows(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmErro
         };
         out_cols.push(m37_alloc_column(interp, &cls, v_lst, n_lst, n) as u64);
     }
+    // M45: if every input frame has a MultiIndex with matching nlevels,
+    // dtypes per level, and names per level, concatenate level-by-level
+    // and emit a MultiIndex.  Otherwise fall through to M43's single-
+    // col concatenation (or RangeIndex fallback).
+    if let Some((m45_levels, m45_lnames)) = m45_concat_rows_multiindex(interp, &dfs) {
+        return Ok(m44_build_df_with_multiindex(
+            interp,
+            &ref_names,
+            &out_cols,
+            total_nrows,
+            &m45_levels,
+            &m45_lnames,
+        ));
+    }
     // M43: concatenate the input indexes when all share dtype + name;
     // otherwise fall back to RangeIndex (today's behavior).
     let (m43_concat_index_col, m43_concat_index_name_ptr) =
@@ -14879,6 +14893,103 @@ fn m39_concat_rows(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmErro
         m43_concat_index_col,
         m43_concat_index_name_ptr,
     ))
+}
+
+/// M45 helper: reconcile per-frame MultiIndexes for `tabular.concat_rows`.
+/// Returns `Some((levels_out, names_out))` for the output frame's
+/// MultiIndex when every input has a MultiIndex with matching nlevels +
+/// per-level dtype + per-level name; `None` otherwise (caller falls
+/// through to `m43_concat_rows_index` for single-col / RangeIndex).
+///
+/// Strict-reconciliation policy matches `m43_concat_rows_index`'s
+/// single-col shape: any mismatch (missing MI on a frame, differing
+/// nlevels, differing per-level dtype, differing per-level name) drops
+/// to the caller's fallback.
+fn m45_concat_rows_multiindex(
+    interp: &mut Interpreter,
+    dfs: &[u64],
+) -> Option<(Vec<u64>, Vec<String>)> {
+    // Every frame must have a MultiIndex.
+    let mut per_frame_levels: Vec<Vec<u64>> = Vec::with_capacity(dfs.len());
+    let mut per_frame_lnames: Vec<Vec<String>> = Vec::with_capacity(dfs.len());
+    for df in dfs {
+        let levels = m44_read_index_levels(*df);
+        if levels.is_empty() {
+            return None;
+        }
+        let lnames = m44_read_index_level_names(*df);
+        per_frame_levels.push(levels);
+        per_frame_lnames.push(lnames);
+    }
+    // Same nlevels everywhere.
+    let nlev = per_frame_levels[0].len();
+    for f in &per_frame_levels[1..] {
+        if f.len() != nlev {
+            return None;
+        }
+    }
+    // Per-level: same dtype + same name across every frame.
+    let ref_classes: Vec<String> = per_frame_levels[0].iter()
+        .map(|cp| m38_col_class_name(*cp)).collect();
+    let ref_names = per_frame_lnames[0].clone();
+    for fi in 1..per_frame_levels.len() {
+        for li in 0..nlev {
+            if m38_col_class_name(per_frame_levels[fi][li]) != ref_classes[li] {
+                return None;
+            }
+            if per_frame_lnames[fi].get(li).cloned().unwrap_or_default() != ref_names.get(li).cloned().unwrap_or_default() {
+                return None;
+            }
+        }
+    }
+    // Concatenate cell-by-cell for each level.
+    let mut m45_out_levels: Vec<u64> = Vec::with_capacity(nlev);
+    for li in 0..nlev {
+        let cls = ref_classes[li].clone();
+        let mut buf_i64: Vec<i64> = Vec::new();
+        let mut buf_f64: Vec<f64> = Vec::new();
+        let mut buf_str: Vec<String> = Vec::new();
+        let mut buf_bool: Vec<bool> = Vec::new();
+        let mut all_nulls: Vec<bool> = Vec::new();
+        for f in &per_frame_levels {
+            let col = f[li];
+            let (vals, nulls, length) = m37_col_fields(col);
+            let ns = m37_read_list_bool(nulls);
+            for i in 0..length as usize {
+                all_nulls.push(ns.get(i).copied().unwrap_or(false));
+            }
+            match cls.as_str() {
+                "ColumnI64" | "ColumnDateTime" => {
+                    let vs = m37_read_list_i64(vals);
+                    buf_i64.extend(vs.into_iter().chain(std::iter::repeat(0)).take(length as usize));
+                }
+                "ColumnF64" => {
+                    let vs = m37_read_list_f64(vals);
+                    buf_f64.extend(vs.into_iter().chain(std::iter::repeat(0.0)).take(length as usize));
+                }
+                "ColumnStr" => {
+                    let vs = m37_read_list_str_lst(vals);
+                    buf_str.extend(vs.into_iter().chain(std::iter::repeat(String::new())).take(length as usize));
+                }
+                "ColumnBool" => {
+                    let vs = m37_read_list_bool(vals);
+                    buf_bool.extend(vs.into_iter().chain(std::iter::repeat(false)).take(length as usize));
+                }
+                _ => {}
+            }
+        }
+        let n = all_nulls.len() as i64;
+        let n_lst = m37_alloc_list_bool(interp, &all_nulls);
+        let v_lst = match cls.as_str() {
+            "ColumnI64" | "ColumnDateTime" => m37_alloc_list_i64(interp, &buf_i64),
+            "ColumnF64" => m37_alloc_list_f64(interp, &buf_f64),
+            "ColumnStr" => m37_alloc_list_str(interp, &buf_str),
+            "ColumnBool" => m37_alloc_list_bool(interp, &buf_bool),
+            _ => m37_alloc_list_i64(interp, &buf_i64),
+        };
+        m45_out_levels.push(m37_alloc_column(interp, &cls, v_lst, n_lst, n) as u64);
+    }
+    Some((m45_out_levels, ref_names))
 }
 
 /// M43 helper: reconcile per-frame indexes for `tabular.concat_rows`.
@@ -15007,6 +15118,23 @@ fn m39_concat_cols(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmErro
             out_names.push(n.clone());
             out_cols.push(cps[j]);
         }
+    }
+    // M45: if lhs has a MultiIndex, take it (clone every level).  Same
+    // lhs-wins policy as M43's single-col concat_cols and M42's merge.
+    let m45_cc_levels = m44_read_index_levels(dfs[0]);
+    if !m45_cc_levels.is_empty() {
+        let m45_cc_lnames = m44_read_index_level_names(dfs[0]);
+        let m45_cc_new_levels: Vec<u64> = m45_cc_levels.iter()
+            .map(|cp| m41_clone_column(interp, *cp))
+            .collect();
+        return Ok(m44_build_df_with_multiindex(
+            interp,
+            &out_names,
+            &out_cols,
+            ref_nrows,
+            &m45_cc_new_levels,
+            &m45_cc_lnames,
+        ));
     }
     // M43: lhs's index wins (consistent with M42's merge policy).  If
     // the first df has an index, clone it onto the output; otherwise
@@ -15929,19 +16057,39 @@ fn m39_df_melt(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     out_cols.push(
         m37_alloc_column(interp, &first_cls, val_v_lst, val_n_lst, val_nulls.len() as i64) as u64,
     );
-    // M43: if the input has an index, the output's index is the input's
-    // index with each label repeated `len(value_vars)` times.  No
-    // index → RangeIndex (today's behavior).
-    let (m43_melt_parent_index, m43_melt_parent_index_name) = m41_df_index_fields(recv);
-    let (m43_melt_out_index, m43_melt_out_index_name) = if m43_melt_parent_index != 0 {
-        // Build the repeated row-index vector.
-        let mut m43_melt_take: Vec<usize> = Vec::with_capacity(out_nrows);
+    // M43/M45: if the input has an index, the output's index is the
+    // input's index with each label repeated `len(value_vars)` times.
+    // M43 handles the M41 single-col case; M45 extends to MultiIndex by
+    // repeating EACH level by the same take vector.  No index →
+    // RangeIndex (today's behavior).
+    let m45_melt_take: Vec<usize> = {
+        let mut t: Vec<usize> = Vec::with_capacity(out_nrows);
         for r in 0..nrows as usize {
             for _ in 0..value_vars.len() {
-                m43_melt_take.push(r);
+                t.push(r);
             }
         }
-        let permuted = m37_column_take(interp, m43_melt_parent_index, &m43_melt_take);
+        t
+    };
+    // M45 first: prefer MultiIndex when the input has one.
+    let m45_melt_levels = m44_read_index_levels(recv);
+    if !m45_melt_levels.is_empty() {
+        let m45_melt_level_names = m44_read_index_level_names(recv);
+        let m45_melt_new_levels: Vec<u64> = m45_melt_levels.iter()
+            .map(|cp| m37_column_take(interp, *cp, &m45_melt_take))
+            .collect();
+        return Ok(m44_build_df_with_multiindex(
+            interp,
+            &out_names,
+            &out_cols,
+            out_nrows as i64,
+            &m45_melt_new_levels,
+            &m45_melt_level_names,
+        ));
+    }
+    let (m43_melt_parent_index, m43_melt_parent_index_name) = m41_df_index_fields(recv);
+    let (m43_melt_out_index, m43_melt_out_index_name) = if m43_melt_parent_index != 0 {
+        let permuted = m37_column_take(interp, m43_melt_parent_index, &m45_melt_take);
         (permuted, m43_melt_parent_index_name)
     } else {
         (0u64, 0u64)

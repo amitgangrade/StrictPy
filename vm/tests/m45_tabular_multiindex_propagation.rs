@@ -236,6 +236,94 @@ fn merge_right_takes_rhs_multiindex() {
     assert!(out.contains("nlev=2"), "got: {out:?}");
 }
 
+// ───────────────────────────────────────────────────────────────────────
+// Phase B — M43 reshape ops: melt repeats levels; concat_rows
+// concatenates level-by-level (with strict reconciliation); concat_cols
+// inherits lhs's MultiIndex; pivot + pivot_table explicitly drop.
+// ───────────────────────────────────────────────────────────────────────
+
+#[test]
+fn melt_repeats_each_multiindex_level() {
+    // Build a MI'd frame.  qty has 5 rows; melt with value_vars=[qty]
+    // produces 5 output rows.  With value_vars=[qty, qty_again] (we
+    // duplicate qty as a second column) the output has 10 rows and each
+    // level should also have length 10.
+    let src = format!(
+        "{MULTI_FRAME_HEADER}\nfn make_frame_two_qtys() -> DataFrame:\n    regs_v: List[str] = []\n    regs_v.append(\"east\")\n    regs_v.append(\"east\")\n    regs_v.append(\"west\")\n    regs_v.append(\"west\")\n    regs_v.append(\"east\")\n    regs: ColumnStr = tabular.col_str_simple(regs_v)\n    cats_v: List[str] = []\n    cats_v.append(\"a\")\n    cats_v.append(\"b\")\n    cats_v.append(\"a\")\n    cats_v.append(\"b\")\n    cats_v.append(\"a\")\n    cats: ColumnStr = tabular.col_str_simple(cats_v)\n    q1_v: List[i64] = []\n    q1_v.append(10i64)\n    q1_v.append(20i64)\n    q1_v.append(30i64)\n    q1_v.append(40i64)\n    q1_v.append(50i64)\n    q1: ColumnI64 = tabular.col_i64_simple(q1_v)\n    q2_v: List[i64] = []\n    q2_v.append(11i64)\n    q2_v.append(22i64)\n    q2_v.append(33i64)\n    q2_v.append(44i64)\n    q2_v.append(55i64)\n    q2: ColumnI64 = tabular.col_i64_simple(q2_v)\n    n: List[str] = []\n    n.append(\"reg\")\n    n.append(\"cat\")\n    n.append(\"q1\")\n    n.append(\"q2\")\n    cs: List[Column] = []\n    cs.append(regs)\n    cs.append(cats)\n    cs.append(q1)\n    cs.append(q2)\n    return tabular.from_columns(n, cs)\nfn main() -> i32:\n    df: DataFrame = make_frame_two_qtys()\n    keys: List[str] = []\n    keys.append(\"reg\")\n    keys.append(\"cat\")\n    mi: DataFrame = df.set_index_multi(keys)\n    id: List[str] = []\n    vv: List[str] = []\n    vv.append(\"q1\")\n    vv.append(\"q2\")\n    mo: DataFrame = mi.melt(id, vv)\n    println(\"rows=\" + str(mo.length()))\n    println(\"nlev=\" + str(mo.index_nlevels()))\n    return 0\n"
+    );
+    let out = run("melt_repeats_mi_levels", &src);
+    // 5 rows * 2 value_vars = 10 rows; nlev=2.
+    assert!(out.contains("rows=10"), "got: {out:?}");
+    assert!(out.contains("nlev=2"), "got: {out:?}");
+}
+
+#[test]
+fn concat_rows_concatenates_multiindexes_level_by_level() {
+    // Two MI'd frames with the same nlevels, dtypes per level, and names
+    // per level → output is a MultiIndex with the concatenated levels.
+    let src = format!(
+        "{MULTI_FRAME_HEADER}\nfn make_other() -> DataFrame:\n    regs_v: List[str] = []\n    regs_v.append(\"north\")\n    regs_v.append(\"south\")\n    regs: ColumnStr = tabular.col_str_simple(regs_v)\n    cats_v: List[str] = []\n    cats_v.append(\"c\")\n    cats_v.append(\"d\")\n    cats: ColumnStr = tabular.col_str_simple(cats_v)\n    qty_v: List[i64] = []\n    qty_v.append(100i64)\n    qty_v.append(200i64)\n    qty: ColumnI64 = tabular.col_i64_simple(qty_v)\n    n: List[str] = []\n    n.append(\"reg\")\n    n.append(\"cat\")\n    n.append(\"qty\")\n    cs: List[Column] = []\n    cs.append(regs)\n    cs.append(cats)\n    cs.append(qty)\n    return tabular.from_columns(n, cs)\nfn main() -> i32:\n    a: DataFrame = make_frame()\n    b: DataFrame = make_other()\n    keys: List[str] = []\n    keys.append(\"reg\")\n    keys.append(\"cat\")\n    ami: DataFrame = a.set_index_multi(keys)\n    bmi: DataFrame = b.set_index_multi(keys)\n    dfs: List[DataFrame] = []\n    dfs.append(ami)\n    dfs.append(bmi)\n    co: DataFrame = tabular.concat_rows(dfs)\n    println(\"rows=\" + str(co.length()))\n    println(\"nlev=\" + str(co.index_nlevels()))\n    return 0\n"
+    );
+    let out = run("concat_rows_mi_level_by_level", &src);
+    // 5 + 2 rows.
+    assert!(out.contains("rows=7"), "got: {out:?}");
+    assert!(out.contains("nlev=2"), "got: {out:?}");
+}
+
+#[test]
+fn concat_rows_mismatched_levels_falls_back() {
+    // lhs has 2-level MI ([reg, cat]); rhs has 1-level MI ([reg]) — both
+    // expose the same regular column shape (just `cat` + `qty` vs
+    // `qty`).  Make the regular column shape match by using two MI'd
+    // frames where lhs lifts both reg+cat and rhs lifts only reg+cat
+    // (single-element MI of ["cat"] vs 2-element MI of ["reg","cat"]).
+    // We pin the regular cols to just `qty` by lifting all of reg+cat
+    // off; the MI nlevels differ (1 vs 2) — strict reconciliation drops
+    // to RangeIndex.
+    let src = format!(
+        "{MULTI_FRAME_HEADER}\nfn make_other() -> DataFrame:\n    cats_v: List[str] = []\n    cats_v.append(\"a\")\n    cats_v.append(\"b\")\n    cats: ColumnStr = tabular.col_str_simple(cats_v)\n    qty_v: List[i64] = []\n    qty_v.append(100i64)\n    qty_v.append(200i64)\n    qty: ColumnI64 = tabular.col_i64_simple(qty_v)\n    n: List[str] = []\n    n.append(\"cat\")\n    n.append(\"qty\")\n    cs: List[Column] = []\n    cs.append(cats)\n    cs.append(qty)\n    return tabular.from_columns(n, cs)\nfn main() -> i32:\n    a: DataFrame = make_frame()\n    keys2: List[str] = []\n    keys2.append(\"reg\")\n    keys2.append(\"cat\")\n    ami: DataFrame = a.set_index_multi(keys2)\n    b: DataFrame = make_other()\n    keys1: List[str] = []\n    keys1.append(\"cat\")\n    bmi: DataFrame = b.set_index_multi(keys1)\n    dfs: List[DataFrame] = []\n    dfs.append(ami)\n    dfs.append(bmi)\n    co: DataFrame = tabular.concat_rows(dfs)\n    println(\"rows=\" + str(co.length()))\n    println(\"nlev=\" + str(co.index_nlevels()))\n    return 0\n"
+    );
+    let out = run("concat_rows_mi_fallback", &src);
+    assert!(out.contains("rows=7"), "got: {out:?}");
+    // nlevels differ (2 vs 1) → strict-reconciliation drops to RangeIndex.
+    assert!(out.contains("nlev=0"), "got: {out:?}");
+}
+
+#[test]
+fn concat_cols_inherits_lhs_multiindex() {
+    // lhs has a 2-level MI; rhs has none.  concat_cols → lhs MI wins.
+    let src = format!(
+        "{MULTI_FRAME_HEADER}\nfn make_other() -> DataFrame:\n    e_v: List[i64] = []\n    e_v.append(1i64)\n    e_v.append(2i64)\n    e_v.append(3i64)\n    e_v.append(4i64)\n    e_v.append(5i64)\n    e: ColumnI64 = tabular.col_i64_simple(e_v)\n    n: List[str] = []\n    n.append(\"extra\")\n    cs: List[Column] = []\n    cs.append(e)\n    return tabular.from_columns(n, cs)\nfn main() -> i32:\n    a: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"reg\")\n    keys.append(\"cat\")\n    ami: DataFrame = a.set_index_multi(keys)\n    b: DataFrame = make_other()\n    dfs: List[DataFrame] = []\n    dfs.append(ami)\n    dfs.append(b)\n    co: DataFrame = tabular.concat_cols(dfs)\n    println(\"rows=\" + str(co.length()))\n    println(\"nlev=\" + str(co.index_nlevels()))\n    return 0\n"
+    );
+    let out = run("concat_cols_inherits_mi", &src);
+    assert!(out.contains("rows=5"), "got: {out:?}");
+    assert!(out.contains("nlev=2"), "got: {out:?}");
+}
+
+#[test]
+fn pivot_drops_multiindex() {
+    // pivot reshapes the row dimension — the input MultiIndex doesn't
+    // map to the output rows (which are unique `index_col` values), so
+    // the MultiIndex is explicitly dropped.  Output's index is promoted
+    // from `index_col` per M43 (a single-col index).
+    let src = format!(
+        "{MULTI_FRAME_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"reg\")\n    keys.append(\"cat\")\n    mi: DataFrame = df.set_index_multi(keys)\n    pv: DataFrame = mi.pivot(\"qty\", \"qty\", \"qty\")\n    println(\"nlev=\" + str(pv.index_nlevels()))\n    return 0\n"
+    );
+    let out = run("pivot_drops_mi", &src);
+    // pivot promotes `qty` to the output's single-col index; MI dropped.
+    assert!(out.contains("nlev=1"), "got: {out:?}");
+}
+
+#[test]
+fn pivot_table_drops_multiindex() {
+    // Same as pivot: reshape the row dimension, drop the input MI.
+    let src = format!(
+        "{MULTI_FRAME_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"reg\")\n    keys.append(\"cat\")\n    mi: DataFrame = df.set_index_multi(keys)\n    pt: DataFrame = mi.pivot_table(\"qty\", \"qty\", \"qty\", \"sum\")\n    println(\"nlev=\" + str(pt.index_nlevels()))\n    return 0\n"
+    );
+    let out = run("pivot_table_drops_mi", &src);
+    assert!(out.contains("nlev=1"), "got: {out:?}");
+}
+
 #[test]
 fn merge_outer_with_multiindex_falls_back_to_range() {
     // M45 explicit anchor: outer-merge with a MultiIndex on either side
