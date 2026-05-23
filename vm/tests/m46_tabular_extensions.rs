@@ -293,3 +293,241 @@ fn main() -> i32:
     assert!(out.contains("orig_rows=3"), "got: {out:?}");
     assert!(out.contains("roundtrip_rows=3"), "got: {out:?}");
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// Phase B — df.loc_range_* per dtype
+// ════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn loc_range_i64_keeps_inclusive_both_ends() {
+    let src = "\
+from tabular import Column, ColumnI64, DataFrame
+import tabular
+fn make() -> DataFrame:
+    iv: List[i64] = []
+    iv.append(1i64)
+    iv.append(3i64)
+    iv.append(5i64)
+    iv.append(7i64)
+    iv.append(9i64)
+    idx: ColumnI64 = tabular.col_i64_simple(iv)
+    qv: List[i64] = []
+    qv.append(10i64)
+    qv.append(20i64)
+    qv.append(30i64)
+    qv.append(40i64)
+    qv.append(50i64)
+    q: ColumnI64 = tabular.col_i64_simple(qv)
+    n: List[str] = []
+    n.append(\"id\")
+    n.append(\"qty\")
+    cs: List[Column] = []
+    cs.append(idx)
+    cs.append(q)
+    return tabular.from_columns(n, cs)
+fn main() -> i32:
+    df: DataFrame = make()
+    si: DataFrame = df.set_index(\"id\")
+    lr: DataFrame = si.loc_range_i64(3i64, 7i64)
+    println(\"rows=\" + str(lr.length()))
+    println(\"has=\" + str(lr.has_index()))
+    return 0
+";
+    let out = run("loc_range_i64", src);
+    assert!(out.contains("rows=3"), "got: {out:?}");
+    assert!(out.contains("has=true"), "got: {out:?}");
+}
+
+#[test]
+fn loc_range_f64_keeps_inclusive() {
+    let src = "\
+from tabular import Column, ColumnF64, ColumnI64, DataFrame
+import tabular
+fn make() -> DataFrame:
+    iv: List[f64] = []
+    iv.append(1.5)
+    iv.append(2.5)
+    iv.append(3.5)
+    idx: ColumnF64 = tabular.col_f64_simple(iv)
+    qv: List[i64] = []
+    qv.append(10i64)
+    qv.append(20i64)
+    qv.append(30i64)
+    q: ColumnI64 = tabular.col_i64_simple(qv)
+    n: List[str] = []
+    n.append(\"id\")
+    n.append(\"qty\")
+    cs: List[Column] = []
+    cs.append(idx)
+    cs.append(q)
+    return tabular.from_columns(n, cs)
+fn main() -> i32:
+    df: DataFrame = make()
+    si: DataFrame = df.set_index(\"id\")
+    lr: DataFrame = si.loc_range_f64(2.0, 3.0)
+    println(\"rows=\" + str(lr.length()))
+    return 0
+";
+    let out = run("loc_range_f64", src);
+    assert!(out.contains("rows=1"), "got: {out:?}");
+}
+
+#[test]
+fn loc_range_str_lex_inclusive() {
+    let src = "\
+from tabular import Column, ColumnStr, ColumnI64, DataFrame
+import tabular
+fn make() -> DataFrame:
+    iv: List[str] = []
+    iv.append(\"alpha\")
+    iv.append(\"beta\")
+    iv.append(\"gamma\")
+    iv.append(\"delta\")
+    idx: ColumnStr = tabular.col_str_simple(iv)
+    qv: List[i64] = []
+    qv.append(1i64)
+    qv.append(2i64)
+    qv.append(3i64)
+    qv.append(4i64)
+    q: ColumnI64 = tabular.col_i64_simple(qv)
+    n: List[str] = []
+    n.append(\"id\")
+    n.append(\"qty\")
+    cs: List[Column] = []
+    cs.append(idx)
+    cs.append(q)
+    return tabular.from_columns(n, cs)
+fn main() -> i32:
+    df: DataFrame = make()
+    si: DataFrame = df.set_index(\"id\")
+    lr: DataFrame = si.loc_range_str(\"alpha\", \"delta\")
+    println(\"rows=\" + str(lr.length()))
+    return 0
+";
+    let out = run("loc_range_str", src);
+    // alpha, beta, delta (not gamma — gamma > delta lex).
+    assert!(out.contains("rows=3"), "got: {out:?}");
+}
+
+#[test]
+fn loc_range_bool_inclusive() {
+    let src = "\
+from tabular import Column, ColumnBool, ColumnI64, DataFrame
+import tabular
+fn make() -> DataFrame:
+    iv: List[bool] = []
+    iv.append(false)
+    iv.append(true)
+    iv.append(false)
+    iv.append(true)
+    idx: ColumnBool = tabular.col_bool_simple(iv)
+    qv: List[i64] = []
+    qv.append(1i64)
+    qv.append(2i64)
+    qv.append(3i64)
+    qv.append(4i64)
+    q: ColumnI64 = tabular.col_i64_simple(qv)
+    n: List[str] = []
+    n.append(\"id\")
+    n.append(\"qty\")
+    cs: List[Column] = []
+    cs.append(idx)
+    cs.append(q)
+    return tabular.from_columns(n, cs)
+fn main() -> i32:
+    df: DataFrame = make()
+    si: DataFrame = df.set_index(\"id\")
+    lr: DataFrame = si.loc_range_bool(true, true)
+    println(\"rows=\" + str(lr.length()))
+    return 0
+";
+    let out = run("loc_range_bool", src);
+    assert!(out.contains("rows=2"), "got: {out:?}");
+}
+
+#[test]
+fn loc_range_datetime_inclusive() {
+    let src = "\
+from tabular import Column, ColumnDateTime, ColumnI64, DataFrame
+import tabular
+fn make() -> DataFrame:
+    iv: List[i64] = []
+    iv.append(100i64)
+    iv.append(200i64)
+    iv.append(300i64)
+    iv.append(400i64)
+    nsv: List[bool] = []
+    nsv.append(false)
+    nsv.append(false)
+    nsv.append(false)
+    nsv.append(false)
+    idx: ColumnDateTime = tabular.col_datetime(iv, nsv)
+    qv: List[i64] = []
+    qv.append(1i64)
+    qv.append(2i64)
+    qv.append(3i64)
+    qv.append(4i64)
+    q: ColumnI64 = tabular.col_i64_simple(qv)
+    n: List[str] = []
+    n.append(\"id\")
+    n.append(\"qty\")
+    cs: List[Column] = []
+    cs.append(idx)
+    cs.append(q)
+    return tabular.from_columns(n, cs)
+fn main() -> i32:
+    df: DataFrame = make()
+    si: DataFrame = df.set_index(\"id\")
+    lr: DataFrame = si.loc_range_datetime(150i64, 350i64)
+    println(\"rows=\" + str(lr.length()))
+    return 0
+";
+    let out = run("loc_range_datetime", src);
+    assert!(out.contains("rows=2"), "got: {out:?}");
+}
+
+#[test]
+fn loc_range_empty_range_returns_empty_frame() {
+    let src = "\
+from tabular import Column, ColumnI64, DataFrame
+import tabular
+fn make() -> DataFrame:
+    iv: List[i64] = []
+    iv.append(1i64)
+    iv.append(2i64)
+    iv.append(3i64)
+    idx: ColumnI64 = tabular.col_i64_simple(iv)
+    qv: List[i64] = []
+    qv.append(10i64)
+    qv.append(20i64)
+    qv.append(30i64)
+    q: ColumnI64 = tabular.col_i64_simple(qv)
+    n: List[str] = []
+    n.append(\"id\")
+    n.append(\"qty\")
+    cs: List[Column] = []
+    cs.append(idx)
+    cs.append(q)
+    return tabular.from_columns(n, cs)
+fn main() -> i32:
+    df: DataFrame = make()
+    si: DataFrame = df.set_index(\"id\")
+    lr: DataFrame = si.loc_range_i64(100i64, 200i64)
+    println(\"rows=\" + str(lr.length()))
+    return 0
+";
+    let out = run("loc_range_empty", src);
+    assert!(out.contains("rows=0"), "got: {out:?}");
+}
+
+#[test]
+fn loc_range_raises_on_multiindex() {
+    let src = format!(
+        "{MULTI_FRAME_HEADER}\nfn main() -> i32:\n    df: DataFrame = make_frame()\n    keys: List[str] = []\n    keys.append(\"reg\")\n    keys.append(\"cat\")\n    mi: DataFrame = df.set_index_multi(keys)\n    try:\n        lr: DataFrame = mi.loc_range_i64(0i64, 99i64)\n        println(\"no-raise\")\n    except ValueError as e:\n        println(\"raised\")\n    return 0\n"
+    );
+    let out = run_expect_err("loc_range_raises_mi", &src);
+    assert!(
+        out.contains("raised") || out.contains("MultiIndex not supported"),
+        "got: {out:?}"
+    );
+}
