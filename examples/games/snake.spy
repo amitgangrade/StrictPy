@@ -1,0 +1,305 @@
+"""snake.spy — M55 reference game: a complete Snake in StrictPy.
+
+A 20x20 cell grid (30 px per cell) with a 60 px top bar for score.
+Window: 600 wide x 660 tall.
+
+Controls:
+  - Arrow keys: change direction.  180° reversal is rejected.
+  - R         : restart after game over.
+  - Escape    : quit.
+  - The window's close button: quit.
+
+Mechanics:
+  - Snake starts 3 segments long, centred, moving right.
+  - Snake steps once every STEP_MS milliseconds (8 cells/second).
+  - Eating food: grow by 1, +1 score, play eat.wav, spawn new food.
+  - Wall collision OR self-collision: game over, play die.wav, overlay.
+
+Architecture:
+  - render() is called every frame (~60 FPS).
+  - step()   is called every STEP_MS ms (~8 Hz).
+  - Direction input is queued in pending_direction so a fast double-tap
+    can't bypass the 180°-reversal guard (the guard checks against the
+    direction at the time of the next step, not at input time).
+
+Run it (from the repo root):
+    cargo build --workspace --release
+    ./target/release/spy examples/games/snake.spy
+
+The compile-only test in compiler/tests/snake_demo_runs.rs verifies the
+file typechecks + bytecode-compiles.  Actually playing the game needs
+a real window — run it manually on your dev box.
+"""
+
+import gfx
+import time
+import random
+from gfx import Window, Event, Font, Sound
+
+# ── Layout constants ─────────────────────────────────────────────────
+final CELL: i32 = 30i32
+final GRID_W: i32 = 20i32
+final GRID_H: i32 = 20i32
+final TOPBAR_H: i32 = 60i32
+final WIN_W: i32 = 600i32              # CELL * GRID_W
+final WIN_H: i32 = 660i32              # TOPBAR_H + CELL * GRID_H
+
+# ── Timing ───────────────────────────────────────────────────────────
+final FRAME_MS: i64 = 16i64            # ~60 FPS render cap
+final STEP_MS: i64 = 125i64            # 8 snake steps per second
+
+# ── Game state ───────────────────────────────────────────────────────
+
+final class GameState:
+    snake: List[Tuple[i32, i32]]       # head first
+    dir_x: i32
+    dir_y: i32
+    pending_dir_x: i32
+    pending_dir_y: i32
+    food_x: i32
+    food_y: i32
+    score: i64
+    game_over: bool
+    last_step_ms: i64
+
+    fn __init__(self) -> None:
+        self.snake = []
+        self.snake.append((10i32, 10i32))
+        self.snake.append((9i32, 10i32))
+        self.snake.append((8i32, 10i32))
+        self.dir_x = 1i32
+        self.dir_y = 0i32
+        self.pending_dir_x = 1i32
+        self.pending_dir_y = 0i32
+        self.food_x = 0i32
+        self.food_y = 0i32
+        self.score = 0i64
+        self.game_over = false
+        self.last_step_ms = time.now_ms()
+
+# ── Helpers ──────────────────────────────────────────────────────────
+
+fn point_on_snake(snake: List[Tuple[i32, i32]], x: i32, y: i32) -> bool:
+    i: i32 = 0i32
+    n: i32 = i32(i64(len(snake)))
+    while i < n:
+        cell: Tuple[i32, i32] = snake[i]
+        if cell.0 == x and cell.1 == y:
+            return true
+        i = i + 1i32
+    return false
+
+fn spawn_food(snake: List[Tuple[i32, i32]]) -> Tuple[i32, i32]:
+    # Reject-sampling: try random cells until one isn't on the snake.
+    # With 400 cells and snake length <= ~30 mid-game, this terminates
+    # in O(1) expected iterations.
+    while true:
+        rx: i64 = random.randint(0i64, i64(GRID_W) - 1i64)
+        ry: i64 = random.randint(0i64, i64(GRID_H) - 1i64)
+        x: i32 = i32(rx)
+        y: i32 = i32(ry)
+        if not point_on_snake(snake, x, y):
+            return (x, y)
+    return (0i32, 0i32)                # unreachable; satisfies the typechecker
+
+fn new_game() -> GameState:
+    s: GameState = GameState()
+    food: Tuple[i32, i32] = spawn_food(s.snake)
+    s.food_x = food.0
+    s.food_y = food.1
+    return s
+
+# ── Game logic step ─────────────────────────────────────────────────
+
+fn step(state: GameState, eat: Sound, die: Sound) -> None:
+    # Apply the input that was queued since the last step.  The 180°
+    # guard already ran at queue time so it's safe to copy in.
+    state.dir_x = state.pending_dir_x
+    state.dir_y = state.pending_dir_y
+
+    head: Tuple[i32, i32] = state.snake[0]
+    new_x: i32 = head.0 + state.dir_x
+    new_y: i32 = head.1 + state.dir_y
+
+    # Wall collision.
+    if new_x < 0i32 or new_x >= GRID_W or new_y < 0i32 or new_y >= GRID_H:
+        state.game_over = true
+        gfx.play_sound(die)
+        return
+
+    # Self collision.  Skip the tail (index len-1) because it WILL
+    # move out of the way unless we're eating; we'll detect the
+    # eating case separately below.
+    ate: bool = (new_x == state.food_x) and (new_y == state.food_y)
+    check_end: i32 = i32(i64(len(state.snake)))
+    if not ate:
+        check_end = check_end - 1i32
+    i: i32 = 0i32
+    while i < check_end:
+        seg: Tuple[i32, i32] = state.snake[i]
+        if seg.0 == new_x and seg.1 == new_y:
+            state.game_over = true
+            gfx.play_sound(die)
+            return
+        i = i + 1i32
+
+    # Build the new snake list.  Head goes first, then the existing
+    # segments (minus the tail if we didn't eat).  We rebuild rather
+    # than insert+pop because List has no insert(0, x) native.
+    new_snake: List[Tuple[i32, i32]] = []
+    new_snake.append((new_x, new_y))
+    keep: i32 = i32(i64(len(state.snake)))
+    if not ate:
+        keep = keep - 1i32
+    j: i32 = 0i32
+    while j < keep:
+        new_snake.append(state.snake[j])
+        j = j + 1i32
+    state.snake = new_snake
+
+    if ate:
+        state.score = state.score + 1i64
+        food: Tuple[i32, i32] = spawn_food(state.snake)
+        state.food_x = food.0
+        state.food_y = food.1
+        gfx.play_sound(eat)
+
+# ── Event handling ──────────────────────────────────────────────────
+
+fn handle_input(state: GameState, ev: Event) -> None:
+    if ev.kind != "key_down":
+        return
+    # Direction keys — guard against 180° reversal.
+    if ev.key == "left" and state.dir_x != 1i32:
+        state.pending_dir_x = -1i32
+        state.pending_dir_y = 0i32
+    elif ev.key == "right" and state.dir_x != -1i32:
+        state.pending_dir_x = 1i32
+        state.pending_dir_y = 0i32
+    elif ev.key == "up" and state.dir_y != 1i32:
+        state.pending_dir_x = 0i32
+        state.pending_dir_y = -1i32
+    elif ev.key == "down" and state.dir_y != -1i32:
+        state.pending_dir_x = 0i32
+        state.pending_dir_y = 1i32
+
+# ── Rendering ───────────────────────────────────────────────────────
+
+fn render(win: Window, font: Font, state: GameState) -> None:
+    # Clear to a dark blue-grey playfield.
+    gfx.clear(win, 30i32, 30i32, 40i32)
+
+    # Top bar background.
+    gfx.draw_rect(win, 0i32, 0i32, WIN_W, TOPBAR_H, 20i32, 22i32, 32i32, 255i32)
+    gfx.draw_line(win, 0i32, TOPBAR_H, WIN_W, TOPBAR_H, 80i32, 80i32, 100i32, 255i32)
+
+    # Score text in the top bar.
+    score_msg: str = "Score: " + str(state.score)
+    gfx.draw_text(win, font, score_msg, 16i32, 18i32, 240i32, 240i32, 240i32)
+
+    # Food cell — red square with small inset.
+    food_px: i32 = state.food_x * CELL
+    food_py: i32 = TOPBAR_H + state.food_y * CELL
+    gfx.draw_rect(win, food_px + 4i32, food_py + 4i32,
+                  CELL - 8i32, CELL - 8i32,
+                  220i32, 60i32, 60i32, 255i32)
+
+    # Snake — head brighter than body.
+    i: i32 = 0i32
+    n: i32 = i32(i64(len(state.snake)))
+    while i < n:
+        cell: Tuple[i32, i32] = state.snake[i]
+        sx: i32 = cell.0 * CELL
+        sy: i32 = TOPBAR_H + cell.1 * CELL
+        if i == 0i32:
+            gfx.draw_rect(win, sx + 2i32, sy + 2i32, CELL - 4i32, CELL - 4i32,
+                          140i32, 230i32, 140i32, 255i32)
+        else:
+            gfx.draw_rect(win, sx + 3i32, sy + 3i32, CELL - 6i32, CELL - 6i32,
+                          80i32, 180i32, 80i32, 255i32)
+        i = i + 1i32
+
+    # Game-over overlay.
+    if state.game_over:
+        # Translucent dark over the playfield only.
+        gfx.draw_rect(win, 0i32, TOPBAR_H, WIN_W, WIN_H - TOPBAR_H,
+                      0i32, 0i32, 0i32, 180i32)
+        msg1: str = "GAME OVER"
+        sz1: Tuple[i32, i32] = gfx.text_size(font, msg1)
+        gfx.draw_text(win, font, msg1,
+                      (WIN_W - sz1.0) / 2i32,
+                      TOPBAR_H + (WIN_H - TOPBAR_H) / 2i32 - 40i32,
+                      240i32, 100i32, 100i32)
+        msg2: str = "Press R to restart, Escape to quit"
+        sz2: Tuple[i32, i32] = gfx.text_size(font, msg2)
+        gfx.draw_text(win, font, msg2,
+                      (WIN_W - sz2.0) / 2i32,
+                      TOPBAR_H + (WIN_H - TOPBAR_H) / 2i32 + 4i32,
+                      220i32, 220i32, 220i32)
+
+    gfx.present(win)
+
+# ── Main ─────────────────────────────────────────────────────────────
+
+fn main() -> i32:
+    gfx.init()
+    gfx.audio_init()
+    random.seed(time.now_ms())
+
+    win: Window = gfx.create_window("Snake — StrictPy M55", WIN_W, WIN_H)
+    font: Font = gfx.load_font("examples/games/snake/assets/font.ttf", 24i32)
+    eat: Sound = gfx.load_sound("examples/games/snake/assets/eat.wav")
+    die: Sound = gfx.load_sound("examples/games/snake/assets/die.wav")
+
+    state: GameState = new_game()
+    running: bool = true
+
+    while running:
+        frame_start: i64 = time.now_ms()
+
+        # Drain input.  Nullable narrowing only takes effect inside an
+        # `if X is not none:` block (matching the pattern used by the
+        # M52 smoke window example) — `while X is not none:` and
+        # `if X is none: break` don't narrow.  We loop until poll
+        # returns none, breaking from the else branch.
+        draining: bool = true
+        while draining:
+            ev_opt: Event? = gfx.poll_event(win)
+            if ev_opt is not none:
+                if ev_opt.kind == "quit":
+                    running = false
+                elif ev_opt.kind == "key_down":
+                    if ev_opt.key == "escape":
+                        running = false
+                    elif state.game_over and ev_opt.key == "r":
+                        state = new_game()
+                    else:
+                        handle_input(state, ev_opt)
+            else:
+                draining = false
+
+        if not running:
+            break
+
+        # Step game logic on its own timer (independent of frame rate).
+        if not state.game_over:
+            now: i64 = time.now_ms()
+            if (now - state.last_step_ms) >= STEP_MS:
+                step(state, eat, die)
+                state.last_step_ms = now
+
+        # Render the current state.
+        render(win, font, state)
+
+        # Frame pace.
+        elapsed: i64 = time.now_ms() - frame_start
+        if elapsed < FRAME_MS:
+            time.sleep_ms(FRAME_MS - elapsed)
+
+    # Tidy up — explicit frees so a long-running session that boots +
+    # quits + reboots the demo doesn't accumulate handles.
+    gfx.free_font(font)
+    gfx.free_sound(eat)
+    gfx.free_sound(die)
+    gfx.close_window(win)
+    return 0

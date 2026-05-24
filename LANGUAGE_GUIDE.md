@@ -3006,9 +3006,46 @@ fn main() -> i32:
     return asyncio.run_i32(main_async)
 ```
 
----
+### 12.6 Snake — desktop game on the `gfx` stack (M55)
 
-## §13 — Maintaining this file
+`examples/games/snake.spy` is the first complete reference game on the M52–M54 `gfx` stdlib.  A 20×20-cell grid with a 60 px top score bar; the snake moves at 8 cells/second; arrow keys turn; R restarts after game over; Escape quits.  Assets (eat/die WAVs + DejaVu Sans Mono TTF) live under `examples/games/snake/assets/` and were generated deterministically by the included `_generate_assets.py` (replace with nicer SFX by dropping new WAVs in place).
+
+The game illustrates the **standard StrictPy desktop-game shape** that M56 (Tetris) and M57 (Space Shooter) will reuse:
+
+- **Module-scope `final` constants** for tunables (`CELL`, `GRID_W`, `STEP_MS`, `FRAME_MS`).
+- **One `final class GameState`** holding all mutable state; `__init__` sets defaults.
+- **Helper functions** (`spawn_food`, `step`, `handle_input`, `render`) take `GameState` (and any assets they need) by reference.
+- **Main loop:**
+  ```python
+  while running:
+      frame_start: i64 = time.now_ms()
+      # Drain input — nullable narrowing only works inside `if X is not none:`
+      draining: bool = true
+      while draining:
+          ev_opt: Event? = gfx.poll_event(win)
+          if ev_opt is not none:
+              # use ev_opt.kind / ev_opt.key here
+              ...
+          else:
+              draining = false
+      # Game logic on its own timer (independent of render frame rate)
+      if not state.game_over and time.now_ms() - state.last_step_ms >= STEP_MS:
+          step(state, eat, die)
+          state.last_step_ms = time.now_ms()
+      # Render every frame
+      render(win, font, state)
+      # Frame pace
+      elapsed: i64 = time.now_ms() - frame_start
+      if elapsed < FRAME_MS:
+          time.sleep_ms(FRAME_MS - elapsed)
+  ```
+- **Two timers:** the render loop runs at ~60 FPS (capped by `FRAME_MS = 16`); game logic ticks at its own slower cadence (`STEP_MS = 125` → 8 Hz for Snake; Tetris's drop-tick will be variable per level).
+- **Pending-direction queueing:** input writes `pending_dir_{x,y}`; the next `step()` copies it into `dir_{x,y}`.  This makes the 180°-reversal guard robust against double-taps within a single step interval.
+- **Reject-sampling food spawn:** spin on `random.randint` until the chosen cell isn't on the snake.  With a 400-cell grid the expected loop count is `<2` until the snake fills most of the board.
+- **No `list.insert(0, x)`** in the stdlib: rebuild the list each step instead.  Cheap for snake lengths in the tens.
+- **Explicit asset cleanup:** `gfx.free_font` / `gfx.free_sound` / `gfx.close_window` at exit.  Required because the GC doesn't automatically run finalisers on SDL handles (see §11.40).
+
+Compile-only test in `compiler/tests/snake_demo_runs.rs` (running the actual game from CI isn't tractable — it waits for keyboard input).
 
 **Discipline**: ship a `LANGUAGE_GUIDE.md` update in the same commit as any new language feature or stdlib module. The agent brief for any future milestone touching language surface or stdlib MUST include:
 

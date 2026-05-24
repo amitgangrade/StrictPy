@@ -291,7 +291,7 @@ Each milestone is a self-contained agent run. Tag them M52 onward (HANDOFF's las
 | **M52 (Complete)** | `gfx` core: SDL2 init, Window, Event, drawing primitives | ~900 Rust + ~150 test Spy | **cross-dispatch + net-new-feature** |
 | **M53 (Complete)** | `gfx` images + sprite sheets | ~400 Rust + ~80 test Spy | disjoint-handler |
 | **M54 (Complete)** | `gfx` audio + fonts + text | ~600 Rust + ~80 test Spy | shared-infra (audio init shared by SFX + music; combined Phase A at ~35%) |
-| **M55** | Snake game | ~400 Spy | net-new-feature (pure user code; one commit when it plays) |
+| **M55 (Complete)** | Snake game | ~400 Spy | net-new-feature (pure user code; one commit when it plays) |
 | **M56** | Tetris game | ~600 Spy | net-new-feature |
 | **M57** | Space Shooter | ~900 Spy | net-new-feature |
 | **M58** | Polish: high scores via sqlite, fullscreen, settings persistence, restart-without-relaunch | ~300 Rust + ~200 Spy | shared-infra |
@@ -460,9 +460,11 @@ The dummy SDL audio driver works: `SDL_AUDIODRIVER=dummy`. Load WAV, call play, 
 
 ---
 
-### M55 — Snake game
+### M55 — Snake game ✅ COMPLETE
 
-**Branch:** `claude/m55-game-snake-<random>`.
+Shipped on `main` (single commit on top of M54). Files: `examples/games/snake.spy` + `examples/games/snake/assets/{eat.wav, die.wav, font.ttf, CREDITS.md, _generate_assets.py}` + `compiler/tests/snake_demo_runs.rs` + LANGUAGE_GUIDE.md §12.6 walkthrough. Compile-only test passes. SFX generated deterministically by the Python helper; font is a copy of the bundled DejaVu CC0 fixture. Manual gameplay smoke-test (run `./target/release/spy examples/games/snake.spy` on a desktop) verifies arrow-key control + collision + restart.
+
+**Branch:** `claude/m55-game-snake-<random>` *(historical brief follows; ignore if reading after M55 has shipped)*.
 
 **Scope**
 

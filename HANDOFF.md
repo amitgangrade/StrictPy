@@ -1,4 +1,4 @@
-# Session handoff — 2026-05-24 (post-M53)
+# Session handoff — 2026-05-24 (post-M55)
 
 ## Read this FIRST in the next session
 
@@ -10,30 +10,65 @@ Everything you need to resume is in:
 4. **`THESIS.md`** + **`BLOG_POST.md`** — synthesis documents (frozen at M34)
 5. **`RELEASE_NOTES_v0.2.md`** — v0.2.0 freeze-point summary
 6. **`LANGUAGE_GUIDE.md`** — single source of truth for AI tools writing
-   StrictPy programs (refreshed post-M53; §11 has gotchas through §11.41)
+   StrictPy programs (refreshed post-M55; §11 has gotchas through §11.43, §12 has games walkthrough §12.6)
 7. **`bench/TABULAR_BENCH_REPORT.md`** + `bench/TABULAR_BENCH_REPORT_M49.md` —
    the StrictPy vs pandas 3.0 comparison
-8. **Memory file**: `C:\Users\AG\.claude\projects\C--Users-AG-CascadeProjects-PythonCompiler\memory\project_strictpy.md`
+8. **`GAMES_PLAN.md`** — sequential plan for the M52-M58 desktop-games stack (Snake done; Tetris next)
+9. **Memory file**: `C:\Users\AG\.claude\projects\C--Users-AG-CascadeProjects-PythonCompiler\memory\project_strictpy.md`
 
 ## Current head
 
 - Branch: `main`
-- Latest commit: `f8c08bc` (M54)
-- Tests passing on main: **1076** (+42 net over M50a — 18 M50b + 16 M50c + 5 M52 + 1 M53 + 2 M54)
+- Latest commit: (post-M55 — `examples/games/snake.spy` + assets + test + LANGUAGE_GUIDE §12.6)
+- Tests passing on main: **1077** (M55 adds 1 compile-only test in `compiler/tests/snake_demo_runs.rs`)
 
 ## Status snapshot
 
 | Metric | Value |
 |---|---:|
-| Milestones complete on main | M0–M54 |
+| Milestones complete on main | M0–M55 |
 | **v0.2.0 release** | **Tagged at M30 (commit 121483f)** |
-| Tests | 1076 / 0 fail / 1 ignored |
+| Tests | 1077 / 0 fail / 1 ignored |
 | Bugs | 35 / 35 / **0 deferred** |
 | Stdlib modules | 39 (no change, `gfx` shipped in M52) |
-| Stdlib classes | 25 (+3 in M54: `gfx.Sound`, `gfx.Music`, `gfx.Font`) |
-| Example programs | **116** (+1 in M54: `_smoke_audio.spy`) |
-| Lesson 1 streak | **37 consecutive clean-commit agents** (M28 → M54) |
+| Stdlib classes | 25 (M52-M54 added Window/Event/Image/Sound/Music/Font) |
+| Example programs | **117** (+1 in M55: `examples/games/snake.spy`) |
+| Lesson 1 streak | **38 consecutive clean-commit agents** (M28 → M55) |
 | Benchmark suites | 3 |
+
+## M55 — completed (this session, 1 commit)
+
+Scope: first reference desktop game built on the M52-M54 `gfx` stack.
+20×20 cell Snake with 60 px top bar for the score, 8 cells/second
+movement, arrow-key control with 180°-reversal guard via pending-
+direction queue, reject-sampling food spawn, "GAME OVER → press R to
+restart" overlay, eat/die SFX, DejaVu Sans Mono score text.
+
+Files shipped:
+- `examples/games/snake.spy` (~280 LOC)
+- `examples/games/snake/assets/eat.wav` + `die.wav` (square-wave SFX
+  generated deterministically by `_generate_assets.py`)
+- `examples/games/snake/assets/font.ttf` (copy of the bundled DejaVu)
+- `examples/games/snake/assets/CREDITS.md`
+- `compiler/tests/snake_demo_runs.rs` — compile-only test (passes)
+- `LANGUAGE_GUIDE.md` §12.6 walkthrough of the standard game-shape
+  (final-class GameState + two timers + pending-dir queue) that M56
+  Tetris and M57 Space Shooter will reuse.
+
+### Findings worth recording for M56/M57
+
+- **Nullable narrowing scope**: `if X is not none:` narrows inside the
+  block, but `while X is not none:` and `if X is none: break` do NOT.
+  The standard event-drain pattern in StrictPy desktop games is
+  `while draining: ev_opt: Event? = gfx.poll_event(win); if ev_opt
+  is not none: ...; else: draining = false`. Document in M56's brief.
+- **No `list.insert(0, x)` native**: rebuild the list each step.
+  Cheap for snake-tens; for Tetris's per-cell grid use a 2D
+  `List[List[i32]]` directly. Mentioned in §12.6.
+- **Module-scope constants use `final` not `let`**: `let CELL: i32 =
+  30i32` at module scope is rejected; `final CELL: i32 = 30i32` works.
+  GAMES_PLAN.md skeleton used `let` — agents picking up M56/M57
+  should patch their skeletons accordingly.
 
 ## M54 — completed (single agent, 1 commit)
 
