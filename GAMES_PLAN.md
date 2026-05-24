@@ -288,8 +288,8 @@ Each milestone is a self-contained agent run. Tag them M52 onward (HANDOFF's las
 
 | Milestone | Scope | Estimated LOC (Rust + Spy) | Cadence classification |
 |---|---|---:|---|
-| **M52** | `gfx` core: SDL2 init, Window, Event, drawing primitives | ~900 Rust + ~150 test Spy | **cross-dispatch + net-new-feature** (new sealed class subclass on Window/Event + new C-dep transport — combined commit at ~60% expected) |
-| **M53** | `gfx` images + sprite sheets | ~400 Rust + ~80 test Spy | disjoint-handler (per-phase commits at ~20%) |
+| **M52 (Complete)** | `gfx` core: SDL2 init, Window, Event, drawing primitives | ~900 Rust + ~150 test Spy | **cross-dispatch + net-new-feature** |
+| **M53 (Complete)** | `gfx` images + sprite sheets | ~400 Rust + ~80 test Spy | disjoint-handler |
 | **M54** | `gfx` audio + fonts + text | ~600 Rust + ~80 test Spy | shared-infra (audio init shared by SFX + music; combined Phase A at ~35%) |
 | **M55** | Snake game | ~400 Spy | net-new-feature (pure user code; one commit when it plays) |
 | **M56** | Tetris game | ~600 Spy | net-new-feature |

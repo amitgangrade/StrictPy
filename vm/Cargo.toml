@@ -106,7 +106,7 @@ rustls-pemfile = "2"
 # hand-roll variations of the RFC 3986 grammar).
 ureq = { version = "2", default-features = false, features = ["tls"] }
 url = "2"
-sdl2 = { version = "0.37", features = ["bundled"] }
+sdl2 = { version = "0.37", features = ["bundled", "image"] }
 cranelift = { version = "0.115", optional = true }
 cranelift-jit = { version = "0.115", optional = true }
 cranelift-codegen = { version = "0.115", optional = true }

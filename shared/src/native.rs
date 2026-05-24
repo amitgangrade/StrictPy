@@ -2232,6 +2232,14 @@ pub enum NativeFn {
     GfxWindowSize       = 1110,
     GfxSetWindowTitle   = 1111,
 
+    // ── 1130–1149: GFX images (M53) ──────────────────────────────────────
+    GfxLoadImage        = 1130,
+    GfxImageSize        = 1131,
+    GfxDrawImage        = 1132,
+    GfxDrawImageRect    = 1133,
+    GfxDrawImageRotated = 1134,
+    GfxFreeImage        = 1135,
+
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
     /// encounters. The VM treats this as a runtime error.
@@ -2948,6 +2956,13 @@ impl NativeFn {
             1109 => Some(Self::GfxDrawPoint),
             1110 => Some(Self::GfxWindowSize),
             1111 => Some(Self::GfxSetWindowTitle),
+            // ── M53 (GFX images) ─────────────────────────────────
+            1130 => Some(Self::GfxLoadImage),
+            1131 => Some(Self::GfxImageSize),
+            1132 => Some(Self::GfxDrawImage),
+            1133 => Some(Self::GfxDrawImageRect),
+            1134 => Some(Self::GfxDrawImageRotated),
+            1135 => Some(Self::GfxFreeImage),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

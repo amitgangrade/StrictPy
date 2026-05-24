@@ -1,0 +1,30 @@
+# _smoke_sprite.spy — Load and draw a PNG sprite
+
+import gfx
+import time
+from gfx import Window, Image
+
+fn main() -> i32:
+    gfx.init()
+    win: Window = gfx.create_window("Smoke Sprite Test", 320i32, 240i32)
+    
+    # Load the red square PNG test asset
+    img: Image = gfx.load_image(win, "vm/tests/fixtures/games/red_square.png")
+    
+    # Clear back buffer to a gray color
+    gfx.clear(win, 50i32, 50i32, 50i32)
+    
+    # Draw the 4x4 image scaled up (e.g. 64x64) in the center of the window
+    gfx.draw_image_rect(win, img, 0i32, 0i32, 4i32, 4i32, 128i32, 88i32, 64i32, 64i32)
+    
+    # Draw it rotated 45 degrees
+    gfx.draw_image_rotated(win, img, 200i32, 88i32, 64i32, 64i32, 45.0f64)
+    
+    gfx.present(win)
+    
+    # Wait for 1 second
+    time.sleep_ms(1000i64)
+    
+    gfx.free_image(img)
+    gfx.close_window(win)
+    return 0

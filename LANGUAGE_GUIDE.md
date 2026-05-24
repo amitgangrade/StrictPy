@@ -1628,18 +1628,19 @@ fnmatch.filter(names: List[str], pattern: str) -> List[str]
 fnmatch.translate(pattern: str) -> str        # glob → regex string
 ```
 
-### gfx (M52)
+### gfx (M52-M53)
 
-The 2D graphics, windowing, and input package, built on native SDL2. Provides the core primitives to create game loops, draw rectangles/lines/pixels, and poll keyboard/mouse events.
+The 2D graphics, windowing, and input package, built on native SDL2 and SDL2_image. Provides the core primitives to create game loops, draw rectangles/lines/pixels, load sprite sheets, and poll keyboard/mouse events.
 
 ```python
 import gfx
-from gfx import Window, Event
+from gfx import Window, Event, Image
 ```
 
 #### Classes
 
 - `gfx.Window` — Opaque handle for an OS window and hardware-accelerated 2D renderer. Must be closed explicitly.
+- `gfx.Image` — Opaque handle for a loaded GPU texture. Must be freed explicitly.
 - `gfx.Event` — Open class representing a user input event. Fields:
   - `kind: str` — One of `"key_down"`, `"key_up"`, `"mouse_down"`, `"mouse_up"`, `"mouse_move"`, or `"quit"`.
   - `key: str` — The key name for keyboard events (e.g. `"left"`, `"right"`, `"escape"`, `"space"`, `"enter"`, lowercase letters like `"a"`).
@@ -1684,9 +1685,27 @@ gfx.window_size(win: Window) -> Tuple[i32, i32]
 
 gfx.set_window_title(win: Window, title: str) -> None
 # Change the window title dynamically.
+
+gfx.load_image(win: Window, path: str) -> Image
+# Load a PNG/JPG/BMP image into a GPU texture. Path is relative to the current working directory. Raises IOError if not found, ValueError on unsupported format.
+
+gfx.image_size(img: Image) -> Tuple[i32, i32]
+# Returns the (width, height) of the image.
+
+gfx.draw_image(win: Window, img: Image, dst_x: i32, dst_y: i32) -> None
+# Blit the image onto the window at its native size.
+
+gfx.draw_image_rect(win: Window, img: Image, src_x: i32, src_y: i32, src_w: i32, src_h: i32, dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32) -> None
+# Blit a sub-rectangle of the image (src_*) onto a destination area (dst_*) of the window, scaling if necessary.
+
+gfx.draw_image_rotated(win: Window, img: Image, dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, angle_deg: f64) -> None
+# Draw the image scaled to dst_* and rotated around its center by angle_deg degrees.
+
+gfx.free_image(img: Image) -> None
+# Explicitly drop/free the image texture resource. Calling other functions with this image raises ValueError.
 ```
 
-See `examples/_smoke_window.spy` for a minimal game loop with input handling.
+See `examples/_smoke_window.spy` and `examples/_smoke_sprite.spy` for minimal game loop and sprite examples.
 
 ### gzip / zlib / bz2 (M27 P3c-C)
 
@@ -2726,9 +2745,15 @@ The server is **single-threaded** — one connection at a time.  Two simultaneou
 - **Single window only:** The `gfx` module only supports one window at a time to simplify event loop routing.
 - **Explicit window disposal required:** The garbage collector does not support finalization hooks. Thus, calling `gfx.close_window(win)` is required to avoid OS resource leaks.
 - **No HiDPI / retina scaling:** HiDPI scaling is disabled by default to keep the drawing canvas logical pixels consistent on all systems.
-- **No images, audio, or fonts in M52:** Image loading, text rendering, and audio playback are deferred to later milestones (M53 and M54).
+- **No audio or fonts in M52-M53:** Text rendering and audio playback are deferred to later milestones (M54).
 - **No gamepad/joystick support:** Controller inputs are not supported in M52.
 - **Testing requires dummy drivers:** For headless verification (such as in CI), you must set `SDL_VIDEODRIVER=dummy` and `SDL_AUDIODRIVER=dummy` in the environment before invoking SDL2.
+
+### 11.41 `gfx.Image` deliberate scope-down (post-M53)
+
+- **Explicit image disposal required:** Like windows, GPU image textures must be explicitly freed via `gfx.free_image(img)` to avoid GPU memory leaks.
+- **Texture bound to creation window:** Image textures are created under a specific window context. If the parent window is closed, any subsequent operations using the loaded images will raise a `ValueError`.
+- **No runtime format conversion:** The library relies on SDL2_image to decode files, returning the native format without color conversion or runtime format manipulation.
 
 ---
 

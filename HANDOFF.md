@@ -1,16 +1,16 @@
-# Session handoff — 2026-05-24 (post-M52)
+# Session handoff — 2026-05-24 (post-M53)
 
 ## Read this FIRST in the next session
 
 Everything you need to resume is in:
 
 1. **This file** — current state + pending work + integration recipes
-2. **`docs/thesis/timeline.md`** — milestone-by-milestone narrative through M52
-3. **`docs/thesis/stats/per_milestone.csv`** — quantitative ground truth (M0-M52)
+2. **`docs/thesis/timeline.md`** — milestone-by-milestone narrative through M53
+3. **`docs/thesis/stats/per_milestone.csv`** — quantitative ground truth (M0-M53)
 4. **`THESIS.md`** + **`BLOG_POST.md`** — synthesis documents (frozen at M34)
 5. **`RELEASE_NOTES_v0.2.md`** — v0.2.0 freeze-point summary
 6. **`LANGUAGE_GUIDE.md`** — single source of truth for AI tools writing
-   StrictPy programs (refreshed post-M52; §11 has gotchas through §11.40)
+   StrictPy programs (refreshed post-M53; §11 has gotchas through §11.41)
 7. **`bench/TABULAR_BENCH_REPORT.md`** + `bench/TABULAR_BENCH_REPORT_M49.md` —
    the StrictPy vs pandas 3.0 comparison
 8. **Memory file**: `C:\Users\AG\.claude\projects\C--Users-AG-CascadeProjects-PythonCompiler\memory\project_strictpy.md`
@@ -19,21 +19,38 @@ Everything you need to resume is in:
 
 - Branch: `main`
 - Latest commit: (to be determined after commit)
-- Tests passing on main: **1073** (+39 net over M50a — 18 M50b + 16 M50c + 5 M52)
+- Tests passing on main: **1074** (+40 net over M50a — 18 M50b + 16 M50c + 5 M52 + 1 M53)
 
 ## Status snapshot
 
 | Metric | Value |
 |---|---:|
-| Milestones complete on main | M0–M52 |
+| Milestones complete on main | M0–M53 |
 | **v0.2.0 release** | **Tagged at M30 (commit 121483f)** |
-| Tests | 1073 / 0 fail / 1 ignored |
+| Tests | 1074 / 0 fail / 1 ignored |
 | Bugs | 35 / 35 / **0 deferred** |
-| Stdlib modules | 39 (+1 in M52: `gfx`) |
-| Stdlib classes | 21 (+2 in M52: `gfx.Window`, `gfx.Event`) |
-| Example programs | **114** (+1 in M52: `_smoke_window.spy`) |
-| Lesson 1 streak | **35 consecutive clean-commit agents** (M28 → M52) |
+| Stdlib modules | 39 (no change, `gfx` shipped in M52) |
+| Stdlib classes | 22 (+1 in M53: `gfx.Image`) |
+| Example programs | **115** (+1 in M53: `_smoke_sprite.spy`) |
+| Lesson 1 streak | **36 consecutive clean-commit agents** (M28 → M53) |
 | Benchmark suites | 3 |
+
+## M53 — completed (single agent, 1 commit)
+
+| Agent | Scope | Var prefix | NativeFn IDs | Commits |
+|---|---|---|---|---|
+| **M53 GFX images** | Sprite loading + blitting + rotation | `m53_` | 1130-1135 (6 new) | (committed) |
+
+### What shipped
+
+Implemented the image loading and rendering primitives (`gfx.Image`) in the `gfx` stdlib package.
+- **SDL2_image Integration**: Enabled the `"image"` feature on the `sdl2` dependency in `vm/Cargo.toml`. Set up pre-compiled DLLs/libs under `third_party/SDL2_image` for linking and runtime on Windows.
+- **Image/Texture Resource**: Implemented `gfx.Image` sealed class with custom handle registration and safety checks in the VM.
+- **Image Operations**: Implemented `load_image`, `image_size`, `draw_image`, `draw_image_rect`, `draw_image_rotated`, `free_image` native functions.
+- **Robust Path Fallback**: Added robust Cwd path resolution: if a path starts with `vm/` and isn't found relative to Cwd, and we are running from inside the `vm/` directory (e.g. `cargo test`), strip the `vm/` prefix and resolve correctly.
+- **Integration Tests**: Added `vm/tests/m53_gfx_images.rs` containing a serialized suite testing all success and error paths under the dummy driver.
+- **Fresh Smoke Example**: Added `examples/_smoke_sprite.spy` loading and drawing a test sprite.
+- **Fresh Documentation**: Updated `LANGUAGE_GUIDE.md` §5 (gfx API surface) and §11.41 (gfx.Image scope-down).
 
 ## M52 — completed (single agent, 1 commit)
 

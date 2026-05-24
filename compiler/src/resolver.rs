@@ -5354,14 +5354,18 @@ impl Resolver {
 
         let win_cid = self.fresh_class();
         let event_cid = self.fresh_class();
+        let img_cid = self.fresh_class();
 
         self.class_name_to_id.insert("Window".into(), win_cid);
         self.class_name_to_id.insert("Event".into(), event_cid);
+        self.class_name_to_id.insert("Image".into(), img_cid);
 
         let win_ty = Ty::Class(win_cid);
         let event_ty = Ty::Class(event_cid);
+        let img_ty = Ty::Class(img_cid);
         let opt_event_ty = Ty::Nullable(Box::new(event_ty.clone()));
         let tuple_i32_i32_ty = Ty::Tuple(vec![i32_ty.clone(), i32_ty.clone()]);
+        let f64_ty = Ty::Primitive(PrimTy::F64);
 
         self.class_layouts.insert(win_cid, ClassLayout {
             id: win_cid,
@@ -5403,6 +5407,26 @@ impl Resolver {
             payload_size: 28,
         });
 
+        self.class_layouts.insert(img_cid, ClassLayout {
+            id: img_cid,
+            name: "Image".into(),
+            base: None,
+            is_open: false,
+            is_sealed: true,
+            fields: vec![
+                FieldInfo {
+                    name: "handle".into(),
+                    ty: Ty::Primitive(PrimTy::I64),
+                    offset: 0,
+                },
+            ],
+            methods: vec![],
+            generics: vec![],
+            generic_tvars: vec![],
+            is_native: true,
+            payload_size: 8,
+        });
+
         const GFX_INIT: u32              = 1100;
         const GFX_CREATE_WINDOW: u32      = 1101;
         const GFX_CLOSE_WINDOW: u32       = 1102;
@@ -5415,6 +5439,12 @@ impl Resolver {
         const GFX_DRAW_POINT: u32         = 1109;
         const GFX_WINDOW_SIZE: u32        = 1110;
         const GFX_SET_WINDOW_TITLE: u32   = 1111;
+        const GFX_LOAD_IMAGE: u32         = 1130;
+        const GFX_IMAGE_SIZE: u32         = 1131;
+        const GFX_DRAW_IMAGE: u32         = 1132;
+        const GFX_DRAW_IMAGE_RECT: u32    = 1133;
+        const GFX_DRAW_IMAGE_ROTATED: u32 = 1134;
+        const GFX_FREE_IMAGE: u32         = 1135;
 
         let gfx_items = vec![
             StdlibItem {
@@ -5427,6 +5457,12 @@ impl Resolver {
                 name: "Event".into(),
                 kind: StdlibItemKind::Class { class_id: event_cid },
                 ty: Ty::Class(event_cid),
+                native_id: 0,
+            },
+            StdlibItem {
+                name: "Image".into(),
+                kind: StdlibItemKind::Class { class_id: img_cid },
+                ty: Ty::Class(img_cid),
                 native_id: 0,
             },
             StdlibItem {
@@ -5550,6 +5586,67 @@ impl Resolver {
                 kind: StdlibItemKind::Function,
                 ty: fn_ty(vec![win_ty.clone(), str_ty.clone()], unit_ty.clone()),
                 native_id: GFX_SET_WINDOW_TITLE,
+            },
+            StdlibItem {
+                name: "load_image".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(vec![win_ty.clone(), str_ty.clone()], img_ty.clone()),
+                native_id: GFX_LOAD_IMAGE,
+            },
+            StdlibItem {
+                name: "image_size".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(vec![img_ty.clone()], tuple_i32_i32_ty.clone()),
+                native_id: GFX_IMAGE_SIZE,
+            },
+            StdlibItem {
+                name: "draw_image".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(vec![win_ty.clone(), img_ty.clone(), i32_ty.clone(), i32_ty.clone()], unit_ty.clone()),
+                native_id: GFX_DRAW_IMAGE,
+            },
+            StdlibItem {
+                name: "draw_image_rect".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(
+                    vec![
+                        win_ty.clone(),
+                        img_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                    ],
+                    unit_ty.clone(),
+                ),
+                native_id: GFX_DRAW_IMAGE_RECT,
+            },
+            StdlibItem {
+                name: "draw_image_rotated".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(
+                    vec![
+                        win_ty.clone(),
+                        img_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        f64_ty.clone(),
+                    ],
+                    unit_ty.clone(),
+                ),
+                native_id: GFX_DRAW_IMAGE_ROTATED,
+            },
+            StdlibItem {
+                name: "free_image".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(vec![img_ty.clone()], unit_ty.clone()),
+                native_id: GFX_FREE_IMAGE,
             },
         ];
 

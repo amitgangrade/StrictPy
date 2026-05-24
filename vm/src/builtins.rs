@@ -7118,6 +7118,14 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         NativeFn::GfxWindowSize                      => m52_gfx_window_size(interp, args),
         NativeFn::GfxSetWindowTitle                  => m52_gfx_set_window_title(interp, args),
 
+        // ── M53: GFX images ──
+        NativeFn::GfxLoadImage                       => m53_gfx_load_image(interp, args),
+        NativeFn::GfxImageSize                       => m53_gfx_image_size(interp, args),
+        NativeFn::GfxDrawImage                       => m53_gfx_draw_image(interp, args),
+        NativeFn::GfxDrawImageRect                   => m53_gfx_draw_image_rect(interp, args),
+        NativeFn::GfxDrawImageRotated                => m53_gfx_draw_image_rotated(interp, args),
+        NativeFn::GfxFreeImage                       => m53_gfx_free_image(interp, args),
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
@@ -23138,6 +23146,7 @@ static M52_SDL_CONTEXT: std::sync::Mutex<Option<M52SdlWrapper>> = std::sync::Mut
 
 struct M52Window {
     canvas: sdl2::render::Canvas<sdl2::video::Window>,
+    texture_creator: sdl2::render::TextureCreator<sdl2::video::WindowContext>,
 }
 unsafe impl Send for M52Window {}
 unsafe impl Sync for M52Window {}
@@ -23237,7 +23246,8 @@ fn m52_gfx_create_window(interp: &mut Interpreter, args: &[u64]) -> Result<u64, 
         message: format!("gfx.create_window: failed to create canvas: {}", e),
     })?;
 
-    let m52_win = Box::new(M52Window { canvas });
+    let texture_creator = canvas.texture_creator();
+    let m52_win = Box::new(M52Window { canvas, texture_creator });
     let win_ptr = Box::into_raw(m52_win) as u64;
     m52_register_window(win_ptr);
 
@@ -23533,6 +23543,221 @@ fn m52_gfx_set_window_title(_interp: &mut Interpreter, args: &[u64]) -> Result<u
             message: format!("gfx.set_window_title failed: {}", e),
         })?;
     }
+    Ok(0)
+}
+
+// ── M53 — gfx stdlib (images) ──
+
+struct M53Image {
+    texture: sdl2::render::Texture<'static>,
+    width: u32,
+    height: u32,
+}
+unsafe impl Send for M53Image {}
+unsafe impl Sync for M53Image {}
+
+static M53_ACTIVE_IMAGES: std::sync::Mutex<Option<std::collections::HashSet<u64>>> = std::sync::Mutex::new(None);
+
+fn m53_register_image(img_ptr: u64) {
+    let mut guard = M53_ACTIVE_IMAGES.lock().unwrap();
+    let set = guard.get_or_insert_with(std::collections::HashSet::new);
+    set.insert(img_ptr);
+}
+
+fn m53_deregister_and_free_image(img_ptr: u64) -> Result<(), VmError> {
+    let mut guard = M53_ACTIVE_IMAGES.lock().unwrap();
+    let set = guard.get_or_insert_with(std::collections::HashSet::new);
+    if set.remove(&img_ptr) {
+        unsafe {
+            let _img = Box::from_raw(img_ptr as *mut M53Image);
+        }
+        Ok(())
+    } else {
+        Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "gfx.free_image: image already freed or invalid".into(),
+        })
+    }
+}
+
+fn m53_get_image(img_ptr: u64) -> Result<*mut M53Image, VmError> {
+    let mut guard = M53_ACTIVE_IMAGES.lock().unwrap();
+    let set = guard.get_or_insert_with(std::collections::HashSet::new);
+    if set.contains(&img_ptr) {
+        Ok(img_ptr as *mut M53Image)
+    } else {
+        Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "gfx operation: image is freed or invalid".into(),
+        })
+    }
+}
+
+fn m53_gfx_load_image(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    use sdl2::image::LoadTexture;
+
+    let win_obj = arg_u64(args, 0);
+    let path_ptr = arg_u64(args, 1) as *const StringRepr;
+    let path_str = unsafe { read_str(path_ptr) };
+
+    let win_ptr = p4b_read_handle(win_obj);
+    let win = m52_get_window(win_ptr as u64)?;
+
+    let mut path = std::path::PathBuf::from(&path_str);
+    if !path.exists() {
+        if path.starts_with("vm") {
+            if let Ok(stripped) = path.strip_prefix("vm") {
+                if stripped.exists() {
+                    path = stripped.to_path_buf();
+                }
+            }
+        }
+    }
+    if !path.exists() {
+        return Err(VmError::UncaughtException {
+            type_name: "IOError".into(),
+            message: format!("gfx.load_image: file not found: {}", path_str),
+        });
+    }
+
+    let texture = unsafe {
+        (*win).texture_creator.load_texture(&path).map_err(|e| {
+            VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!("gfx.load_image: failed to load image '{}': {}", path_str, e),
+            }
+        })?
+    };
+
+    let query = texture.query();
+    let width = query.width;
+    let height = query.height;
+
+    let texture_static = unsafe {
+        std::mem::transmute::<sdl2::render::Texture<'_>, sdl2::render::Texture<'static>>(texture)
+    };
+
+    let m53_img = Box::new(M53Image {
+        texture: texture_static,
+        width,
+        height,
+    });
+    let img_ptr = Box::into_raw(m53_img) as u64;
+    m53_register_image(img_ptr);
+
+    let recv = m34_alloc_class_obj(interp, "Image", 8);
+    m34_store_payload_u64(recv as u64, img_ptr, 0);
+
+    Ok(recv as u64)
+}
+
+fn m53_gfx_image_size(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let img_obj = arg_u64(args, 0);
+    let img_ptr = p4b_read_handle(img_obj);
+    let img = m53_get_image(img_ptr as u64)?;
+
+    let w = unsafe { (*img).width };
+    let h = unsafe { (*img).height };
+    let tup = interp.alloc_tuple_obj(&[w as u64, h as u64]);
+    Ok(tup as u64)
+}
+
+fn m53_gfx_draw_image(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let win_obj = arg_u64(args, 0);
+    let img_obj = arg_u64(args, 1);
+    let dst_x = arg_i64(args, 2) as i32;
+    let dst_y = arg_i64(args, 3) as i32;
+
+    let win_ptr = p4b_read_handle(win_obj);
+    let win = m52_get_window(win_ptr as u64)?;
+
+    let img_ptr = p4b_read_handle(img_obj);
+    let img = m53_get_image(img_ptr as u64)?;
+
+    unsafe {
+        let w = (*img).width;
+        let h = (*img).height;
+        let dst_rect = sdl2::rect::Rect::new(dst_x, dst_y, w, h);
+        (*win).canvas.copy(&(*img).texture, None, Some(dst_rect)).map_err(|e| {
+            VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("gfx.draw_image failed: {}", e),
+            }
+        })?;
+    }
+    Ok(0)
+}
+
+fn m53_gfx_draw_image_rect(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let win_obj = arg_u64(args, 0);
+    let img_obj = arg_u64(args, 1);
+    let src_x = arg_i64(args, 2) as i32;
+    let src_y = arg_i64(args, 3) as i32;
+    let src_w = arg_i64(args, 4) as u32;
+    let src_h = arg_i64(args, 5) as u32;
+    let dst_x = arg_i64(args, 6) as i32;
+    let dst_y = arg_i64(args, 7) as i32;
+    let dst_w = arg_i64(args, 8) as u32;
+    let dst_h = arg_i64(args, 9) as u32;
+
+    let win_ptr = p4b_read_handle(win_obj);
+    let win = m52_get_window(win_ptr as u64)?;
+
+    let img_ptr = p4b_read_handle(img_obj);
+    let img = m53_get_image(img_ptr as u64)?;
+
+    unsafe {
+        let src_rect = sdl2::rect::Rect::new(src_x, src_y, src_w, src_h);
+        let dst_rect = sdl2::rect::Rect::new(dst_x, dst_y, dst_w, dst_h);
+        (*win).canvas.copy(&(*img).texture, Some(src_rect), Some(dst_rect)).map_err(|e| {
+            VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("gfx.draw_image_rect failed: {}", e),
+            }
+        })?;
+    }
+    Ok(0)
+}
+
+fn m53_gfx_draw_image_rotated(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let win_obj = arg_u64(args, 0);
+    let img_obj = arg_u64(args, 1);
+    let dst_x = arg_i64(args, 2) as i32;
+    let dst_y = arg_i64(args, 3) as i32;
+    let dst_w = arg_i64(args, 4) as u32;
+    let dst_h = arg_i64(args, 5) as u32;
+    let angle_deg = f64::from_bits(arg_u64(args, 6));
+
+    let win_ptr = p4b_read_handle(win_obj);
+    let win = m52_get_window(win_ptr as u64)?;
+
+    let img_ptr = p4b_read_handle(img_obj);
+    let img = m53_get_image(img_ptr as u64)?;
+
+    unsafe {
+        let dst_rect = sdl2::rect::Rect::new(dst_x, dst_y, dst_w, dst_h);
+        (*win).canvas.copy_ex(
+            &(*img).texture,
+            None,
+            Some(dst_rect),
+            angle_deg,
+            None,
+            false,
+            false,
+        ).map_err(|e| {
+            VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("gfx.draw_image_rotated failed: {}", e),
+            }
+        })?;
+    }
+    Ok(0)
+}
+
+fn m53_gfx_free_image(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let img_obj = arg_u64(args, 0);
+    let img_ptr = p4b_read_handle(img_obj);
+    m53_deregister_and_free_image(img_ptr as u64)?;
     Ok(0)
 }
 
