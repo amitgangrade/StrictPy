@@ -53,6 +53,11 @@ final WIN_W: i32 = 600i32
 final WIN_H: i32 = 720i32               # 600 board + 120 footer (status text)
 final STEP_MS: i64 = 33i64              # ~30 FPS render rate
 final HARD_DROP_BONUS: i64 = 2i64       # points per cell on hard-drop
+# v2: bumped level-1 drop from 800 ms to 1500 ms — gives more time
+# between auto-drops so a user only tapping left/right doesn't
+# perceive each tap as also causing the piece to fall.  Still feels
+# Tetris-like; floors at 100 ms once levels stack up.
+final BASE_DROP_MS: i64 = 1500i64
 
 # ── Piece encoding ──────────────────────────────────────────────────
 #
@@ -311,10 +316,10 @@ fn score_for_clear(cleared: i32, level: i64) -> i64:
     return 0i64
 
 fn drop_interval_ms(level: i64) -> i64:
-    """800 ms at level 1, -50 ms per level, floor at 100 ms."""
-    raw: i64 = 800i64 - 50i64 * (level - 1i64)
-    if raw < 100i64:
-        return 100i64
+    """1500 ms at level 1, -100 ms per level, floor at 200 ms."""
+    raw: i64 = BASE_DROP_MS - 100i64 * (level - 1i64)
+    if raw < 200i64:
+        return 200i64
     return raw
 
 fn after_lock(state: GameState, clear_sfx: Sound, tetris_sfx: Sound, die_sfx: Sound) -> None:
@@ -601,6 +606,13 @@ fn main() -> i32:
                 if ev_opt.kind == "quit":
                     running = false
                 elif ev_opt.kind == "key_down":
+                    # v2 diagnostics — prints to stdout per input event.
+                    # Lets the user share console output to diagnose the
+                    # "left/right also moves down" bug.  Compare timing
+                    # against DROP lines to see whether auto-drops
+                    # coincide with input or fire on their own.
+                    println("INPUT key=" + ev_opt.key + " t=" + str(time.now_ms())
+                            + " cur=(" + str(state.cur_x) + "," + str(state.cur_y) + ")")
                     if ev_opt.key == "escape":
                         running = false
                     elif state.game_over and ev_opt.key == "r":
@@ -617,11 +629,15 @@ fn main() -> i32:
 
         # Auto-drop on its own timer.  Dual timer here is unavoidable:
         # render must run at ~30 FPS for input responsiveness, but the
-        # drop fires only every drop_interval_ms (800 -> 100 ms).
+        # drop fires only every drop_interval_ms (1500 -> 200 ms).
         if not state.game_over:
             now: i64 = time.now_ms()
             interval: i64 = drop_interval_ms(state.level)
-            if (now - state.last_drop_ms) >= interval:
+            elapsed_since_drop: i64 = now - state.last_drop_ms
+            if elapsed_since_drop >= interval:
+                println("DROP t=" + str(now) + " elapsed=" + str(elapsed_since_drop)
+                        + "ms interval=" + str(interval) + "ms level=" + str(state.level)
+                        + " cur=(" + str(state.cur_x) + "," + str(state.cur_y) + ")")
                 auto_drop(state, sfx_clear, sfx_tetris, sfx_die)
                 state.last_drop_ms = now
 
