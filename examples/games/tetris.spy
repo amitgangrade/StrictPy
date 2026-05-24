@@ -1,0 +1,638 @@
+"""tetris.spy — M56 reference game: a complete Tetris in StrictPy.
+
+A 10x20 grid (30 px per cell) with a 300 px side panel showing score,
+level, lines cleared, and the next-piece preview.  Window: 600x720.
+
+Controls:
+  - Left / Right arrows : move piece horizontally
+  - Down arrow          : soft drop (one cell + 1 score)
+  - Up arrow            : rotate clockwise (with naive wall-kick: try +0,
+                          then -1 col, then +1 col before rejecting)
+  - Space               : hard drop (instant + 2 score per cell)
+  - R                   : restart after game over
+  - Escape              : quit
+
+Mechanics:
+  - 7 tetrominoes (I/O/T/S/Z/J/L) encoded as 4 rotation states each.
+  - Auto-drop interval: 800 ms at level 1, decreases 50 ms per level,
+    floor at 100 ms.
+  - Lines cleared per level: 10.  Level-up speeds up the drop.
+  - Scoring: 100/300/500/800 × level for single/double/triple/tetris;
+    soft drop +1 per cell, hard drop +2 per cell.
+  - Game over when a freshly spawned piece overlaps the board.
+
+Architecture: dual timer.  Render at ~30 FPS (loop sleeps 33 ms) for
+responsive input; auto-drop fires on its own `time.now_ms()`-anchored
+timer so the drop rate is independent of render rate.  Each input
+(move/rotate/soft-drop/hard-drop) takes effect immediately — no
+pending-state indirection.
+
+Run from the repo root:
+    cargo build --workspace --release   # only needed once
+    ./target/release/spy examples/games/tetris.spy
+
+The compile-only test in compiler/tests/tetris_demo_runs.rs verifies
+the file typechecks + bytecode-compiles.  Actual gameplay needs a
+real desktop window — run it manually on your dev box.
+"""
+
+import gfx
+import time
+import random
+from gfx import Window, Event, Font, Sound
+
+# ── Layout constants ────────────────────────────────────────────────
+final CELL: i32 = 30i32
+final COLS: i32 = 10i32
+final ROWS: i32 = 20i32
+final BOARD_W: i32 = 300i32             # COLS * CELL
+final BOARD_H: i32 = 600i32             # ROWS * CELL
+final SIDE_X: i32 = 300i32              # left edge of side panel
+final SIDE_W: i32 = 300i32
+final WIN_W: i32 = 600i32
+final WIN_H: i32 = 720i32               # 600 board + 120 footer (status text)
+final STEP_MS: i64 = 33i64              # ~30 FPS render rate
+final HARD_DROP_BONUS: i64 = 2i64       # points per cell on hard-drop
+
+# ── Piece encoding ──────────────────────────────────────────────────
+#
+# Each tetromino has 4 rotation states.  Each state is encoded as a
+# 16-bit mask of a 4x4 grid, with bit (row*4 + col) set when the cell
+# is filled (bit 0 = top-left at row 0/col 0; bit 15 = bottom-right
+# at row 3/col 3).
+#
+# The 7 piece types in order:
+#   0 = I (cyan)
+#   1 = O (yellow)
+#   2 = T (purple)
+#   3 = S (green)
+#   4 = Z (red)
+#   5 = J (blue)
+#   6 = L (orange)
+
+fn make_piece_masks() -> List[i32]:
+    """Returns 28 masks (7 pieces × 4 rotations), indexed as
+    masks[ptype * 4 + rot]."""
+    m: List[i32] = []
+    # I-piece
+    m.append(0x00F0i32)   # rot 0: horizontal, row 1
+    m.append(0x4444i32)   # rot 1: vertical, col 2
+    m.append(0x0F00i32)   # rot 2: horizontal, row 2
+    m.append(0x2222i32)   # rot 3: vertical, col 1
+    # O-piece (same in all rotations)
+    m.append(0x0660i32)
+    m.append(0x0660i32)
+    m.append(0x0660i32)
+    m.append(0x0660i32)
+    # T-piece
+    m.append(0x0072i32)   # rot 0: T pointing down (bar on top)
+    m.append(0x0262i32)   # rot 1: T pointing left
+    m.append(0x0270i32)   # rot 2: T pointing up
+    m.append(0x0232i32)   # rot 3: T pointing right
+    # S-piece (2-fold symmetry — rot 2/3 mirror 0/1)
+    m.append(0x0036i32)   # rot 0
+    m.append(0x0231i32)   # rot 1
+    m.append(0x0036i32)
+    m.append(0x0231i32)
+    # Z-piece (2-fold symmetry)
+    m.append(0x0063i32)
+    m.append(0x0132i32)
+    m.append(0x0063i32)
+    m.append(0x0132i32)
+    # J-piece
+    m.append(0x0071i32)
+    m.append(0x0226i32)
+    m.append(0x0470i32)
+    m.append(0x0322i32)
+    # L-piece
+    m.append(0x0074i32)
+    m.append(0x0622i32)
+    m.append(0x0170i32)
+    m.append(0x0223i32)
+    return m
+
+fn append_rgb(c: List[i32], r: i32, g: i32, b: i32) -> None:
+    c.append(r)
+    c.append(g)
+    c.append(b)
+
+fn make_piece_colors() -> List[i32]:
+    """7 pieces × 3 channels (RGB) = 21 entries.  Index as
+    colors[ptype * 3 + channel]."""
+    c: List[i32] = []
+    append_rgb(c,   0i32, 200i32, 220i32)   # I: cyan
+    append_rgb(c, 220i32, 200i32,   0i32)   # O: yellow
+    append_rgb(c, 160i32,   0i32, 200i32)   # T: purple
+    append_rgb(c,   0i32, 200i32,  60i32)   # S: green
+    append_rgb(c, 220i32,  40i32,  40i32)   # Z: red
+    append_rgb(c,  40i32,  80i32, 220i32)   # J: blue
+    append_rgb(c, 220i32, 130i32,   0i32)   # L: orange
+    return c
+
+fn piece_cell(masks: List[i32], ptype: i32, rot: i32, row: i32, col: i32) -> bool:
+    """True iff the (row, col) cell of this piece's bounding box is
+    filled in the given rotation state.  Row/col both in 0..3."""
+    if row < 0i32 or row >= 4i32 or col < 0i32 or col >= 4i32:
+        return false
+    mask: i32 = masks[ptype * 4i32 + rot]
+    bit: i32 = (mask >> (row * 4i32 + col)) & 1i32
+    return bit == 1i32
+
+# ── Game state ──────────────────────────────────────────────────────
+
+final class GameState:
+    # Board: COLS * ROWS = 200 cells, row-major.  0 = empty;
+    # 1-7 = (ptype + 1) of the locked piece for colour rendering.
+    board: List[i32]
+    masks: List[i32]
+    colors: List[i32]
+    # Active falling piece.
+    cur_type: i32
+    cur_rot: i32
+    cur_x: i32              # column of the piece's 4x4 bounding-box's left edge
+    cur_y: i32              # row of the bounding-box's top edge
+    # Next piece in the queue (shown in side panel preview).
+    next_type: i32
+    score: i64
+    level: i64
+    lines: i64              # total lines cleared (used for level progression)
+    last_drop_ms: i64
+    last_clear_count: i32   # for the brief "flash" effect on render (M58 will animate)
+    last_clear_frame_ms: i64
+    game_over: bool
+
+    fn __init__(self, masks: List[i32], colors: List[i32]) -> None:
+        self.masks = masks
+        self.colors = colors
+        self.board = []
+        i: i32 = 0i32
+        n: i32 = COLS * ROWS
+        while i < n:
+            self.board.append(0i32)
+            i = i + 1i32
+        self.cur_type = 0i32
+        self.cur_rot = 0i32
+        self.cur_x = 3i32
+        self.cur_y = 0i32
+        self.next_type = 0i32
+        self.score = 0i64
+        self.level = 1i64
+        self.lines = 0i64
+        self.last_drop_ms = time.now_ms()
+        self.last_clear_count = 0i32
+        self.last_clear_frame_ms = 0i64
+        self.game_over = false
+
+# ── Board helpers ───────────────────────────────────────────────────
+
+fn board_get(state: GameState, row: i32, col: i32) -> i32:
+    if row < 0i32 or row >= ROWS or col < 0i32 or col >= COLS:
+        return -1i32                # off-board = treat as "wall" (always collides)
+    return state.board[row * COLS + col]
+
+fn board_set(state: GameState, row: i32, col: i32, v: i32) -> None:
+    if row < 0i32 or row >= ROWS or col < 0i32 or col >= COLS:
+        return
+    state.board[row * COLS + col] = v
+
+fn collides(state: GameState, ptype: i32, rot: i32, x: i32, y: i32) -> bool:
+    """True iff placing the piece at bounding-box origin (x, y) would
+    overlap a wall, floor, or already-locked cell on the board."""
+    r: i32 = 0i32
+    while r < 4i32:
+        c: i32 = 0i32
+        while c < 4i32:
+            if piece_cell(state.masks, ptype, rot, r, c):
+                br: i32 = y + r
+                bc: i32 = x + c
+                # Floor / left / right wall.
+                if br >= ROWS or bc < 0i32 or bc >= COLS:
+                    return true
+                # Above the top is fine — pieces spawn there briefly.
+                if br >= 0i32:
+                    if state.board[br * COLS + bc] != 0i32:
+                        return true
+            c = c + 1i32
+        r = r + 1i32
+    return false
+
+# ── Piece spawning + locking ────────────────────────────────────────
+
+fn spawn_piece(state: GameState) -> bool:
+    """Take the next-queued piece, place it at the spawn position,
+    refresh the next-queued slot.  Returns false if the spawn
+    position already collides (game over)."""
+    state.cur_type = state.next_type
+    state.cur_rot = 0i32
+    state.cur_x = 3i32
+    state.cur_y = 0i32
+    state.next_type = i32(random.randint(0i64, 6i64))
+    if collides(state, state.cur_type, state.cur_rot, state.cur_x, state.cur_y):
+        return false
+    return true
+
+fn lock_piece(state: GameState) -> None:
+    """Stamp the current piece's filled cells into the board at the
+    current position with colour = ptype+1."""
+    fill: i32 = state.cur_type + 1i32
+    r: i32 = 0i32
+    while r < 4i32:
+        c: i32 = 0i32
+        while c < 4i32:
+            if piece_cell(state.masks, state.cur_type, state.cur_rot, r, c):
+                board_set(state, state.cur_y + r, state.cur_x + c, fill)
+            c = c + 1i32
+        r = r + 1i32
+
+fn clear_lines(state: GameState) -> i32:
+    """Scan the board, remove fully-filled rows, drop everything
+    above down by the number of cleared rows.  Returns the count."""
+    cleared: i32 = 0i32
+    new_board: List[i32] = []
+    # Walk rows bottom-to-top.  Non-full rows are kept; full rows are
+    # skipped.  At the end we prepend empty rows for each cleared.
+    r: i32 = ROWS - 1i32
+    while r >= 0i32:
+        full: bool = true
+        c: i32 = 0i32
+        while c < COLS:
+            if state.board[r * COLS + c] == 0i32:
+                full = false
+                # Break out via the loop bound — Spy has no `break`
+                # at this scope in the simplest form.
+                c = COLS
+            c = c + 1i32
+        if full:
+            cleared = cleared + 1i32
+        else:
+            # Append the row's cells to new_board (we're building it
+            # bottom-up, so append in column order; we'll reverse at
+            # the end).
+            c2: i32 = 0i32
+            while c2 < COLS:
+                new_board.append(state.board[r * COLS + c2])
+                c2 = c2 + 1i32
+        r = r - 1i32
+
+    # Prepend empty rows (one per cleared line).
+    empty_rows: i32 = cleared
+    while empty_rows > 0i32:
+        c: i32 = 0i32
+        while c < COLS:
+            new_board.append(0i32)
+            c = c + 1i32
+        empty_rows = empty_rows - 1i32
+
+    # new_board is currently in bottom-to-top, column-major-ish order.
+    # We built it row-by-row from the bottom, then appended empty rows
+    # on top, so the layout is: [row_bottom, row_above, ..., row_top].
+    # The real board is row-major top-to-bottom, so we need to flip
+    # rows: row i (top-down) = new_board[(ROWS-1-i)*COLS .. +COLS].
+    flipped: List[i32] = []
+    rr: i32 = ROWS - 1i32
+    while rr >= 0i32:
+        cc: i32 = 0i32
+        while cc < COLS:
+            flipped.append(new_board[rr * COLS + cc])
+            cc = cc + 1i32
+        rr = rr - 1i32
+    state.board = flipped
+    return cleared
+
+fn score_for_clear(cleared: i32, level: i64) -> i64:
+    if cleared == 1i32:
+        return 100i64 * level
+    if cleared == 2i32:
+        return 300i64 * level
+    if cleared == 3i32:
+        return 500i64 * level
+    if cleared == 4i32:
+        return 800i64 * level
+    return 0i64
+
+fn drop_interval_ms(level: i64) -> i64:
+    """800 ms at level 1, -50 ms per level, floor at 100 ms."""
+    raw: i64 = 800i64 - 50i64 * (level - 1i64)
+    if raw < 100i64:
+        return 100i64
+    return raw
+
+fn after_lock(state: GameState, clear_sfx: Sound, tetris_sfx: Sound, die_sfx: Sound) -> None:
+    """Run line-clear scoring, level progression, and spawn the next
+    piece.  Triggers game over and the dying SFX on failure to spawn."""
+    cleared: i32 = clear_lines(state)
+    if cleared > 0i32:
+        state.score = state.score + score_for_clear(cleared, state.level)
+        state.lines = state.lines + i64(cleared)
+        new_level: i64 = 1i64 + state.lines / 10i64
+        if new_level > state.level:
+            state.level = new_level
+        state.last_clear_count = cleared
+        state.last_clear_frame_ms = time.now_ms()
+        if cleared == 4i32:
+            gfx.play_sound(tetris_sfx)
+        else:
+            gfx.play_sound(clear_sfx)
+    if not spawn_piece(state):
+        state.game_over = true
+        gfx.play_sound(die_sfx)
+
+# ── Game logic step (auto-drop) ─────────────────────────────────────
+
+fn auto_drop(state: GameState, clear_sfx: Sound, tetris_sfx: Sound, die_sfx: Sound) -> None:
+    """Try moving the current piece down by one row.  If that would
+    collide, lock the piece in place, clear lines, spawn the next."""
+    if collides(state, state.cur_type, state.cur_rot, state.cur_x, state.cur_y + 1i32):
+        lock_piece(state)
+        after_lock(state, clear_sfx, tetris_sfx, die_sfx)
+    else:
+        state.cur_y = state.cur_y + 1i32
+
+# ── Input ───────────────────────────────────────────────────────────
+
+fn try_rotate(state: GameState, sfx_rotate: Sound) -> None:
+    new_rot: i32 = (state.cur_rot + 1i32) % 4i32
+    # Try (0, +/-1) wall-kicks: same column, then -1, then +1.
+    if not collides(state, state.cur_type, new_rot, state.cur_x, state.cur_y):
+        state.cur_rot = new_rot
+        gfx.play_sound(sfx_rotate)
+        return
+    if not collides(state, state.cur_type, new_rot, state.cur_x - 1i32, state.cur_y):
+        state.cur_rot = new_rot
+        state.cur_x = state.cur_x - 1i32
+        gfx.play_sound(sfx_rotate)
+        return
+    if not collides(state, state.cur_type, new_rot, state.cur_x + 1i32, state.cur_y):
+        state.cur_rot = new_rot
+        state.cur_x = state.cur_x + 1i32
+        gfx.play_sound(sfx_rotate)
+        return
+    # Rotation rejected — no SFX, no state change.
+
+fn try_move(state: GameState, dx: i32, sfx_move: Sound) -> None:
+    if not collides(state, state.cur_type, state.cur_rot,
+                    state.cur_x + dx, state.cur_y):
+        state.cur_x = state.cur_x + dx
+        gfx.play_sound(sfx_move)
+
+fn soft_drop(state: GameState, clear_sfx: Sound, tetris_sfx: Sound,
+             die_sfx: Sound, move_sfx: Sound) -> None:
+    """Down-arrow press: one-cell drop + 1 score bonus, or lock if
+    already on the floor.  Resets the auto-drop timer."""
+    if collides(state, state.cur_type, state.cur_rot,
+                state.cur_x, state.cur_y + 1i32):
+        lock_piece(state)
+        after_lock(state, clear_sfx, tetris_sfx, die_sfx)
+    else:
+        state.cur_y = state.cur_y + 1i32
+        state.score = state.score + 1i64
+        gfx.play_sound(move_sfx)
+    state.last_drop_ms = time.now_ms()
+
+fn hard_drop(state: GameState, clear_sfx: Sound, tetris_sfx: Sound,
+             die_sfx: Sound) -> None:
+    """Space: drop the piece all the way down, lock it, +2 per cell."""
+    cells: i32 = 0i32
+    while not collides(state, state.cur_type, state.cur_rot,
+                       state.cur_x, state.cur_y + 1i32):
+        state.cur_y = state.cur_y + 1i32
+        cells = cells + 1i32
+    state.score = state.score + i64(cells) * HARD_DROP_BONUS
+    lock_piece(state)
+    after_lock(state, clear_sfx, tetris_sfx, die_sfx)
+    state.last_drop_ms = time.now_ms()
+
+fn handle_input(state: GameState, ev: Event,
+                sfx_move: Sound, sfx_rotate: Sound,
+                sfx_clear: Sound, sfx_tetris: Sound, sfx_die: Sound) -> None:
+    if ev.kind != "key_down":
+        return
+    if ev.key == "left":
+        try_move(state, -1i32, sfx_move)
+    elif ev.key == "right":
+        try_move(state, 1i32, sfx_move)
+    elif ev.key == "up":
+        try_rotate(state, sfx_rotate)
+    elif ev.key == "down":
+        soft_drop(state, sfx_clear, sfx_tetris, sfx_die, sfx_move)
+    elif ev.key == "space":
+        hard_drop(state, sfx_clear, sfx_tetris, sfx_die)
+
+# ── Rendering ───────────────────────────────────────────────────────
+
+fn draw_cell(win: Window, state: GameState, row: i32, col: i32, fill: i32) -> None:
+    """Draw one board cell at (row, col) with the given fill code
+    (1-7 = piece colour; 0 = empty leaves the playfield colour)."""
+    if fill == 0i32:
+        return
+    idx: i32 = (fill - 1i32) * 3i32
+    r: i32 = state.colors[idx]
+    g: i32 = state.colors[idx + 1i32]
+    b: i32 = state.colors[idx + 2i32]
+    px: i32 = col * CELL
+    py: i32 = row * CELL
+    gfx.draw_rect(win, px + 1i32, py + 1i32, CELL - 2i32, CELL - 2i32,
+                  r, g, b, 255i32)
+    # Inner 1-px bevel.
+    gfx.draw_rect_outline(win, px + 3i32, py + 3i32, CELL - 6i32, CELL - 6i32,
+                          (r + 60i32) % 256i32,
+                          (g + 60i32) % 256i32,
+                          (b + 60i32) % 256i32, 200i32)
+
+fn draw_piece_preview(win: Window, state: GameState, font: Font) -> None:
+    """Draw the next piece in the side panel preview box."""
+    px: i32 = SIDE_X + 30i32
+    py: i32 = 160i32
+    box_w: i32 = 4i32 * CELL
+    box_h: i32 = 4i32 * CELL
+    # Box background.
+    gfx.draw_rect(win, px, py, box_w, box_h, 40i32, 40i32, 50i32, 255i32)
+    gfx.draw_rect_outline(win, px, py, box_w, box_h, 100i32, 100i32, 120i32, 255i32)
+    gfx.draw_text(win, font, "NEXT", px, py - 28i32, 200i32, 200i32, 220i32)
+    fill: i32 = state.next_type + 1i32
+    idx: i32 = state.next_type * 3i32
+    r: i32 = state.colors[idx]
+    g: i32 = state.colors[idx + 1i32]
+    b: i32 = state.colors[idx + 2i32]
+    rr: i32 = 0i32
+    while rr < 4i32:
+        cc: i32 = 0i32
+        while cc < 4i32:
+            if piece_cell(state.masks, state.next_type, 0i32, rr, cc):
+                cx: i32 = px + cc * CELL
+                cy: i32 = py + rr * CELL
+                gfx.draw_rect(win, cx + 1i32, cy + 1i32, CELL - 2i32, CELL - 2i32,
+                              r, g, b, 255i32)
+            cc = cc + 1i32
+        rr = rr + 1i32
+
+fn render(win: Window, font: Font, state: GameState) -> None:
+    # Background.
+    gfx.clear(win, 18i32, 18i32, 28i32)
+
+    # Board background.
+    gfx.draw_rect(win, 0i32, 0i32, BOARD_W, BOARD_H, 30i32, 30i32, 42i32, 255i32)
+
+    # Faint grid lines.
+    gi: i32 = 1i32
+    while gi < COLS:
+        gfx.draw_line(win, gi * CELL, 0i32, gi * CELL, BOARD_H,
+                      45i32, 45i32, 60i32, 255i32)
+        gi = gi + 1i32
+    gj: i32 = 1i32
+    while gj < ROWS:
+        gfx.draw_line(win, 0i32, gj * CELL, BOARD_W, gj * CELL,
+                      45i32, 45i32, 60i32, 255i32)
+        gj = gj + 1i32
+
+    # Locked cells.
+    r: i32 = 0i32
+    while r < ROWS:
+        c: i32 = 0i32
+        while c < COLS:
+            v: i32 = state.board[r * COLS + c]
+            if v != 0i32:
+                draw_cell(win, state, r, c, v)
+            c = c + 1i32
+        r = r + 1i32
+
+    # Current falling piece.
+    if not state.game_over:
+        fill: i32 = state.cur_type + 1i32
+        rr: i32 = 0i32
+        while rr < 4i32:
+            cc: i32 = 0i32
+            while cc < 4i32:
+                if piece_cell(state.masks, state.cur_type, state.cur_rot, rr, cc):
+                    br: i32 = state.cur_y + rr
+                    bc: i32 = state.cur_x + cc
+                    if br >= 0i32 and br < ROWS:
+                        draw_cell(win, state, br, bc, fill)
+                cc = cc + 1i32
+            rr = rr + 1i32
+
+    # Line-clear flash: if a clear happened within the last 100 ms,
+    # tint the playfield white.  Cheap stand-in for an animation.
+    now: i64 = time.now_ms()
+    if state.last_clear_count > 0i32 and (now - state.last_clear_frame_ms) < 100i64:
+        flash_a: i32 = 80i32
+        gfx.draw_rect(win, 0i32, 0i32, BOARD_W, BOARD_H,
+                      255i32, 255i32, 255i32, flash_a)
+
+    # Side panel — score, level, lines.
+    gfx.draw_rect(win, SIDE_X, 0i32, SIDE_W, BOARD_H, 22i32, 22i32, 32i32, 255i32)
+    gfx.draw_line(win, SIDE_X, 0i32, SIDE_X, BOARD_H, 80i32, 80i32, 100i32, 255i32)
+
+    gfx.draw_text(win, font, "TETRIS", SIDE_X + 30i32, 20i32,
+                  255i32, 220i32, 100i32)
+    gfx.draw_text(win, font, "Score:", SIDE_X + 30i32, 60i32, 200i32, 200i32, 220i32)
+    gfx.draw_text(win, font, str(state.score), SIDE_X + 30i32, 88i32, 255i32, 255i32, 255i32)
+    gfx.draw_text(win, font, "Level:", SIDE_X + 30i32, 116i32, 200i32, 200i32, 220i32)
+    gfx.draw_text(win, font, str(state.level), SIDE_X + 110i32, 116i32, 255i32, 255i32, 255i32)
+    gfx.draw_text(win, font, "Lines:", SIDE_X + 30i32, 138i32, 200i32, 200i32, 220i32)
+    gfx.draw_text(win, font, str(state.lines), SIDE_X + 110i32, 138i32, 255i32, 255i32, 255i32)
+
+    draw_piece_preview(win, state, font)
+
+    # Footer help.
+    fy: i32 = BOARD_H + 12i32
+    gfx.draw_rect(win, 0i32, BOARD_H, WIN_W, WIN_H - BOARD_H, 12i32, 12i32, 20i32, 255i32)
+    gfx.draw_text(win, font, "←/→ move    ↑ rotate    ↓ soft-drop",
+                  16i32, fy, 200i32, 200i32, 220i32)
+    gfx.draw_text(win, font, "space hard-drop    R restart    Esc quit",
+                  16i32, fy + 28i32, 200i32, 200i32, 220i32)
+
+    # Game over overlay.
+    if state.game_over:
+        gfx.draw_rect(win, 0i32, 0i32, BOARD_W, BOARD_H, 0i32, 0i32, 0i32, 180i32)
+        msg1: str = "GAME OVER"
+        sz1: Tuple[i32, i32] = gfx.text_size(font, msg1)
+        gfx.draw_text(win, font, msg1,
+                      (BOARD_W - sz1.0) / 2i32,
+                      BOARD_H / 2i32 - 40i32,
+                      240i32, 100i32, 100i32)
+        msg2: str = "R to restart"
+        sz2: Tuple[i32, i32] = gfx.text_size(font, msg2)
+        gfx.draw_text(win, font, msg2,
+                      (BOARD_W - sz2.0) / 2i32,
+                      BOARD_H / 2i32 + 4i32,
+                      220i32, 220i32, 220i32)
+
+    gfx.present(win)
+
+# ── Game lifecycle ─────────────────────────────────────────────────
+
+fn new_game(masks: List[i32], colors: List[i32]) -> GameState:
+    s: GameState = GameState(masks, colors)
+    # Seed the next-queue, then spawn — so cur_type isn't a leftover 0.
+    s.next_type = i32(random.randint(0i64, 6i64))
+    if not spawn_piece(s):
+        s.game_over = true        # extremely unlikely on an empty board
+    return s
+
+# ── Main ────────────────────────────────────────────────────────────
+
+fn main() -> i32:
+    gfx.init()
+    gfx.audio_init()
+    random.seed(time.now_ms())
+
+    masks: List[i32] = make_piece_masks()
+    colors: List[i32] = make_piece_colors()
+
+    win: Window = gfx.create_window("Tetris — StrictPy M56", WIN_W, WIN_H)
+    font: Font = gfx.load_font("examples/games/tetris/assets/font.ttf", 22i32)
+    sfx_move: Sound = gfx.load_sound("examples/games/tetris/assets/move.wav")
+    sfx_rotate: Sound = gfx.load_sound("examples/games/tetris/assets/rotate.wav")
+    sfx_clear: Sound = gfx.load_sound("examples/games/tetris/assets/clear.wav")
+    sfx_tetris: Sound = gfx.load_sound("examples/games/tetris/assets/tetris.wav")
+    sfx_die: Sound = gfx.load_sound("examples/games/tetris/assets/gameover.wav")
+
+    state: GameState = new_game(masks, colors)
+    running: bool = true
+
+    while running:
+        # Drain input.  Nullable narrowing only works inside
+        # `if X is not none:` per the M55 finding.
+        draining: bool = true
+        while draining:
+            ev_opt: Event? = gfx.poll_event(win)
+            if ev_opt is not none:
+                if ev_opt.kind == "quit":
+                    running = false
+                elif ev_opt.kind == "key_down":
+                    if ev_opt.key == "escape":
+                        running = false
+                    elif state.game_over and ev_opt.key == "r":
+                        state = new_game(masks, colors)
+                    elif not state.game_over:
+                        handle_input(state, ev_opt,
+                                     sfx_move, sfx_rotate,
+                                     sfx_clear, sfx_tetris, sfx_die)
+            else:
+                draining = false
+
+        if not running:
+            break
+
+        # Auto-drop on its own timer.  Dual timer here is unavoidable:
+        # render must run at ~30 FPS for input responsiveness, but the
+        # drop fires only every drop_interval_ms (800 -> 100 ms).
+        if not state.game_over:
+            now: i64 = time.now_ms()
+            interval: i64 = drop_interval_ms(state.level)
+            if (now - state.last_drop_ms) >= interval:
+                auto_drop(state, sfx_clear, sfx_tetris, sfx_die)
+                state.last_drop_ms = now
+
+        render(win, font, state)
+        time.sleep_ms(STEP_MS)
+
+    gfx.free_font(font)
+    gfx.free_sound(sfx_move)
+    gfx.free_sound(sfx_rotate)
+    gfx.free_sound(sfx_clear)
+    gfx.free_sound(sfx_tetris)
+    gfx.free_sound(sfx_die)
+    gfx.close_window(win)
+    return 0

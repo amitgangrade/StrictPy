@@ -1,6 +1,6 @@
 # StrictPy — language guide for AI coding tools
 
-**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M54 (2026-05-24).
+**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M56 (2026-05-24).
 
 **Audience**: any AI coding tool (Claude, GPT, Gemini, etc.) being asked to write a StrictPy program. This file is the single source of truth for writing idiomatic StrictPy — you should NOT need to read the compiler source (`compiler/src/`) or VM source (`vm/src/`) to write correct code.
 
@@ -3046,6 +3046,22 @@ The game illustrates the **standard StrictPy desktop-game shape** that M56 (Tetr
 - **Explicit asset cleanup:** `gfx.free_font` / `gfx.free_sound` / `gfx.close_window` at exit.  Required because the GC doesn't automatically run finalisers on SDL handles (see §11.40).
 
 Compile-only test in `compiler/tests/snake_demo_runs.rs` (running the actual game from CI isn't tractable — it waits for keyboard input).
+
+**Snake known issue (carry forward into M58 polish):** on at least one Windows configuration the game requires an arrow-key press per cell of snake movement — the autonomous step timer doesn't progress between presses.  Reproduces post-M55 v3 (single-timer simplification) too.  Could not repro on the Linux dev container under `SDL_VIDEODRIVER=dummy`.  Unresolved; tracked as a follow-up.
+
+### 12.7 Tetris — full-feature game on the `gfx` stack (M56)
+
+`examples/games/tetris.spy` is the second reference game.  10×20 board, all 7 tetrominoes with simple 4-state rotation, naive ±1-column wall kicks, auto-drop timer that speeds up per level (800 → 100 ms over 14 levels), soft drop (Down arrow = +1 cell + 1 score), hard drop (Space = instant + 2 score per cell), single/double/triple/tetris line-clear scoring (100/300/500/800 × level), next-piece preview in a side panel, brief white flash on line clear.  Five WAV SFX (move/rotate/clear/tetris-celebration/gameover) generated deterministically by the included `_generate_assets.py`.
+
+Reuses the §12.6 desktop-game shape but extends it in three ways worth knowing for M57 and beyond:
+
+- **Bitmask piece encoding** — each tetromino's 4 rotation states are encoded as 16-bit masks (one bit per cell of the 4×4 bounding box).  `piece_cell(masks, ptype, rot, row, col) -> bool` does the lookup with one `>>` and `&`.  Compared to a flat `List[i32]` of 448 cells, this is ~10× smaller and the indexed-bit fetch is single-instruction.  Spy supports hex literals (`0x00F0i32`) and bitwise operators (`>>`, `&`, `|`, `^`, `~`).
+- **Helper for repeated list appends** — `append_rgb(c, r, g, b)` consolidates `c.append(r); c.append(g); c.append(b)` because Spy doesn't accept `;`-separated statements on one line.  Same idiom for the asset-credits CSV-like tables.
+- **Dual timer (unavoidable for Tetris)** — render at ~30 FPS (`time.sleep_ms(33)` per loop) so input is responsive; auto-drop on a separate `time.now_ms()`-anchored timer with a variable interval per level.  Manual drops (down arrow, space) reset `last_drop_ms = time.now_ms()` to prevent the auto-drop from firing immediately after.  This is the pattern the Snake v3 simplification couldn't avoid; Tetris would feel sluggish without it.
+
+The line-clear pass rebuilds the board bottom-up, skipping full rows and prepending empty rows for each cleared.  Order-flip at the end converts the bottom-up bottom-to-top buffer back to row-major top-to-bottom for in-place storage.  See `clear_lines` in `tetris.spy`.
+
+Compile-only test in `compiler/tests/tetris_demo_runs.rs`.
 
 **Discipline**: ship a `LANGUAGE_GUIDE.md` update in the same commit as any new language feature or stdlib module. The agent brief for any future milestone touching language surface or stdlib MUST include:
 

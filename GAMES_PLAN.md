@@ -292,7 +292,7 @@ Each milestone is a self-contained agent run. Tag them M52 onward (HANDOFF's las
 | **M53 (Complete)** | `gfx` images + sprite sheets | ~400 Rust + ~80 test Spy | disjoint-handler |
 | **M54 (Complete)** | `gfx` audio + fonts + text | ~600 Rust + ~80 test Spy | shared-infra (audio init shared by SFX + music; combined Phase A at ~35%) |
 | **M55 (Complete)** | Snake game | ~400 Spy | net-new-feature (pure user code; one commit when it plays) |
-| **M56** | Tetris game | ~600 Spy | net-new-feature |
+| **M56 (Complete)** | Tetris game | ~600 Spy | net-new-feature |
 | **M57** | Space Shooter | ~900 Spy | net-new-feature |
 | **M58** | Polish: high scores via sqlite, fullscreen, settings persistence, restart-without-relaunch | ~300 Rust + ~200 Spy | shared-infra |
 
@@ -568,9 +568,11 @@ fn main() -> i32:
 
 ---
 
-### M56 — Tetris
+### M56 — Tetris ✅ COMPLETE
 
-**Branch:** `claude/m56-game-tetris-<random>`.
+Shipped on `main` directly after M55.  Files: `examples/games/tetris.spy` (~510 LOC) + `examples/games/tetris/assets/{move.wav, rotate.wav, clear.wav, tetris.wav, gameover.wav, font.ttf, CREDITS.md, _generate_assets.py}` + `compiler/tests/tetris_demo_runs.rs` + LANGUAGE_GUIDE.md §12.7 walkthrough.  Compile-only test passes.  5 WAV SFX generated deterministically by the Python helper.  Used bitmask piece encoding (16-bit masks per rotation; 28 masks total) rather than the flat `List[i32]` of 448 cells the brief suggested — denser and faster to test.
+
+**Branch:** `claude/m56-game-tetris-<random>` *(historical brief follows; ignore if reading after M56 has shipped)*.
 
 **Scope**
 

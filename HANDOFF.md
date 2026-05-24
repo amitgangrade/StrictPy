@@ -1,4 +1,4 @@
-# Session handoff — 2026-05-24 (post-M55)
+# Session handoff — 2026-05-24 (post-M56)
 
 ## Read this FIRST in the next session
 
@@ -10,31 +10,65 @@ Everything you need to resume is in:
 4. **`THESIS.md`** + **`BLOG_POST.md`** — synthesis documents (frozen at M34)
 5. **`RELEASE_NOTES_v0.2.md`** — v0.2.0 freeze-point summary
 6. **`LANGUAGE_GUIDE.md`** — single source of truth for AI tools writing
-   StrictPy programs (refreshed post-M55; §11 has gotchas through §11.43, §12 has games walkthrough §12.6)
+   StrictPy programs (refreshed post-M56; §11 has gotchas through §11.43, §12 has games walkthroughs §12.6/§12.7)
 7. **`bench/TABULAR_BENCH_REPORT.md`** + `bench/TABULAR_BENCH_REPORT_M49.md` —
    the StrictPy vs pandas 3.0 comparison
-8. **`GAMES_PLAN.md`** — sequential plan for the M52-M58 desktop-games stack (Snake done; Tetris next)
+8. **`GAMES_PLAN.md`** — sequential plan for the M52-M58 desktop-games stack (Snake + Tetris done; Space Shooter next)
 9. **Memory file**: `C:\Users\AG\.claude\projects\C--Users-AG-CascadeProjects-PythonCompiler\memory\project_strictpy.md`
 
 ## Current head
 
 - Branch: `main`
-- Latest commit: (post-M55 — `examples/games/snake.spy` + assets + test + LANGUAGE_GUIDE §12.6)
-- Tests passing on main: **1077** (M55 adds 1 compile-only test in `compiler/tests/snake_demo_runs.rs`)
+- Latest commit: (post-M56 — `examples/games/tetris.spy` + assets + test + LANGUAGE_GUIDE §12.7)
+- Tests passing on main: **1078** (M56 adds 1 compile-only test in `compiler/tests/tetris_demo_runs.rs`)
 
 ## Status snapshot
 
 | Metric | Value |
 |---|---:|
-| Milestones complete on main | M0–M55 |
+| Milestones complete on main | M0–M56 |
 | **v0.2.0 release** | **Tagged at M30 (commit 121483f)** |
-| Tests | 1077 / 0 fail / 1 ignored |
-| Bugs | 35 / 35 / **0 deferred** |
+| Tests | 1078 / 0 fail / 1 ignored |
+| Bugs | 35 / 35 / **0 deferred** + 1 known unresolved (Snake "moves only on key press" on Windows; see M55 below) |
 | Stdlib modules | 39 (no change, `gfx` shipped in M52) |
 | Stdlib classes | 25 (M52-M54 added Window/Event/Image/Sound/Music/Font) |
-| Example programs | **117** (+1 in M55: `examples/games/snake.spy`) |
-| Lesson 1 streak | **38 consecutive clean-commit agents** (M28 → M55) |
+| Example programs | **118** (+1 in M56: `examples/games/tetris.spy`) |
+| Lesson 1 streak | **39 consecutive clean-commit agents** (M28 → M56) |
 | Benchmark suites | 3 |
+
+## M56 — completed (this session, 1 commit)
+
+Scope: second reference desktop game on the M52-M54 `gfx` stack.
+10×20 board, all 7 tetrominoes, 4 rotation states per piece (encoded
+as 16-bit masks), naive ±1-column wall kicks, auto-drop timer that
+speeds up per level (800 → 100 ms over 14 levels), soft drop, hard
+drop, line-clear scoring (100/300/500/800 × level), next-piece
+preview, 100 ms white-flash on clear, full SFX (move/rotate/clear/
+tetris/gameover).  Dual timer (render at 30 FPS, drop at variable
+interval) — unavoidable for input responsiveness.
+
+Files shipped:
+- `examples/games/tetris.spy` (~510 LOC).
+- `examples/games/tetris/assets/{move,rotate,clear,tetris,gameover}.wav`
+  (square-wave SFX generated deterministically by `_generate_assets.py`).
+- `examples/games/tetris/assets/font.ttf` (copy of the bundled DejaVu).
+- `examples/games/tetris/assets/CREDITS.md`.
+- `compiler/tests/tetris_demo_runs.rs` — compile-only test (passes).
+- `LANGUAGE_GUIDE.md` §12.7 walkthrough of the bitmask piece
+  encoding + dual-timer pattern + line-clear bottom-up rebuild.
+
+### Findings worth recording for M57
+
+- **Hex literals + bitwise ops** work in Spy (`0x00F0i32`, `>>`, `&`).
+  Used for compact tetromino encoding (16-bit mask per rotation × 28
+  rotations vs. 448-cell flat list).
+- **No `;` between statements** — Spy is strict Python-style.
+  Multi-statement helpers like `c.append(r); c.append(g); c.append(b)`
+  must be a separate fn (`append_rgb(c, r, g, b)`).
+- **Module-scope `final` only takes literals** — not function calls
+  (e.g. can't write `final MASKS: List[i32] = make_piece_masks()`).
+  Compute lookup tables once in `main()` and pass them as args to
+  helpers that need them.  See `tetris.spy`'s `masks`/`colors`.
 
 ## M55 — completed (this session, 1 commit)
 
