@@ -112,6 +112,14 @@ cranelift-jit = { version = "0.115", optional = true }
 cranelift-codegen = { version = "0.115", optional = true }
 cranelift-frontend = { version = "0.115", optional = true }
 cranelift-module = { version = "0.115", optional = true }
+# M54: pure-Rust audio (WAV + OGG streaming, no system SDL2_mixer required)
+# rodio provides a cross-platform audio output stream; the `wav` and `vorbis`
+# features add the respective decoders (both pure Rust, no C dependencies).
+rodio = { version = "0.19", default-features = false, features = ["wav", "vorbis"] }
+# M54: pure-Rust TrueType rasteriser (no system SDL2_ttf required).
+# fontdue parses TTF/OTF and rasterises glyphs to alpha bitmaps that we
+# composite into SDL2 textures manually.
+fontdue = "0.7"
 
 # M27 P3c-A: `libc` for `shutil.disk_usage` on Unix (statvfs syscall).
 # Windows uses GetDiskFreeSpaceExW from kernel32 declared inline — no

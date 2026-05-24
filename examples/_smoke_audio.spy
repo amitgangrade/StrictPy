@@ -1,0 +1,30 @@
+# _smoke_audio.spy — Load audio + draw text in a window
+
+import gfx
+import time
+from gfx import Window, Sound, Font
+
+fn main() -> i32:
+    gfx.init()
+    gfx.audio_init()
+    win: Window = gfx.create_window("Smoke Audio", 320i32, 240i32)
+
+    # Load and play a short blip
+    snd: Sound = gfx.load_sound("vm/tests/fixtures/games/blip.wav")
+    gfx.set_sound_volume(snd, 96i32)
+    gfx.play_sound(snd)
+
+    # Load font and draw some text
+    font: Font = gfx.load_font("vm/tests/fixtures/games/DejaVuSansMono.ttf", 24i32)
+
+    gfx.clear(win, 20i32, 20i32, 30i32)
+    gfx.draw_text(win, font, "Audio OK!", 80i32, 100i32, 100i32, 220i32, 255i32)
+    gfx.present(win)
+
+    # Brief pause so the sound can play
+    time.sleep_ms(300i64)
+
+    gfx.free_sound(snd)
+    gfx.free_font(font)
+    gfx.close_window(win)
+    return 0

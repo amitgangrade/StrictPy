@@ -2757,6 +2757,107 @@ The server is **single-threaded** — one connection at a time.  Two simultaneou
 
 ---
 
+### 11.42 `gfx` audio (M54)
+
+The audio subsystem wraps **SDL_mixer** (bundled via the `sdl2` crate). Call `gfx.audio_init()` once after `gfx.init()` before using any audio functions. Both calls are idempotent.
+
+#### API
+
+| Function | Signature | Description |
+|---|---|---|
+| `gfx.audio_init()` | `() → unit` | Initialise SDL_mixer (44100 Hz, 16-bit stereo, 2048-frame buffer, 16 channels). Must call `gfx.init()` first. |
+| `gfx.load_sound(path)` | `(str) → Sound` | Load a WAV file into memory. Raises `IOError` if file not found, `ValueError` on decode error. |
+| `gfx.play_sound(snd)` | `(Sound) → unit` | Play the sound once on the first available mixer channel. Fire-and-forget. |
+| `gfx.set_sound_volume(snd, vol)` | `(Sound, i32) → unit` | Set volume for a specific sound. Range 0–128. |
+| `gfx.free_sound(snd)` | `(Sound) → unit` | Explicitly release memory. Raises `ValueError` on use-after-free or double-free. |
+| `gfx.load_music(path)` | `(str) → Music` | Load an OGG or WAV file for streaming playback. Raises `IOError` / `ValueError`. |
+| `gfx.play_music(music, loops)` | `(Music, i32) → unit` | Start streaming. `loops=0` plays once, `loops=-1` loops forever. |
+| `gfx.stop_music()` | `() → unit` | Halt music immediately. |
+| `gfx.set_music_volume(vol)` | `(i32) → unit` | Global music volume, 0–128. |
+
+#### Design notes
+
+- **Formats:** WAV is universally supported; OGG Vorbis is recommended for music (licence-free, good compression). MP3 may or may not be available depending on the SDL_mixer build flags.
+- **Channel count:** 16 simultaneous SFX channels. If all channels are busy, `play_sound` silently skips.
+- **Dummy driver in CI:** `SDL_AUDIODRIVER=dummy` lets the full loading + playback pipeline run without a real audio device.
+- **Explicit free:** `Sound` and `Music` objects must be freed with `free_sound` / no `free_music` exposed because `Music` lifetime ends when the `Music` object goes out of scope. (Use `stop_music` before discarding.)
+- **Linux audio backend:** SDL_mixer uses ALSA by default on Linux. Some systems may need PulseAudio. Set `SDL_AUDIODRIVER=pulse` if ALSA is unavailable.
+
+#### Example
+
+```python
+import gfx
+import time
+from gfx import Window, Sound, Music
+
+fn main() -> i32:
+    gfx.init()
+    gfx.audio_init()
+    win: Window = gfx.create_window("Demo", 640i32, 480i32)
+
+    eat: Sound = gfx.load_sound("assets/eat.wav")
+    bgm: Music = gfx.load_music("assets/music.ogg")
+
+    gfx.set_music_volume(80i32)
+    gfx.play_music(bgm, -1i32)   # loop forever
+
+    gfx.play_sound(eat)
+    time.sleep_ms(500i64)
+
+    gfx.stop_music()
+    gfx.free_sound(eat)
+    gfx.close_window(win)
+    return 0
+```
+
+---
+
+### 11.43 `gfx` font and text rendering (M54)
+
+Text is rendered via **SDL_ttf** (bundled via the `sdl2` crate). No separate `ttf_init()` call is required — `gfx.load_font()` initialises SDL_ttf automatically and idempotently.
+
+#### API
+
+| Function | Signature | Description |
+|---|---|---|
+| `gfx.load_font(path, size)` | `(str, i32) → Font` | Load a TrueType font at the given point size. Raises `IOError` if not found, `ValueError` on decode error. |
+| `gfx.draw_text(win, font, text, x, y, r, g, b)` | `(Window, Font, str, i32, i32, i32, i32, i32) → unit` | Render `text` at pixel position `(x, y)` in colour `(r, g, b)`. Uses blended anti-aliasing. |
+| `gfx.text_size(font, text)` | `(Font, str) → Tuple[i32, i32]` | Returns `(width, height)` in pixels of the rendered text without drawing it. Returns `(0, 0)` for empty string. |
+| `gfx.free_font(font)` | `(Font) → unit` | Explicitly release the font. Raises `ValueError` on double-free or use-after-free. |
+
+#### Design notes
+
+- **CC0 font:** `vm/tests/fixtures/games/DejaVuSansMono.ttf` is bundled in the repo (Bitstream Vera / DejaVu licence, effectively public domain for redistribution). Use it as a fallback in your games.
+- **Point size vs pixels:** `size` in `load_font` is in typographic points at 72 dpi. For a 24pt font you get roughly 32px tall glyphs on a 96-dpi monitor.
+- **Blended rendering:** `draw_text` uses SDL_ttf's blended (anti-aliased) mode for best quality. Alpha blending requires the canvas to be in a blended draw state (the default after `gfx.init`).
+- **Multiline text:** Not built-in. Split on `\n` and call `draw_text` once per line with a `y` offset computed from `text_size`.
+- **Explicit free:** Fonts hold a significant amount of glyph cache memory. Free them when changing scenes.
+
+#### Example
+
+```python
+import gfx
+from gfx import Window, Font
+
+fn main() -> i32:
+    gfx.init()
+    win: Window = gfx.create_window("Text Demo", 640i32, 480i32)
+    font: Font = gfx.load_font("assets/font.ttf", 28i32)
+
+    sz: Tuple[i32, i32] = gfx.text_size(font, "Score: 0")
+    label_w: i32 = sz.0
+
+    gfx.clear(win, 10i32, 10i32, 20i32)
+    gfx.draw_text(win, font, "Score: 0", (320i32 - label_w / 2i32), 20i32, 255i32, 220i32, 100i32)
+    gfx.present(win)
+
+    gfx.free_font(font)
+    gfx.close_window(win)
+    return 0
+```
+
+---
+
 ## §12 — End-to-end example programs
 
 ### 12.1 Word count

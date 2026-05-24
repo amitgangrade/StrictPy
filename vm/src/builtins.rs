@@ -7126,6 +7126,23 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         NativeFn::GfxDrawImageRotated                => m53_gfx_draw_image_rotated(interp, args),
         NativeFn::GfxFreeImage                       => m53_gfx_free_image(interp, args),
 
+        // ── M54: GFX audio ──
+        NativeFn::GfxAudioInit                       => m54_gfx_audio_init(interp, args),
+        NativeFn::GfxLoadSound                       => m54_gfx_load_sound(interp, args),
+        NativeFn::GfxPlaySound                       => m54_gfx_play_sound(interp, args),
+        NativeFn::GfxFreeSound                       => m54_gfx_free_sound(interp, args),
+        NativeFn::GfxLoadMusic                       => m54_gfx_load_music(interp, args),
+        NativeFn::GfxPlayMusic                       => m54_gfx_play_music(interp, args),
+        NativeFn::GfxStopMusic                       => m54_gfx_stop_music(interp, args),
+        NativeFn::GfxSetMusicVolume                  => m54_gfx_set_music_volume(interp, args),
+        NativeFn::GfxSetSoundVolume                  => m54_gfx_set_sound_volume(interp, args),
+
+        // ── M54: GFX fonts/text ──
+        NativeFn::GfxLoadFont                        => m54_gfx_load_font(interp, args),
+        NativeFn::GfxDrawText                        => m54_gfx_draw_text(interp, args),
+        NativeFn::GfxTextSize                        => m54_gfx_text_size(interp, args),
+        NativeFn::GfxFreeFont                        => m54_gfx_free_font(interp, args),
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
@@ -23761,6 +23778,608 @@ fn m53_gfx_free_image(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, Vm
     Ok(0)
 }
 
+// ── M54 — gfx stdlib (audio via rodio + fonts/text via fontdue) ──
+//
+// SDL2_mixer and SDL2_ttf are NOT bundled by the sdl2 Rust crate on Windows
+// and require pre-installed system libraries.  Instead we use:
+//   • rodio  — pure-Rust audio output (CPAL backend, WAV + OGG decoders)
+//   • fontdue — pure-Rust TrueType rasteriser; we composite glyphs into
+//               SDL2 software textures manually.
+
+// ─── rodio output stream ─────────────────────────────────────────────────────
+
+struct M54AudioBackend {
+    _stream: rodio::OutputStream,
+    handle: rodio::OutputStreamHandle,
+    /// Sink dedicated to background music (one at a time).
+    music_sink: std::sync::Mutex<Option<rodio::Sink>>,
+}
+unsafe impl Send for M54AudioBackend {}
+unsafe impl Sync for M54AudioBackend {}
+
+static M54_AUDIO_BACKEND: std::sync::Mutex<Option<Box<M54AudioBackend>>> =
+    std::sync::Mutex::new(None);
+
+// ─── Sound (in-memory WAV/OGG bytes) ────────────────────────────────────────
+
+struct M54Sound {
+    /// Raw file bytes — kept so we can create a fresh Decoder on each play.
+    data: std::sync::Arc<Vec<u8>>,
+    /// Volume 0–128 (rodio uses 0.0–1.0 internally; we convert on play).
+    volume: std::sync::atomic::AtomicI32,
+}
+unsafe impl Send for M54Sound {}
+unsafe impl Sync for M54Sound {}
+
+static M54_ACTIVE_SOUNDS: std::sync::Mutex<Option<std::collections::HashSet<u64>>> =
+    std::sync::Mutex::new(None);
+
+fn m54_register_sound(ptr: u64) {
+    let mut g = M54_ACTIVE_SOUNDS.lock().unwrap();
+    g.get_or_insert_with(std::collections::HashSet::new).insert(ptr);
+}
+
+fn m54_deregister_and_free_sound(ptr: u64) -> Result<(), VmError> {
+    let mut g = M54_ACTIVE_SOUNDS.lock().unwrap();
+    let set = g.get_or_insert_with(std::collections::HashSet::new);
+    if set.remove(&ptr) {
+        unsafe { let _drop = Box::from_raw(ptr as *mut M54Sound); }
+        Ok(())
+    } else {
+        Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "gfx.free_sound: sound already freed or invalid".into(),
+        })
+    }
+}
+
+fn m54_get_sound(ptr: u64) -> Result<*mut M54Sound, VmError> {
+    let mut g = M54_ACTIVE_SOUNDS.lock().unwrap();
+    let set = g.get_or_insert_with(std::collections::HashSet::new);
+    if set.contains(&ptr) {
+        Ok(ptr as *mut M54Sound)
+    } else {
+        Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "gfx operation: sound is freed or invalid".into(),
+        })
+    }
+}
+
+// ─── Music (a dedicated rodio Sink, one at a time) ───────────────────────────
+
+struct M54Music {
+    /// Raw file bytes for the music track.
+    data: Vec<u8>,
+}
+unsafe impl Send for M54Music {}
+unsafe impl Sync for M54Music {}
+
+static M54_ACTIVE_MUSICS: std::sync::Mutex<Option<std::collections::HashSet<u64>>> =
+    std::sync::Mutex::new(None);
+
+fn m54_register_music(ptr: u64) {
+    let mut g = M54_ACTIVE_MUSICS.lock().unwrap();
+    g.get_or_insert_with(std::collections::HashSet::new).insert(ptr);
+}
+
+fn m54_deregister_and_free_music(ptr: u64) -> Result<(), VmError> {
+    let mut g = M54_ACTIVE_MUSICS.lock().unwrap();
+    let set = g.get_or_insert_with(std::collections::HashSet::new);
+    if set.remove(&ptr) {
+        unsafe { let _drop = Box::from_raw(ptr as *mut M54Music); }
+        Ok(())
+    } else {
+        Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "gfx.free_music: music already freed or invalid".into(),
+        })
+    }
+}
+
+fn m54_get_music(ptr: u64) -> Result<*mut M54Music, VmError> {
+    let mut g = M54_ACTIVE_MUSICS.lock().unwrap();
+    let set = g.get_or_insert_with(std::collections::HashSet::new);
+    if set.contains(&ptr) {
+        Ok(ptr as *mut M54Music)
+    } else {
+        Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "gfx operation: music is freed or invalid".into(),
+        })
+    }
+}
+
+// ─── Font (fontdue rasteriser) ───────────────────────────────────────────────
+
+struct M54Font {
+    font: fontdue::Font,
+    /// Point size (px at 72 dpi; fontdue uses px directly).
+    size_px: f32,
+}
+unsafe impl Send for M54Font {}
+unsafe impl Sync for M54Font {}
+
+static M54_ACTIVE_FONTS: std::sync::Mutex<Option<std::collections::HashSet<u64>>> =
+    std::sync::Mutex::new(None);
+
+fn m54_register_font(ptr: u64) {
+    let mut g = M54_ACTIVE_FONTS.lock().unwrap();
+    g.get_or_insert_with(std::collections::HashSet::new).insert(ptr);
+}
+
+fn m54_deregister_and_free_font(ptr: u64) -> Result<(), VmError> {
+    let mut g = M54_ACTIVE_FONTS.lock().unwrap();
+    let set = g.get_or_insert_with(std::collections::HashSet::new);
+    if set.remove(&ptr) {
+        unsafe { let _drop = Box::from_raw(ptr as *mut M54Font); }
+        Ok(())
+    } else {
+        Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "gfx.free_font: font already freed or invalid".into(),
+        })
+    }
+}
+
+fn m54_get_font(ptr: u64) -> Result<*mut M54Font, VmError> {
+    let mut g = M54_ACTIVE_FONTS.lock().unwrap();
+    let set = g.get_or_insert_with(std::collections::HashSet::new);
+    if set.contains(&ptr) {
+        Ok(ptr as *mut M54Font)
+    } else {
+        Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "gfx operation: font is freed or invalid".into(),
+        })
+    }
+}
+
+// ─── Path resolution (same pattern as M53) ───────────────────────────────────
+
+fn m54_resolve_path(path_str: &str) -> std::path::PathBuf {
+    let mut path = std::path::PathBuf::from(path_str);
+    if !path.exists() {
+        if path.starts_with("vm") {
+            if let Ok(stripped) = path.strip_prefix("vm") {
+                if stripped.exists() {
+                    path = stripped.to_path_buf();
+                }
+            }
+        }
+    }
+    path
+}
+
+// ─── Audio functions ─────────────────────────────────────────────────────────
+
+fn m54_gfx_audio_init(_interp: &mut Interpreter, _args: &[u64]) -> Result<u64, VmError> {
+    let mut guard = M54_AUDIO_BACKEND.lock().unwrap();
+    if guard.is_some() {
+        return Ok(0); // idempotent
+    }
+
+    let (stream, handle) = rodio::OutputStream::try_default().map_err(|e| {
+        VmError::UncaughtException {
+            type_name: "RuntimeError".into(),
+            message: format!("gfx.audio_init: could not open audio output: {}", e),
+        }
+    })?;
+
+    let backend = Box::new(M54AudioBackend {
+        _stream: stream,
+        handle,
+        music_sink: std::sync::Mutex::new(None),
+    });
+    *guard = Some(backend);
+    Ok(0)
+}
+
+fn m54_gfx_load_sound(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let path_ptr = arg_u64(args, 0) as *const StringRepr;
+    let path_str = unsafe { read_str(path_ptr) };
+    let path = m54_resolve_path(&path_str);
+
+    if !path.exists() {
+        return Err(VmError::UncaughtException {
+            type_name: "IOError".into(),
+            message: format!("gfx.load_sound: file not found: {}", path_str),
+        });
+    }
+
+    let data = std::fs::read(&path).map_err(|e| VmError::UncaughtException {
+        type_name: "IOError".into(),
+        message: format!("gfx.load_sound: failed to read '{}': {}", path_str, e),
+    })?;
+
+    // Validate the file is decodable by rodio before storing.
+    {
+        let cursor = std::io::Cursor::new(data.clone());
+        rodio::Decoder::new(cursor).map_err(|e| VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("gfx.load_sound: unsupported audio format '{}': {}", path_str, e),
+        })?;
+    }
+
+    let snd = Box::new(M54Sound {
+        data: std::sync::Arc::new(data),
+        volume: std::sync::atomic::AtomicI32::new(128),
+    });
+    let snd_ptr = Box::into_raw(snd) as u64;
+    m54_register_sound(snd_ptr);
+
+    let recv = m34_alloc_class_obj(interp, "Sound", 8);
+    m34_store_payload_u64(recv as u64, snd_ptr, 0);
+    Ok(recv as u64)
+}
+
+fn m54_gfx_play_sound(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let snd_obj = arg_u64(args, 0);
+    let snd_ptr = p4b_read_handle(snd_obj);
+    let snd = m54_get_sound(snd_ptr as u64)?;
+
+    let guard = M54_AUDIO_BACKEND.lock().unwrap();
+    let backend = match guard.as_ref() {
+        Some(b) => b,
+        None => return Ok(0), // audio_init not called, silently skip
+    };
+
+    unsafe {
+        let vol_raw = (*snd).volume.load(std::sync::atomic::Ordering::Relaxed);
+        let vol_f32 = (vol_raw as f32) / 128.0;
+        let data = std::sync::Arc::clone(&(*snd).data);
+        let cursor = std::io::Cursor::new((*data).clone());
+        if let Ok(source) = rodio::Decoder::new(cursor) {
+            let amplified = rodio::source::Source::amplify(source, vol_f32);
+            // play_raw is fire-and-forget; errors are non-fatal
+            let _ = backend.handle.play_raw(rodio::source::Source::convert_samples(amplified));
+        }
+    }
+    Ok(0)
+}
+
+fn m54_gfx_free_sound(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let snd_obj = arg_u64(args, 0);
+    let snd_ptr = p4b_read_handle(snd_obj);
+    m54_deregister_and_free_sound(snd_ptr as u64)?;
+    Ok(0)
+}
+
+fn m54_gfx_load_music(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let path_ptr = arg_u64(args, 0) as *const StringRepr;
+    let path_str = unsafe { read_str(path_ptr) };
+    let path = m54_resolve_path(&path_str);
+
+    if !path.exists() {
+        return Err(VmError::UncaughtException {
+            type_name: "IOError".into(),
+            message: format!("gfx.load_music: file not found: {}", path_str),
+        });
+    }
+
+    let data = std::fs::read(&path).map_err(|e| VmError::UncaughtException {
+        type_name: "IOError".into(),
+        message: format!("gfx.load_music: failed to read '{}': {}", path_str, e),
+    })?;
+
+    // Validate decodable.
+    {
+        let cursor = std::io::Cursor::new(data.clone());
+        rodio::Decoder::new(cursor).map_err(|e| VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("gfx.load_music: unsupported audio format '{}': {}", path_str, e),
+        })?;
+    }
+
+    let mus = Box::new(M54Music { data });
+    let mus_ptr = Box::into_raw(mus) as u64;
+    m54_register_music(mus_ptr);
+
+    let recv = m34_alloc_class_obj(interp, "Music", 8);
+    m34_store_payload_u64(recv as u64, mus_ptr, 0);
+    Ok(recv as u64)
+}
+
+fn m54_gfx_play_music(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let mus_obj = arg_u64(args, 0);
+    let loops = arg_i64(args, 1) as i32;
+    let mus_ptr = p4b_read_handle(mus_obj);
+    let mus = m54_get_music(mus_ptr as u64)?;
+
+    let guard = M54_AUDIO_BACKEND.lock().unwrap();
+    let backend = match guard.as_ref() {
+        Some(b) => b,
+        None => return Ok(0), // silently skip if audio_init not called
+    };
+
+    // Stop any existing music.
+    {
+        let mut sink_guard = backend.music_sink.lock().unwrap();
+        if let Some(old_sink) = sink_guard.take() {
+            old_sink.stop();
+        }
+    }
+
+    let sink = rodio::Sink::try_new(&backend.handle).map_err(|e| VmError::UncaughtException {
+        type_name: "RuntimeError".into(),
+        message: format!("gfx.play_music: sink creation failed: {}", e),
+    })?;
+
+    unsafe {
+        let data = (*mus).data.clone();
+        if loops < 0 {
+            // Loop forever
+            let cursor = std::io::Cursor::new(data);
+            if let Ok(source) = rodio::Decoder::new(cursor) {
+                sink.append(rodio::source::Source::repeat_infinite(source));
+            }
+        } else {
+            // Play loops+1 times (loops=0 → play once)
+            let play_count = if loops == 0 { 1 } else { loops as usize };
+            for _ in 0..play_count {
+                let cursor = std::io::Cursor::new(data.clone());
+                if let Ok(source) = rodio::Decoder::new(cursor) {
+                    sink.append(source);
+                }
+            }
+        }
+    }
+
+    sink.play();
+    let mut sink_guard = backend.music_sink.lock().unwrap();
+    *sink_guard = Some(sink);
+    Ok(0)
+}
+
+fn m54_gfx_stop_music(_interp: &mut Interpreter, _args: &[u64]) -> Result<u64, VmError> {
+    let guard = M54_AUDIO_BACKEND.lock().unwrap();
+    if let Some(backend) = guard.as_ref() {
+        let mut sink_guard = backend.music_sink.lock().unwrap();
+        if let Some(sink) = sink_guard.take() {
+            sink.stop();
+        }
+    }
+    Ok(0)
+}
+
+fn m54_gfx_set_music_volume(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let vol = (arg_i64(args, 0) as i32).clamp(0, 128);
+    let vol_f32 = vol as f32 / 128.0;
+    let guard = M54_AUDIO_BACKEND.lock().unwrap();
+    if let Some(backend) = guard.as_ref() {
+        let sink_guard = backend.music_sink.lock().unwrap();
+        if let Some(sink) = sink_guard.as_ref() {
+            sink.set_volume(vol_f32);
+        }
+    }
+    Ok(0)
+}
+
+fn m54_gfx_set_sound_volume(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let snd_obj = arg_u64(args, 0);
+    let vol = (arg_i64(args, 1) as i32).clamp(0, 128);
+    let snd_ptr = p4b_read_handle(snd_obj);
+    let snd = m54_get_sound(snd_ptr as u64)?;
+    unsafe {
+        (*snd).volume.store(vol, std::sync::atomic::Ordering::Relaxed);
+    }
+    Ok(0)
+}
+
+// ─── Font/text functions (fontdue rasteriser → SDL2 texture) ─────────────────
+
+fn m54_gfx_load_font(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let path_ptr = arg_u64(args, 0) as *const StringRepr;
+    let size_pt  = arg_i64(args, 1) as u16;
+    let path_str = unsafe { read_str(path_ptr) };
+    let path = m54_resolve_path(&path_str);
+
+    if !path.exists() {
+        return Err(VmError::UncaughtException {
+            type_name: "IOError".into(),
+            message: format!("gfx.load_font: file not found: {}", path_str),
+        });
+    }
+
+    let bytes = std::fs::read(&path).map_err(|e| VmError::UncaughtException {
+        type_name: "IOError".into(),
+        message: format!("gfx.load_font: failed to read '{}': {}", path_str, e),
+    })?;
+
+    let settings = fontdue::FontSettings {
+        scale: size_pt as f32,
+        ..fontdue::FontSettings::default()
+    };
+    let font = fontdue::Font::from_bytes(bytes.as_slice(), settings).map_err(|e| {
+        VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("gfx.load_font: failed to parse '{}': {}", path_str, e),
+        }
+    })?;
+
+    let fnt = Box::new(M54Font { font, size_px: size_pt as f32 });
+    let fnt_ptr = Box::into_raw(fnt) as u64;
+    m54_register_font(fnt_ptr);
+
+    let recv = m34_alloc_class_obj(interp, "Font", 8);
+    m34_store_payload_u64(recv as u64, fnt_ptr, 0);
+    Ok(recv as u64)
+}
+
+/// Rasterise `text` with fontdue and return a Vec<u8> of RGBA pixels plus
+/// the (width, height) of the resulting bitmap.
+fn m54_rasterise_text(
+    font: &fontdue::Font,
+    size_px: f32,
+    text: &str,
+    r: u8, g: u8, b: u8,
+) -> (Vec<u8>, u32, u32) {
+    if text.is_empty() {
+        return (vec![], 0, 0);
+    }
+
+    // First pass: collect metrics to compute total width and max height.
+    let glyphs: Vec<(fontdue::Metrics, Vec<u8>)> = text
+        .chars()
+        .map(|ch| font.rasterize(ch, size_px))
+        .collect();
+
+    let total_width: i32 = glyphs.iter().map(|(m, _)| m.advance_width as i32).sum();
+    let ascent = glyphs
+        .iter()
+        .map(|(m, _)| m.height as i32 + m.ymin)
+        .max()
+        .unwrap_or(size_px as i32);
+    let descent = glyphs
+        .iter()
+        .map(|(m, _)| -m.ymin)
+        .max()
+        .unwrap_or(0);
+    let total_height = (ascent + descent).max(1);
+
+    let w = total_width.max(1) as u32;
+    let h = total_height as u32;
+    let mut pixels = vec![0u8; (w * h * 4) as usize];
+
+    let mut pen_x: i32 = 0;
+    for (metrics, bitmap) in &glyphs {
+        let glyph_top = ascent - (metrics.height as i32 + metrics.ymin);
+
+        for gy in 0..metrics.height {
+            for gx in 0..metrics.width {
+                let alpha = bitmap[gy * metrics.width + gx];
+                if alpha == 0 {
+                    continue;
+                }
+                let px = pen_x + gx as i32;
+                let py = glyph_top + gy as i32;
+                if px < 0 || py < 0 || px >= w as i32 || py >= h as i32 {
+                    continue;
+                }
+                let idx = ((py as u32 * w + px as u32) * 4) as usize;
+                pixels[idx]     = r;
+                pixels[idx + 1] = g;
+                pixels[idx + 2] = b;
+                pixels[idx + 3] = alpha;
+            }
+        }
+        pen_x += metrics.advance_width as i32;
+    }
+
+    (pixels, w, h)
+}
+
+fn m54_gfx_draw_text(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let win_obj = arg_u64(args, 0);
+    let fnt_obj = arg_u64(args, 1);
+    let txt_ptr = arg_u64(args, 2) as *const StringRepr;
+    let x       = arg_i64(args, 3) as i32;
+    let y       = arg_i64(args, 4) as i32;
+    let r       = arg_i64(args, 5) as u8;
+    let g       = arg_i64(args, 6) as u8;
+    let b       = arg_i64(args, 7) as u8;
+
+    let text = unsafe { read_str(txt_ptr) };
+    if text.is_empty() {
+        return Ok(0);
+    }
+
+    let win_ptr = p4b_read_handle(win_obj);
+    let win     = m52_get_window(win_ptr as u64)?;
+    let fnt_ptr = p4b_read_handle(fnt_obj);
+    let fnt     = m54_get_font(fnt_ptr as u64)?;
+
+    let (pixels, w, h) = unsafe {
+        m54_rasterise_text(&(*fnt).font, (*fnt).size_px, &text, r, g, b)
+    };
+
+    if w == 0 || h == 0 {
+        return Ok(0);
+    }
+
+    // Create an SDL2 streaming texture and upload the RGBA pixels.
+    unsafe {
+        let tex = (*win)
+            .texture_creator
+            .create_texture_streaming(
+                sdl2::pixels::PixelFormatEnum::RGBA8888,
+                w,
+                h,
+            )
+            .map_err(|e| VmError::UncaughtException {
+                type_name: "RuntimeError".into(),
+                message: format!("gfx.draw_text: texture create failed: {}", e),
+            })?;
+
+        // Reinterpret as mutable — texture_creator.create_texture_streaming
+        // returns a Texture with an immutable borrow on the creator.  We use
+        // the same transmute pattern as M53 to escape the borrow.
+        let mut tex: sdl2::render::Texture<'static> =
+            std::mem::transmute::<
+                sdl2::render::Texture<'_>,
+                sdl2::render::Texture<'static>,
+            >(tex);
+
+        tex.with_lock(None, |buf, pitch| {
+            for row in 0..h as usize {
+                for col in 0..w as usize {
+                    let src = (row * w as usize + col) * 4;
+                    let dst = row * pitch + col * 4;
+                    // fontdue gives us (r,g,b,a); SDL RGBA8888 in memory on
+                    // little-endian is stored as ABGR (byte 0 = R).
+                    buf[dst]     = pixels[src + 3]; // A
+                    buf[dst + 1] = pixels[src];     // R  (SDL RGBA8888 LE)
+                    buf[dst + 2] = pixels[src + 1]; // G
+                    buf[dst + 3] = pixels[src + 2]; // B
+                }
+            }
+        })
+        .map_err(|e| VmError::UncaughtException {
+            type_name: "RuntimeError".into(),
+            message: format!("gfx.draw_text: texture upload failed: {}", e),
+        })?;
+
+        tex.set_blend_mode(sdl2::render::BlendMode::Blend);
+
+        let dst_rect = sdl2::rect::Rect::new(x, y, w, h);
+        (*win)
+            .canvas
+            .copy(&tex, None, Some(dst_rect))
+            .map_err(|e| VmError::UncaughtException {
+                type_name: "RuntimeError".into(),
+                message: format!("gfx.draw_text: blit failed: {}", e),
+            })?;
+    }
+    Ok(0)
+}
+
+fn m54_gfx_text_size(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let fnt_obj = arg_u64(args, 0);
+    let txt_ptr = arg_u64(args, 1) as *const StringRepr;
+    let text    = unsafe { read_str(txt_ptr) };
+
+    let fnt_ptr = p4b_read_handle(fnt_obj);
+    let fnt     = m54_get_font(fnt_ptr as u64)?;
+
+    let (w, h) = if text.is_empty() {
+        (0u32, 0u32)
+    } else {
+        unsafe {
+            let (_, tw, th) = m54_rasterise_text(&(*fnt).font, (*fnt).size_px, &text, 0, 0, 0);
+            (tw, th)
+        }
+    };
+
+    let tup = interp.alloc_tuple_obj(&[w as u64, h as u64]);
+    Ok(tup as u64)
+}
+
+fn m54_gfx_free_font(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let fnt_obj = arg_u64(args, 0);
+    let fnt_ptr = p4b_read_handle(fnt_obj);
+    m54_deregister_and_free_font(fnt_ptr as u64)?;
+    Ok(0)
+}
 #[cfg(test)]
 mod tests {
     //! Per-native unit tests. Each test constructs a minimal interpreter

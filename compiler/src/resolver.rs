@@ -5355,14 +5355,23 @@ impl Resolver {
         let win_cid = self.fresh_class();
         let event_cid = self.fresh_class();
         let img_cid = self.fresh_class();
+        let sound_cid = self.fresh_class();
+        let music_cid = self.fresh_class();
+        let font_cid = self.fresh_class();
 
         self.class_name_to_id.insert("Window".into(), win_cid);
         self.class_name_to_id.insert("Event".into(), event_cid);
         self.class_name_to_id.insert("Image".into(), img_cid);
+        self.class_name_to_id.insert("Sound".into(), sound_cid);
+        self.class_name_to_id.insert("Music".into(), music_cid);
+        self.class_name_to_id.insert("Font".into(), font_cid);
 
         let win_ty = Ty::Class(win_cid);
         let event_ty = Ty::Class(event_cid);
         let img_ty = Ty::Class(img_cid);
+        let sound_ty = Ty::Class(sound_cid);
+        let music_ty = Ty::Class(music_cid);
+        let font_ty = Ty::Class(font_cid);
         let opt_event_ty = Ty::Nullable(Box::new(event_ty.clone()));
         let tuple_i32_i32_ty = Ty::Tuple(vec![i32_ty.clone(), i32_ty.clone()]);
         let f64_ty = Ty::Primitive(PrimTy::F64);
@@ -5427,6 +5436,66 @@ impl Resolver {
             payload_size: 8,
         });
 
+        self.class_layouts.insert(sound_cid, ClassLayout {
+            id: sound_cid,
+            name: "Sound".into(),
+            base: None,
+            is_open: false,
+            is_sealed: true,
+            fields: vec![
+                FieldInfo {
+                    name: "handle".into(),
+                    ty: Ty::Primitive(PrimTy::I64),
+                    offset: 0,
+                },
+            ],
+            methods: vec![],
+            generics: vec![],
+            generic_tvars: vec![],
+            is_native: true,
+            payload_size: 8,
+        });
+
+        self.class_layouts.insert(music_cid, ClassLayout {
+            id: music_cid,
+            name: "Music".into(),
+            base: None,
+            is_open: false,
+            is_sealed: true,
+            fields: vec![
+                FieldInfo {
+                    name: "handle".into(),
+                    ty: Ty::Primitive(PrimTy::I64),
+                    offset: 0,
+                },
+            ],
+            methods: vec![],
+            generics: vec![],
+            generic_tvars: vec![],
+            is_native: true,
+            payload_size: 8,
+        });
+
+        self.class_layouts.insert(font_cid, ClassLayout {
+            id: font_cid,
+            name: "Font".into(),
+            base: None,
+            is_open: false,
+            is_sealed: true,
+            fields: vec![
+                FieldInfo {
+                    name: "handle".into(),
+                    ty: Ty::Primitive(PrimTy::I64),
+                    offset: 0,
+                },
+            ],
+            methods: vec![],
+            generics: vec![],
+            generic_tvars: vec![],
+            is_native: true,
+            payload_size: 8,
+        });
+
         const GFX_INIT: u32              = 1100;
         const GFX_CREATE_WINDOW: u32      = 1101;
         const GFX_CLOSE_WINDOW: u32       = 1102;
@@ -5445,6 +5514,21 @@ impl Resolver {
         const GFX_DRAW_IMAGE_RECT: u32    = 1133;
         const GFX_DRAW_IMAGE_ROTATED: u32 = 1134;
         const GFX_FREE_IMAGE: u32         = 1135;
+        // M54: audio
+        const GFX_AUDIO_INIT: u32         = 1150;
+        const GFX_LOAD_SOUND: u32         = 1151;
+        const GFX_PLAY_SOUND: u32         = 1152;
+        const GFX_FREE_SOUND: u32         = 1153;
+        const GFX_LOAD_MUSIC: u32         = 1154;
+        const GFX_PLAY_MUSIC: u32         = 1155;
+        const GFX_STOP_MUSIC: u32         = 1156;
+        const GFX_SET_MUSIC_VOLUME: u32   = 1157;
+        const GFX_SET_SOUND_VOLUME: u32   = 1158;
+        // M54: fonts/text
+        const GFX_LOAD_FONT: u32          = 1170;
+        const GFX_DRAW_TEXT: u32          = 1171;
+        const GFX_TEXT_SIZE: u32          = 1172;
+        const GFX_FREE_FONT: u32          = 1173;
 
         let gfx_items = vec![
             StdlibItem {
@@ -5647,6 +5731,117 @@ impl Resolver {
                 kind: StdlibItemKind::Function,
                 ty: fn_ty(vec![img_ty.clone()], unit_ty.clone()),
                 native_id: GFX_FREE_IMAGE,
+            },
+            // ── M54 classes ──
+            StdlibItem {
+                name: "Sound".into(),
+                kind: StdlibItemKind::Class { class_id: sound_cid },
+                ty: Ty::Class(sound_cid),
+                native_id: 0,
+            },
+            StdlibItem {
+                name: "Music".into(),
+                kind: StdlibItemKind::Class { class_id: music_cid },
+                ty: Ty::Class(music_cid),
+                native_id: 0,
+            },
+            StdlibItem {
+                name: "Font".into(),
+                kind: StdlibItemKind::Class { class_id: font_cid },
+                ty: Ty::Class(font_cid),
+                native_id: 0,
+            },
+            // ── M54 audio functions ──
+            StdlibItem {
+                name: "audio_init".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(vec![], unit_ty.clone()),
+                native_id: GFX_AUDIO_INIT,
+            },
+            StdlibItem {
+                name: "load_sound".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(vec![str_ty.clone()], sound_ty.clone()),
+                native_id: GFX_LOAD_SOUND,
+            },
+            StdlibItem {
+                name: "play_sound".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(vec![sound_ty.clone()], unit_ty.clone()),
+                native_id: GFX_PLAY_SOUND,
+            },
+            StdlibItem {
+                name: "free_sound".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(vec![sound_ty.clone()], unit_ty.clone()),
+                native_id: GFX_FREE_SOUND,
+            },
+            StdlibItem {
+                name: "load_music".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(vec![str_ty.clone()], music_ty.clone()),
+                native_id: GFX_LOAD_MUSIC,
+            },
+            StdlibItem {
+                name: "play_music".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(vec![music_ty.clone(), i32_ty.clone()], unit_ty.clone()),
+                native_id: GFX_PLAY_MUSIC,
+            },
+            StdlibItem {
+                name: "stop_music".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(vec![], unit_ty.clone()),
+                native_id: GFX_STOP_MUSIC,
+            },
+            StdlibItem {
+                name: "set_music_volume".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(vec![i32_ty.clone()], unit_ty.clone()),
+                native_id: GFX_SET_MUSIC_VOLUME,
+            },
+            StdlibItem {
+                name: "set_sound_volume".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(vec![sound_ty.clone(), i32_ty.clone()], unit_ty.clone()),
+                native_id: GFX_SET_SOUND_VOLUME,
+            },
+            // ── M54 font/text functions ──
+            StdlibItem {
+                name: "load_font".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(vec![str_ty.clone(), i32_ty.clone()], font_ty.clone()),
+                native_id: GFX_LOAD_FONT,
+            },
+            StdlibItem {
+                name: "draw_text".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(
+                    vec![
+                        win_ty.clone(),
+                        font_ty.clone(),
+                        str_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                    ],
+                    unit_ty.clone(),
+                ),
+                native_id: GFX_DRAW_TEXT,
+            },
+            StdlibItem {
+                name: "text_size".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(vec![font_ty.clone(), str_ty.clone()], tuple_i32_i32_ty.clone()),
+                native_id: GFX_TEXT_SIZE,
+            },
+            StdlibItem {
+                name: "free_font".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(vec![font_ty.clone()], unit_ty.clone()),
+                native_id: GFX_FREE_FONT,
             },
         ];
 

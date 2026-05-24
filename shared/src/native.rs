@@ -2240,6 +2240,23 @@ pub enum NativeFn {
     GfxDrawImageRotated = 1134,
     GfxFreeImage        = 1135,
 
+    // ── 1150–1159: GFX audio (M54) ───────────────────────────────────────
+    GfxAudioInit        = 1150,
+    GfxLoadSound        = 1151,
+    GfxPlaySound        = 1152,
+    GfxFreeSound        = 1153,
+    GfxLoadMusic        = 1154,
+    GfxPlayMusic        = 1155,
+    GfxStopMusic        = 1156,
+    GfxSetMusicVolume   = 1157,
+    GfxSetSoundVolume   = 1158,
+
+    // ── 1170–1179: GFX fonts/text (M54) ──────────────────────────────────
+    GfxLoadFont         = 1170,
+    GfxDrawText         = 1171,
+    GfxTextSize         = 1172,
+    GfxFreeFont         = 1173,
+
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
     /// encounters. The VM treats this as a runtime error.
@@ -2963,6 +2980,21 @@ impl NativeFn {
             1133 => Some(Self::GfxDrawImageRect),
             1134 => Some(Self::GfxDrawImageRotated),
             1135 => Some(Self::GfxFreeImage),
+            // ── M54 (GFX audio) ──────────────────────────────────────
+            1150 => Some(Self::GfxAudioInit),
+            1151 => Some(Self::GfxLoadSound),
+            1152 => Some(Self::GfxPlaySound),
+            1153 => Some(Self::GfxFreeSound),
+            1154 => Some(Self::GfxLoadMusic),
+            1155 => Some(Self::GfxPlayMusic),
+            1156 => Some(Self::GfxStopMusic),
+            1157 => Some(Self::GfxSetMusicVolume),
+            1158 => Some(Self::GfxSetSoundVolume),
+            // ── M54 (GFX fonts/text) ─────────────────────────────────
+            1170 => Some(Self::GfxLoadFont),
+            1171 => Some(Self::GfxDrawText),
+            1172 => Some(Self::GfxTextSize),
+            1173 => Some(Self::GfxFreeFont),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }
