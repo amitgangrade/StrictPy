@@ -182,6 +182,21 @@ bugs that had been producing wrong-looking-but-not-obviously-wrong behavior:
 - `debug_dot_capture` — leftover debugging scratchpad, ignored to keep
   `cargo test` output clean.
 
+## Games and Graphics (M52+)
+
+StrictPy features a native 2D graphics, windowing, and input standard library module `gfx`, built on top of native SDL2 (statically linked for hermetic builds). This module allows building native desktop applications and games directly in StrictPy.
+
+A minimal windowing and drawing example is available at `examples/_smoke_window.spy`:
+
+```powershell
+./target/release/spy.exe examples/_smoke_window.spy
+```
+
+We are building three native desktop reference games in StrictPy:
+1. **Snake** (`examples/games/snake.spy`)
+2. **Tetris** (`examples/games/tetris.spy`)
+3. **Space Shooter** (`examples/games/space_shooter.spy`)
+
 ## License
 
 Dual-licensed under either of:

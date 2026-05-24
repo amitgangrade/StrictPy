@@ -7104,6 +7104,20 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         NativeFn::M50aTabServe                       => m50a_serve_blocking(interp, args),
         NativeFn::M50aTabServeWithTimeout            => m50a_serve_with_timeout(interp, args),
 
+        // ── M52: GFX core ──
+        NativeFn::GfxInit                            => m52_gfx_init(interp, args),
+        NativeFn::GfxCreateWindow                    => m52_gfx_create_window(interp, args),
+        NativeFn::GfxCloseWindow                     => m52_gfx_close_window(interp, args),
+        NativeFn::GfxPollEvent                       => m52_gfx_poll_event(interp, args),
+        NativeFn::GfxClear                           => m52_gfx_clear(interp, args),
+        NativeFn::GfxPresent                         => m52_gfx_present(interp, args),
+        NativeFn::GfxDrawRect                        => m52_gfx_draw_rect(interp, args),
+        NativeFn::GfxDrawRectOutline                 => m52_gfx_draw_rect_outline(interp, args),
+        NativeFn::GfxDrawLine                        => m52_gfx_draw_line(interp, args),
+        NativeFn::GfxDrawPoint                       => m52_gfx_draw_point(interp, args),
+        NativeFn::GfxWindowSize                      => m52_gfx_window_size(interp, args),
+        NativeFn::GfxSetWindowTitle                  => m52_gfx_set_window_title(interp, args),
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
@@ -23112,6 +23126,414 @@ fn m50a_handle_pivot(
 #[allow(dead_code)]
 fn _m50a_unused_mutex_marker() {
     let _: Option<Mutex<()>> = None;
+}
+
+// ── M52 — gfx stdlib (windows + events + drawing) ──
+
+struct M52SdlWrapper(sdl2::Sdl);
+unsafe impl Send for M52SdlWrapper {}
+unsafe impl Sync for M52SdlWrapper {}
+
+static M52_SDL_CONTEXT: std::sync::Mutex<Option<M52SdlWrapper>> = std::sync::Mutex::new(None);
+
+struct M52Window {
+    canvas: sdl2::render::Canvas<sdl2::video::Window>,
+}
+unsafe impl Send for M52Window {}
+unsafe impl Sync for M52Window {}
+
+static M52_ACTIVE_WINDOWS: std::sync::Mutex<Option<std::collections::HashSet<u64>>> = std::sync::Mutex::new(None);
+
+fn m52_register_window(win_ptr: u64) {
+    let mut guard = M52_ACTIVE_WINDOWS.lock().unwrap();
+    let set = guard.get_or_insert_with(std::collections::HashSet::new);
+    set.insert(win_ptr);
+}
+
+fn m52_deregister_and_free_window(win_ptr: u64) -> Result<(), VmError> {
+    let mut guard = M52_ACTIVE_WINDOWS.lock().unwrap();
+    let set = guard.get_or_insert_with(std::collections::HashSet::new);
+    if set.remove(&win_ptr) {
+        unsafe {
+            let _win = Box::from_raw(win_ptr as *mut M52Window);
+        }
+        Ok(())
+    } else {
+        Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "gfx.close_window: window already closed or invalid".into(),
+        })
+    }
+}
+
+fn m52_get_window(win_ptr: u64) -> Result<*mut M52Window, VmError> {
+    let mut guard = M52_ACTIVE_WINDOWS.lock().unwrap();
+    let set = guard.get_or_insert_with(std::collections::HashSet::new);
+    if set.contains(&win_ptr) {
+        Ok(win_ptr as *mut M52Window)
+    } else {
+        Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "gfx operation: window is closed or invalid".into(),
+        })
+    }
+}
+
+fn m52_store_payload_i32(recv_ptr: u64, value: i32, offset_bytes: usize) {
+    let obj = recv_ptr as *mut u8;
+    if obj.is_null() {
+        return;
+    }
+    unsafe {
+        let slot = obj.add(HDR + offset_bytes) as *mut i32;
+        std::ptr::write_unaligned(slot, value);
+    }
+}
+
+fn m52_gfx_init(_interp: &mut Interpreter, _args: &[u64]) -> Result<u64, VmError> {
+    let mut guard = M52_SDL_CONTEXT.lock().unwrap();
+    if guard.is_none() {
+        let sdl = sdl2::init().map_err(|e| VmError::UncaughtException {
+            type_name: "IOError".into(),
+            message: format!("gfx.init: failed to initialize SDL2: {}", e),
+        })?;
+        *guard = Some(M52SdlWrapper(sdl));
+    }
+    Ok(0)
+}
+
+fn m52_gfx_create_window(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let title_ptr = arg_u64(args, 0) as *const StringRepr;
+    let width = arg_i64(args, 1) as u32;
+    let height = arg_i64(args, 2) as u32;
+    let title = unsafe { read_str(title_ptr) };
+
+    let guard = M52_SDL_CONTEXT.lock().unwrap();
+    let sdl = guard.as_ref().ok_or_else(|| VmError::UncaughtException {
+        type_name: "ValueError".into(),
+        message: "gfx.create_window: gfx not initialized (call gfx.init first)".into(),
+    })?;
+
+    let video_subsystem = sdl.0.video().map_err(|e| VmError::UncaughtException {
+        type_name: "IOError".into(),
+        message: format!("gfx.create_window: failed to get video subsystem: {}", e),
+    })?;
+
+    let sdl_window = video_subsystem
+        .window(&title, width, height)
+        .position_centered()
+        .build()
+        .map_err(|e| VmError::UncaughtException {
+            type_name: "IOError".into(),
+            message: format!("gfx.create_window: failed to build window: {}", e),
+        })?;
+
+    let mut builder = sdl_window.into_canvas();
+    if std::env::var("SDL_VIDEODRIVER").unwrap_or_default() != "dummy" {
+        builder = builder.accelerated().present_vsync();
+    }
+    let canvas = builder.build().map_err(|e| VmError::UncaughtException {
+        type_name: "IOError".into(),
+        message: format!("gfx.create_window: failed to create canvas: {}", e),
+    })?;
+
+    let m52_win = Box::new(M52Window { canvas });
+    let win_ptr = Box::into_raw(m52_win) as u64;
+    m52_register_window(win_ptr);
+
+    let recv = m34_alloc_class_obj(interp, "Window", 8);
+    m34_store_payload_u64(recv as u64, win_ptr, 0);
+
+    Ok(recv as u64)
+}
+
+fn m52_gfx_close_window(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let win_obj = arg_u64(args, 0);
+    let win_ptr = p4b_read_handle(win_obj);
+    m52_deregister_and_free_window(win_ptr as u64)?;
+    m34_store_payload_u64(win_obj, 0, 0);
+    Ok(0)
+}
+
+fn m52_key_to_str(kc: sdl2::keyboard::Keycode) -> String {
+    let name = kc.name();
+    match name.as_str() {
+        "Escape" => "escape".into(),
+        "Space" => "space".into(),
+        "Return" => "enter".into(),
+        "Left" => "left".into(),
+        "Right" => "right".into(),
+        "Up" => "up".into(),
+        "Down" => "down".into(),
+        "Left Shift" | "Right Shift" => "shift".into(),
+        "Left Ctrl" | "Right Ctrl" => "ctrl".into(),
+        "Left Alt" | "Right Alt" => "alt".into(),
+        "Tab" => "tab".into(),
+        other => other.to_lowercase(),
+    }
+}
+
+fn m52_create_event_obj(
+    interp: &mut Interpreter,
+    kind: &str,
+    key: &str,
+    x: i32,
+    y: i32,
+    button: i32,
+) -> Result<u64, VmError> {
+    let event_obj = m34_alloc_class_obj(interp, "Event", 28);
+    let kind_ptr = interp.alloc_string(kind.into());
+    let key_ptr = interp.alloc_string(key.into());
+
+    m34_store_payload_u64(event_obj as u64, kind_ptr as u64, 0);
+    m34_store_payload_u64(event_obj as u64, key_ptr as u64, 8);
+    m52_store_payload_i32(event_obj as u64, x, 16);
+    m52_store_payload_i32(event_obj as u64, y, 20);
+    m52_store_payload_i32(event_obj as u64, button, 24);
+
+    Ok(event_obj as u64)
+}
+
+fn m52_translate_event(interp: &mut Interpreter, event: sdl2::event::Event) -> Result<u64, VmError> {
+    let kind;
+    let key = "";
+    let mut x = 0i32;
+    let mut y = 0i32;
+    let mut button = 0i32;
+
+    match event {
+        sdl2::event::Event::Quit { .. } |
+        sdl2::event::Event::Window { win_event: sdl2::event::WindowEvent::Close, .. } => {
+            kind = "quit";
+        }
+        sdl2::event::Event::KeyDown { keycode: Some(kc), .. } => {
+            kind = "key_down";
+            let k = m52_key_to_str(kc);
+            return m52_create_event_obj(interp, kind, &k, 0, 0, 0);
+        }
+        sdl2::event::Event::KeyUp { keycode: Some(kc), .. } => {
+            kind = "key_up";
+            let k = m52_key_to_str(kc);
+            return m52_create_event_obj(interp, kind, &k, 0, 0, 0);
+        }
+        sdl2::event::Event::MouseButtonDown { mouse_btn, x: mx, y: my, .. } => {
+            kind = "mouse_down";
+            x = mx;
+            y = my;
+            button = match mouse_btn {
+                sdl2::mouse::MouseButton::Left => 1,
+                sdl2::mouse::MouseButton::Middle => 2,
+                sdl2::mouse::MouseButton::Right => 3,
+                _ => 0,
+            };
+        }
+        sdl2::event::Event::MouseButtonUp { mouse_btn, x: mx, y: my, .. } => {
+            kind = "mouse_up";
+            x = mx;
+            y = my;
+            button = match mouse_btn {
+                sdl2::mouse::MouseButton::Left => 1,
+                sdl2::mouse::MouseButton::Middle => 2,
+                sdl2::mouse::MouseButton::Right => 3,
+                _ => 0,
+            };
+        }
+        sdl2::event::Event::MouseMotion { x: mx, y: my, .. } => {
+            kind = "mouse_move";
+            x = mx;
+            y = my;
+        }
+        _ => {
+            return Ok(NONE_SENTINEL);
+        }
+    }
+
+    m52_create_event_obj(interp, kind, key, x, y, button)
+}
+
+fn m52_gfx_poll_event(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let win_obj = arg_u64(args, 0);
+    let win_ptr = p4b_read_handle(win_obj);
+    m52_get_window(win_ptr as u64)?;
+
+    let guard = M52_SDL_CONTEXT.lock().unwrap();
+    let sdl = guard.as_ref().ok_or_else(|| VmError::UncaughtException {
+        type_name: "ValueError".into(),
+        message: "gfx.poll_event: gfx not initialized".into(),
+    })?;
+
+    let mut event_pump = sdl.0.event_pump().map_err(|e| VmError::UncaughtException {
+        type_name: "IOError".into(),
+        message: format!("gfx.poll_event: failed to get event pump: {}", e),
+    })?;
+
+    loop {
+        if let Some(event) = event_pump.poll_event() {
+            let event_obj = m52_translate_event(interp, event)?;
+            if event_obj != NONE_SENTINEL {
+                return Ok(event_obj);
+            }
+        } else {
+            return Ok(NONE_SENTINEL);
+        }
+    }
+}
+
+fn m52_gfx_clear(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let win_obj = arg_u64(args, 0);
+    let r = arg_i64(args, 1) as u8;
+    let g = arg_i64(args, 2) as u8;
+    let b = arg_i64(args, 3) as u8;
+
+    let win_ptr = p4b_read_handle(win_obj);
+    let win = m52_get_window(win_ptr as u64)?;
+
+    unsafe {
+        (*win).canvas.set_draw_color(sdl2::pixels::Color::RGB(r, g, b));
+        (*win).canvas.clear();
+    }
+    Ok(0)
+}
+
+fn m52_gfx_present(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let win_obj = arg_u64(args, 0);
+    let win_ptr = p4b_read_handle(win_obj);
+    let win = m52_get_window(win_ptr as u64)?;
+
+    unsafe {
+        (*win).canvas.present();
+    }
+    Ok(0)
+}
+
+fn m52_gfx_draw_rect(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let win_obj = arg_u64(args, 0);
+    let x = arg_i64(args, 1) as i32;
+    let y = arg_i64(args, 2) as i32;
+    let w = arg_i64(args, 3) as u32;
+    let h = arg_i64(args, 4) as u32;
+    let r = arg_i64(args, 5) as u8;
+    let g = arg_i64(args, 6) as u8;
+    let b = arg_i64(args, 7) as u8;
+    let a = arg_i64(args, 8) as u8;
+
+    let win_ptr = p4b_read_handle(win_obj);
+    let win = m52_get_window(win_ptr as u64)?;
+
+    let rect = sdl2::rect::Rect::new(x, y, w, h);
+    unsafe {
+        (*win).canvas.set_blend_mode(sdl2::render::BlendMode::Blend);
+        (*win).canvas.set_draw_color(sdl2::pixels::Color::RGBA(r, g, b, a));
+        (*win).canvas.fill_rect(rect).map_err(|e| VmError::UncaughtException {
+            type_name: "IOError".into(),
+            message: format!("gfx.draw_rect failed: {}", e),
+        })?;
+    }
+    Ok(0)
+}
+
+fn m52_gfx_draw_rect_outline(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let win_obj = arg_u64(args, 0);
+    let x = arg_i64(args, 1) as i32;
+    let y = arg_i64(args, 2) as i32;
+    let w = arg_i64(args, 3) as u32;
+    let h = arg_i64(args, 4) as u32;
+    let r = arg_i64(args, 5) as u8;
+    let g = arg_i64(args, 6) as u8;
+    let b = arg_i64(args, 7) as u8;
+    let a = arg_i64(args, 8) as u8;
+
+    let win_ptr = p4b_read_handle(win_obj);
+    let win = m52_get_window(win_ptr as u64)?;
+
+    let rect = sdl2::rect::Rect::new(x, y, w, h);
+    unsafe {
+        (*win).canvas.set_blend_mode(sdl2::render::BlendMode::Blend);
+        (*win).canvas.set_draw_color(sdl2::pixels::Color::RGBA(r, g, b, a));
+        (*win).canvas.draw_rect(rect).map_err(|e| VmError::UncaughtException {
+            type_name: "IOError".into(),
+            message: format!("gfx.draw_rect_outline failed: {}", e),
+        })?;
+    }
+    Ok(0)
+}
+
+fn m52_gfx_draw_line(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let win_obj = arg_u64(args, 0);
+    let x1 = arg_i64(args, 1) as i32;
+    let y1 = arg_i64(args, 2) as i32;
+    let x2 = arg_i64(args, 3) as i32;
+    let y2 = arg_i64(args, 4) as i32;
+    let r = arg_i64(args, 5) as u8;
+    let g = arg_i64(args, 6) as u8;
+    let b = arg_i64(args, 7) as u8;
+    let a = arg_i64(args, 8) as u8;
+
+    let win_ptr = p4b_read_handle(win_obj);
+    let win = m52_get_window(win_ptr as u64)?;
+
+    let p1 = sdl2::rect::Point::new(x1, y1);
+    let p2 = sdl2::rect::Point::new(x2, y2);
+    unsafe {
+        (*win).canvas.set_blend_mode(sdl2::render::BlendMode::Blend);
+        (*win).canvas.set_draw_color(sdl2::pixels::Color::RGBA(r, g, b, a));
+        (*win).canvas.draw_line(p1, p2).map_err(|e| VmError::UncaughtException {
+            type_name: "IOError".into(),
+            message: format!("gfx.draw_line failed: {}", e),
+        })?;
+    }
+    Ok(0)
+}
+
+fn m52_gfx_draw_point(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let win_obj = arg_u64(args, 0);
+    let x = arg_i64(args, 1) as i32;
+    let y = arg_i64(args, 2) as i32;
+    let r = arg_i64(args, 3) as u8;
+    let g = arg_i64(args, 4) as u8;
+    let b = arg_i64(args, 5) as u8;
+    let a = arg_i64(args, 6) as u8;
+
+    let win_ptr = p4b_read_handle(win_obj);
+    let win = m52_get_window(win_ptr as u64)?;
+
+    let p = sdl2::rect::Point::new(x, y);
+    unsafe {
+        (*win).canvas.set_blend_mode(sdl2::render::BlendMode::Blend);
+        (*win).canvas.set_draw_color(sdl2::pixels::Color::RGBA(r, g, b, a));
+        (*win).canvas.draw_point(p).map_err(|e| VmError::UncaughtException {
+            type_name: "IOError".into(),
+            message: format!("gfx.draw_point failed: {}", e),
+        })?;
+    }
+    Ok(0)
+}
+
+fn m52_gfx_window_size(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let win_obj = arg_u64(args, 0);
+    let win_ptr = p4b_read_handle(win_obj);
+    let win = m52_get_window(win_ptr as u64)?;
+
+    let (w, h) = unsafe { (*win).canvas.window().size() };
+    let tup = interp.alloc_tuple_obj(&[w as u64, h as u64]);
+    Ok(tup as u64)
+}
+
+fn m52_gfx_set_window_title(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let win_obj = arg_u64(args, 0);
+    let title_ptr = arg_u64(args, 1) as *const StringRepr;
+    let title = unsafe { read_str(title_ptr) };
+
+    let win_ptr = p4b_read_handle(win_obj);
+    let win = m52_get_window(win_ptr as u64)?;
+
+    unsafe {
+        (*win).canvas.window_mut().set_title(&title).map_err(|e| VmError::UncaughtException {
+            type_name: "IOError".into(),
+            message: format!("gfx.set_window_title failed: {}", e),
+        })?;
+    }
+    Ok(0)
 }
 
 #[cfg(test)]

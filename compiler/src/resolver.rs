@@ -5342,7 +5342,224 @@ impl Resolver {
             });
         }
         self.stdlib_modules.insert("tabular".into(), m37_tabular_mod);
+
+        // ── M52: `gfx` module ──────────────────────────────────────────
+        let str_ty = Ty::Primitive(PrimTy::Str);
+        let unit_ty = Ty::Primitive(PrimTy::Unit);
+        let i32_ty = Ty::Primitive(PrimTy::I32);
+        let fn_ty = |params: Vec<Ty>, ret: Ty| Ty::Function {
+            params,
+            ret: Box::new(ret),
+        };
+
+        let win_cid = self.fresh_class();
+        let event_cid = self.fresh_class();
+
+        self.class_name_to_id.insert("Window".into(), win_cid);
+        self.class_name_to_id.insert("Event".into(), event_cid);
+
+        let win_ty = Ty::Class(win_cid);
+        let event_ty = Ty::Class(event_cid);
+        let opt_event_ty = Ty::Nullable(Box::new(event_ty.clone()));
+        let tuple_i32_i32_ty = Ty::Tuple(vec![i32_ty.clone(), i32_ty.clone()]);
+
+        self.class_layouts.insert(win_cid, ClassLayout {
+            id: win_cid,
+            name: "Window".into(),
+            base: None,
+            is_open: false,
+            is_sealed: true,
+            fields: vec![
+                FieldInfo {
+                    name: "handle".into(),
+                    ty: Ty::Primitive(PrimTy::I64),
+                    offset: 0,
+                },
+            ],
+            methods: vec![],
+            generics: vec![],
+            generic_tvars: vec![],
+            is_native: true,
+            payload_size: 8,
+        });
+
+        self.class_layouts.insert(event_cid, ClassLayout {
+            id: event_cid,
+            name: "Event".into(),
+            base: None,
+            is_open: true,
+            is_sealed: false,
+            fields: vec![
+                FieldInfo { name: "kind".into(),   ty: str_ty.clone(), offset: 0 },
+                FieldInfo { name: "key".into(),    ty: str_ty.clone(), offset: 8 },
+                FieldInfo { name: "x".into(),      ty: i32_ty.clone(), offset: 16 },
+                FieldInfo { name: "y".into(),      ty: i32_ty.clone(), offset: 20 },
+                FieldInfo { name: "button".into(), ty: i32_ty.clone(), offset: 24 },
+            ],
+            methods: vec![],
+            generics: vec![],
+            generic_tvars: vec![],
+            is_native: false,
+            payload_size: 28,
+        });
+
+        const GFX_INIT: u32              = 1100;
+        const GFX_CREATE_WINDOW: u32      = 1101;
+        const GFX_CLOSE_WINDOW: u32       = 1102;
+        const GFX_POLL_EVENT: u32         = 1103;
+        const GFX_CLEAR: u32              = 1104;
+        const GFX_PRESENT: u32            = 1105;
+        const GFX_DRAW_RECT: u32          = 1106;
+        const GFX_DRAW_RECT_OUTLINE: u32  = 1107;
+        const GFX_DRAW_LINE: u32          = 1108;
+        const GFX_DRAW_POINT: u32         = 1109;
+        const GFX_WINDOW_SIZE: u32        = 1110;
+        const GFX_SET_WINDOW_TITLE: u32   = 1111;
+
+        let gfx_items = vec![
+            StdlibItem {
+                name: "Window".into(),
+                kind: StdlibItemKind::Class { class_id: win_cid },
+                ty: Ty::Class(win_cid),
+                native_id: 0,
+            },
+            StdlibItem {
+                name: "Event".into(),
+                kind: StdlibItemKind::Class { class_id: event_cid },
+                ty: Ty::Class(event_cid),
+                native_id: 0,
+            },
+            StdlibItem {
+                name: "init".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(vec![], i32_ty.clone()),
+                native_id: GFX_INIT,
+            },
+            StdlibItem {
+                name: "create_window".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(vec![str_ty.clone(), i32_ty.clone(), i32_ty.clone()], win_ty.clone()),
+                native_id: GFX_CREATE_WINDOW,
+            },
+            StdlibItem {
+                name: "close_window".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(vec![win_ty.clone()], unit_ty.clone()),
+                native_id: GFX_CLOSE_WINDOW,
+            },
+            StdlibItem {
+                name: "poll_event".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(vec![win_ty.clone()], opt_event_ty.clone()),
+                native_id: GFX_POLL_EVENT,
+            },
+            StdlibItem {
+                name: "clear".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(vec![win_ty.clone(), i32_ty.clone(), i32_ty.clone(), i32_ty.clone()], unit_ty.clone()),
+                native_id: GFX_CLEAR,
+            },
+            StdlibItem {
+                name: "present".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(vec![win_ty.clone()], unit_ty.clone()),
+                native_id: GFX_PRESENT,
+            },
+            StdlibItem {
+                name: "draw_rect".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(
+                    vec![
+                        win_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                    ],
+                    unit_ty.clone(),
+                ),
+                native_id: GFX_DRAW_RECT,
+            },
+            StdlibItem {
+                name: "draw_rect_outline".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(
+                    vec![
+                        win_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                    ],
+                    unit_ty.clone(),
+                ),
+                native_id: GFX_DRAW_RECT_OUTLINE,
+            },
+            StdlibItem {
+                name: "draw_line".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(
+                    vec![
+                        win_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                    ],
+                    unit_ty.clone(),
+                ),
+                native_id: GFX_DRAW_LINE,
+            },
+            StdlibItem {
+                name: "draw_point".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(
+                    vec![
+                        win_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                        i32_ty.clone(),
+                    ],
+                    unit_ty.clone(),
+                ),
+                native_id: GFX_DRAW_POINT,
+            },
+            StdlibItem {
+                name: "window_size".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(vec![win_ty.clone()], tuple_i32_i32_ty.clone()),
+                native_id: GFX_WINDOW_SIZE,
+            },
+            StdlibItem {
+                name: "set_window_title".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(vec![win_ty.clone(), str_ty.clone()], unit_ty.clone()),
+                native_id: GFX_SET_WINDOW_TITLE,
+            },
+        ];
+
+        let gfx_mod = StdlibModule {
+            name: "gfx".into(),
+            items: gfx_items,
+        };
+        self.stdlib_modules.insert("gfx".into(), gfx_mod);
     }
+
 
 
     // ─────────────────────────────────────────────────────────────────────

@@ -1115,6 +1115,38 @@ empirical findings, both honest data:
 
 No language/compiler changes; new pure-bench infrastructure only.
 
+## M52 — Core GFX Stdlib (Windows + Events + Drawing Primitives) (2026-05-24)
+
+Implemented the core `gfx` stdlib package in StrictPy. Exposes windowing, keyboard/mouse event polling, and 2D drawing primitives using native SDL2.
+
+Single agent, 1 commit, ~900 LOC Rust + ~150 LOC Spy, **zero STOP CRITERIA cuts**.
+
+### Surface
+
+- `gfx.init() -> i32` — Initialize SDL2 video + events. Idempotent.
+- `gfx.create_window(title: str, width: i32, height: i32) -> Window` — Create logical size window with hardware renderer.
+- `gfx.close_window(win: Window) -> None` — Destroy window + renderer.
+- `gfx.poll_event(win: Window) -> Event?` — Non-blocking event poll. Loops internally to discard unmapped/ignored events and return `NONE_SENTINEL` (maps to `none` in Spy) when empty, preventing `NullPointerError`.
+- `gfx.clear(win: Window, r: i32, g: i32, b: i32) -> None` — Fill background.
+- `gfx.present(win: Window) -> None` — Swap buffers.
+- `gfx.draw_rect(win, x, y, w, h, r, g, b, a)` / `gfx.draw_rect_outline(win, x, y, w, h, r, g, b, a)` — Fill/outline rectangles.
+- `gfx.draw_line(win, x1, y1, x2, y2, r, g, b, a)` — Draw line.
+- `gfx.draw_point(win, x, y, r, g, b, a)` — Draw point.
+- `gfx.window_size(win) -> Tuple[i32, i32]` — Window dimensions.
+- `gfx.set_window_title(win, title) -> None` — Update title.
+
+### Architecture — SDL2 + VM Integration
+
+Plumbed the native `sdl2` crate (with the `bundled` feature flag to compile libSDL2 hermetically using CMake) into `vm/Cargo.toml`. Since StrictPy does not support GC finalizers, explicit window close via `gfx.close_window(win)` is required.
+To enable headless verification (e.g. CI running without display servers), canvas builder configuration conditionally disables hardware acceleration and VSync if the `SDL_VIDEODRIVER` env var is set to `"dummy"`.
+
+### Tests + size
+
+- **Tests**: 1068 → 1073 (+5 net: 5 new VM integration tests in `vm/tests/m52_gfx_core.rs` covering window lifecycle, size, title, drawing primitives, and event polling).
+- **Examples**: 113 → 114 (+1: `examples/_smoke_window.spy`).
+- **Stdlib modules**: 38 → 39 (+1: `gfx`).
+- **Stdlib classes**: 19 → 21 (+2: `gfx.Window`, `gfx.Event`).
+
 ---
 
 ## M50a — `tabular.serve` HTTP transport + minimal browser-tab frontend (2026-05-24)

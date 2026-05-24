@@ -2218,6 +2218,20 @@ pub enum NativeFn {
     PatternSource      = 798,
     // 799 reserved for v0.4 PatternIterFinds (lazy iterator).
 
+    // ── 1100–1129: GFX core (M52) ───────────────────────────────────────
+    GfxInit             = 1100,
+    GfxCreateWindow     = 1101,
+    GfxCloseWindow      = 1102,
+    GfxPollEvent        = 1103,
+    GfxClear            = 1104,
+    GfxPresent          = 1105,
+    GfxDrawRect         = 1106,
+    GfxDrawRectOutline  = 1107,
+    GfxDrawLine         = 1108,
+    GfxDrawPoint        = 1109,
+    GfxWindowSize       = 1110,
+    GfxSetWindowTitle   = 1111,
+
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
     /// encounters. The VM treats this as a runtime error.
@@ -2921,6 +2935,19 @@ impl NativeFn {
             // ── M50a (tabular.serve HTTP transport) ──────────────
             1067 => Some(Self::M50aTabServe),
             1068 => Some(Self::M50aTabServeWithTimeout),
+            // ── M52 (GFX core) ───────────────────────────────────
+            1100 => Some(Self::GfxInit),
+            1101 => Some(Self::GfxCreateWindow),
+            1102 => Some(Self::GfxCloseWindow),
+            1103 => Some(Self::GfxPollEvent),
+            1104 => Some(Self::GfxClear),
+            1105 => Some(Self::GfxPresent),
+            1106 => Some(Self::GfxDrawRect),
+            1107 => Some(Self::GfxDrawRectOutline),
+            1108 => Some(Self::GfxDrawLine),
+            1109 => Some(Self::GfxDrawPoint),
+            1110 => Some(Self::GfxWindowSize),
+            1111 => Some(Self::GfxSetWindowTitle),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

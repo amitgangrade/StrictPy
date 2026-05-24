@@ -1,0 +1,42 @@
+import gfx
+
+fn main() -> i32:
+    # 1. Initialize gfx
+    gfx.init()
+
+    # 2. Create window
+    win: Window = gfx.create_window("StrictPy GFX Smoke Test", 320, 240)
+
+    # 3. Game loop
+    running: bool = True
+    while running:
+        # Poll event
+        ev: Event? = gfx.poll_event(win)
+        if ev is not none:
+            if ev.kind == "quit":
+                running = False
+            elif ev.kind == "key_down":
+                if ev.key == "escape":
+                    running = False
+
+        # Clear to light blue
+        gfx.clear(win, 0, 128, 255)
+
+        # Draw a red rectangle in the center
+        gfx.draw_rect(win, 110, 70, 100, 100, 255, 0, 0, 255)
+
+        # Draw a yellow outline rectangle around it
+        gfx.draw_rect_outline(win, 105, 65, 110, 110, 255, 255, 0, 255)
+
+        # Draw a green diagonal line
+        gfx.draw_line(win, 105, 65, 215, 175, 0, 255, 0, 255)
+
+        # Draw a white point
+        gfx.draw_point(win, 160, 120, 255, 255, 255, 255)
+
+        # Present the frame
+        gfx.present(win)
+
+    # 4. Close window
+    gfx.close_window(win)
+    return 0

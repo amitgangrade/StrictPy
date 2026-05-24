@@ -1,44 +1,60 @@
-# Session handoff — 2026-05-24 (post-M50a)
+# Session handoff — 2026-05-24 (post-M52)
 
 ## Read this FIRST in the next session
 
 Everything you need to resume is in:
 
 1. **This file** — current state + pending work + integration recipes
-2. **`docs/thesis/timeline.md`** — milestone-by-milestone narrative through M50a
-3. **`docs/thesis/stats/per_milestone.csv`** — quantitative ground truth (M0-M50a)
-4. **`THESIS.md`** + **`BLOG_POST.md`** — synthesis documents **(frozen at M34;
-   need an M40-M50a refresh pass — see "Priority queue" below; this is item #1)**
+2. **`docs/thesis/timeline.md`** — milestone-by-milestone narrative through M52
+3. **`docs/thesis/stats/per_milestone.csv`** — quantitative ground truth (M0-M52)
+4. **`THESIS.md`** + **`BLOG_POST.md`** — synthesis documents (frozen at M34)
 5. **`RELEASE_NOTES_v0.2.md`** — v0.2.0 freeze-point summary
 6. **`LANGUAGE_GUIDE.md`** — single source of truth for AI tools writing
-   StrictPy programs (refreshed post-M50a; §11 has gotchas through §11.39)
+   StrictPy programs (refreshed post-M52; §11 has gotchas through §11.40)
 7. **`bench/TABULAR_BENCH_REPORT.md`** + `bench/TABULAR_BENCH_REPORT_M49.md` —
-   the StrictPy vs pandas 3.0 comparison (M48 baseline + M49 categorical
-   codes optimization rerun showing ~70-194× speedup on the targeted cell)
+   the StrictPy vs pandas 3.0 comparison
 8. **Memory file**: `C:\Users\AG\.claude\projects\C--Users-AG-CascadeProjects-PythonCompiler\memory\project_strictpy.md`
 
 ## Current head
 
 - Branch: `main`
-- Latest commit: `e684608` (M50a E: tabular serve — demo + LANGUAGE_GUIDE update + agent report)
-- Tag: `v0.2.0` (commit `121483f`, pushed)
-- Tests passing on main: **1034** (+18 net over M49 — 16 new vm + 2 new demo)
+- Latest commit: (to be determined after commit)
+- Tests passing on main: **1073** (+39 net over M50a — 18 M50b + 16 M50c + 5 M52)
 
 ## Status snapshot
 
 | Metric | Value |
 |---|---:|
-| Milestones complete on main | M0–M50a |
+| Milestones complete on main | M0–M52 |
 | **v0.2.0 release** | **Tagged at M30 (commit 121483f)** |
-| Tests | 1034 / 0 fail / 1 ignored |
+| Tests | 1073 / 0 fail / 1 ignored |
 | Bugs | 35 / 35 / **0 deferred** |
-| Stdlib modules | 38 |
-| Stdlib classes | 19 (unchanged — M50a adds 2 new functions but no new classes) |
-| Example programs | **113** (+1 in M50a: `tabular_serve_demo.spy`) |
-| Lesson 1 streak | **32 consecutive clean-commit agents** (M28 → M50a) |
+| Stdlib modules | 39 (+1 in M52: `gfx`) |
+| Stdlib classes | 21 (+2 in M52: `gfx.Window`, `gfx.Event`) |
+| Example programs | **114** (+1 in M52: `_smoke_window.spy`) |
+| Lesson 1 streak | **35 consecutive clean-commit agents** (M28 → M52) |
 | Benchmark suites | 3 |
 
+## M52 — completed (single agent, 1 commit)
+
+| Agent | Scope | Var prefix | NativeFn IDs | Commits |
+|---|---|---|---|---|
+| **M52 GFX core** | SDL2 init, Window, Event, drawing primitives | `m52_` | 1100-1111 (12 new) | (committed) |
+
+### What shipped
+
+Implemented the core GFX stdlib package (`gfx`) in StrictPy. Exposes windowing, keyboard/mouse event polling, and 2D drawing primitives using native SDL2.
+- **SDL2 Context & Integration**: Plumbed native `sdl2` crate dependency (with `bundled` feature for hermetic builds).
+- **Single Window Only**: Opaque native pointer registered in the VM, supporting a single OS window at any given time.
+- **Event Polling**: Translation of SDL events to the `Event` class with fields (`kind`, `key`, `x`, `y`, `button`). Fixed a critical `NullPointerError` bug in event loop checks by looping until a mapped event is returned, or returning `NONE_SENTINEL` (which maps to `none` in StrictPy).
+- **Drawing Primitives**: Implemented `clear`, `present`, `draw_rect`, `draw_rect_outline`, `draw_line`, `draw_point`.
+- **Integration Tests**: 5 new integration tests in `vm/tests/m52_gfx_core.rs` (all passing under dummy video/audio drivers).
+- **Fresh Smoke Example**: Added `examples/_smoke_window.spy` demonstrating the core API and game loop.
+- **Fresh Documentation**: fresh entries in `LANGUAGE_GUIDE.md` §5 and gotchas §11.40.
+
 ## M50a — completed (single agent, 2 commits — Phases A-D combined + Phase E)
+
+
 
 | Agent | Scope | Var prefix | NativeFn IDs | Commits |
 |---|---|---|---|---|

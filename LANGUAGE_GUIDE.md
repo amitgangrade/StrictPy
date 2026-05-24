@@ -1,6 +1,6 @@
 # StrictPy — language guide for AI coding tools
 
-**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M50c (2026-05-24).
+**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M52 (2026-05-24).
 
 **Audience**: any AI coding tool (Claude, GPT, Gemini, etc.) being asked to write a StrictPy program. This file is the single source of truth for writing idiomatic StrictPy — you should NOT need to read the compiler source (`compiler/src/`) or VM source (`vm/src/`) to write correct code.
 
@@ -1628,6 +1628,66 @@ fnmatch.filter(names: List[str], pattern: str) -> List[str]
 fnmatch.translate(pattern: str) -> str        # glob → regex string
 ```
 
+### gfx (M52)
+
+The 2D graphics, windowing, and input package, built on native SDL2. Provides the core primitives to create game loops, draw rectangles/lines/pixels, and poll keyboard/mouse events.
+
+```python
+import gfx
+from gfx import Window, Event
+```
+
+#### Classes
+
+- `gfx.Window` — Opaque handle for an OS window and hardware-accelerated 2D renderer. Must be closed explicitly.
+- `gfx.Event` — Open class representing a user input event. Fields:
+  - `kind: str` — One of `"key_down"`, `"key_up"`, `"mouse_down"`, `"mouse_up"`, `"mouse_move"`, or `"quit"`.
+  - `key: str` — The key name for keyboard events (e.g. `"left"`, `"right"`, `"escape"`, `"space"`, `"enter"`, lowercase letters like `"a"`).
+  - `x: i32`, `y: i32` — Coordinates for mouse events.
+  - `button: i32` — Mouse button for mouse events (1 = left, 2 = middle, 3 = right).
+
+#### Functions
+
+```python
+gfx.init() -> i32
+# Initialize SDL2 video and events subsystems. Idempotent. Returns 0 on success.
+
+gfx.create_window(title: str, width: i32, height: i32) -> Window
+# Create an OS window with logical width and height.
+
+gfx.close_window(win: Window) -> None
+# Destroy the window and its renderer. Calling other gfx functions with this window raises ValueError.
+
+gfx.poll_event(win: Window) -> Event?
+# Return the next input event, or none if the queue is empty. Non-blocking.
+
+gfx.clear(win: Window, r: i32, g: i32, b: i32) -> None
+# Fill the window with a solid color.
+
+gfx.present(win: Window) -> None
+# Flip the back buffer to the screen. Call once per frame after drawing.
+
+gfx.draw_rect(win: Window, x: i32, y: i32, w: i32, h: i32, r: i32, g: i32, b: i32, a: i32) -> None
+# Draw a filled rectangle with transparency (alpha: 0..255).
+
+gfx.draw_rect_outline(win: Window, x: i32, y: i32, w: i32, h: i32, r: i32, g: i32, b: i32, a: i32) -> None
+# Draw a 1-pixel rectangle outline.
+
+gfx.draw_line(win: Window, x1: i32, y1: i32, x2: i32, y2: i32, r: i32, g: i32, b: i32, a: i32) -> None
+# Draw a 1-pixel line segment from (x1, y1) to (x2, y2).
+
+gfx.draw_point(win: Window, x: i32, y: i32, r: i32, g: i32, b: i32, a: i32) -> None
+# Draw a single pixel.
+
+gfx.window_size(win: Window) -> Tuple[i32, i32]
+# Returns (width, height) tuple of the window.
+
+gfx.set_window_title(win: Window, title: str) -> None
+# Change the window title dynamically.
+```
+
+See `examples/_smoke_window.spy` for a minimal game loop with input handling.
+
 ### gzip / zlib / bz2 (M27 P3c-C)
 
 ```python
@@ -2660,6 +2720,15 @@ The fallback (string-hash) is still correct — it just doesn't get the codes-ha
 - **Index columns are not click-sortable in v1** — only regular column headers wire to `/api/sort`.  Workaround: clear the current view via "Reset to primary" + re-group with `sort:true`.
 
 The server is **single-threaded** — one connection at a time.  Two simultaneous browser tabs hitting it will see the second tab queue behind the first.  This is fine for interactive use and tests; production-grade concurrency is M29's framework.
+
+### 11.40 `gfx` deliberate scope-down (post-M52)
+
+- **Single window only:** The `gfx` module only supports one window at a time to simplify event loop routing.
+- **Explicit window disposal required:** The garbage collector does not support finalization hooks. Thus, calling `gfx.close_window(win)` is required to avoid OS resource leaks.
+- **No HiDPI / retina scaling:** HiDPI scaling is disabled by default to keep the drawing canvas logical pixels consistent on all systems.
+- **No images, audio, or fonts in M52:** Image loading, text rendering, and audio playback are deferred to later milestones (M53 and M54).
+- **No gamepad/joystick support:** Controller inputs are not supported in M52.
+- **Testing requires dummy drivers:** For headless verification (such as in CI), you must set `SDL_VIDEODRIVER=dummy` and `SDL_AUDIODRIVER=dummy` in the environment before invoking SDL2.
 
 ---
 
