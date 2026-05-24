@@ -20908,11 +20908,12 @@ impl M50aServerState {
 }
 
 /// Bundled minimal HTML+JS frontend.  M50a shipped the original; M50b
-/// adds: sortable column headers (click), composite AND/OR filters
-/// (add/remove clauses), CSV download, "forget derived df" cleanup,
-/// virtual-scroll-style DOM-node recycling for frames >10K rows, and
-/// CSS polish.  Categorical cells now render as their resolved string
-/// (server change).  See LANGUAGE_GUIDE.md §11.39 for caveats.
+/// added sortable column headers, composite AND/OR filters, CSV
+/// download, forget cleanup, DOM-node recycling, and CSS polish.
+/// M50c adds: an interactive Pivot panel (index/columns/values/aggfunc),
+/// canvas-based chart rendering (bar/line/histogram on loaded rows),
+/// and a "sort" checkbox in the group-by panel.  See LANGUAGE_GUIDE.md
+/// §11.39 for the remaining v1 scope-down list.
 const M50A_BUNDLED_HTML: &str = r#"<!DOCTYPE html>
 <html>
 <head>
@@ -21002,6 +21003,14 @@ table#data tbody td {
 table#data tbody tr:nth-child(even) td { background: #fafafa; }
 table#data tbody tr:hover td { background: #eff6ff; }
 td.null { color: #9ca3af; font-style: italic; }
+th.idx, td.idx {
+  background: #eef2ff !important;
+  color: #1e3a8a;
+  font-weight: 500;
+  border-right: 2px solid #c7d2fe;
+}
+th.idx { background: #e0e7ff !important; }
+td.idx.null { color: #9ca3af; font-weight: normal; font-style: italic; }
 
 .clause-row { display: flex; gap: 4px; align-items: center; margin-bottom: 3px; }
 .clause-row .x {
@@ -21033,6 +21042,15 @@ td.null { color: #9ca3af; font-style: italic; }
   <h3>Group by</h3>
   <div class="row" id="groupby-bar"></div>
 </div>
+<div class="panel" id="pivot-panel">
+  <h3>Pivot</h3>
+  <div class="row" id="pivot-bar"></div>
+</div>
+<div class="panel" id="chart-panel">
+  <h3>Chart (renders the rows currently loaded into the table)</h3>
+  <div class="row" id="chart-bar"></div>
+  <canvas id="chart-canvas" width="800" height="240" style="background:#fff;border:1px solid #e5e7eb;display:none;"></canvas>
+</div>
 <div id="status"></div>
 <div id="table-wrap">
   <table id="data"><thead></thead><tbody></tbody></table>
@@ -21063,10 +21081,24 @@ td.null { color: #9ca3af; font-style: italic; }
   }
 
   // ── Render: table header (sortable) ───────────────────────────────
+  // M50c: prepend index-column headers (with a distinct .idx class)
+  // before the regular column headers.  Index columns are not
+  // click-sortable in v1 (would require a separate sort_index endpoint
+  // wired through the bundled HTML; the server already supports it via
+  // groupby's sort flag for the common case).
   function renderHeader() {
     var thead = document.querySelector('#data thead');
     thead.innerHTML = '';
     var tr = document.createElement('tr');
+    var idxNames = (m50aSchema && m50aSchema.index_names) || [];
+    var idxDtypes = (m50aSchema && m50aSchema.index_dtypes) || [];
+    for (var i = 0; i < idxNames.length; i++) {
+      var th = document.createElement('th');
+      th.className = 'idx';
+      var label = idxNames[i] && idxNames[i].length > 0 ? idxNames[i] : ('idx' + i);
+      th.textContent = label + ' [' + (idxDtypes[i] || '?') + ']';
+      tr.appendChild(th);
+    }
     for (var i = 0; i < m50aSchema.names.length; i++) {
       var th = document.createElement('th');
       var name = m50aSchema.names[i];
@@ -21089,7 +21121,11 @@ td.null { color: #9ca3af; font-style: italic; }
   }
 
   // ── Render: row append + DOM-node recycle ─────────────────────────
-  function renderRows(rows, append) {
+  // M50c: rows now arrive with a parallel `index` array per row when
+  // the frame has an index/multiindex.  Render those first with a
+  // distinct .idx class so the keys stay visible for group_by/pivot
+  // results.
+  function renderRows(rows, index, append) {
     var tbody = document.querySelector('#data tbody');
     if (!append) {
       tbody.innerHTML = '';
@@ -21097,6 +21133,14 @@ td.null { color: #9ca3af; font-style: italic; }
     }
     for (var i = 0; i < rows.length; i++) {
       var tr = document.createElement('tr');
+      var idxRow = (index && index[i]) || [];
+      for (var k = 0; k < idxRow.length; k++) {
+        var td = document.createElement('td'); td.className = 'idx';
+        var v = idxRow[k];
+        if (v === null) { td.textContent = 'null'; td.className = 'idx null'; }
+        else { td.textContent = String(v); }
+        tr.appendChild(td);
+      }
       for (var j = 0; j < rows[i].length; j++) {
         var td = document.createElement('td');
         var v = rows[i][j];
@@ -21180,13 +21224,253 @@ td.null { color: #9ca3af; font-style: italic; }
     for (var k = 0; k < ops.length; k++) {
       var o = document.createElement('option'); o.value = ops[k]; o.textContent = ops[k]; aggOp.appendChild(o);
     }
+    // M50c: sort-by-group-key checkbox.
+    var sortLbl = document.createElement('label'); sortLbl.style.marginLeft = '8px';
+    var sortCb = document.createElement('input'); sortCb.type = 'checkbox'; sortCb.id = 'gby-sort';
+    sortLbl.appendChild(sortCb); sortLbl.appendChild(document.createTextNode(' sort by key'));
     var btn = document.createElement('button'); btn.textContent = 'Group';
     btn.onclick = function() {
       var by = [];
       for (var i = 0; i < checks.length; i++) if (checks[i].checked) by.push(checks[i].value);
-      submitGroupby(by, aggCol.value, aggOp.value);
+      submitGroupby(by, aggCol.value, aggOp.value, sortCb.checked);
     };
-    bar.appendChild(aggCol); bar.appendChild(aggOp); bar.appendChild(btn);
+    bar.appendChild(aggCol); bar.appendChild(aggOp); bar.appendChild(sortLbl); bar.appendChild(btn);
+  }
+
+  // ── Render: pivot panel (M50c) ────────────────────────────────────
+  function renderPivotBar() {
+    var bar = document.getElementById('pivot-bar');
+    bar.innerHTML = '';
+    function mkColSel(label) {
+      bar.appendChild(document.createTextNode(label + ': '));
+      var sel = document.createElement('select');
+      for (var i = 0; i < m50aSchema.names.length; i++) {
+        var opt = document.createElement('option');
+        opt.value = m50aSchema.names[i]; opt.textContent = m50aSchema.names[i];
+        sel.appendChild(opt);
+      }
+      bar.appendChild(sel);
+      bar.appendChild(document.createTextNode(' '));
+      return sel;
+    }
+    var idx = mkColSel('index');
+    var cols = mkColSel('columns');
+    var vals = mkColSel('values');
+    bar.appendChild(document.createTextNode('aggfunc: '));
+    var agg = document.createElement('select');
+    var ops = ['sum','mean','min','max','count'];
+    for (var k = 0; k < ops.length; k++) {
+      var o = document.createElement('option'); o.value = ops[k]; o.textContent = ops[k]; agg.appendChild(o);
+    }
+    bar.appendChild(agg);
+    var btn = document.createElement('button'); btn.textContent = 'Pivot';
+    btn.style.marginLeft = '6px';
+    btn.onclick = function() {
+      submitPivot(idx.value, cols.value, vals.value, agg.value);
+    };
+    bar.appendChild(btn);
+  }
+
+  // ── Render: chart panel (M50c) ────────────────────────────────────
+  // Renders directly off the rows currently in the DOM table — no
+  // extra API roundtrip.  Three chart types:
+  //   bar       — categorical X (any dtype) + numeric Y; one bar per row
+  //   line      — numeric X (or row index) + numeric Y; lines through rows
+  //   histogram — single numeric column, binned into 20 buckets
+  function renderChartBar() {
+    var bar = document.getElementById('chart-bar');
+    bar.innerHTML = '';
+    bar.appendChild(document.createTextNode('Type: '));
+    var typeSel = document.createElement('select');
+    [['bar','bar'],['line','line'],['histogram','histogram']].forEach(function(p){
+      var o = document.createElement('option'); o.value = p[0]; o.textContent = p[1]; typeSel.appendChild(o);
+    });
+    bar.appendChild(typeSel);
+    bar.appendChild(document.createTextNode(' X: '));
+    var xSel = document.createElement('select');
+    for (var i = 0; i < m50aSchema.names.length; i++) {
+      var o = document.createElement('option'); o.value = m50aSchema.names[i]; o.textContent = m50aSchema.names[i]; xSel.appendChild(o);
+    }
+    bar.appendChild(xSel);
+    bar.appendChild(document.createTextNode(' Y: '));
+    var ySel = document.createElement('select');
+    for (var i = 0; i < m50aSchema.names.length; i++) {
+      var o = document.createElement('option'); o.value = m50aSchema.names[i]; o.textContent = m50aSchema.names[i]; ySel.appendChild(o);
+    }
+    bar.appendChild(ySel);
+    var btn = document.createElement('button'); btn.textContent = 'Render';
+    btn.style.marginLeft = '6px';
+    btn.onclick = function() {
+      renderChart(typeSel.value, xSel.value, ySel.value);
+    };
+    var hide = document.createElement('button'); hide.className = 'secondary'; hide.textContent = 'Hide';
+    hide.style.marginLeft = '4px';
+    hide.onclick = function() { document.getElementById('chart-canvas').style.display = 'none'; };
+    bar.appendChild(btn); bar.appendChild(hide);
+  }
+
+  function readVisibleRows() {
+    // Walk the current tbody and extract cell text per row.  The
+    // status bar already tells us how many rows are loaded; this is
+    // simply what the user can SEE.  For million-row frames they
+    // should scroll-load more before charting.
+    var tbody = document.querySelector('#data tbody');
+    var rows = [];
+    var trs = tbody.children;
+    for (var i = 0; i < trs.length; i++) {
+      var row = [];
+      var tds = trs[i].children;
+      for (var j = 0; j < tds.length; j++) row.push(tds[j].textContent);
+      rows.push(row);
+    }
+    return rows;
+  }
+
+  function colIndex(name) { return m50aSchema ? m50aSchema.names.indexOf(name) : -1; }
+
+  function parseNumOrNull(s) {
+    if (s === 'null' || s === '' || s == null) return null;
+    var v = parseFloat(s);
+    return isNaN(v) ? null : v;
+  }
+
+  function renderChart(kind, xCol, yCol) {
+    var rows = readVisibleRows();
+    var c = document.getElementById('chart-canvas');
+    c.style.display = 'block';
+    var ctx = c.getContext('2d');
+    ctx.clearRect(0, 0, c.width, c.height);
+    if (rows.length === 0) {
+      ctx.fillStyle = '#9ca3af'; ctx.font = '14px sans-serif';
+      ctx.fillText('No rows loaded.', 12, 24);
+      return;
+    }
+    if (kind === 'histogram') {
+      drawHistogram(ctx, rows, colIndex(xCol));
+    } else if (kind === 'bar') {
+      drawBar(ctx, rows, colIndex(xCol), colIndex(yCol));
+    } else if (kind === 'line') {
+      drawLine(ctx, rows, colIndex(xCol), colIndex(yCol));
+    }
+  }
+
+  function axisFrame(ctx) {
+    var W = ctx.canvas.width, H = ctx.canvas.height;
+    var pad = {l: 40, r: 10, t: 10, b: 30};
+    ctx.strokeStyle = '#9ca3af'; ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(pad.l, pad.t); ctx.lineTo(pad.l, H - pad.b);
+    ctx.lineTo(W - pad.r, H - pad.b);
+    ctx.stroke();
+    return {W: W, H: H, pad: pad,
+            innerW: W - pad.l - pad.r, innerH: H - pad.t - pad.b};
+  }
+
+  function drawHistogram(ctx, rows, xi) {
+    if (xi < 0) return;
+    var vals = [];
+    for (var i = 0; i < rows.length; i++) {
+      var v = parseNumOrNull(rows[i][xi]);
+      if (v != null) vals.push(v);
+    }
+    if (vals.length === 0) return;
+    var lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
+    if (lo === hi) { hi = lo + 1; }
+    var nbins = 20;
+    var bw = (hi - lo) / nbins;
+    var counts = new Array(nbins).fill(0);
+    for (var i = 0; i < vals.length; i++) {
+      var k = Math.min(nbins - 1, Math.floor((vals[i] - lo) / bw));
+      counts[k] += 1;
+    }
+    var f = axisFrame(ctx);
+    var maxC = Math.max.apply(null, counts);
+    if (maxC === 0) return;
+    var barW = f.innerW / nbins;
+    ctx.fillStyle = '#2563eb';
+    for (var i = 0; i < nbins; i++) {
+      var h = (counts[i] / maxC) * f.innerH;
+      var x = f.pad.l + i * barW;
+      var y = f.H - f.pad.b - h;
+      ctx.fillRect(x + 1, y, Math.max(1, barW - 2), h);
+    }
+    // Axis labels.
+    ctx.fillStyle = '#374151'; ctx.font = '10px sans-serif';
+    ctx.fillText(lo.toFixed(2), f.pad.l, f.H - 12);
+    ctx.fillText(hi.toFixed(2), f.W - f.pad.r - 40, f.H - 12);
+    ctx.fillText('0', 8, f.H - f.pad.b);
+    ctx.fillText(String(maxC), 8, f.pad.t + 10);
+  }
+
+  function drawBar(ctx, rows, xi, yi) {
+    if (xi < 0 || yi < 0) return;
+    var pairs = [];
+    for (var i = 0; i < rows.length; i++) {
+      var y = parseNumOrNull(rows[i][yi]);
+      if (y != null) pairs.push({x: rows[i][xi], y: y});
+    }
+    if (pairs.length === 0) return;
+    var f = axisFrame(ctx);
+    var ys = pairs.map(function(p){ return p.y; });
+    var maxY = Math.max.apply(null, ys);
+    var minY = Math.min.apply(null, ys); if (minY > 0) minY = 0;
+    if (maxY === minY) { maxY = minY + 1; }
+    var n = pairs.length;
+    var barW = f.innerW / n;
+    ctx.fillStyle = '#16a34a';
+    for (var i = 0; i < n; i++) {
+      var v = (pairs[i].y - minY) / (maxY - minY);
+      var h = v * f.innerH;
+      var x = f.pad.l + i * barW;
+      var y = f.H - f.pad.b - h;
+      ctx.fillRect(x + 1, y, Math.max(1, barW - 2), h);
+    }
+    ctx.fillStyle = '#374151'; ctx.font = '10px sans-serif';
+    ctx.fillText('0', 8, f.H - f.pad.b);
+    ctx.fillText(String(maxY.toFixed(2)), 8, f.pad.t + 10);
+    if (n <= 30) {
+      for (var i = 0; i < n; i++) {
+        var x = f.pad.l + i * barW + barW/2;
+        ctx.save();
+        ctx.translate(x, f.H - f.pad.b + 4);
+        ctx.rotate(-Math.PI/4);
+        ctx.fillText(String(pairs[i].x).substr(0, 8), 0, 8);
+        ctx.restore();
+      }
+    }
+  }
+
+  function drawLine(ctx, rows, xi, yi) {
+    if (yi < 0) return;
+    var pts = [];
+    for (var i = 0; i < rows.length; i++) {
+      var y = parseNumOrNull(rows[i][yi]);
+      if (y == null) continue;
+      var x = (xi >= 0) ? parseNumOrNull(rows[i][xi]) : i;
+      if (x == null) continue;
+      pts.push({x: x, y: y});
+    }
+    if (pts.length < 2) return;
+    var f = axisFrame(ctx);
+    var xs = pts.map(function(p){ return p.x; });
+    var ys = pts.map(function(p){ return p.y; });
+    var xLo = Math.min.apply(null, xs), xHi = Math.max.apply(null, xs);
+    var yLo = Math.min.apply(null, ys), yHi = Math.max.apply(null, ys);
+    if (xHi === xLo) xHi = xLo + 1;
+    if (yHi === yLo) yHi = yLo + 1;
+    ctx.strokeStyle = '#dc2626'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (var i = 0; i < pts.length; i++) {
+      var px = f.pad.l + ((pts[i].x - xLo) / (xHi - xLo)) * f.innerW;
+      var py = f.H - f.pad.b - ((pts[i].y - yLo) / (yHi - yLo)) * f.innerH;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+    ctx.fillStyle = '#374151'; ctx.font = '10px sans-serif';
+    ctx.fillText(yLo.toFixed(2), 8, f.H - f.pad.b);
+    ctx.fillText(yHi.toFixed(2), 8, f.pad.t + 10);
+    ctx.fillText(xLo.toFixed(2), f.pad.l, f.H - 12);
+    ctx.fillText(xHi.toFixed(2), f.W - f.pad.r - 40, f.H - 12);
   }
 
   function setStatus(text) { document.getElementById('status').textContent = text; }
@@ -21216,11 +21500,23 @@ td.null { color: #9ca3af; font-style: italic; }
     });
   }
 
-  function submitGroupby(by, aggCol, aggOp) {
+  function submitGroupby(by, aggCol, aggOp, sort) {
     if (by.length === 0) { setStatus('Pick at least one group-by column.'); return; }
     var agg = {}; agg[aggCol] = aggOp;
-    apiPost('/api/groupby', {df: m50aCurDf, by: by, agg: agg}).then(function(r) {
+    apiPost('/api/groupby', {df: m50aCurDf, by: by, agg: agg, sort: !!sort}).then(function(r) {
       if (r.error) { setStatus('Groupby error: ' + r.error); return; }
+      m50aCurDf = r.df;
+      m50aSort = null;
+      reload();
+    });
+  }
+
+  // ── M50c: pivot submit ─────────────────────────────────────────────
+  function submitPivot(idx, cols, vals, agg) {
+    apiPost('/api/pivot', {
+      df: m50aCurDf, index: idx, columns: cols, values: vals, aggfunc: agg
+    }).then(function(r) {
+      if (r.error) { setStatus('Pivot error: ' + r.error); return; }
       m50aCurDf = r.df;
       m50aSort = null;
       reload();
@@ -21263,10 +21559,13 @@ td.null { color: #9ca3af; font-style: italic; }
   // ── Schema reload + lazy row pagination ───────────────────────────
   function reload() {
     api('/api/schema?df=' + m50aCurDf).then(function(s) {
-      m50aSchema = s; renderHeader(); renderFilterPanel(); renderGroupbyBar();
+      m50aSchema = s;
+      renderHeader(); renderFilterPanel(); renderGroupbyBar();
+      renderPivotBar(); renderChartBar();
       m50aRowsLoaded = 0;
       document.querySelector('#data tbody').innerHTML = '';
       document.getElementById('df-badge').textContent = '· df=' + m50aCurDf;
+      document.getElementById('chart-canvas').style.display = 'none';
       fetchMore();
     });
   }
@@ -21279,7 +21578,7 @@ td.null { color: #9ca3af; font-style: italic; }
     var start = m50aRowsLoaded;
     var stop = Math.min(m50aSchema.nrows, start + m50aPageSize);
     api('/api/rows?df=' + m50aCurDf + '&start=' + start + '&stop=' + stop).then(function(r) {
-      renderRows(r.rows, start > 0);
+      renderRows(r.rows, r.index, start > 0);
       m50aRowsLoaded = stop;
       setStatus('df=' + m50aCurDf + ' rows=' + m50aRowsLoaded + '/' + m50aSchema.nrows
                 + (m50aDomStartRow > 0 ? ' (DOM[' + m50aDomStartRow + ':' + m50aRowsLoaded + '])' : ''));
@@ -21607,6 +21906,10 @@ fn m50a_handle_request(
     if m50a_req.m50a_method == "POST" && m50a_path == "/api/forget" {
         return m50a_handle_forget(m50a_state, &m50a_req.m50a_body);
     }
+    // ── M50c: pivot endpoint ──────────────────────────────────────────
+    if m50a_req.m50a_method == "POST" && m50a_path == "/api/pivot" {
+        return m50a_handle_pivot(interp, m50a_state, &m50a_req.m50a_body);
+    }
     M50aResponse::text(404, "not found".into())
 }
 
@@ -21687,7 +21990,48 @@ fn m50a_dtype_for_class(m50a_class: &str) -> &'static str {
     }
 }
 
-/// Serialize a DataFrame's schema as JSON.
+/// Resolve the per-level index column pointers + names for a frame.
+/// Returns an empty Vec for a RangeIndex frame; a single-element Vec
+/// for a single-col index (M41); N elements for a MultiIndex (M44).
+/// M50c added this so /api/rows and /api/schema can surface index
+/// data instead of dropping it.
+fn m50a_index_levels(m50a_df: u64) -> Vec<(u64, String)> {
+    let (single_idx_ptr, single_name_ptr) = m41_df_index_fields(m50a_df);
+    let (multi_levels_ptr, multi_names_ptr) = m44_df_multiindex_fields(m50a_df);
+    if multi_levels_ptr != 0 {
+        // Walk the per-level lists.
+        let mut out = Vec::new();
+        unsafe {
+            let levels = multi_levels_ptr as *const crate::object::ListRepr;
+            let n = (*levels).length;
+            let data = (*levels).data as *const u64;
+            let names = if multi_names_ptr != 0 {
+                m37_read_list_str_lst(multi_names_ptr as *const crate::object::ListRepr)
+            } else {
+                Vec::new()
+            };
+            for i in 0..n {
+                let cp = std::ptr::read_unaligned(data.add(i));
+                let name = names.get(i).cloned().unwrap_or_default();
+                out.push((cp, name));
+            }
+        }
+        out
+    } else if single_idx_ptr != 0 {
+        let name = if single_name_ptr != 0 {
+            unsafe { read_str(single_name_ptr as *const StringRepr) }
+        } else {
+            String::new()
+        };
+        vec![(single_idx_ptr, name)]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Serialize a DataFrame's schema as JSON.  M50c additions:
+/// `index_names` and `index_dtypes` arrays surface per-level info
+/// the frontend uses to render an index-column prefix.
 fn m50a_serialize_schema(m50a_df: u64) -> String {
     let (m50a_names_lst, m50a_cols_lst, m50a_nrows) = m37_df_fields(m50a_df);
     let m50a_names = m37_read_list_str_lst(m50a_names_lst);
@@ -21723,6 +22067,15 @@ fn m50a_serialize_schema(m50a_df: u64) -> String {
         0
     };
 
+    // M50c: per-level index names + dtypes for frontend rendering.
+    let m50a_index_levels = m50a_index_levels(m50a_df);
+    let m50a_index_names: Vec<String> =
+        m50a_index_levels.iter().map(|(_, n)| n.clone()).collect();
+    let m50a_index_dtypes: Vec<String> = m50a_index_levels
+        .iter()
+        .map(|(ptr, _)| m50a_dtype_for_class(&m50a_col_class_name(*ptr)).to_string())
+        .collect();
+
     let mut out = String::new();
     out.push('{');
     out.push_str("\"names\":[");
@@ -21743,7 +22096,17 @@ fn m50a_serialize_schema(m50a_df: u64) -> String {
     out.push_str(&m50a_json_escape_str(&m50a_index_name));
     out.push_str(",\"index_nlevels\":");
     out.push_str(&m50a_index_nlevels.to_string());
-    out.push('}');
+    out.push_str(",\"index_names\":[");
+    for (i, n) in m50a_index_names.iter().enumerate() {
+        if i > 0 { out.push(','); }
+        out.push_str(&m50a_json_escape_str(n));
+    }
+    out.push_str("],\"index_dtypes\":[");
+    for (i, d) in m50a_index_dtypes.iter().enumerate() {
+        if i > 0 { out.push(','); }
+        out.push_str(&m50a_json_escape_str(d));
+    }
+    out.push_str("]}");
     out
 }
 
@@ -21805,14 +22168,16 @@ fn m50a_column_cells_as_json(m50a_col_ptr: u64) -> Vec<String> {
 }
 
 /// Serialize a row-range of a DataFrame as JSON.  `start` and `stop`
-/// are clamped to `[0, nrows]`.
+/// are clamped to `[0, nrows]`.  M50c addition: emits an `index`
+/// parallel array (one entry per row, each entry is a list of N level
+/// values) when the frame has an index or multiindex.  Empty list per
+/// row when no index is set.
 fn m50a_serialize_rows(m50a_df: u64, m50a_start: i64, m50a_stop: i64) -> String {
     let (_, m50a_cols_lst, m50a_nrows) = m37_df_fields(m50a_df);
     let m50a_start = m50a_start.max(0).min(m50a_nrows);
     let m50a_stop = m50a_stop.max(m50a_start).min(m50a_nrows);
 
-    // Pre-render each column's cells once; this avoids re-reading the
-    // ListRepr per row.
+    // Pre-render each regular column's cells once.
     let mut m50a_by_col: Vec<Vec<String>> = Vec::new();
     if !m50a_cols_lst.is_null() {
         unsafe {
@@ -21824,6 +22189,12 @@ fn m50a_serialize_rows(m50a_df: u64, m50a_start: i64, m50a_stop: i64) -> String 
             }
         }
     }
+    // M50c: pre-render each index level's cells once.
+    let m50a_idx_levels = m50a_index_levels(m50a_df);
+    let m50a_by_idx: Vec<Vec<String>> = m50a_idx_levels
+        .iter()
+        .map(|(ptr, _)| m50a_column_cells_as_json(*ptr))
+        .collect();
 
     let mut out = String::new();
     out.push_str("{\"start\":");
@@ -21841,6 +22212,18 @@ fn m50a_serialize_rows(m50a_df: u64, m50a_start: i64, m50a_stop: i64) -> String 
         for (c, col_cells) in m50a_by_col.iter().enumerate() {
             if c > 0 { out.push(','); }
             out.push_str(col_cells.get(i as usize).map(|s| s.as_str()).unwrap_or("null"));
+        }
+        out.push(']');
+    }
+    out.push_str("],\"index\":[");
+    let mut first_row = true;
+    for i in m50a_start..m50a_stop {
+        if !first_row { out.push(','); }
+        first_row = false;
+        out.push('[');
+        for (c, lvl_cells) in m50a_by_idx.iter().enumerate() {
+            if c > 0 { out.push(','); }
+            out.push_str(lvl_cells.get(i as usize).map(|s| s.as_str()).unwrap_or("null"));
         }
         out.push(']');
     }
@@ -22164,7 +22547,9 @@ fn m50a_apply_filter(
     Ok(derived)
 }
 
-/// POST /api/groupby handler.
+/// POST /api/groupby handler.  M50c: accepts an optional `"sort":true`
+/// to chain `df.sort_by(first_by_col, ascending=true)` onto the agg
+/// result; otherwise group order is hash-iteration (undefined).
 fn m50a_handle_groupby(
     interp: &mut Interpreter,
     m50a_state: &mut M50aServerState,
@@ -22188,19 +22573,48 @@ fn m50a_handle_groupby(
     if m50a_agg.is_empty() {
         return M50aResponse::json(400, m50a_err_json("agg must be non-empty"));
     }
+    let m50a_sort: bool = match m50a_parsed.get("sort") {
+        Some(v) if v.starts_with("STR:") => &v[4..] == "true",
+        Some(v) => v == "true" || v == "1",
+        None => false,
+    };
 
     let m50a_df = match m50a_state.lookup(m50a_id) {
         Some(d) => d,
         None => return M50aResponse::json(404, m50a_err_json(&format!("unknown df id {}", m50a_id))),
     };
-    match m50a_apply_groupby(interp, m50a_df, &m50a_by, &m50a_agg) {
-        Ok(derived) => {
-            let new_id = m50a_state.register(derived);
-            let (_, _, nrows) = m37_df_fields(derived);
-            M50aResponse::json(200, format!("{{\"df\":{},\"nrows\":{}}}", new_id, nrows))
-        }
-        Err(msg) => M50aResponse::json(400, m50a_err_json(&msg)),
-    }
+    let result = match m50a_apply_groupby(interp, m50a_df, &m50a_by, &m50a_agg) {
+        Ok(d) => d,
+        Err(msg) => return M50aResponse::json(400, m50a_err_json(&msg)),
+    };
+    // M50c: optional sort by the group keys.  group_by's output shape
+    // depends on the number of keys:
+    //   - single-col group_by promotes its key to the index (M43)      → sort_index
+    //   - multi-col  group_by promotes keys to a MultiIndex (M44)      → sort_index_multi
+    //   - (fallback path, in case some future shape keeps keys as
+    //      regular columns)                                            → sort_by(keys[0])
+    // Detect by inspecting the result's index fields and dispatch.
+    let final_df = if m50a_sort {
+        let (single_idx_ptr, _) = m41_df_index_fields(result);
+        let (multi_levels_ptr, _) = m44_df_multiindex_fields(result);
+        let asc: u64 = 1;
+        let sorted = if multi_levels_ptr != 0 {
+            m44_df_sort_index_multi(interp, &[result, asc]).ok()
+        } else if single_idx_ptr != 0 {
+            m41_df_sort_index(interp, &[result, asc]).ok()
+        } else {
+            let col_sp = interp.alloc_string(&m50a_by[0]) as u64;
+            m37_df_sort_by(interp, &[result, col_sp, asc]).ok()
+        };
+        // Whichever path we took, fall back to the unsorted result on
+        // failure rather than 400'ing the whole request.
+        sorted.unwrap_or(result)
+    } else {
+        result
+    };
+    let new_id = m50a_state.register(final_df);
+    let (_, _, nrows) = m37_df_fields(final_df);
+    M50aResponse::json(200, format!("{{\"df\":{},\"nrows\":{}}}", new_id, nrows))
 }
 
 /// Run df.group_by(by).agg(specs).  Reuses the M38 handlers by
@@ -22611,6 +23025,85 @@ fn m50a_handle_filter_multi(
             M50aResponse::json(200, format!("{{\"df\":{},\"nrows\":{}}}", new_id, nrows))
         }
         Err(msg) => M50aResponse::json(400, m50a_err_json(&msg)),
+    }
+}
+
+// ── M50c: pivot endpoint ─────────────────────────────────────────────
+//
+// Server-side wrapper around the existing m41_df_pivot_table.  Wire
+// shape:
+//   POST /api/pivot
+//        {"df":N, "index":"X", "columns":"Y", "values":"Z",
+//         "aggfunc":"sum"|"mean"|"min"|"max"|"count"}
+//                                → {"df":new_id, "nrows":N}
+//
+// Validates column existence + aggfunc vocabulary before dispatch so
+// the error message lands in the M50a {error: ...} JSON envelope
+// rather than the raw VmError-stringified shape.
+
+/// POST /api/pivot handler.
+fn m50a_handle_pivot(
+    interp: &mut Interpreter,
+    m50a_state: &mut M50aServerState,
+    m50a_body: &str,
+) -> M50aResponse {
+    let m50a_parsed = m50a_parse_simple_json(m50a_body);
+    let m50a_id = m50a_parsed.get("df").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+    let get_str = |k: &str| -> Option<String> {
+        match m50a_parsed.get(k) {
+            Some(s) if s.starts_with("STR:") => Some(s[4..].to_string()),
+            _ => None,
+        }
+    };
+    let index_col = match get_str("index") {
+        Some(s) => s,
+        None => return M50aResponse::json(400, m50a_err_json("missing index")),
+    };
+    let columns_col = match get_str("columns") {
+        Some(s) => s,
+        None => return M50aResponse::json(400, m50a_err_json("missing columns")),
+    };
+    let values_col = match get_str("values") {
+        Some(s) => s,
+        None => return M50aResponse::json(400, m50a_err_json("missing values")),
+    };
+    let aggfunc = match get_str("aggfunc") {
+        Some(s) => s,
+        None => return M50aResponse::json(400, m50a_err_json("missing aggfunc")),
+    };
+    if !["sum", "mean", "min", "max", "count"].contains(&aggfunc.as_str()) {
+        return M50aResponse::json(400, m50a_err_json(&format!(
+            "aggfunc must be sum|mean|min|max|count, got {:?}", aggfunc
+        )));
+    }
+    let m50a_df = match m50a_state.lookup(m50a_id) {
+        Some(d) => d,
+        None => return M50aResponse::json(404, m50a_err_json(&format!("unknown df id {}", m50a_id))),
+    };
+    // Up-front column existence checks (cheaper than re-stringifying
+    // the VmError from m41_df_pivot_table).
+    let (names_lst, _, _) = m37_df_fields(m50a_df);
+    let names = m37_read_list_str_lst(names_lst);
+    for (label, col) in &[("index", &index_col), ("columns", &columns_col), ("values", &values_col)] {
+        if !names.iter().any(|n| &n == col) {
+            return M50aResponse::json(400, m50a_err_json(&format!(
+                "{} column {:?} not found", label, col
+            )));
+        }
+    }
+
+    let i_sp = interp.alloc_string(&index_col) as u64;
+    let c_sp = interp.alloc_string(&columns_col) as u64;
+    let v_sp = interp.alloc_string(&values_col) as u64;
+    let a_sp = interp.alloc_string(&aggfunc) as u64;
+    let args = [m50a_df, i_sp, c_sp, v_sp, a_sp];
+    match m41_df_pivot_table(interp, &args) {
+        Ok(derived) => {
+            let new_id = m50a_state.register(derived);
+            let (_, _, nrows) = m37_df_fields(derived);
+            M50aResponse::json(200, format!("{{\"df\":{},\"nrows\":{}}}", new_id, nrows))
+        }
+        Err(e) => M50aResponse::json(400, m50a_err_json(&format!("pivot failed: {:?}", e))),
     }
 }
 

@@ -1,6 +1,6 @@
 # StrictPy — language guide for AI coding tools
 
-**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M50b (2026-05-23).
+**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M50c (2026-05-24).
 
 **Audience**: any AI coding tool (Claude, GPT, Gemini, etc.) being asked to write a StrictPy program. This file is the single source of truth for writing idiomatic StrictPy — you should NOT need to read the compiler source (`compiler/src/`) or VM source (`vm/src/`) to write correct code.
 
@@ -996,7 +996,7 @@ cur.row_count() -> i64                            # rows the underlying query pr
 
 All cells are stringified (v0.4 will add typed cell access).
 
-### tabular (M37, extended by M38, M39, M40, M41, M42, M43, M44, M45, M46, M47, M49, M50a, M50b)
+### tabular (M37, extended by M38, M39, M40, M41, M42, M43, M44, M45, M46, M47, M49, M50a, M50b, M50c)
 
 First Pandas-shaped data package — native Rust impl (real pandas can't import). Sealed `Column` hierarchy + `DataFrame` with named columns + per-column null mask. First stdlib package to register its classes module-scoped from the start (no prelude bloat — see §6.2). M38 rounds out the M37 STOP-CRITERIA debt and adds per-column aggregations, `df.describe`, `Column.fill_null`, `tabular.from_dict`, and hash-based group-by via a new `GroupedDataFrame` class. M39 adds the Phase 4 reshape surface: per-dtype `unique`, `value_counts`, `concat_rows`/`concat_cols`, `df.merge` (hash-join), `df.pivot`, and `df.melt`. M40 closes the time-series / null-handling / cumulative / range-slicing surface: per-column cumulative ops, whole-frame `dropna` / `fillna_*`, `df.iloc` range slicing, rolling-window aggregations, `df.resample` time-bucketing, and `df.asof_merge`.
 
@@ -1572,20 +1572,21 @@ tabular.serve_with_timeout(df: DataFrame, port: i32,
 
 Endpoints exposed by both functions:
 
-- `GET /` — bundled HTML+JS frontend (vanilla DOM, ~350 LOC of JS, sticky sortable headers + composite-filter panel + groupby checkbox UI + CSV download + reset-to-primary button + DOM-recycle pagination capped at 5000 rendered rows).
-- `GET /api/schema?df=ID` — `{"names": [...], "dtypes": [...], "nrows": N, "has_index": bool, "index_name": "...", "index_nlevels": N}`.
-- `GET /api/rows?df=ID&start=N&stop=M` — `{"start": N, "stop": M, "nrows": Total, "rows": [[...], ...]}`.  Cells are typed JSON values (`i64` → number, `f64` → number or null on NaN/Inf, `str` → string, `bool` → boolean, `datetime` → epoch-ms number, **`categorical` → string** since M50b — M50a rendered as null).  Null cells emit `null`.
+- `GET /` — bundled HTML+JS frontend (vanilla DOM, ~550 LOC of JS, sticky sortable headers + index-column prefix rendering + composite-filter panel + groupby checkbox UI w/ sort toggle + Pivot panel + Chart panel (canvas-based bar/line/histogram) + CSV download + reset-to-primary button + DOM-recycle pagination capped at 5000 rendered rows).
+- `GET /api/schema?df=ID` — `{"names": [...], "dtypes": [...], "nrows": N, "has_index": bool, "index_name": "...", "index_nlevels": N, "index_names": [...], "index_dtypes": [...]}`.  The `index_names`/`index_dtypes` arrays are per-level (M50c) and let the frontend render index columns as a distinct prefix.
+- `GET /api/rows?df=ID&start=N&stop=M` — `{"start": N, "stop": M, "nrows": Total, "rows": [[...], ...], "index": [[...], ...]}`.  Cells are typed JSON values (`i64` → number, `f64` → number or null on NaN/Inf, `str` → string, `bool` → boolean, `datetime` → epoch-ms number, **`categorical` → string** since M50b — M50a rendered as null).  Null cells emit `null`.  The `index` array is parallel to `rows` (one entry per row, each entry is a list of N level values) and is empty arrays for RangeIndex frames (M50c).
 - `GET /api/cell?df=ID&row=R&col=C` — `{"value": <cell>}` or 400 with a JSON error body on bad indices.
 - `GET /api/csv?df=ID` — `text/csv` body for the full frame (M50b).  Header row + one row per data row; null cells become empty fields; datetime cells are ISO-8601; categorical cells resolve through codes → category strings.
 - `POST /api/filter` — body `{"df": ID, "column": "name", "op": "eq|ne|gt|lt|ge|le", "value": <typed>}`; returns `{"df": NEW_ID, "nrows": N}` on success.  Server-side DataFrame ID registry holds derived dfs at fresh IDs.
 - `POST /api/filter_multi` — body `{"df": ID, "logic": "and"|"or", "clauses": [{column, op, value}, ...]}` (M50b).  Composite AND/OR filtering; each clause shape matches `/api/filter`.
-- `POST /api/groupby` — body `{"df": ID, "by": ["col1", "col2"], "agg": {"col3": "sum", "col4": "mean"}}`; returns `{"df": NEW_ID, "nrows": N}`.
+- `POST /api/groupby` — body `{"df": ID, "by": ["col1", "col2"], "agg": {"col3": "sum", "col4": "mean"}, "sort": false}`.  M50c added the optional `sort` flag — when true, the agg result is sorted by the group keys (uses `sort_index_multi` for multi-key group_by where keys live in a MultiIndex; `sort_index` for single-key where the key is the index; falls back to `sort_by(by[0])` for the rare regular-column shape).  Returns `{"df": NEW_ID, "nrows": N}`.
 - `POST /api/sort` — body `{"df": ID, "column": "name", "ascending": true|false}` (M50b).  Returns `{"df": NEW_ID, "nrows": N}`.  The bundled frontend wires column-header clicks to this endpoint with toggling ascending/descending.
+- `POST /api/pivot` — body `{"df": ID, "index": "X", "columns": "Y", "values": "Z", "aggfunc": "sum|mean|min|max|count"}` (M50c).  Server-side wrapper around `df.pivot_table`.  Returns `{"df": NEW_ID, "nrows": N}` or 400 on missing/unknown column or invalid aggfunc.
 - `POST /api/forget` — body `{"df": ID}` (M50b).  Drops a derived DataFrame from the registry.  Returns `{"ok": true|false}` (false for unknown IDs and for the primary df, id=0, which is refused).
 
 Missing `df` query param defaults to ID 0 (the primary df passed to `serve`).  Unknown `df` returns 404.
 
-See `examples/tabular_serve_demo.spy` for a working walkthrough (M50b updates it to include a ColumnCategorical column so the categorical-cell rendering shows up in the frontend).  M50c will add the interactive pivot UI + chart rendering.
+See `examples/tabular_serve_demo.spy` for a working walkthrough.  The demo includes a ColumnCategorical column so M50b categorical rendering shows up in the frontend, and the interactive Pivot + Chart panels (M50c) work against it out of the box.
 
 ### shutil (M27 P3c-A)
 
@@ -2632,29 +2633,31 @@ cc2 = tabular.col_categorical_ordered(values_b, shared_cats)
 
 The fallback (string-hash) is still correct — it just doesn't get the codes-hash speedup.  At low cardinality the difference is negligible; at high cardinality (~1000+ distinct values), the fastpath is ~10-100× faster.
 
-### 11.39 `tabular.serve` deliberate scope-down (post-M50b)
+### 11.39 `tabular.serve` deliberate scope-down (post-M50c)
 
-`tabular.serve` (and `serve_with_timeout`) is the localhost desktop-UI for a DataFrame.  M50a shipped the HTTP transport + a minimal frontend; M50b polished the frontend and added the missing endpoints listed below.  M50c (interactive pivot UI) is still upcoming.
+`tabular.serve` (and `serve_with_timeout`) is the localhost desktop-UI for a DataFrame.  M50a shipped the HTTP transport + a minimal frontend; M50b polished the frontend and added missing endpoints; M50c added the interactive pivot panel, canvas-based chart rendering, sortable group-by, and surfaced index columns through the rows/schema endpoints.
 
-**What landed in M50b:**
+**What landed in M50c (this milestone):**
 
-- **`POST /api/sort`** — sortable column headers.  Body `{"df":N, "column":"X", "ascending":true|false}` returns `{"df":new_id, "nrows":N}` (a derived frame).  Clicking a column header in the bundled UI now drives this — click toggles between ascending and descending; ▲/▼ markers show the current sort direction.
-- **`POST /api/filter_multi`** — composite AND/OR filters.  Body `{"df":N, "logic":"and"|"or", "clauses":[{column, op, value}, ...]}`.  Each clause is the same shape as `/api/filter`'s body (column + op ∈ eq/ne/gt/lt/ge/le + value).  The frontend's filter panel lets you add/remove clauses and toggle the combiner.  The original `/api/filter` endpoint is still wired for backwards compatibility.
-- **`GET /api/csv?df=N`** — CSV download for the current frame.  Returns `text/csv` (one header row + one row per data row; null cells → empty fields, datetime cells → ISO-8601).  The bundled UI's "CSV download" button hits this.
-- **`POST /api/forget`** — drop a derived DataFrame from the server-side registry.  Body `{"df":N}`.  Returns `{"ok":true}` if removed, `{"ok":false}` if the id was unknown OR was the primary frame (id=0 is refused — removing it would break the frontend's default-df reference).  The "Reset to primary" button uses this to clean up between exploration steps.
-- **ColumnCategorical cells now serialize as their resolved category strings** — M50a punted to JSON `null` because the M47 ColumnCategorical layout (32-byte payload, codes + categories) differs from the M37 Column shape.  M50b reads `m47_col_cat_categories_ptr` and resolves through `codes[i] → categories[codes[i]]` for both the `/api/rows` and `/api/csv` paths.  `m37_df_stringify` was patched in the same fix so `df.show()` and `tabular.write_csv` get the same benefit.
-- **Virtual-scroll-friendly DOM-node recycling** — the frontend caps the rendered DOM at 5000 rows.  When lazy-loading more rows would exceed the cap, the oldest rows are evicted from the table head.  The status bar shows the visible window (e.g. `DOM[1200:6200]`).  This keeps the DOM bounded for million-row frames without true virtual-scroll plumbing (which would require fixed row heights).
-- **Better styling** — top-bar header, two-panel layout (composite filter + group-by), zebra-striped rows, hover highlight, sticky column headers.
+- **`POST /api/pivot`** — interactive pivot UI backend.  Body `{"df":N, "index":"X", "columns":"Y", "values":"Z", "aggfunc":"sum|mean|min|max|count"}`.  Server-side wrapper around `df.pivot_table`.  The bundled frontend's Pivot panel surfaces this — pick index/columns/values columns + aggfunc, click "Pivot" — returns a derived df that becomes the active view.
+- **`/api/groupby` now accepts `"sort":true`** — sorts the agg result by the group keys.  Single-key group_by → `sort_index`; multi-key group_by → `sort_index_multi` (M44 MultiIndex shape); fallback to `sort_by(by[0])` for the rare regular-column shape.  Failure of the chosen sort path falls back to the unsorted aggregate rather than 400'ing the request.  The frontend's group-by panel exposes a "sort by key" checkbox.
+- **Canvas-based chart rendering** — `/` now ships a Chart panel with three chart types: `bar` (categorical X + numeric Y), `line` (numeric X + numeric Y; defaults X to row index if non-numeric), `histogram` (single numeric column, 20 bins).  Charts read from the currently-loaded rows in the DOM table (no extra API roundtrip); for million-row frames scroll-load first.  Pure-JS Canvas2D — no charting library bundled.
+- **Index columns surfaced through `/api/rows` and `/api/schema`** — `/api/schema` now includes `index_names` + `index_dtypes` arrays (per-level for MultiIndex); `/api/rows` includes a parallel `index` array (one entry per row, each entry is a list of N level values).  The bundled frontend renders index columns as a distinct prefix (light-blue `td.idx` cells with a divider).  This was a blocker for the pivot/groupby experience — without surfacing the index, group-by results showed only the aggregated value and the keys were invisible.
 
-**Remaining deliberate v1 simplifications (M50c+ work):**
+**Earlier milestones (still relevant context):**
+
+- **M50b**: `POST /api/sort` (sortable column headers, ▲/▼ click toggle), `POST /api/filter_multi` (composite AND/OR), `GET /api/csv` (CSV download), `POST /api/forget` (drop derived df from registry; refuses id=0), `ColumnCategorical` cells serialize as their resolved category strings, DOM-node recycling capped at 5000 rendered rows.
+
+**Remaining deliberate v1 simplifications:**
 
 - **No HTTPS** — localhost-only.  M28 P3b-B's `ssl` stdlib could plumb in rustls, but in-process bind on `127.0.0.1` is a single-machine boundary; encrypted localhost adds no security and a lot of cert-handling complexity.
 - **No keep-alive** — each connection serves one request, then closes.  Low-frequency UI traffic doesn't notice; production HTTP traffic routes through M29's framework instead.
-- **No interactive pivot UI** — pivots still require `tabular.pivot_table(...)` from user code before calling `serve`.  M50c picks this up.
-- **No chart rendering** — bars/lines/histograms are M50c.
+- **Chart rendering operates on visible rows only** — the chart panel reads cells out of the rendered DOM, so for a 1M-row frame the chart reflects whatever the user has scroll-loaded (capped at the M50b 5000-row DOM cap).  A future v0.5 could add a `/api/chart_data?col=X&kind=histogram` endpoint that computes server-side over the full frame.
+- **No streaming pivot** — `/api/pivot` materializes the full pivoted DataFrame.  For very wide pivots (1000+ distinct columns_col values) this can blow up.
 - **DOM-node recycling is not true virtual scroll** — the frontend evicts from the top instead of repositioning rows by absolute pixels.  For frames where the user wants to scroll back to row 0 after exploring row 800K, the head rows have to refetch.  Pragmatic tradeoff: avoids the fixed-row-height constraint and the rangemap bookkeeping a real virtual scroller needs.
-- **DataFrame ID registry has no LRU eviction** — derived frames stick around until the server shuts down OR the user clicks "Reset to primary" (which calls `/api/forget`).  Long-running unattended sessions still grow; M50c can add a max-derived-count + LRU.
+- **DataFrame ID registry has no LRU eviction** — derived frames stick around until the server shuts down OR the user clicks "Reset to primary" (which calls `/api/forget`).  Long-running unattended sessions still grow; v0.5 could add a max-derived-count + LRU.
 - **No request-rate limiting** — a malicious client could DoS the server by spamming /api/groupby.  localhost-only mitigates this.
+- **Index columns are not click-sortable in v1** — only regular column headers wire to `/api/sort`.  Workaround: clear the current view via "Reset to primary" + re-group with `sort:true`.
 
 The server is **single-threaded** — one connection at a time.  Two simultaneous browser tabs hitting it will see the second tab queue behind the first.  This is fine for interactive use and tests; production-grade concurrency is M29's framework.
 

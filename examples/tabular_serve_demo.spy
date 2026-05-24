@@ -1,4 +1,4 @@
-"""tabular_serve_demo.spy — walkthrough of `tabular.serve` (M50a + M50b).
+"""tabular_serve_demo.spy — walkthrough of `tabular.serve` (M50a + M50b + M50c).
 
 Builds a small DataFrame in memory, then boots a localhost HTTP/1.1
 server exposing it as a JSON API + a minimal bundled HTML/JS frontend.
@@ -11,9 +11,13 @@ Surface demonstrated:
   2. tabular.serve_with_timeout(df, port, timeout_ms) — boots the
      localhost server and shuts it down after the timeout.
   3. The bundled HTML+JS frontend at GET /, plus the JSON API at
-     /api/schema, /api/rows, /api/cell, /api/filter (POST),
-     /api/groupby (POST), and the M50b additions: /api/sort,
-     /api/filter_multi, /api/csv, /api/forget.
+     /api/schema, /api/rows (with M50c index data), /api/cell,
+     /api/filter (POST), /api/groupby (POST, with optional
+     `"sort":true` per M50c), and the M50b additions: /api/sort,
+     /api/filter_multi, /api/csv, /api/forget; plus the M50c
+     additions: /api/pivot.
+  4. M50c bundled chart panel (canvas-based bar/line/histogram) and
+     pivot panel (index/columns/values/aggfunc selectors).
 
 This demo uses serve_with_timeout so it exits cleanly after a short
 interval — that lets the test harness (`compiler/tests/
@@ -21,7 +25,10 @@ tabular_serve_demo_runs.rs`) run it deterministically.
 
 To use the server interactively, change `timeout_ms` below to a
 larger value (e.g. 600000 = 10 minutes) and open
-http://127.0.0.1:8765/ in a browser.
+http://127.0.0.1:8765/ in a browser.  Try: click a column header to
+sort, use the Pivot panel with index=dept/columns=active/values=score/
+aggfunc=mean, then click Render in the Chart panel after picking
+bar + an X/Y combo.
 """
 
 from tabular import Column, ColumnI64, ColumnStr, ColumnF64, ColumnBool, ColumnCategorical, DataFrame
@@ -108,16 +115,17 @@ fn main() -> i32:
     println("Booting localhost HTTP server on 127.0.0.1:8765 ...")
     println("Open http://127.0.0.1:8765/ in a browser to view it.")
     println("Endpoints:")
-    println("  GET  /                — bundled HTML/JS frontend (M50b polish)")
-    println("  GET  /api/schema      — column names + dtypes + nrows")
-    println("  GET  /api/rows        — paginated rows (start, stop, df)")
-    println("  GET  /api/cell        — single cell (row, col, df)")
-    println("  GET  /api/csv         — full frame as CSV download (M50b)")
-    println("  POST /api/filter      — one-column filter (eq/ne/gt/lt/ge/le)")
+    println("  GET  /                 — bundled HTML/JS frontend (M50b/M50c polish)")
+    println("  GET  /api/schema       — names + dtypes + nrows + index info (M50c)")
+    println("  GET  /api/rows         — paginated rows + parallel index array (M50c)")
+    println("  GET  /api/cell         — single cell (row, col, df)")
+    println("  GET  /api/csv          — full frame as CSV download (M50b)")
+    println("  POST /api/filter       — one-column filter (eq/ne/gt/lt/ge/le)")
     println("  POST /api/filter_multi — composite AND/OR filter (M50b)")
-    println("  POST /api/groupby     — group-by + aggregation")
-    println("  POST /api/sort        — sortable column headers (M50b)")
-    println("  POST /api/forget      — drop a derived df from registry (M50b)")
+    println("  POST /api/groupby      — group-by + agg; optional sort:true (M50c)")
+    println("  POST /api/sort         — sortable column headers (M50b)")
+    println("  POST /api/pivot        — interactive pivot table (M50c)")
+    println("  POST /api/forget       — drop a derived df from registry (M50b)")
     println("Server timeout: 600 ms (demo mode).")
     rc: i32 = tabular.serve_with_timeout(df, 8765i32, 600i64)
     println("Server shut down with exit code: " + str(rc))
