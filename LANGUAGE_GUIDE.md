@@ -1,6 +1,6 @@
 # StrictPy — language guide for AI coding tools
 
-**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M52 (2026-05-24).
+**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M54 (2026-05-24).
 
 **Audience**: any AI coding tool (Claude, GPT, Gemini, etc.) being asked to write a StrictPy program. This file is the single source of truth for writing idiomatic StrictPy — you should NOT need to read the compiler source (`compiler/src/`) or VM source (`vm/src/`) to write correct code.
 
@@ -1628,7 +1628,7 @@ fnmatch.filter(names: List[str], pattern: str) -> List[str]
 fnmatch.translate(pattern: str) -> str        # glob → regex string
 ```
 
-### gfx (M52-M53)
+### gfx (M52-M54)
 
 The 2D graphics, windowing, and input package, built on native SDL2 and SDL2_image. Provides the core primitives to create game loops, draw rectangles/lines/pixels, load sprite sheets, and poll keyboard/mouse events.
 
@@ -2759,29 +2759,29 @@ The server is **single-threaded** — one connection at a time.  Two simultaneou
 
 ### 11.42 `gfx` audio (M54)
 
-The audio subsystem wraps **SDL_mixer** (bundled via the `sdl2` crate). Call `gfx.audio_init()` once after `gfx.init()` before using any audio functions. Both calls are idempotent.
+The audio subsystem uses **pure-Rust [`rodio`](https://crates.io/crates/rodio)** (with the `cpal` backend) for output — not SDL_mixer. This was a deliberate deviation from the original GAMES_PLAN.md design: avoids requiring `SDL2_mixer` as a separate system C library. Call `gfx.audio_init()` once after `gfx.init()` before using any audio functions. Both calls are idempotent.
 
 #### API
 
 | Function | Signature | Description |
 |---|---|---|
-| `gfx.audio_init()` | `() → unit` | Initialise SDL_mixer (44100 Hz, 16-bit stereo, 2048-frame buffer, 16 channels). Must call `gfx.init()` first. |
-| `gfx.load_sound(path)` | `(str) → Sound` | Load a WAV file into memory. Raises `IOError` if file not found, `ValueError` on decode error. |
-| `gfx.play_sound(snd)` | `(Sound) → unit` | Play the sound once on the first available mixer channel. Fire-and-forget. |
-| `gfx.set_sound_volume(snd, vol)` | `(Sound, i32) → unit` | Set volume for a specific sound. Range 0–128. |
+| `gfx.audio_init()` | `() → unit` | Open the default audio output device through `rodio::OutputStream::try_default()`. Idempotent. Must call `gfx.init()` first. |
+| `gfx.load_sound(path)` | `(str) → Sound` | Load a WAV or OGG file into memory. Raises `IOError` if file not found, `ValueError` on decode error. |
+| `gfx.play_sound(snd)` | `(Sound) → unit` | Decode + play the sound through the global output stream. Multiple simultaneous plays of the same sound mix correctly. Fire-and-forget — no channel cap. |
+| `gfx.set_sound_volume(snd, vol)` | `(Sound, i32) → unit` | Per-sound volume, range 0–128 (rodio converts to a 0.0–1.0 amplifier internally). |
 | `gfx.free_sound(snd)` | `(Sound) → unit` | Explicitly release memory. Raises `ValueError` on use-after-free or double-free. |
-| `gfx.load_music(path)` | `(str) → Music` | Load an OGG or WAV file for streaming playback. Raises `IOError` / `ValueError`. |
-| `gfx.play_music(music, loops)` | `(Music, i32) → unit` | Start streaming. `loops=0` plays once, `loops=-1` loops forever. |
+| `gfx.load_music(path)` | `(str) → Music` | Load a WAV or OGG file for streaming playback through a dedicated `rodio::Sink`. Raises `IOError` / `ValueError`. |
+| `gfx.play_music(music, loops)` | `(Music, i32) → unit` | Start streaming. `loops=0` plays once, `loops=-1` loops forever. Only one music track at a time — calling `play_music` again stops any current track. |
 | `gfx.stop_music()` | `() → unit` | Halt music immediately. |
 | `gfx.set_music_volume(vol)` | `(i32) → unit` | Global music volume, 0–128. |
 
 #### Design notes
 
-- **Formats:** WAV is universally supported; OGG Vorbis is recommended for music (licence-free, good compression). MP3 may or may not be available depending on the SDL_mixer build flags.
-- **Channel count:** 16 simultaneous SFX channels. If all channels are busy, `play_sound` silently skips.
-- **Dummy driver in CI:** `SDL_AUDIODRIVER=dummy` lets the full loading + playback pipeline run without a real audio device.
-- **Explicit free:** `Sound` and `Music` objects must be freed with `free_sound` / no `free_music` exposed because `Music` lifetime ends when the `Music` object goes out of scope. (Use `stop_music` before discarding.)
-- **Linux audio backend:** SDL_mixer uses ALSA by default on Linux. Some systems may need PulseAudio. Set `SDL_AUDIODRIVER=pulse` if ALSA is unavailable.
+- **Formats:** WAV is universally supported; OGG Vorbis is recommended for music (licence-free, good compression). MP3 is not enabled in the default rodio build.
+- **No mixer-channel cap:** rodio's `play_raw` accepts any number of concurrent sources. The 16-channel limit familiar to SDL_mixer users does not apply.
+- **Dummy driver in CI:** `SDL_AUDIODRIVER=dummy` short-circuits `gfx.audio_init()` to leave the backend as `None`. Every downstream audio call (`play_sound`, `play_music`, `set_*_volume`, `stop_music`) then becomes a no-op. Game code keeps running silently — useful for headless CI and developer machines without a working audio device.
+- **Explicit free:** `Sound` objects must be freed with `free_sound`. `Music` has no `free_music` — the underlying `Sink` is dropped automatically when the `Music` value goes out of scope. (Use `stop_music` before discarding if you want immediate playback halt.)
+- **Linux audio backend:** rodio uses ALSA on Linux through `cpal`. Building requires `libasound2-dev` (`apt-get install libasound2-dev` on Debian/Ubuntu). At runtime the system needs a working ALSA or PulseAudio device. CI without one should set `SDL_AUDIODRIVER=dummy`.
 
 #### Example
 
@@ -2814,14 +2814,14 @@ fn main() -> i32:
 
 ### 11.43 `gfx` font and text rendering (M54)
 
-Text is rendered via **SDL_ttf** (bundled via the `sdl2` crate). No separate `ttf_init()` call is required — `gfx.load_font()` initialises SDL_ttf automatically and idempotently.
+Text is rendered via **pure-Rust [`fontdue`](https://crates.io/crates/fontdue)** (TrueType parser + glyph rasteriser) — not SDL_ttf. Glyphs are rasterised to alpha bitmaps in Rust, then composited into a software SDL2 texture per `draw_text` call. This was a deliberate deviation from the GAMES_PLAN.md design: avoids requiring `SDL2_ttf` as a separate system C library. No separate `ttf_init()` call needed.
 
 #### API
 
 | Function | Signature | Description |
 |---|---|---|
-| `gfx.load_font(path, size)` | `(str, i32) → Font` | Load a TrueType font at the given point size. Raises `IOError` if not found, `ValueError` on decode error. |
-| `gfx.draw_text(win, font, text, x, y, r, g, b)` | `(Window, Font, str, i32, i32, i32, i32, i32) → unit` | Render `text` at pixel position `(x, y)` in colour `(r, g, b)`. Uses blended anti-aliasing. |
+| `gfx.load_font(path, size)` | `(str, i32) → Font` | Parse a TrueType file with fontdue and store the per-size rasterisation context. Raises `IOError` if not found, `ValueError` on decode error. |
+| `gfx.draw_text(win, font, text, x, y, r, g, b)` | `(Window, Font, str, i32, i32, i32, i32, i32) → unit` | Rasterise each character, composite into an RGBA buffer, upload as a one-shot SDL2 texture, blit at `(x, y)` in colour `(r, g, b)`. Anti-aliased via fontdue's coverage-mask output. |
 | `gfx.text_size(font, text)` | `(Font, str) → Tuple[i32, i32]` | Returns `(width, height)` in pixels of the rendered text without drawing it. Returns `(0, 0)` for empty string. |
 | `gfx.free_font(font)` | `(Font) → unit` | Explicitly release the font. Raises `ValueError` on double-free or use-after-free. |
 
@@ -2829,9 +2829,9 @@ Text is rendered via **SDL_ttf** (bundled via the `sdl2` crate). No separate `tt
 
 - **CC0 font:** `vm/tests/fixtures/games/DejaVuSansMono.ttf` is bundled in the repo (Bitstream Vera / DejaVu licence, effectively public domain for redistribution). Use it as a fallback in your games.
 - **Point size vs pixels:** `size` in `load_font` is in typographic points at 72 dpi. For a 24pt font you get roughly 32px tall glyphs on a 96-dpi monitor.
-- **Blended rendering:** `draw_text` uses SDL_ttf's blended (anti-aliased) mode for best quality. Alpha blending requires the canvas to be in a blended draw state (the default after `gfx.init`).
+- **Per-frame cost:** `draw_text` rasterises + uploads a fresh texture every call. For UI text that changes per frame this is wasteful but fine for v1. M58 (or later) should add a glyph-atlas cache.
 - **Multiline text:** Not built-in. Split on `\n` and call `draw_text` once per line with a `y` offset computed from `text_size`.
-- **Explicit free:** Fonts hold a significant amount of glyph cache memory. Free them when changing scenes.
+- **Explicit free:** Fonts hold the parsed TTF data plus a per-size shape cache. Free them when changing scenes.
 
 #### Example
 

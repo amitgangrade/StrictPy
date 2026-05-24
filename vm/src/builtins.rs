@@ -23959,6 +23959,15 @@ fn m54_gfx_audio_init(_interp: &mut Interpreter, _args: &[u64]) -> Result<u64, V
         return Ok(0); // idempotent
     }
 
+    // Headless/CI mode: when SDL_AUDIODRIVER=dummy is set (the same knob
+    // SDL_mixer honors), skip opening a real device.  Leaves the backend
+    // as None — every downstream audio call (play_sound, play_music,
+    // set_*_volume, stop_music) already short-circuits to Ok(0) when the
+    // backend is None, so game code keeps running silently.
+    if std::env::var("SDL_AUDIODRIVER").as_deref() == Ok("dummy") {
+        return Ok(0);
+    }
+
     let (stream, handle) = rodio::OutputStream::try_default().map_err(|e| {
         VmError::UncaughtException {
             type_name: "RuntimeError".into(),
