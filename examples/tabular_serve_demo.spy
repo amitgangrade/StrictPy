@@ -8,8 +8,8 @@ Surface demonstrated:
   1. DataFrame construction (col_* + from_columns) including a
      ColumnCategorical column (M50b serializes these as their
      resolved category strings; M50a rendered them as null).
-  2. tabular.serve_with_timeout(df, port, timeout_ms) — boots the
-     localhost server and shuts it down after the timeout.
+  2. tabular.serve(df, port) — boots the localhost server and runs
+     until Ctrl+C (or the 24h safety cap built into the runtime).
   3. The bundled HTML+JS frontend at GET /, plus the JSON API at
      /api/schema, /api/rows (with M50c index data), /api/cell,
      /api/filter (POST), /api/groupby (POST, with optional
@@ -19,16 +19,15 @@ Surface demonstrated:
   4. M50c bundled chart panel (canvas-based bar/line/histogram) and
      pivot panel (index/columns/values/aggfunc selectors).
 
-This demo uses serve_with_timeout so it exits cleanly after a short
-interval — that lets the test harness (`compiler/tests/
-tabular_serve_demo_runs.rs`) run it deterministically.
-
-To use the server interactively, change `timeout_ms` below to a
-larger value (e.g. 600000 = 10 minutes) and open
-http://127.0.0.1:8765/ in a browser.  Try: click a column header to
+Run it, open http://127.0.0.1:8765/ in a browser, and press Ctrl+C
+in the terminal when you're done.  Try: click a column header to
 sort, use the Pivot panel with index=dept/columns=active/values=score/
 aggfunc=mean, then click Render in the Chart panel after picking
 bar + an X/Y combo.
+
+The end-to-end test in `compiler/tests/tabular_serve_demo_runs.rs`
+rewrites the `tabular.serve(...)` call below to `serve_with_timeout`
+before compiling so the test can run deterministically.
 """
 
 from tabular import Column, ColumnI64, ColumnStr, ColumnF64, ColumnBool, ColumnCategorical, DataFrame
@@ -126,7 +125,7 @@ fn main() -> i32:
     println("  POST /api/sort         — sortable column headers (M50b)")
     println("  POST /api/pivot        — interactive pivot table (M50c)")
     println("  POST /api/forget       — drop a derived df from registry (M50b)")
-    println("Server timeout: 600 ms (demo mode).")
-    rc: i32 = tabular.serve_with_timeout(df, 8765i32, 600i64)
+    println("Press Ctrl+C to stop the server.")
+    rc: i32 = tabular.serve(df, 8765i32)
     println("Server shut down with exit code: " + str(rc))
     return rc

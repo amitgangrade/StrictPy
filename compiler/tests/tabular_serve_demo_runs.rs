@@ -1,9 +1,11 @@
 //! Subprocess integration test for `examples/tabular_serve_demo.spy` (M50a).
 //!
 //! Compiles + runs the tabular.serve walkthrough through `spy.exe`
-//! and asserts the program exited cleanly after the bundled
-//! `serve_with_timeout` deadline.  The demo uses a 600ms timeout so the
-//! test completes in well under a second.
+//! and asserts the program exited cleanly.  The user-facing demo calls
+//! the unbounded `tabular.serve(df, 8765)` so it runs until Ctrl+C;
+//! this test rewrites that call to `tabular.serve_with_timeout(df,
+//! 8765, 600)` before compiling so the run completes in well under a
+//! second.
 
 use std::fs;
 use std::path::PathBuf;
@@ -18,18 +20,34 @@ fn project_root() -> PathBuf {
     p
 }
 
+/// Swap the user-facing `tabular.serve(df, 8765i32)` for a bounded
+/// `tabular.serve_with_timeout(df, 8765i32, 600i64)` so the demo
+/// exits deterministically when invoked from the test harness.  Both
+/// the compile test and the runs test go through this so a regression
+/// that breaks the substitution surfaces in both places.
+fn read_and_bound_demo_src() -> (PathBuf, String) {
+    let src_path = project_root().join("examples").join("tabular_serve_demo.spy");
+    let original = fs::read_to_string(&src_path).expect("read tabular_serve_demo.spy");
+    let needle = "tabular.serve(df, 8765i32)";
+    let replacement = "tabular.serve_with_timeout(df, 8765i32, 600i64)";
+    assert!(
+        original.contains(needle),
+        "demo no longer contains expected unbounded serve call {:?}", needle
+    );
+    let bounded = original.replace(needle, replacement);
+    (src_path, bounded)
+}
+
 #[test]
 fn tabular_serve_demo_compiles() {
-    let src_path = project_root().join("examples").join("tabular_serve_demo.spy");
-    let src = fs::read_to_string(&src_path).expect("read tabular_serve_demo.spy");
+    let (src_path, src) = read_and_bound_demo_src();
     let _bytes = compile_source(src_path.display().to_string(), &src)
         .unwrap_or_else(|e| panic!("compile tabular_serve_demo.spy: {e}"));
 }
 
 #[test]
 fn tabular_serve_demo_runs_via_spy_exe() {
-    let src_path = project_root().join("examples").join("tabular_serve_demo.spy");
-    let src = fs::read_to_string(&src_path).expect("read tabular_serve_demo.spy");
+    let (src_path, src) = read_and_bound_demo_src();
     let bytes = compile_source(src_path.display().to_string(), &src)
         .unwrap_or_else(|e| panic!("compile tabular_serve_demo.spy: {e}"));
     let spyc_path =
