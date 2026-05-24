@@ -10,25 +10,24 @@ Controls:
   - The window's close button: quit.
 
 Mechanics:
-  - Snake starts 3 segments long, centred, moving right.
+  - Snake starts 3 segments long, centred, stationary.  First arrow
+    press starts movement.
   - Snake steps once every STEP_MS milliseconds (8 cells/second).
   - Eating food: grow by 1, +1 score, play eat.wav, spawn new food.
   - Wall collision OR self-collision: game over, play die.wav, overlay.
 
 Architecture:
-  - render() is called every frame (~60 FPS).
-  - step()   is called every STEP_MS ms (~8 Hz).
-  - Direction input is queued in pending_direction so a fast double-tap
-    can't bypass the 180°-reversal guard (the guard checks against the
-    direction at the time of the next step, not at input time).
+  - Single timer: loop body = drain events → step → render → sleep
+    STEP_MS.  Everything runs at 8 Hz.  Input latency is ≤ STEP_MS,
+    which for Snake is imperceptible.
+  - The arrow keys set `dir_x` / `dir_y` directly with an inline 180°
+    guard.  The earlier pending-direction indirection was simpler in
+    principle but caused a Windows-only bug where the snake only
+    moved on each key press (M55-v3 root cause).
 
 Run it (from the repo root):
     cargo build --workspace --release
     ./target/release/spy examples/games/snake.spy
-
-The compile-only test in compiler/tests/snake_demo_runs.rs verifies the
-file typechecks + bytecode-compiles.  Actually playing the game needs
-a real window — run it manually on your dev box.
 """
 
 import gfx
@@ -45,42 +44,31 @@ final WIN_W: i32 = 600i32              # CELL * GRID_W
 final WIN_H: i32 = 660i32              # TOPBAR_H + CELL * GRID_H
 
 # ── Timing ───────────────────────────────────────────────────────────
-final FRAME_MS: i64 = 16i64            # ~60 FPS render cap
 final STEP_MS: i64 = 125i64            # 8 snake steps per second
 
 # ── Game state ───────────────────────────────────────────────────────
 
 final class GameState:
     snake: List[Tuple[i32, i32]]       # head first
-    dir_x: i32
-    dir_y: i32
-    pending_dir_x: i32
-    pending_dir_y: i32
+    dir_x: i32                         # -1 / 0 / 1
+    dir_y: i32                         # -1 / 0 / 1
     food_x: i32
     food_y: i32
     score: i64
     game_over: bool
-    last_step_ms: i64
 
     fn __init__(self) -> None:
         self.snake = []
         self.snake.append((10i32, 10i32))
         self.snake.append((9i32, 10i32))
         self.snake.append((8i32, 10i32))
-        # M55 v2: snake spawns stationary.  Step is a no-op until the
-        # player presses an arrow key (which sets pending_dir to a
-        # non-zero vector).  Without this the snake would plow into
-        # the right wall in ~1.25s if the player didn't react fast
-        # enough — especially painful after R-restart.
+        # Stationary spawn — first arrow press picks a direction.
         self.dir_x = 0i32
         self.dir_y = 0i32
-        self.pending_dir_x = 0i32
-        self.pending_dir_y = 0i32
         self.food_x = 0i32
         self.food_y = 0i32
         self.score = 0i64
         self.game_over = false
-        self.last_step_ms = time.now_ms()
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -96,8 +84,6 @@ fn point_on_snake(snake: List[Tuple[i32, i32]], x: i32, y: i32) -> bool:
 
 fn spawn_food(snake: List[Tuple[i32, i32]]) -> Tuple[i32, i32]:
     # Reject-sampling: try random cells until one isn't on the snake.
-    # With 400 cells and snake length <= ~30 mid-game, this terminates
-    # in O(1) expected iterations.
     while true:
         rx: i64 = random.randint(0i64, i64(GRID_W) - 1i64)
         ry: i64 = random.randint(0i64, i64(GRID_H) - 1i64)
@@ -117,16 +103,7 @@ fn new_game() -> GameState:
 # ── Game logic step ─────────────────────────────────────────────────
 
 fn step(state: GameState, eat: Sound, die: Sound) -> None:
-    # Apply the input that was queued since the last step.  The 180°
-    # guard already ran at queue time so it's safe to copy in.
-    state.dir_x = state.pending_dir_x
-    state.dir_y = state.pending_dir_y
-
-    # M55 v2: stationary snake — happens at start-of-game and after
-    # restart, before the player presses any arrow key.  Step is a
-    # no-op (snake doesn't move, no collision is checked).  Once the
-    # player presses an arrow, pending_dir flips non-zero and the
-    # next step actually advances.
+    # Stationary snake?  No-op until the player picks a direction.
     if state.dir_x == 0i32 and state.dir_y == 0i32:
         return
 
@@ -141,8 +118,8 @@ fn step(state: GameState, eat: Sound, die: Sound) -> None:
         return
 
     # Self collision.  Skip the tail (index len-1) because it WILL
-    # move out of the way unless we're eating; we'll detect the
-    # eating case separately below.
+    # move out of the way unless we're eating; the ate-check below
+    # is consulted to decide which segments stay put.
     ate: bool = (new_x == state.food_x) and (new_y == state.food_y)
     check_end: i32 = i32(i64(len(state.snake)))
     if not ate:
@@ -157,8 +134,8 @@ fn step(state: GameState, eat: Sound, die: Sound) -> None:
         i = i + 1i32
 
     # Build the new snake list.  Head goes first, then the existing
-    # segments (minus the tail if we didn't eat).  We rebuild rather
-    # than insert+pop because List has no insert(0, x) native.
+    # segments (minus the tail if we didn't eat).  List has no
+    # insert(0, x) native so we rebuild.
     new_snake: List[Tuple[i32, i32]] = []
     new_snake.append((new_x, new_y))
     keep: i32 = i32(i64(len(state.snake)))
@@ -182,19 +159,22 @@ fn step(state: GameState, eat: Sound, die: Sound) -> None:
 fn handle_input(state: GameState, ev: Event) -> None:
     if ev.kind != "key_down":
         return
-    # Direction keys — guard against 180° reversal.
+    # Arrow keys set direction directly.  Inline 180°-reversal guard:
+    # reject the change if it would be the exact opposite of current
+    # direction (e.g. snake moving Right cannot turn Left in place).
+    # The stationary-snake case (dir = 0) passes every guard.
     if ev.key == "left" and state.dir_x != 1i32:
-        state.pending_dir_x = -1i32
-        state.pending_dir_y = 0i32
+        state.dir_x = -1i32
+        state.dir_y = 0i32
     elif ev.key == "right" and state.dir_x != -1i32:
-        state.pending_dir_x = 1i32
-        state.pending_dir_y = 0i32
+        state.dir_x = 1i32
+        state.dir_y = 0i32
     elif ev.key == "up" and state.dir_y != 1i32:
-        state.pending_dir_x = 0i32
-        state.pending_dir_y = -1i32
+        state.dir_x = 0i32
+        state.dir_y = -1i32
     elif ev.key == "down" and state.dir_y != -1i32:
-        state.pending_dir_x = 0i32
-        state.pending_dir_y = 1i32
+        state.dir_x = 0i32
+        state.dir_y = 1i32
 
 # ── Rendering ───────────────────────────────────────────────────────
 
@@ -237,7 +217,6 @@ fn render(win: Window, font: Font, state: GameState) -> None:
     if (state.dir_x == 0i32) and (state.dir_y == 0i32) and (not state.game_over):
         hint: str = "Press an arrow key to start"
         hsz: Tuple[i32, i32] = gfx.text_size(font, hint)
-        # Soft translucent backing so the hint reads over the snake.
         gfx.draw_rect(win,
                       (WIN_W - hsz.0) / 2i32 - 12i32,
                       TOPBAR_H + 16i32,
@@ -251,7 +230,6 @@ fn render(win: Window, font: Font, state: GameState) -> None:
 
     # Game-over overlay.
     if state.game_over:
-        # Translucent dark over the playfield only.
         gfx.draw_rect(win, 0i32, TOPBAR_H, WIN_W, WIN_H - TOPBAR_H,
                       0i32, 0i32, 0i32, 180i32)
         msg1: str = "GAME OVER"
@@ -285,13 +263,9 @@ fn main() -> i32:
     running: bool = true
 
     while running:
-        frame_start: i64 = time.now_ms()
-
-        # Drain input.  Nullable narrowing only takes effect inside an
-        # `if X is not none:` block (matching the pattern used by the
-        # M52 smoke window example) — `while X is not none:` and
-        # `if X is none: break` don't narrow.  We loop until poll
-        # returns none, breaking from the else branch.
+        # Drain all pending events.  Nullable narrowing only takes
+        # effect inside `if X is not none:` blocks; we loop until
+        # poll returns none using a sentinel boolean.
         draining: bool = true
         while draining:
             ev_opt: Event? = gfx.poll_event(win)
@@ -311,23 +285,19 @@ fn main() -> i32:
         if not running:
             break
 
-        # Step game logic on its own timer (independent of frame rate).
+        # Step game logic once per loop iteration.  The fixed
+        # time.sleep_ms(STEP_MS) at the end of the loop paces the
+        # whole thing at 8 Hz, so each iteration = one snake step.
         if not state.game_over:
-            now: i64 = time.now_ms()
-            if (now - state.last_step_ms) >= STEP_MS:
-                step(state, eat, die)
-                state.last_step_ms = now
+            step(state, eat, die)
 
-        # Render the current state.
+        # Render.
         render(win, font, state)
 
-        # Frame pace.
-        elapsed: i64 = time.now_ms() - frame_start
-        if elapsed < FRAME_MS:
-            time.sleep_ms(FRAME_MS - elapsed)
+        # Pace the loop.  Constant sleep — input latency is bounded
+        # by STEP_MS, which is imperceptible at 125 ms for Snake.
+        time.sleep_ms(STEP_MS)
 
-    # Tidy up — explicit frees so a long-running session that boots +
-    # quits + reboots the demo doesn't accumulate handles.
     gfx.free_font(font)
     gfx.free_sound(eat)
     gfx.free_sound(die)
