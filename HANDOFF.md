@@ -18,22 +18,39 @@ Everything you need to resume is in:
 ## Current head
 
 - Branch: `main`
-- Latest commit: (to be determined after commit)
-- Tests passing on main: **1074** (+40 net over M50a — 18 M50b + 16 M50c + 5 M52 + 1 M53)
+- Latest commit: `f8c08bc` (M54)
+- Tests passing on main: **1076** (+42 net over M50a — 18 M50b + 16 M50c + 5 M52 + 1 M53 + 2 M54)
 
 ## Status snapshot
 
 | Metric | Value |
 |---|---:|
-| Milestones complete on main | M0–M53 |
+| Milestones complete on main | M0–M54 |
 | **v0.2.0 release** | **Tagged at M30 (commit 121483f)** |
-| Tests | 1074 / 0 fail / 1 ignored |
+| Tests | 1076 / 0 fail / 1 ignored |
 | Bugs | 35 / 35 / **0 deferred** |
 | Stdlib modules | 39 (no change, `gfx` shipped in M52) |
-| Stdlib classes | 22 (+1 in M53: `gfx.Image`) |
-| Example programs | **115** (+1 in M53: `_smoke_sprite.spy`) |
-| Lesson 1 streak | **36 consecutive clean-commit agents** (M28 → M53) |
+| Stdlib classes | 25 (+3 in M54: `gfx.Sound`, `gfx.Music`, `gfx.Font`) |
+| Example programs | **116** (+1 in M54: `_smoke_audio.spy`) |
+| Lesson 1 streak | **37 consecutive clean-commit agents** (M28 → M54) |
 | Benchmark suites | 3 |
+
+## M54 — completed (single agent, 1 commit)
+
+| Agent | Scope | Var prefix | NativeFn IDs | Commits |
+|---|---|---|---|---|
+| **M54 GFX audio + fonts** | CPAL audio + Fontdue rasterizer | `m54_` | 1150-1158, 1170-1173 (13 new) | (committed) |
+
+### What shipped
+
+Implemented audio output and font rendering/text sizing (`gfx.Sound`, `gfx.Music`, `gfx.Font`) in the `gfx` stdlib package using pure Rust decoders.
+- **Pure-Rust CPAL/Rodio Integration**: Plumbed `rodio` to bypass system dependency on `SDL2_mixer`. Implemented in-memory WAV playback (`load_sound`, `play_sound`, `set_sound_volume`, `free_sound`) and streaming background music playback (`load_music`, `play_music`, `stop_music`, `set_music_volume`).
+- **Pure-Rust Fontdue Integration**: Plumbed `fontdue` to bypass system dependency on `SDL2_ttf`. Implemented font loading, pixel text measurement (`text_size`), and anti-aliased blended text composition onto the Window canvas (`draw_text`).
+- **Class Registration**: Registered `gfx.Sound`, `gfx.Music`, and `gfx.Font` sealed classes in compiler and VM with handle tracking.
+- **Asset Fixtures**: Generated `blip.wav` and committed `DejaVuSansMono.ttf`.
+- **Integration Tests**: Added `vm/tests/m54_gfx_audio.rs` and `vm/tests/m54_gfx_text.rs` running under dummy audio/video drivers.
+- **Fresh Smoke Example**: Added `examples/_smoke_audio.spy` demonstrating sound playing and text rendering.
+- **Fresh Documentation**: Updated `LANGUAGE_GUIDE.md` §11.42 (audio API gotchas) and §11.43 (fonts gotchas).
 
 ## M53 — completed (single agent, 1 commit)
 

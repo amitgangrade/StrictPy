@@ -290,7 +290,7 @@ Each milestone is a self-contained agent run. Tag them M52 onward (HANDOFF's las
 |---|---|---:|---|
 | **M52 (Complete)** | `gfx` core: SDL2 init, Window, Event, drawing primitives | ~900 Rust + ~150 test Spy | **cross-dispatch + net-new-feature** |
 | **M53 (Complete)** | `gfx` images + sprite sheets | ~400 Rust + ~80 test Spy | disjoint-handler |
-| **M54** | `gfx` audio + fonts + text | ~600 Rust + ~80 test Spy | shared-infra (audio init shared by SFX + music; combined Phase A at ~35%) |
+| **M54 (Complete)** | `gfx` audio + fonts + text | ~600 Rust + ~80 test Spy | shared-infra (audio init shared by SFX + music; combined Phase A at ~35%) |
 | **M55** | Snake game | ~400 Spy | net-new-feature (pure user code; one commit when it plays) |
 | **M56** | Tetris game | ~600 Spy | net-new-feature |
 | **M57** | Space Shooter | ~900 Spy | net-new-feature |
