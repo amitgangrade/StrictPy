@@ -1,0 +1,164 @@
+# Generic Typed Parser Combinator in StrictPy
+
+# Class wrapping a generic parse function
+final class Parser[T]:
+    impl: fn(str, i64) -> Tuple[T, i64]?
+
+    fn __init__(self, impl: fn(str, i64) -> Tuple[T, i64]?) -> None:
+        self.impl = impl
+
+    fn parse(self, src: str, pos: i64) -> Tuple[T, i64]?:
+        f: fn(str, i64) -> Tuple[T, i64]? = self.impl
+        return f(src, pos)
+
+# 1. Base Char Parser
+fn char_parser_impl(expected: char, src: str, pos: i64) -> Tuple[char, i64]?:
+    if pos < len(src):
+        if src.char_at(pos) == expected:
+            res: Tuple[char, i64] = (expected, pos + 1i64)
+            return res
+    return none
+
+fn char_parser(expected: char) -> Parser[char]:
+    return Parser(fn(src: str, pos: i64) -> Tuple[char, i64]?: char_parser_impl(expected, src, pos))
+
+# 2. Map Parser Combinator
+fn map_parser_impl[T, U](p: Parser[T], f: fn(T) -> U, src: str, pos: i64) -> Tuple[U, i64]?:
+    res: Tuple[T, i64]? = p.parse(src, pos)
+    if res is not none:
+        val: T = res.0
+        next_pos: i64 = res.1
+        mapped_val: U = f(val)
+        out: Tuple[U, i64] = (mapped_val, next_pos)
+        return out
+    return none
+
+fn map_parser[T, U](p: Parser[T], f: fn(T) -> U) -> Parser[U]:
+    return Parser(fn(src: str, pos: i64) -> Tuple[U, i64]?: map_parser_impl(p, f, src, pos))
+
+# 3. Choice Combinator (Or Else)
+fn or_else_impl[T](p1: Parser[T], p2: Parser[T], src: str, pos: i64) -> Tuple[T, i64]?:
+    res1: Tuple[T, i64]? = p1.parse(src, pos)
+    if res1 is not none:
+        return res1
+    return p2.parse(src, pos)
+
+fn or_else[T](p1: Parser[T], p2: Parser[T]) -> Parser[T]:
+    return Parser(fn(src: str, pos: i64) -> Tuple[T, i64]?: or_else_impl(p1, p2, src, pos))
+
+# ── AST Node Definitions (Sealed Expr Family) ──
+sealed class Expr:
+    fn __init__(self) -> None:
+        pass
+
+final class NumExpr(Expr):
+    val: i64
+    fn __init__(self, val: i64) -> None:
+        self.val = val
+
+final class PlusExpr(Expr):
+    lhs: Expr
+    rhs: Expr
+    fn __init__(self, lhs: Expr, rhs: Expr) -> None:
+        self.lhs = lhs
+        self.rhs = rhs
+
+# ── Custom Parsers for our Simple Plus Language ──
+
+# Parses an integer literal
+fn int_parser_impl(src: str, pos: i64) -> Tuple[i64, i64]?:
+    start: i64 = pos
+    current: i64 = pos
+    while current < len(src):
+        c: char = src.char_at(current)
+        if c >= '0' and c <= '9':
+            current = current + 1i64
+        else:
+            break
+    if current > start:
+        num_str: str = src.slice(start, current)
+        val: i64 = parse_i64(num_str)
+        out: Tuple[i64, i64] = (val, current)
+        return out
+    return none
+
+fn int_parser() -> Parser[i64]:
+    return Parser(fn(src: str, pos: i64) -> Tuple[i64, i64]?: int_parser_impl(src, pos))
+
+# Parses a NumExpr AST node
+fn num_expr_parser_impl(p_int: Parser[i64], src: str, pos: i64) -> Tuple[Expr, i64]?:
+    res: Tuple[i64, i64]? = p_int.parse(src, pos)
+    if res is not none:
+        val: Expr = NumExpr(res.0)
+        out: Tuple[Expr, i64] = (val, res.1)
+        return out
+    return none
+
+fn num_expr_parser() -> Parser[Expr]:
+    p_int: Parser[i64] = int_parser()
+    return Parser(fn(src: str, pos: i64) -> Tuple[Expr, i64]?: num_expr_parser_impl(p_int, src, pos))
+
+# Parses an addition operation (NumExpr + NumExpr)
+fn plus_parser_impl(p_num: Parser[Expr], p_plus: Parser[char], src: str, pos: i64) -> Tuple[Expr, i64]?:
+    r1: Tuple[Expr, i64]? = p_num.parse(src, pos)
+    if r1 is not none:
+        lhs: Expr = r1.0
+        r2: Tuple[char, i64]? = p_plus.parse(src, r1.1)
+        if r2 is not none:
+            r3: Tuple[Expr, i64]? = p_num.parse(src, r2.1)
+            if r3 is not none:
+                rhs: Expr = r3.0
+                expr: Expr = PlusExpr(lhs, rhs)
+                out: Tuple[Expr, i64] = (expr, r3.1)
+                return out
+    return none
+
+fn plus_parser() -> Parser[Expr]:
+    p_num: Parser[Expr] = num_expr_parser()
+    p_plus: Parser[char] = char_parser('+')
+    return Parser(fn(src: str, pos: i64) -> Tuple[Expr, i64]?: plus_parser_impl(p_num, p_plus, src, pos))
+
+# Combines Plus and Num expressions
+fn expr_parser() -> Parser[Expr]:
+    p_plus: Parser[Expr] = plus_parser()
+    p_num: Parser[Expr] = num_expr_parser()
+    return or_else(p_plus, p_num)
+
+# Evaluates the AST using pattern matching
+fn eval_expr(e: Expr) -> i64:
+    match e:
+        case NumExpr(val):
+            return val
+        case PlusExpr(lhs, rhs):
+            return eval_expr(lhs) + eval_expr(rhs)
+    raise ValueError("invalid expression")
+
+fn main() -> i32:
+    parser: Parser[Expr] = expr_parser()
+
+    # 1. Parse simple literal "42"
+    r1: Tuple[Expr, i64]? = parser.parse("42", 0i64)
+    if r1 is not none:
+        e1: Expr = r1.0
+        val1: i64 = eval_expr(e1)
+        println("parsed '42' -> eval value: " + str(val1))
+    else:
+        println("failed to parse '42'")
+
+    # 2. Parse addition "123+456"
+    r2: Tuple[Expr, i64]? = parser.parse("123+456", 0i64)
+    if r2 is not none:
+        e2: Expr = r2.0
+        val2: i64 = eval_expr(e2)
+        println("parsed '123+456' -> eval value: " + str(val2))
+    else:
+        println("failed to parse '123+456'")
+
+    # 3. Fail case
+    r3: Tuple[Expr, i64]? = parser.parse("abc", 0i64)
+    if r3 is none:
+        println("correctly failed to parse 'abc'")
+    else:
+        println("unexpected success parsing 'abc'")
+
+    return 0

@@ -1,0 +1,164 @@
+[
+  {
+    "name": "ping_pong_sync",
+    "size": "100_iter",
+    "spy_wall_ms": 69.96940006501973,
+    "py_wall_ms": 107.73449996486306,
+    "spy_loop_ms": 57.082600000000006,
+    "py_loop_ms": 47.0000000204891,
+    "note": ""
+  },
+  {
+    "name": "ping_pong_sync",
+    "size": "1000_iter",
+    "spy_wall_ms": 102.7851999970153,
+    "py_wall_ms": 155.66839999519289,
+    "spy_loop_ms": 88.863,
+    "py_loop_ms": 92.99999999348074,
+    "note": ""
+  },
+  {
+    "name": "ping_pong_sync",
+    "size": "5000_iter",
+    "spy_wall_ms": 245.05290004890412,
+    "py_wall_ms": 355.92220001854,
+    "spy_loop_ms": 232.25019999999998,
+    "py_loop_ms": 312.99999996554106,
+    "note": ""
+  },
+  {
+    "name": "throughput_sync",
+    "size": "1MB",
+    "spy_wall_ms": 113.29260002821684,
+    "py_wall_ms": 105.59960000682622,
+    "spy_loop_ms": 88.8031,
+    "py_loop_ms": 62.000000034458935,
+    "note": ""
+  },
+  {
+    "name": "throughput_sync",
+    "size": "10MB",
+    "spy_wall_ms": 150.87890007998794,
+    "py_wall_ms": 131.33789994753897,
+    "spy_loop_ms": 125.99559999999998,
+    "py_loop_ms": 92.99999999348074,
+    "note": ""
+  },
+  {
+    "name": "throughput_sync",
+    "size": "50MB",
+    "spy_wall_ms": 319.05819999519736,
+    "py_wall_ms": 240.61320000328124,
+    "spy_loop_ms": 292.0233,
+    "py_loop_ms": 188.0000000819564,
+    "note": ""
+  },
+  {
+    "name": "ping_pong_async",
+    "size": "100_iter",
+    "spy_wall_ms": 45.53209990262985,
+    "py_wall_ms": 141.5948000503704,
+    "spy_loop_ms": 32.177899999999994,
+    "py_loop_ms": 0.0,
+    "note": ""
+  },
+  {
+    "name": "ping_pong_async",
+    "size": "1000_iter",
+    "spy_wall_ms": 292.01270011253655,
+    "py_wall_ms": 194.96200000867248,
+    "spy_loop_ms": 279.0829,
+    "py_loop_ms": 62.000000034458935,
+    "note": ""
+  },
+  {
+    "name": "ping_pong_async",
+    "size": "5000_iter",
+    "spy_wall_ms": 1389.4276999635622,
+    "py_wall_ms": 414.579400094226,
+    "spy_loop_ms": 1371.8410000000001,
+    "py_loop_ms": 297.0000000204891,
+    "note": ""
+  },
+  {
+    "name": "udp_ping_pong_sync",
+    "size": "100_iter",
+    "spy_wall_ms": 68.4006999945268,
+    "py_wall_ms": 107.54130000714213,
+    "spy_loop_ms": 55.6011,
+    "py_loop_ms": 47.0000000204891,
+    "note": ""
+  },
+  {
+    "name": "udp_ping_pong_sync",
+    "size": "1000_iter",
+    "spy_wall_ms": 100.5507999798283,
+    "py_wall_ms": 137.9773000953719,
+    "spy_loop_ms": 87.67060000000001,
+    "py_loop_ms": 94.0000000409782,
+    "note": ""
+  },
+  {
+    "name": "udp_ping_pong_sync",
+    "size": "5000_iter",
+    "spy_wall_ms": 251.07080000452697,
+    "py_wall_ms": 279.94909998960793,
+    "spy_loop_ms": 236.1004,
+    "py_loop_ms": 234.99999998603016,
+    "note": ""
+  },
+  {
+    "name": "http_get_sync",
+    "size": "100_requests",
+    "spy_wall_ms": 67.9723999928683,
+    "py_wall_ms": 205.50889999140054,
+    "spy_loop_ms": 55.11109999999999,
+    "py_loop_ms": 94.0000000409782,
+    "note": ""
+  },
+  {
+    "name": "http_get_sync",
+    "size": "500_requests",
+    "spy_wall_ms": 257.7375000109896,
+    "py_wall_ms": 504.7573000192642,
+    "spy_loop_ms": 260.2486,
+    "py_loop_ms": 391.0000000614673,
+    "note": ""
+  },
+  {
+    "name": "http_get_sync",
+    "size": "1000_requests",
+    "spy_wall_ms": 524.7887999285012,
+    "py_wall_ms": 740.4488000320271,
+    "spy_loop_ms": 567.6109,
+    "py_loop_ms": 719.0000000409782,
+    "note": ""
+  },
+  {
+    "name": "tcp_concurrent_sync",
+    "size": "2_clients",
+    "spy_wall_ms": 83.22540007065982,
+    "py_wall_ms": 136.05349999852479,
+    "spy_loop_ms": 20.16269999999999,
+    "py_loop_ms": 31.00000007543713,
+    "note": ""
+  },
+  {
+    "name": "tcp_concurrent_sync",
+    "size": "4_clients",
+    "spy_wall_ms": 91.55509993433952,
+    "py_wall_ms": 155.8717000298202,
+    "spy_loop_ms": 28.196500000000007,
+    "py_loop_ms": 47.0000000204891,
+    "note": ""
+  },
+  {
+    "name": "tcp_concurrent_sync",
+    "size": "8_clients",
+    "spy_wall_ms": 98.48009992856532,
+    "py_wall_ms": 234.74220000207424,
+    "spy_loop_ms": 34.5744,
+    "py_loop_ms": 125.0,
+    "note": ""
+  }
+]

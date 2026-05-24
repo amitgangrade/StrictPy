@@ -1,0 +1,180 @@
+import os
+import io
+import struct
+import hashlib
+
+fn pack_i32_be(val: i32) -> str:
+    uval: i64 = i64(val)
+    if val < 0i32:
+        uval = i64(val) + 4294967296i64
+    return struct.pack_u32_be(uval)
+
+fn unpack_i32_be(data: str, offset: i32) -> i32:
+    uval: i64 = struct.unpack_u32_be(data, offset)
+    if uval >= 2147483648i64:
+        return i32(uval - 4294967296i64)
+    return i32(uval)
+
+# Class representing an offset in the log file
+final class RecordOffset:
+    offset: i64
+    length: i32
+
+    fn __init__(self, offset: i64, length: i32) -> None:
+        self.offset = offset
+        self.length = length
+
+# Binary append-only log Key-Value Store
+final class BinaryKVStore:
+    file_path: str
+    index: Dict[str, RecordOffset]
+
+    fn __init__(self, file_path: str) -> None:
+        self.file_path = file_path
+        self.index = {}
+        # Touch or create the file
+        if not os.exists(file_path):
+            f: io.File = open(file_path, "w")
+            f.close()
+        self.load_index()
+
+    fn load_index(self) -> None:
+        f: io.File = open(self.file_path, "r")
+        content: str = f.read()
+        f.close()
+
+        n: i64 = len(content)
+        offset: i64 = 0i64
+        while offset + 72i64 <= n:
+            checksum: str = content.slice(offset, offset + 64i64)
+            klen: i32 = unpack_i32_be(content, i32(offset + 64i64))
+            vlen: i32 = unpack_i32_be(content, i32(offset + 68i64))
+
+            total_len: i64 = 72i64 + i64(klen) + i64(vlen)
+            if vlen == -1i32:
+                # Tombstone deletion record has vlen = -1
+                total_len = 72i64 + i64(klen)
+
+            if offset + total_len > n:
+                break # Incomplete trailing write
+
+            key: str = content.slice(offset + 72i64, offset + 72i64 + i64(klen))
+            
+            if vlen == -1i32:
+                # Mark as deleted in index
+                self.index[key] = RecordOffset(-1i64, -1i32)
+            else:
+                self.index[key] = RecordOffset(offset + 72i64 + i64(klen), vlen)
+
+            offset = offset + total_len
+
+    fn set(self, key: str, value: str) -> None:
+        # Checksum of key + value
+        checksum: str = hashlib.sha256(key + value)
+        klen: i32 = i32(len(key))
+        vlen: i32 = i32(len(value))
+
+        header: str = checksum + pack_i32_be(klen) + pack_i32_be(vlen)
+        record: str = header + key + value
+
+        # Read current content to get offset (WAL size)
+        f_read: io.File = open(self.file_path, "r")
+        content: str = f_read.read()
+        f_read.close()
+        offset: i64 = len(content)
+
+        # Append record
+        f_write: io.File = open(self.file_path, "a")
+        f_write.write(record)
+        f_write.close()
+
+        # Update index
+        self.index[key] = RecordOffset(offset + 72i64 + i64(klen), vlen)
+
+    fn get(self, key: str) -> str?:
+        entry: RecordOffset? = self.index.get(key)
+        if entry is none:
+            return none
+
+        if entry.length == -1i32:
+            return none # Deleted
+
+        f: io.File = open(self.file_path, "r")
+        content: str = f.read()
+        f.close()
+
+        val: str = content.slice(entry.offset, entry.offset + i64(entry.length))
+        return val
+
+    fn delete(self, key: str) -> bool:
+        entry: RecordOffset? = self.index.get(key)
+        if entry is none:
+            return false
+        if entry.length == -1i32:
+            return false # Already deleted
+
+        # Write tombstone record
+        checksum: str = hashlib.sha256(key)
+        klen: i32 = i32(len(key))
+        vlen: i32 = -1i32
+
+        header: str = checksum + pack_i32_be(klen) + pack_i32_be(vlen)
+        record: str = header + key
+
+        f_write: io.File = open(self.file_path, "a")
+        f_write.write(record)
+        f_write.close()
+
+        # Update index with tombstone
+        self.index[key] = RecordOffset(-1i64, -1i32)
+        return true
+
+fn main() -> i32:
+    db_file: str = "test_kv.bin"
+    
+    # Ensure starting clean
+    if os.exists(db_file):
+        os.remove(db_file)
+
+    db: BinaryKVStore = BinaryKVStore(db_file)
+    
+    db.set("user:101", "Alice")
+    db.set("user:102", "Bob")
+    
+    u101: str? = db.get("user:101")
+    if u101 is not none:
+        println("GET user:101 -> " + u101)
+    
+    u102: str? = db.get("user:102")
+    if u102 is not none:
+        println("GET user:102 -> " + u102)
+
+    # Overwrite user:101
+    db.set("user:101", "Alice Smith")
+    u101_v2: str? = db.get("user:101")
+    if u101_v2 is not none:
+        println("GET user:101 (v2) -> " + u101_v2)
+
+    # Delete user:102
+    del_ok: bool = db.delete("user:102")
+    println("DEL user:102 -> " + str(del_ok))
+    
+    u102_del: str? = db.get("user:102")
+    if u102_del is none:
+        println("GET user:102 after delete -> <none>")
+
+    # Restart database to verify replay
+    println("Restarting database...")
+    db2: BinaryKVStore = BinaryKVStore(db_file)
+    
+    u101_replay: str? = db2.get("user:101")
+    if u101_replay is not none:
+        println("Replay GET user:101 -> " + u101_replay)
+        
+    u102_replay: str? = db2.get("user:102")
+    if u102_replay is none:
+        println("Replay GET user:102 -> <none>")
+
+    # Cleanup
+    os.remove(db_file)
+    return 0

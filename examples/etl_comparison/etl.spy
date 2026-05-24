@@ -1,0 +1,89 @@
+import os
+import sqlite3
+from sqlite3 import Connection, Cursor
+import tabular
+from tabular import DataFrame, Column, ColumnF64, ColumnI64, ColumnDateTime
+
+fn setup_data() -> None:
+    # 1. Write synthetic transactions to CSV
+    csv_data: str = "Symbol,Timestamp,Price,Volume\n" + \
+        "AAPL,2026-05-23T10:00:00Z,150.0,100\n" + \
+        "AAPL,2026-05-23T10:01:00Z,152.0,150\n" + \
+        "MSFT,2026-05-23T10:01:30Z,300.0,200\n" + \
+        "AAPL,2026-05-23T10:02:00Z,151.0,120\n" + \
+        "MSFT,2026-05-23T10:03:00Z,302.0,250\n" + \
+        "AAPL,2026-05-23T10:04:00Z,153.0,110\n" + \
+        "MSFT,2026-05-23T10:05:00Z,301.0,180\n" + \
+        "AAPL,2026-05-23T10:06:00Z,154.0,130\n" + \
+        "MSFT,2026-05-23T10:07:00Z,305.0,220\n"
+    os.write_file("transactions.csv", csv_data)
+
+    # 2. Setup SQLite database with company metadata
+    conn: Connection = sqlite3.open("metadata.db")
+    conn.execute("CREATE TABLE IF NOT EXISTS company_sectors (symbol TEXT, company TEXT, sector TEXT)")
+    conn.execute("DELETE FROM company_sectors")
+    conn.execute_params("INSERT INTO company_sectors (symbol, company, sector) VALUES (?, ?, ?)", ["AAPL", "Apple Inc.", "Technology"])
+    conn.execute_params("INSERT INTO company_sectors (symbol, company, sector) VALUES (?, ?, ?)", ["MSFT", "Microsoft Corp.", "Technology"])
+    conn.close()
+
+fn main() -> i32:
+    setup_data()
+
+    # Load transactions from CSV
+    tx_schema: List[Tuple[str, str]] = []
+    tx_schema.append(("Symbol", "str"))
+    tx_schema.append(("Timestamp", "datetime"))
+    tx_schema.append(("Price", "f64"))
+    tx_schema.append(("Volume", "i64"))
+    tx_df: DataFrame = tabular.read_csv("transactions.csv", tx_schema)
+
+    # Load metadata from SQLite
+    conn: Connection = sqlite3.open("metadata.db")
+    cur: Cursor = conn.query("SELECT symbol, company, sector FROM company_sectors")
+    meta_schema: List[Tuple[str, str]] = []
+    meta_schema.append(("Symbol", "str"))
+    meta_schema.append(("Company", "str"))
+    meta_schema.append(("Sector", "str"))
+    meta_df: DataFrame = tabular.from_sql(cur, meta_schema)
+    conn.close()
+
+    println("--- Transactions DataFrame ---")
+    println(tx_df.show(-1i64))
+
+    println("--- Metadata DataFrame ---")
+    println(meta_df.show(-1i64))
+
+    # Inner Join (merge) on Symbol
+    on_cols: List[str] = []
+    on_cols.append("Symbol")
+    merged_df: DataFrame = tx_df.merge(meta_df, on_cols, "inner")
+    println("--- Merged DataFrame ---")
+    println(merged_df.show(-1i64))
+
+    # Resample to 2-minute intervals (mean aggregation)
+    resampled_df: DataFrame = merged_df.resample("Timestamp", "2m", "mean")
+    println("--- Resampled (2m Mean) ---")
+    println(resampled_df.show(-1i64))
+
+    # Sort by Timestamp to compute rolling mean
+    sorted_df: DataFrame = merged_df.sort_by("Timestamp", true)
+    price_col: ColumnF64? = sorted_df.get_column_f64("Price")
+    
+    println("--- Rolling Price Mean (Window=3) ---")
+    if price_col is not none:
+        rolling_p: ColumnF64 = price_col.rolling_mean(3i64)
+        i: i64 = 0i64
+        while i < sorted_df.length():
+            row_data: List[str] = sorted_df.row(i)
+            roll_val: f64? = rolling_p.get(i)
+            roll_str: str = "null"
+            if roll_val is not none:
+                roll_str = str(roll_val)
+            println("Symbol=" + row_data[0i32] + " Time=" + row_data[1i32] + " Price=" + row_data[2i32] + " RollMean=" + roll_str)
+            i = i + 1i64
+
+    # Cleanup files
+    os.remove("transactions.csv")
+    os.remove("metadata.db")
+
+    return 0

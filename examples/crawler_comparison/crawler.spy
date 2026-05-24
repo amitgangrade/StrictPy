@@ -1,0 +1,204 @@
+import socket
+import threading
+import http_client
+import re
+from re import Pattern
+
+# Visited tracking class (thread-safe wrapper around Dict[str, bool])
+final class VisitedTracker:
+    lock: i64
+    visited: Dict[str, bool]
+
+    fn __init__(self) -> None:
+        self.lock = threading.lock_new()
+        self.visited = {}
+
+    fn mark_visited(self, url: str) -> bool:
+        fresh: bool = false
+        threading.lock_acquire(self.lock)
+        if not self.visited.has(url):
+            self.visited[url] = true
+            fresh = true
+        threading.lock_release(self.lock)
+        return fresh
+
+    fn check_visited(self, url: str) -> bool:
+        res: bool = false
+        threading.lock_acquire(self.lock)
+        res = self.visited.has(url)
+        threading.lock_release(self.lock)
+        return res
+
+fn contains(s: str, needle: str) -> bool:
+    sn: i64 = len(s)
+    nn: i64 = len(needle)
+    if nn == 0i64:
+        return true
+    if nn > sn:
+        return false
+    i: i64 = 0i64
+    while i <= sn - nn:
+        j: i64 = 0i64
+        ok: bool = true
+        while j < nn:
+            if s.char_at(i + j) != needle.char_at(j):
+                ok = false
+                break
+            j = j + 1i64
+        if ok:
+            return true
+        i = i + 1i64
+    return false
+
+# Mock HTTP Server running on a background thread
+fn run_mock_server(port: i32) -> None:
+    lis: i64 = socket.listen_tcp("127.0.0.1", port, 16i32)
+    requests_handled: i32 = 0
+    # Serve a finite number of requests to terminate cleanly
+    while requests_handled < 10i32:
+        try:
+            conn: i64 = 0i64
+            peer: str = ""
+            accepted: Tuple[i64, str] = socket.accept(lis)
+            conn = accepted.0
+            peer = accepted.1
+            
+            req: str = socket.recv(conn, 1024i32)
+            resp_body: str = ""
+            status_line: str = "HTTP/1.1 200 OK\r\n"
+            
+            if contains(req, "GET /page1") or contains(req, "GET / ") or contains(req, "GET /index.html"):
+                resp_body = "<html><body><h1>Page 1</h1><a href=\"/page2\">Page 2</a> <a href=\"/page3\">Page 3</a></body></html>"
+            elif contains(req, "GET /page2"):
+                resp_body = "<html><body><h1>Page 2</h1><a href=\"/page3\">Page 3</a> <a href=\"/index.html\">Page 1</a></body></html>"
+            elif contains(req, "GET /page3"):
+                resp_body = "<html><body><h1>Page 3</h1><a href=\"/index.html\">Back to Home</a></body></html>"
+            else:
+                status_line = "HTTP/1.1 404 Not Found\r\n"
+                resp_body = "Not Found"
+            
+            resp: str = status_line + "Content-Type: text/html\r\nContent-Length: " + str(len(resp_body)) + "\r\n\r\n" + resp_body
+            socket.send(conn, resp)
+            socket.close(conn)
+            requests_handled = requests_handled + 1i32
+        except IOError as e:
+            # Ignore socket errors
+            pass
+    socket.close_listener(lis)
+
+# Crawler worker function
+fn crawler_worker(
+    worker_id: i32,
+    base_url: str,
+    queue: Channel[str],
+    tracker: VisitedTracker,
+    pending_lock: i64,
+    pending: List[i32],
+    results: Channel[str]
+) -> None:
+    regex: Pattern = re.compile("href=\"/[^\"]*\"")
+    while true:
+        url: str = queue.recv()
+        if url == "SHUTDOWN":
+            queue.send("SHUTDOWN") # Propagate shutdown to other workers
+            break
+
+        println("Worker " + str(worker_id) + " crawling: " + url)
+        
+        # Simulate fetch
+        full_url: str = base_url + url
+        success: bool = false
+        body: str = ""
+        try:
+            status: i32 = 0
+            response_body: str = ""
+            fetched: Tuple[i32, str] = http_client.get(full_url)
+            status = fetched.0
+            response_body = fetched.1
+            if status == 200:
+                success = true
+                body = response_body
+            else:
+                println("Worker " + str(worker_id) + " failed: " + url + " status=" + str(status))
+        except IOError as e:
+            println("Worker " + str(worker_id) + " error: " + url + " message=" + e.message)
+
+        if success:
+            results.send(url)
+            matches: List[str] = regex.find_all(body)
+            for m: str in matches:
+                # Extract URL path (slice off href="/ and ")
+                path: str = m.slice(6, len(m) - 1)
+                
+                # Check if already visited before pushing to prevent infinite pending growth
+                if not tracker.check_visited(path):
+                    fresh: bool = tracker.mark_visited(path)
+                    if fresh:
+                        # Increment pending and push
+                        threading.lock_acquire(pending_lock)
+                        pending[0] = pending[0] + 1i32
+                        threading.lock_release(pending_lock)
+                        queue.send(path)
+
+        # Finished processing this item, decrement pending
+        threading.lock_acquire(pending_lock)
+        pending[0] = pending[0] - 1i32
+        done: bool = (pending[0] == 0i32)
+        threading.lock_release(pending_lock)
+
+        if done:
+            queue.send("SHUTDOWN")
+
+fn main() -> i32:
+    port: i32 = 50045i32 # Choose port
+    
+    # Start the mock server on a background thread
+    server_t: Thread = Thread(fn() -> None: run_mock_server(port))
+    server_t.start()
+    
+    base_url: str = "http://127.0.0.1:" + str(port)
+    queue: Channel[str] = Channel[str](16i32)
+    tracker: VisitedTracker = VisitedTracker()
+    pending_lock: i64 = threading.lock_new()
+    pending: List[i32] = [1i32]
+    results: Channel[str] = Channel[str](16i32)
+
+    # Seed the first page
+    tracker.mark_visited("/index.html")
+    queue.send("/index.html")
+
+    # Spawn 3 crawler workers
+    workers: List[Thread] = []
+    i: i32 = 0i32
+    while i < 3i32:
+        wid: i32 = i + 1i32
+        b: str = base_url
+        q: Channel[str] = queue
+        tr: VisitedTracker = tracker
+        pl: i64 = pending_lock
+        pd: List[i32] = pending
+        res: Channel[str] = results
+        t: Thread = Thread(fn() -> None: crawler_worker(wid, b, q, tr, pl, pd, res))
+        t.start()
+        workers.append(t)
+        i = i + 1i32
+
+    # Join all crawler threads
+    j: i32 = 0i32
+    while j < 3i32:
+        workers[j].join()
+        j = j + 1i32
+
+    # Join server thread
+    server_t.join()
+
+    # Collect crawled results
+    println("\nCrawl complete. Visited pages:")
+    while true:
+        r: str? = results.try_recv()
+        if r is not none:
+            println("- " + r)
+        else:
+            break
+
+    return 0
