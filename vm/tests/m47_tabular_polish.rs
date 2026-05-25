@@ -926,6 +926,128 @@ fn main() -> i32:
     assert!(out.contains("v2=mango"), "got: {out:?}");
 }
 
+// ── M47b: ColumnCategorical as index/columns key in pivot_table ───────
+//
+// Regression test for the post-M50c finding: passing a
+// ColumnCategorical as the `index_col` or `columns_col` of
+// `df.pivot_table(...)` previously fell through to the default-"?"
+// label in m41_df_pivot_table's i_label/c_label closures, collapsing
+// every row into a single bucket.  The fix routes ColumnCategorical
+// through codes → categories like every other categorical-aware op.
+
+#[test]
+fn pivot_table_with_categorical_index_resolves_to_distinct_rows() {
+    let src = "\
+from tabular import DataFrame, Column, ColumnI64, ColumnBool, ColumnCategorical
+import tabular
+fn main() -> i32:
+    regions: List[str] = []
+    regions.append(\"east\")
+    regions.append(\"east\")
+    regions.append(\"west\")
+    regions.append(\"west\")
+    regions.append(\"north\")
+    regions.append(\"north\")
+    active_v: List[bool] = []
+    active_v.append(true)
+    active_v.append(false)
+    active_v.append(true)
+    active_v.append(false)
+    active_v.append(true)
+    active_v.append(false)
+    units_v: List[i64] = []
+    units_v.append(10i64)
+    units_v.append(5i64)
+    units_v.append(7i64)
+    units_v.append(3i64)
+    units_v.append(2i64)
+    units_v.append(8i64)
+    nulls: List[bool] = []
+    nulls.append(false)
+    nulls.append(false)
+    nulls.append(false)
+    nulls.append(false)
+    nulls.append(false)
+    nulls.append(false)
+    region_col: ColumnCategorical = tabular.col_categorical(regions)
+    active_col: ColumnBool = tabular.col_bool(active_v, nulls)
+    units_col: ColumnI64 = tabular.col_i64(units_v, nulls)
+    cols: List[Column] = []
+    cols.append(region_col)
+    cols.append(active_col)
+    cols.append(units_col)
+    names: List[str] = []
+    names.append(\"region\")
+    names.append(\"active\")
+    names.append(\"units\")
+    df: DataFrame = tabular.from_columns(names, cols)
+    pt: DataFrame = df.pivot_table(\"region\", \"active\", \"units\", \"sum\")
+    println(\"nrows=\" + str(pt.length()))
+    println(\"has_idx=\" + str(pt.has_index()))
+    println(\"nlev=\" + str(pt.index_nlevels()))
+    return 0
+";
+    let out = run("cat_pivot_index", src);
+    // 3 distinct regions → 3 rows in the pivoted output.  Before the
+    // fix this would have been "nrows=1" (all rows collapse to "?").
+    assert!(out.contains("nrows=3"), "got: {out:?}");
+    assert!(out.contains("has_idx=true"), "got: {out:?}");
+    assert!(out.contains("nlev=1"), "got: {out:?}");
+}
+
+#[test]
+fn pivot_table_with_categorical_columns_axis_resolves() {
+    // Same fix on the columns_col side — the c_label closure had
+    // the same fall-through bug.
+    let src = "\
+from tabular import DataFrame, Column, ColumnI64, ColumnStr, ColumnCategorical
+import tabular
+fn main() -> i32:
+    regions: List[str] = []
+    regions.append(\"east\")
+    regions.append(\"west\")
+    regions.append(\"east\")
+    regions.append(\"west\")
+    products: List[str] = []
+    products.append(\"a\")
+    products.append(\"a\")
+    products.append(\"b\")
+    products.append(\"b\")
+    units_v: List[i64] = []
+    units_v.append(10i64)
+    units_v.append(7i64)
+    units_v.append(5i64)
+    units_v.append(3i64)
+    nulls: List[bool] = []
+    nulls.append(false)
+    nulls.append(false)
+    nulls.append(false)
+    nulls.append(false)
+    region_col: ColumnStr = tabular.col_str(regions, nulls)
+    # product is the CATEGORICAL columns-axis key.
+    product_col: ColumnCategorical = tabular.col_categorical(products)
+    units_col: ColumnI64 = tabular.col_i64(units_v, nulls)
+    cols: List[Column] = []
+    cols.append(region_col)
+    cols.append(product_col)
+    cols.append(units_col)
+    names: List[str] = []
+    names.append(\"region\")
+    names.append(\"product\")
+    names.append(\"units\")
+    df: DataFrame = tabular.from_columns(names, cols)
+    pt: DataFrame = df.pivot_table(\"region\", \"product\", \"units\", \"sum\")
+    println(\"nrows=\" + str(pt.length()))
+    println(\"ncols=\" + str(pt.ncols()))
+    return 0
+";
+    let out = run("cat_pivot_cols", src);
+    // 2 regions × 2 distinct product values = 2 rows × 2 cols.
+    // Before the fix this would have been ncols=1 (all products collapse to "?").
+    assert!(out.contains("nrows=2"), "got: {out:?}");
+    assert!(out.contains("ncols=2"), "got: {out:?}");
+}
+
 // Suppress dead-code warning for the helper.
 #[allow(dead_code)]
 fn _use_helper() -> String {

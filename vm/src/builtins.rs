@@ -18808,6 +18808,16 @@ fn m41_df_pivot_table(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmE
             "ColumnF64" => m37_read_list_f64(vals).get(row).copied().unwrap_or(0.0).to_string(),
             "ColumnStr" => m37_read_list_str_lst(vals).get(row).cloned().unwrap_or_default(),
             "ColumnBool" => if m37_read_list_bool(vals).get(row).copied().unwrap_or(false) { "true".to_string() } else { "false".to_string() },
+            // M47b fix: route ColumnCategorical through codes → categories.
+            // Previously fell through to "?" which collapsed every row
+            // into a single bucket — observed during M50c testing.
+            "ColumnCategorical" => {
+                let codes = m37_read_list_i64(vals);
+                let cats_ptr = m47_col_cat_categories_ptr(i_col_p);
+                let cats = m37_read_list_str_lst(cats_ptr);
+                let code = codes.get(row).copied().unwrap_or(0) as usize;
+                cats.get(code).cloned().unwrap_or_default()
+            }
             _ => "?".to_string(),
         })
     };
@@ -18820,6 +18830,14 @@ fn m41_df_pivot_table(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmE
             "ColumnF64" => m37_read_list_f64(vals).get(row).copied().unwrap_or(0.0).to_string(),
             "ColumnStr" => m37_read_list_str_lst(vals).get(row).cloned().unwrap_or_default(),
             "ColumnBool" => if m37_read_list_bool(vals).get(row).copied().unwrap_or(false) { "true".to_string() } else { "false".to_string() },
+            // M47b fix: same as i_label above.
+            "ColumnCategorical" => {
+                let codes = m37_read_list_i64(vals);
+                let cats_ptr = m47_col_cat_categories_ptr(c_col_p);
+                let cats = m37_read_list_str_lst(cats_ptr);
+                let code = codes.get(row).copied().unwrap_or(0) as usize;
+                cats.get(code).cloned().unwrap_or_default()
+            }
             _ => "?".to_string(),
         })
     };

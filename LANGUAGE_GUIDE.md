@@ -2695,6 +2695,12 @@ M40 shipped fixed-width resample rules: `Nm` (minutes), `Nh` (hours), `Nd` (days
 
 **Months/years are NOT fixed-width**: each `1M` bucket may contain 28-31 days; each `1Y` bucket contains 365 or 366 days.  Aggregations (`sum`, `mean`, `min`, `max`, `count`) operate on the rows that fall in each bucket regardless of the bucket's day-count.
 
+### 11.38b `tabular.pivot_table` resolves `ColumnCategorical` keys through codes → categories (post-M50c fix)
+
+If you pass a `ColumnCategorical` as `df.pivot_table(...)`'s `index_col` or `columns_col`, the pivot now correctly resolves each cell to its category string and groups distinct categories into distinct rows/columns.  Before the fix, `m41_df_pivot_table` had a fall-through case that labeled every categorical cell as `"?"`, collapsing all rows into a single `"?"` bucket.  Same fix automatically applies to `pivot_table_aggfunc_list` and `pivot_table_margins` since they delegate to the same helper.
+
+The values column still requires `ColumnI64` or `ColumnF64` for non-`count` aggfuncs (pivot can't sum/mean strings).  For `aggfunc="count"` any dtype works.
+
 ### 11.38 `tabular.merge` codes-hash requires bit-identical `categories[]` (post-M49)
 
 When `df.merge(other, on, how)` is called and every `on` column on BOTH sides is a `ColumnCategorical`, M49 checks whether the two sides' `categories[]` are **bit-identical** (same length + same strings at the same indices).  If yes → codes-hash fastpath fires (hash on i64 codes vector).  If no (different orderings, or different category sets) → falls back to the string-hash path.
