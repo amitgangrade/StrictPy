@@ -996,7 +996,7 @@ cur.row_count() -> i64                            # rows the underlying query pr
 
 All cells are stringified (v0.4 will add typed cell access).
 
-### tabular (M37, extended by M38, M39, M40, M41, M42, M43, M44, M45, M46, M47, M49, M50a, M50b, M50c)
+### tabular (M37, extended by M38, M39, M40, M41, M42, M43, M44, M45, M46, M47, M49, M50a, M50b, M50c, M51)
 
 First Pandas-shaped data package — native Rust impl (real pandas can't import). Sealed `Column` hierarchy + `DataFrame` with named columns + per-column null mask. First stdlib package to register its classes module-scoped from the start (no prelude bloat — see §6.2). M38 rounds out the M37 STOP-CRITERIA debt and adds per-column aggregations, `df.describe`, `Column.fill_null`, `tabular.from_dict`, and hash-based group-by via a new `GroupedDataFrame` class. M39 adds the Phase 4 reshape surface: per-dtype `unique`, `value_counts`, `concat_rows`/`concat_cols`, `df.merge` (hash-join), `df.pivot`, and `df.melt`. M40 closes the time-series / null-handling / cumulative / range-slicing surface: per-column cumulative ops, whole-frame `dropna` / `fillna_*`, `df.iloc` range slicing, rolling-window aggregations, `df.resample` time-bucketing, and `df.asof_merge`.
 
@@ -1587,6 +1587,49 @@ Endpoints exposed by both functions:
 Missing `df` query param defaults to ID 0 (the primary df passed to `serve`).  Unknown `df` returns 404.
 
 See `examples/tabular_serve_demo.spy` for a working walkthrough.  The demo includes a ColumnCategorical column so M50b categorical rendering shows up in the frontend, and the interactive Pivot + Chart panels (M50c) work against it out of the box.
+
+#### M51 — chainable RollingWindow
+
+M51 adds pandas-style chainable rolling-window aggregation on a DataFrame: `df.rolling(W).mean()` and friends.  Replaces the M40 / M47 per-column `col.rolling_sum(W)` / `col.rolling_*_min_periods(W, mp)` direct surface with a higher-level fan-out that operates on every numeric column at once and preserves the parent's index.  The per-column direct methods stay (no API removed) and remain useful when you want to roll a single Column.
+
+```python
+from tabular import DataFrame, RollingWindow
+
+# Trailing 3-day rolling sum / mean / std / min / max over every
+# numeric column.  Non-numeric columns are silently dropped from the
+# output (except for count(), which counts every column).
+df.rolling(3i64).sum()       # -> DataFrame
+df.rolling(3i64).mean()      # -> DataFrame (always f64 output dtype)
+df.rolling(3i64).std()       # -> DataFrame (always f64; sample std, ddof=1)
+df.rolling(3i64).min()
+df.rolling(3i64).max()
+df.rolling(3i64).count()     # -> DataFrame[i64] including non-numeric cols
+
+# Centered window — for W=3, position i covers [i-1, i+1] (rather
+# than the trailing [i-2, i] of plain rolling).  Output cells where
+# the window crosses a frame boundary are null.  StrictPy has no
+# kwargs, so center=True is a separate constructor variant:
+df.rolling_centered(3i64).mean()
+
+# min_periods — emit a non-null cell whenever the window contains at
+# least `min_periods` non-null cells (otherwise null).  Defaults to
+# the full window when not supplied.  min_periods=1 with a partial
+# window is the common "fill in the start" idiom:
+df.rolling_min_periods(3i64, 1i64).sum()
+df.rolling_centered_min_periods(5i64, 2i64).mean()
+
+# The intermediate RollingWindow object is a real value — you can
+# bind it and inspect.  Carries (parent_df, window, min_periods,
+# center_bool) in a 32-byte payload.
+rw: RollingWindow = df.rolling_centered_min_periods(5i64, 2i64)
+rw.window()       # -> i64 (5)
+rw.min_periods()  # -> i64 (2)  ← effective value; defaults to window if unset
+rw.is_centered()  # -> bool (true)
+```
+
+Index propagation: the output frame keeps the parent's index untouched — single-column M41 index and multi-column M44 MultiIndex are both carried through.  This means `df.set_index("day").rolling(7i64).mean()` returns a frame still indexed by day, ready to plot directly.
+
+See `examples/tabular_m51_rolling_window_demo.spy` for a 10-row daily-sales walkthrough including all four constructor variants.
 
 ### shutil (M27 P3c-A)
 

@@ -1330,6 +1330,58 @@ pub enum NativeFn {
     // 1069-1090 reserved for v1 follow-ups (M50b/M50c — sortable
     // headers, composite filters, virtual scroll, CSV download, pivot
     // UI).
+    // M51 carves out 1069-1086 for the chainable RollingWindow API
+    // (df.rolling(W).{sum,mean,min,max,std,count} + center=True +
+    // min_periods).  See vm/src/builtins.rs::m51_alloc_rolling_window
+    // and the RollingWindow ClassLayout in compiler/src/resolver.rs.
+    /// `DataFrame.rolling(window: i64) -> RollingWindow`.  Constructs a
+    /// chainable rolling-window aggregator over every numeric column of
+    /// the receiver.  The returned object holds (parent, window,
+    /// min_periods=-1 sentinel, center=false).  Call .sum/.mean/.min/
+    /// .max/.std/.count on it to materialize a DataFrame.
+    M51TabDfRolling                    = 1069,
+    /// `DataFrame.rolling_centered(window: i64) -> RollingWindow`.
+    /// Same as `rolling` but with center=true.  For window=W, position
+    /// i uses the window [i - (W-1)/2, i + W/2]; positions where the
+    /// window crosses a boundary produce nulls.
+    M51TabDfRollingCentered            = 1070,
+    /// `DataFrame.rolling_min_periods(window: i64, min_periods: i64)
+    /// -> RollingWindow`.  Same as `rolling` but with explicit
+    /// min_periods (positions whose window contains fewer than
+    /// min_periods non-null cells produce a null cell instead of a
+    /// computed value).
+    M51TabDfRollingMinPeriods          = 1071,
+    /// `DataFrame.rolling_centered_min_periods(window, min_periods)
+    /// -> RollingWindow`.  Combination of center=true + min_periods.
+    M51TabDfRollingCenteredMinPeriods  = 1072,
+    /// `RollingWindow.sum() -> DataFrame`.  Per-column rolling sum
+    /// (numeric columns only; non-numeric columns are silently dropped
+    /// in v1).  Index is propagated from the parent if present.
+    M51TabRwSum                        = 1073,
+    /// `RollingWindow.mean() -> DataFrame`.  Per-column rolling mean.
+    /// Output dtype is always f64.
+    M51TabRwMean                       = 1074,
+    /// `RollingWindow.min() -> DataFrame`.  Per-column rolling min.
+    M51TabRwMin                        = 1075,
+    /// `RollingWindow.max() -> DataFrame`.  Per-column rolling max.
+    M51TabRwMax                        = 1076,
+    /// `RollingWindow.std() -> DataFrame`.  Per-column rolling sample
+    /// standard deviation (ddof=1).  Output dtype is always f64.
+    M51TabRwStd                        = 1077,
+    /// `RollingWindow.count() -> DataFrame`.  Per-column rolling
+    /// count of non-null cells.  Applies to every column (including
+    /// non-numeric); output dtype is always i64.
+    M51TabRwCount                      = 1078,
+    /// `RollingWindow.window() -> i64`.  Introspection: the window
+    /// size the RollingWindow was constructed with.
+    M51TabRwWindow                     = 1079,
+    /// `RollingWindow.min_periods() -> i64`.  Introspection: returns
+    /// the explicit min_periods, or window when no min_periods was
+    /// supplied at construction time.
+    M51TabRwMinPeriods                 = 1080,
+    /// `RollingWindow.is_centered() -> bool`.  Introspection: whether
+    /// the RollingWindow was constructed with center=true.
+    M51TabRwIsCentered                 = 1081,
 
     // ── 250–289: M22 P2A (argparse + collections + csv) ─────────────────
     // Phase 2 starts here.  P2A's job is to bring three high-ROI stdlib
@@ -2960,6 +3012,20 @@ impl NativeFn {
             // ── M50a (tabular.serve HTTP transport) ──────────────
             1067 => Some(Self::M50aTabServe),
             1068 => Some(Self::M50aTabServeWithTimeout),
+            // ── M51 (chainable RollingWindow) ────────────────────
+            1069 => Some(Self::M51TabDfRolling),
+            1070 => Some(Self::M51TabDfRollingCentered),
+            1071 => Some(Self::M51TabDfRollingMinPeriods),
+            1072 => Some(Self::M51TabDfRollingCenteredMinPeriods),
+            1073 => Some(Self::M51TabRwSum),
+            1074 => Some(Self::M51TabRwMean),
+            1075 => Some(Self::M51TabRwMin),
+            1076 => Some(Self::M51TabRwMax),
+            1077 => Some(Self::M51TabRwStd),
+            1078 => Some(Self::M51TabRwCount),
+            1079 => Some(Self::M51TabRwWindow),
+            1080 => Some(Self::M51TabRwMinPeriods),
+            1081 => Some(Self::M51TabRwIsCentered),
             // ── M52 (GFX core) ───────────────────────────────────
             1100 => Some(Self::GfxInit),
             1101 => Some(Self::GfxCreateWindow),

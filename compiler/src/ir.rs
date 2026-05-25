@@ -4273,6 +4273,21 @@ fn lower_method_call(
                     },
                 );
             }
+            // M51: chainable RollingWindow.  `df.rolling*` constructors
+            // live on DataFrame and return a RollingWindow; the
+            // aggregator methods (`.sum/.mean/...`) live on
+            // RollingWindow itself and return a DataFrame.
+            if let Some(nid) = m51_tabular_class_method_native_id_by_name(
+                layout.name.as_str(), method,
+            ) {
+                return fb.push_value(
+                    ret_ty,
+                    ValueKind::Op {
+                        op: IROp::NativeCall { native_id: nid },
+                        args: arg_vs,
+                    },
+                );
+            }
         }
     }
 
@@ -4837,6 +4852,40 @@ fn m41_tabular_class_method_native_id_by_name(
         ("DataFrame", "loc_range_multi_i64")      => NativeFn::M49TabDfLocRangeMultiI64       as u32,
         ("DataFrame", "loc_range_multi_str")      => NativeFn::M49TabDfLocRangeMultiStr       as u32,
         ("DataFrame", "loc_range_multi_datetime") => NativeFn::M49TabDfLocRangeMultiDateTime  as u32,
+        _ => return None,
+    })
+}
+
+/// M51: dispatch the chainable RollingWindow surface.  Two halves:
+///   - `df.rolling*` constructors on DataFrame → return RollingWindow.
+///   - `.sum/.mean/.min/.max/.std/.count/.window/.min_periods/
+///      .is_centered` aggregators on RollingWindow → return DataFrame
+///      (or i64 / bool for the introspection getters).
+/// Same shape as `m41_tabular_class_method_native_id_by_name`.
+fn m51_tabular_class_method_native_id_by_name(
+    class_name: &str,
+    method: &str,
+) -> Option<u32> {
+    Some(match (class_name, method) {
+        // ── DataFrame.rolling* constructors ──
+        ("DataFrame", "rolling")
+            => NativeFn::M51TabDfRolling                   as u32,
+        ("DataFrame", "rolling_centered")
+            => NativeFn::M51TabDfRollingCentered           as u32,
+        ("DataFrame", "rolling_min_periods")
+            => NativeFn::M51TabDfRollingMinPeriods         as u32,
+        ("DataFrame", "rolling_centered_min_periods")
+            => NativeFn::M51TabDfRollingCenteredMinPeriods as u32,
+        // ── RollingWindow aggregators / introspection ──
+        ("RollingWindow", "sum")         => NativeFn::M51TabRwSum         as u32,
+        ("RollingWindow", "mean")        => NativeFn::M51TabRwMean        as u32,
+        ("RollingWindow", "min")         => NativeFn::M51TabRwMin         as u32,
+        ("RollingWindow", "max")         => NativeFn::M51TabRwMax         as u32,
+        ("RollingWindow", "std")         => NativeFn::M51TabRwStd         as u32,
+        ("RollingWindow", "count")       => NativeFn::M51TabRwCount       as u32,
+        ("RollingWindow", "window")      => NativeFn::M51TabRwWindow      as u32,
+        ("RollingWindow", "min_periods") => NativeFn::M51TabRwMinPeriods  as u32,
+        ("RollingWindow", "is_centered") => NativeFn::M51TabRwIsCentered  as u32,
         _ => return None,
     })
 }

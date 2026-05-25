@@ -4731,6 +4731,12 @@ impl Resolver {
         let m38_gdf_cid = self.fresh_class();
         self.class_name_to_id.insert("GroupedDataFrame".into(), m38_gdf_cid);
         let m38_gdf_ty = Ty::Class(m38_gdf_cid);
+        // ── M51: RollingWindow class id (allocated before DataFrame
+        // layout so DataFrame.rolling can reference it as its return
+        // type, same pattern as GroupedDataFrame above).
+        let m51_rw_cid = self.fresh_class();
+        self.class_name_to_id.insert("RollingWindow".into(), m51_rw_cid);
+        let m51_rw_ty = Ty::Class(m51_rw_cid);
         // ── M38: tuple (str, str) for rename / agg-spec params.
         let m38_str_pair_list = Ty::Generic {
             base: TypeCtor::List,
@@ -5092,6 +5098,32 @@ impl Resolver {
                     params: vec![m37_str.clone()],
                     ret: Ty::Nullable(Box::new(m47_col_cat_ty.clone())),
                 },
+                // ── M51: chainable rolling-window constructors.  Each
+                // returns a RollingWindow which the caller chains with
+                // .sum/.mean/.min/.max/.std/.count to materialise the
+                // aggregated DataFrame.  No kwargs in StrictPy, so the
+                // center=True and min_periods options each get their
+                // own constructor variant.
+                MethodSig {
+                    name: "rolling".into(),
+                    params: vec![m37_i64.clone()],
+                    ret: m51_rw_ty.clone(),
+                },
+                MethodSig {
+                    name: "rolling_centered".into(),
+                    params: vec![m37_i64.clone()],
+                    ret: m51_rw_ty.clone(),
+                },
+                MethodSig {
+                    name: "rolling_min_periods".into(),
+                    params: vec![m37_i64.clone(), m37_i64.clone()],
+                    ret: m51_rw_ty.clone(),
+                },
+                MethodSig {
+                    name: "rolling_centered_min_periods".into(),
+                    params: vec![m37_i64.clone(), m37_i64.clone()],
+                    ret: m51_rw_ty.clone(),
+                },
             ],
             generics: vec![], generic_tvars: vec![],
             is_native: false, payload_size: 56,
@@ -5122,6 +5154,39 @@ impl Resolver {
                     name: "agg".into(),
                     params: vec![m38_str_pair_list.clone()],
                     ret: m37_df_ty.clone(),
+                },
+            ],
+            generics: vec![], generic_tvars: vec![],
+            is_native: false, payload_size: 32,
+        });
+
+        // ── M51: RollingWindow layout — payload carries (parent_df,
+        // window, min_periods, center_bool).  Same 32-byte payload shape
+        // as GroupedDataFrame.  min_periods is the effective value (=
+        // window when caller did not supply one); the i64 sentinel -1
+        // is not used here — see m51_alloc_rolling_window which
+        // normalises it.  center_bool is stored as i64 (0/1).
+        self.class_layouts.insert(m51_rw_cid, ClassLayout {
+            id: m51_rw_cid, name: "RollingWindow".into(), base: None,
+            is_open: false, is_sealed: false,
+            fields: vec![
+                FieldInfo { name: "parent".into(),       ty: m37_df_ty.clone(), offset: 0 },
+                FieldInfo { name: "window".into(),       ty: m37_i64.clone(),   offset: 8 },
+                FieldInfo { name: "min_periods".into(),  ty: m37_i64.clone(),   offset: 16 },
+                FieldInfo { name: "center_bool".into(),  ty: m37_i64.clone(),   offset: 24 },
+            ],
+            methods: vec![
+                MethodSig { name: "sum".into(),         params: vec![], ret: m37_df_ty.clone() },
+                MethodSig { name: "mean".into(),        params: vec![], ret: m37_df_ty.clone() },
+                MethodSig { name: "min".into(),         params: vec![], ret: m37_df_ty.clone() },
+                MethodSig { name: "max".into(),         params: vec![], ret: m37_df_ty.clone() },
+                MethodSig { name: "std".into(),         params: vec![], ret: m37_df_ty.clone() },
+                MethodSig { name: "count".into(),       params: vec![], ret: m37_df_ty.clone() },
+                MethodSig { name: "window".into(),      params: vec![], ret: m37_i64.clone() },
+                MethodSig { name: "min_periods".into(), params: vec![], ret: m37_i64.clone() },
+                MethodSig {
+                    name: "is_centered".into(), params: vec![],
+                    ret: Ty::Primitive(PrimTy::Bool),
                 },
             ],
             generics: vec![], generic_tvars: vec![],
@@ -5333,6 +5398,11 @@ impl Resolver {
             // works.  Users never construct it directly; `df.group_by`
             // is the only entry point.
             ("GroupedDataFrame",  m38_gdf_cid),
+            // ── M51: RollingWindow — same shape as GroupedDataFrame
+            // above.  Users never construct it directly; `df.rolling`
+            // (and the centered / min_periods variants) is the only
+            // entry point.
+            ("RollingWindow",     m51_rw_cid),
         ] {
             m37_tabular_mod.items.push(StdlibItem {
                 name: m37_name.into(),

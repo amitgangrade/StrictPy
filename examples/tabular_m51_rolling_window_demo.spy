@@ -1,0 +1,98 @@
+"""M51 demo — chainable RollingWindow.
+
+Shows the new `df.rolling(W)` accessor (plus the centered + min_periods
+variants) and how chained .sum()/.mean()/etc. produce a DataFrame whose
+index is propagated from the parent.
+
+Run with: ./target/release/spy examples/tabular_m51_rolling_window_demo.spy
+"""
+
+from tabular import DataFrame, Column, ColumnI64, ColumnF64, ColumnStr, RollingWindow
+import tabular
+
+
+fn main() -> i32:
+    # ── Build a 10-row daily sales frame ──────────────────────────────
+    day_v: List[i64] = []
+    units_v: List[i64] = []
+    revenue_v: List[f64] = []
+    region_v: List[str] = []
+    region_cycle: List[str] = []
+    region_cycle.append("east")
+    region_cycle.append("west")
+    region_cycle.append("east")
+    region_cycle.append("east")
+    region_cycle.append("west")
+    region_cycle.append("east")
+    region_cycle.append("west")
+    region_cycle.append("east")
+    region_cycle.append("west")
+    region_cycle.append("west")
+    i: i64 = 0i64
+    while i < 10i64:
+        day_v.append(i + 1i64)
+        units_v.append((i + 1i64) * 10i64)
+        # Revenue: monotonically increasing with a midweek bump.
+        rev: f64 = 100.0 + 25.0 * f64(i)
+        if i == 4i64:
+            rev = rev + 75.0
+        revenue_v.append(rev)
+        idx: i32 = i32(i)
+        region_v.append(region_cycle[idx])
+        i = i + 1i64
+    nulls: List[bool] = []
+    j: i64 = 0i64
+    while j < 10i64:
+        nulls.append(false)
+        j = j + 1i64
+    day_c: ColumnI64 = tabular.col_i64(day_v, nulls)
+    units_c: ColumnI64 = tabular.col_i64(units_v, nulls)
+    revenue_c: ColumnF64 = tabular.col_f64(revenue_v, nulls)
+    region_c: ColumnStr = tabular.col_str(region_v, nulls)
+    names: List[str] = []
+    names.append("day")
+    names.append("units")
+    names.append("revenue")
+    names.append("region")
+    cols: List[Column] = []
+    cols.append(day_c)
+    cols.append(units_c)
+    cols.append(revenue_c)
+    cols.append(region_c)
+    df: DataFrame = tabular.from_columns(names, cols)
+    df_indexed: DataFrame = df.set_index("day")
+
+    # ── 1. Plain 3-day trailing rolling sum + mean ─────────────────────
+    println("== plain rolling(3).sum() ==")
+    s3: DataFrame = df_indexed.rolling(3i64).sum()
+    println(s3.show(-1i64))
+    println("")
+    println("== plain rolling(3).mean() ==")
+    m3: DataFrame = df_indexed.rolling(3i64).mean()
+    println(m3.show(-1i64))
+    println("")
+
+    # ── 2. Centered rolling — same data, output shifted ────────────────
+    println("== rolling_centered(3).sum() ==")
+    c3: DataFrame = df_indexed.rolling_centered(3i64).sum()
+    println(c3.show(-1i64))
+    println("")
+
+    # ── 3. min_periods=1 → partial windows at the start get filled ────
+    println("== rolling_min_periods(3, 1).sum() ==")
+    p3: DataFrame = df_indexed.rolling_min_periods(3i64, 1i64).sum()
+    println(p3.show(-1i64))
+    println("")
+
+    # ── 4. count() works on every column (including the str region) ───
+    println("== rolling(3).count() ==")
+    cnt3: DataFrame = df_indexed.rolling(3i64).count()
+    println(cnt3.show(-1i64))
+    println("")
+
+    # ── 5. Introspection — the chainable carries its params ───────────
+    rw: RollingWindow = df_indexed.rolling_centered_min_periods(5i64, 2i64)
+    println("rw.window=" + str(rw.window()))
+    println("rw.min_periods=" + str(rw.min_periods()))
+    println("rw.is_centered=" + str(rw.is_centered()))
+    return 0

@@ -7104,6 +7104,21 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         NativeFn::M50aTabServe                       => m50a_serve_blocking(interp, args),
         NativeFn::M50aTabServeWithTimeout            => m50a_serve_with_timeout(interp, args),
 
+        // ── M51: chainable RollingWindow ──
+        NativeFn::M51TabDfRolling                    => m51_df_rolling(interp, args),
+        NativeFn::M51TabDfRollingCentered            => m51_df_rolling_centered(interp, args),
+        NativeFn::M51TabDfRollingMinPeriods          => m51_df_rolling_min_periods(interp, args),
+        NativeFn::M51TabDfRollingCenteredMinPeriods  => m51_df_rolling_centered_min_periods(interp, args),
+        NativeFn::M51TabRwSum                        => m51_rw_agg_shortcut(interp, args, "sum"),
+        NativeFn::M51TabRwMean                       => m51_rw_agg_shortcut(interp, args, "mean"),
+        NativeFn::M51TabRwMin                        => m51_rw_agg_shortcut(interp, args, "min"),
+        NativeFn::M51TabRwMax                        => m51_rw_agg_shortcut(interp, args, "max"),
+        NativeFn::M51TabRwStd                        => m51_rw_agg_shortcut(interp, args, "std"),
+        NativeFn::M51TabRwCount                      => m51_rw_agg_shortcut(interp, args, "count"),
+        NativeFn::M51TabRwWindow                     => m51_rw_window(interp, args),
+        NativeFn::M51TabRwMinPeriods                 => m51_rw_min_periods(interp, args),
+        NativeFn::M51TabRwIsCentered                 => m51_rw_is_centered(interp, args),
+
         // ── M52: GFX core ──
         NativeFn::GfxInit                            => m52_gfx_init(interp, args),
         NativeFn::GfxCreateWindow                    => m52_gfx_create_window(interp, args),
@@ -23169,6 +23184,369 @@ fn m50a_handle_pivot(
 #[allow(dead_code)]
 fn _m50a_unused_mutex_marker() {
     let _: Option<Mutex<()>> = None;
+}
+
+// ── M51 — chainable RollingWindow ────────────────────────────────────
+//
+// M51 adds `df.rolling(window).{sum,mean,min,max,std,count}()` to
+// mirror pandas's chainable `Rolling` accessor.  Variants:
+//   - `df.rolling_centered(window)`           ← center=True
+//   - `df.rolling_min_periods(W, mp)`         ← explicit min_periods
+//   - `df.rolling_centered_min_periods(W, mp)`← both
+//
+// Cross-dispatch shape (per M47 lesson §11): a new sealed class
+// `RollingWindow` is added to the resolver, with payload (parent_df,
+// window, min_periods, center).  `df.rolling*` constructors return
+// it; aggregator methods on it return a DataFrame whose index is
+// propagated from the parent (single-col or MultiIndex preserved).
+//
+// Window kernel: for center=false at position i, window is
+// [i-W+1, i]; for center=true, it is [i-(W-1)/2, i+W/2].  Out-of-
+// bounds positions clamp the window; if the clamped slice contains
+// fewer than `min_periods` non-null cells, the output cell is null.
+// min_periods defaults to W when not supplied (matching pandas's
+// default for the no-min_periods path).
+
+const M51_RW_PAYLOAD: usize = 32;
+
+fn m51_alloc_rolling_window(
+    interp: &mut Interpreter,
+    parent_df: u64,
+    window: i64,
+    min_periods: i64,
+    center: bool,
+) -> u64 {
+    let p = m34_alloc_class_obj(interp, "RollingWindow", M51_RW_PAYLOAD);
+    unsafe {
+        let parent_slot = p.add(HDR) as *mut u64;
+        let w_slot      = p.add(HDR + 8) as *mut i64;
+        let mp_slot     = p.add(HDR + 16) as *mut i64;
+        let c_slot      = p.add(HDR + 24) as *mut i64;
+        std::ptr::write_unaligned(parent_slot, parent_df);
+        std::ptr::write_unaligned(w_slot, window);
+        std::ptr::write_unaligned(mp_slot, min_periods);
+        std::ptr::write_unaligned(c_slot, if center { 1 } else { 0 });
+    }
+    p as u64
+}
+
+fn m51_rw_fields(recv: u64) -> (u64, i64, i64, bool) {
+    let obj = recv as *const u8;
+    if obj.is_null() {
+        return (0, 0, 0, false);
+    }
+    unsafe {
+        let parent = std::ptr::read_unaligned(obj.add(HDR) as *const u64);
+        let w      = std::ptr::read_unaligned(obj.add(HDR + 8) as *const i64);
+        let mp     = std::ptr::read_unaligned(obj.add(HDR + 16) as *const i64);
+        let cb     = std::ptr::read_unaligned(obj.add(HDR + 24) as *const i64);
+        (parent, w, mp, cb != 0)
+    }
+}
+
+fn m51_validate_window(
+    window: i64,
+    min_periods: i64,
+    nrows: i64,
+    site: &str,
+) -> Result<i64, VmError> {
+    if window < 1 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("{}: window must be >= 1, got {}", site, window),
+        });
+    }
+    if window > nrows {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "{}: window {} exceeds DataFrame length {}", site, window, nrows),
+        });
+    }
+    // -1 = "caller did not supply min_periods → use window".
+    let eff = if min_periods < 0 { window } else { min_periods };
+    if eff < 1 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("{}: min_periods must be >= 1, got {}", site, eff),
+        });
+    }
+    if eff > window {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "{}: min_periods {} cannot exceed window {}", site, eff, window),
+        });
+    }
+    Ok(eff)
+}
+
+// ── DataFrame.rolling* constructors ──
+
+fn m51_df_rolling(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let window = arg_i64(args, 1);
+    let (_, _, nrows) = m37_df_fields(recv);
+    m51_validate_window(window, -1, nrows, "DataFrame.rolling")?;
+    Ok(m51_alloc_rolling_window(interp, recv, window, -1, false))
+}
+
+fn m51_df_rolling_centered(
+    interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError>
+{
+    let recv = arg_u64(args, 0);
+    let window = arg_i64(args, 1);
+    let (_, _, nrows) = m37_df_fields(recv);
+    m51_validate_window(window, -1, nrows, "DataFrame.rolling_centered")?;
+    Ok(m51_alloc_rolling_window(interp, recv, window, -1, true))
+}
+
+fn m51_df_rolling_min_periods(
+    interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError>
+{
+    let recv = arg_u64(args, 0);
+    let window = arg_i64(args, 1);
+    let min_periods = arg_i64(args, 2);
+    let (_, _, nrows) = m37_df_fields(recv);
+    let eff = m51_validate_window(
+        window, min_periods, nrows, "DataFrame.rolling_min_periods")?;
+    Ok(m51_alloc_rolling_window(interp, recv, window, eff, false))
+}
+
+fn m51_df_rolling_centered_min_periods(
+    interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError>
+{
+    let recv = arg_u64(args, 0);
+    let window = arg_i64(args, 1);
+    let min_periods = arg_i64(args, 2);
+    let (_, _, nrows) = m37_df_fields(recv);
+    let eff = m51_validate_window(
+        window, min_periods, nrows,
+        "DataFrame.rolling_centered_min_periods")?;
+    Ok(m51_alloc_rolling_window(interp, recv, window, eff, true))
+}
+
+// ── RollingWindow introspection ──
+
+fn m51_rw_window(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let (_, w, _, _) = m51_rw_fields(recv);
+    Ok(w as u64)
+}
+
+fn m51_rw_min_periods(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let (_, w, mp, _) = m51_rw_fields(recv);
+    let eff = if mp < 0 { w } else { mp };
+    Ok(eff as u64)
+}
+
+fn m51_rw_is_centered(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let (_, _, _, c) = m51_rw_fields(recv);
+    Ok(if c { 1 } else { 0 })
+}
+
+// ── Per-column rolling kernel ──
+
+/// Returns a freshly allocated output column.  Output dtype:
+/// count → i64; mean/std → f64; sum/min/max → input dtype.  Only
+/// ColumnI64 / ColumnF64 inputs are accepted for sum/min/max/mean/std;
+/// for count, every dtype works.  This is enforced in
+/// `m51_rw_agg_shortcut` which skips non-numeric columns for the
+/// arithmetic ops; `m51_rolling_per_column` itself trusts its caller.
+fn m51_rolling_per_column(
+    interp: &mut Interpreter,
+    col_p: u64,
+    window: i64,
+    min_periods: i64,
+    center: bool,
+    op: &str,
+) -> u64 {
+    let cls = m38_col_class_name(col_p);
+    let (vals, nulls, length) = m37_col_fields(col_p);
+    let n = length as usize;
+    let w = window as usize;
+    let mp = min_periods.max(1) as usize;
+    let ns = m37_read_list_bool(nulls);
+
+    // Window endpoints (inclusive [lo, hi]) for output position i.
+    // For center=true the window is symmetric with the larger half on
+    // the right (matches pandas: `floor((W-1)/2)` to the left,
+    // `floor(W/2)` to the right).
+    let bounds = |i: isize| -> (isize, isize) {
+        if center {
+            let lhalf = (w as isize - 1) / 2;
+            let rhalf = (w as isize) / 2;
+            (i - lhalf, i + rhalf)
+        } else {
+            (i - w as isize + 1, i)
+        }
+    };
+
+    // Decide output dtype + allocate the output buffer up front.
+    let (out_cls, use_f64) = match (op, cls.as_str()) {
+        ("count", _)                      => ("ColumnI64", false),
+        ("mean" | "std", _)               => ("ColumnF64", true),
+        (_, "ColumnF64")                  => ("ColumnF64", true),
+        _                                 => ("ColumnI64", false),
+    };
+    let mut out_i64: Vec<i64> = if use_f64 { Vec::new() } else { vec![0; n] };
+    let mut out_f64: Vec<f64> = if use_f64 { vec![0.0; n] } else { Vec::new() };
+    let mut out_nulls: Vec<bool> = vec![true; n];
+
+    // Pre-read source vals once (only for numeric kernels).
+    let src_i64 = if cls == "ColumnI64" { m37_read_list_i64(vals) } else { Vec::new() };
+    let src_f64 = if cls == "ColumnF64" { m37_read_list_f64(vals) } else { Vec::new() };
+
+    for i in 0..n as isize {
+        let (lo, hi) = bounds(i);
+        if lo > hi { continue; }
+        let lo_c = lo.max(0) as usize;
+        let hi_c = (hi.min(n as isize - 1)) as usize;
+        if lo_c > hi_c { continue; }
+        // Count non-null in-bounds cells.
+        let mut nn = 0usize;
+        for j in lo_c..=hi_c {
+            if !ns.get(j).copied().unwrap_or(false) { nn += 1; }
+        }
+        if nn < mp { continue; }
+        let i_us = i as usize;
+        match op {
+            "count" => {
+                out_i64[i_us] = nn as i64;
+                out_nulls[i_us] = false;
+            }
+            "sum" | "min" | "max" | "mean" | "std" => {
+                if cls == "ColumnI64" {
+                    let mut acc_sum_i: i64 = 0;
+                    let mut acc_sum_f: f64 = 0.0;
+                    let mut acc_sumsq: f64 = 0.0;
+                    let mut acc_min: i64 = i64::MAX;
+                    let mut acc_max: i64 = i64::MIN;
+                    for j in lo_c..=hi_c {
+                        if ns.get(j).copied().unwrap_or(false) { continue; }
+                        let v = src_i64[j];
+                        acc_sum_i = acc_sum_i.wrapping_add(v);
+                        let vf = v as f64;
+                        acc_sum_f += vf;
+                        acc_sumsq += vf * vf;
+                        if v < acc_min { acc_min = v; }
+                        if v > acc_max { acc_max = v; }
+                    }
+                    match op {
+                        "sum"  => out_i64[i_us] = acc_sum_i,
+                        "min"  => out_i64[i_us] = acc_min,
+                        "max"  => out_i64[i_us] = acc_max,
+                        "mean" => out_f64[i_us] = acc_sum_f / nn as f64,
+                        "std"  => {
+                            out_f64[i_us] = if nn <= 1 { 0.0 } else {
+                                let mean = acc_sum_f / nn as f64;
+                                let var = (acc_sumsq - (nn as f64) * mean * mean)
+                                          / ((nn - 1) as f64);
+                                if var > 0.0 { var.sqrt() } else { 0.0 }
+                            };
+                        }
+                        _ => unreachable!(),
+                    }
+                    out_nulls[i_us] = false;
+                } else if cls == "ColumnF64" {
+                    let mut acc_sum: f64 = 0.0;
+                    let mut acc_sumsq: f64 = 0.0;
+                    let mut acc_min: f64 = f64::INFINITY;
+                    let mut acc_max: f64 = f64::NEG_INFINITY;
+                    for j in lo_c..=hi_c {
+                        if ns.get(j).copied().unwrap_or(false) { continue; }
+                        let v = src_f64[j];
+                        acc_sum += v;
+                        acc_sumsq += v * v;
+                        if v < acc_min { acc_min = v; }
+                        if v > acc_max { acc_max = v; }
+                    }
+                    out_f64[i_us] = match op {
+                        "sum"  => acc_sum,
+                        "min"  => acc_min,
+                        "max"  => acc_max,
+                        "mean" => acc_sum / nn as f64,
+                        "std"  => {
+                            if nn <= 1 { 0.0 } else {
+                                let mean = acc_sum / nn as f64;
+                                let var = (acc_sumsq - (nn as f64) * mean * mean)
+                                          / ((nn - 1) as f64);
+                                if var > 0.0 { var.sqrt() } else { 0.0 }
+                            }
+                        }
+                        _ => unreachable!(),
+                    };
+                    out_nulls[i_us] = false;
+                }
+                // (Non-numeric columns for arithmetic ops are gated
+                // out by the caller, so the else branch never fires.)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    let n_lst = m37_alloc_list_bool(interp, &out_nulls);
+    let v_lst = if use_f64 {
+        m37_alloc_list_f64(interp, &out_f64)
+    } else {
+        m37_alloc_list_i64(interp, &out_i64)
+    };
+    m37_alloc_column(interp, out_cls, v_lst, n_lst, n as i64) as u64
+}
+
+/// Fan the requested op over every applicable column of the parent
+/// DataFrame, then build an output DataFrame.  Index propagation:
+///   - If parent has a MultiIndex → output keeps it via
+///     m44_build_df_with_multiindex.
+///   - If parent has a single-col index → output keeps it via
+///     m41_build_df_with_index.
+///   - Otherwise → output is RangeIndex (no index).
+fn m51_rw_agg_shortcut(
+    interp: &mut Interpreter, args: &[u64], op: &str,
+) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let (parent, window, min_periods, center) = m51_rw_fields(recv);
+    if parent == 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "RollingWindow.{}: receiver has no parent DataFrame", op),
+        });
+    }
+    let (names_lst, _cols_lst, nrows) = m37_df_fields(parent);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_ptrs = m37_df_col_ptrs(parent);
+    let eff_mp = if min_periods < 0 { window } else { min_periods };
+    let mut out_names: Vec<String> = Vec::new();
+    let mut out_cols: Vec<u64> = Vec::new();
+    for (i, cp) in col_ptrs.iter().enumerate() {
+        let cls = m38_col_class_name(*cp);
+        let numeric = matches!(cls.as_str(), "ColumnI64" | "ColumnF64");
+        let include = match op {
+            "count" => true,
+            _       => numeric,
+        };
+        if !include { continue; }
+        out_names.push(names[i].clone());
+        out_cols.push(m51_rolling_per_column(
+            interp, *cp, window, eff_mp, center, op,
+        ));
+    }
+    let (mi_levels, _) = m44_df_multiindex_fields(parent);
+    if mi_levels != 0 {
+        let level_cols = m44_read_index_levels(parent);
+        let level_names = m44_read_index_level_names(parent);
+        Ok(m44_build_df_with_multiindex(
+            interp, &out_names, &out_cols, nrows, &level_cols, &level_names,
+        ))
+    } else {
+        let (single_idx, single_name) = m41_df_index_fields(parent);
+        Ok(m41_build_df_with_index(
+            interp, &out_names, &out_cols, nrows, single_idx, single_name,
+        ))
+    }
 }
 
 // ── M52 — gfx stdlib (windows + events + drawing) ──
