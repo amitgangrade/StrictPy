@@ -1,6 +1,6 @@
 # StrictPy — language guide for AI coding tools
 
-**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M56 (2026-05-24).
+**Status**: live document. Updated whenever a new language feature, stdlib module, or surface change lands. Last refresh: post-M51 (RollingWindow chainable + tabular grab-bag; 2026-05-30).
 
 **Audience**: any AI coding tool (Claude, GPT, Gemini, etc.) being asked to write a StrictPy program. This file is the single source of truth for writing idiomatic StrictPy — you should NOT need to read the compiler source (`compiler/src/`) or VM source (`vm/src/`) to write correct code.
 
@@ -1535,18 +1535,46 @@ M49 ships the PRIMARY follow-up from M48's benchmark: `group_by` and `merge` on 
 
 - `tabular.col_categorical_ordered(values: List[str], categories: List[str]) -> ColumnCategorical` — pin the categories[] ordering up front.  All values must appear in categories (else `ValueError`).  Duplicate categories raise `ValueError`.  Codes are positions in `categories`.  The typical merge-on-codes workflow is `df1_cat = col_categorical_ordered(vals_a, cats)` + `df2_cat = col_categorical_ordered(vals_b, cats)` so both sides share categories[] and the codes-hash fastpath fires.
 - `tabular.col_categorical_from_codes(codes: List[i64], categories: List[str]) -> ColumnCategorical` — reverse constructor (useful for round-tripping `cc.codes()` + `cc.categories()` → back into a ColumnCategorical).  Each code must satisfy `0 <= code < len(categories)`.
-- `cc.is_ordered() -> bool` — heuristic predicate.  Returns true iff `categories[]` has unreferenced entries (the signature of an explicit-categories build).  See §11.36 for the v1 nuance.
+- `cc.is_ordered() -> bool` — **M51: now an explicit stored bit** (was an M49 heuristic).  Returns true for categoricals built via `col_categorical_ordered` / `col_categorical_from_codes`, false for `col_categorical` / `col_categorical_with_nulls` — regardless of whether every category is referenced by a code.  See §11.36.
 
 **Phase D small polish**:
 
 - `df.resample(time_col, "1w", agg)` — weekly buckets (fixed-width: 7 × 86_400_000 ms).  `df.resample(time_col, "1M", agg)` and `"1Y"` — monthly / yearly buckets via calendar arithmetic (Howard Hinnant's `days_from_civil` / `civil_from_days` for proleptic Gregorian).  End-of-month clamping applies: Jan 31 + 1M = Feb 29 (leap year) or Feb 28 (non-leap).  Feb 29 + 1Y in a non-leap year clamps to Feb 28.  See §11.37.
 - **Outer-merge MultiIndex on either side** — extends M46's NaN-padded 2-level fallback (which previously fired only for dtype-mismatched single-col indexes on both sides).  Now handles three new cases: lhs MultiIndex + rhs single-col (rhs becomes the last level), lhs single-col + rhs MultiIndex (lhs becomes the first level), both MultiIndex with equal level count + matching level dtypes (stitched level-by-level).  Mismatched level counts or level dtypes falls back to RangeIndex (documented v1 limitation).
 - **`df.unstack()` distributes every regular column** (M46 only used the first).  Single-regular-column input preserves M46's `"{innermost_value}"` output naming (byte-compatible); multi-regular uses `"{innermost_value}_{source_col_name}"` (pandas behavior).
-- **`df.loc_range_multi_{i64, str, datetime}(start, stop)`** — innermost-level range filter on a MultiIndex (outer levels left intact).  Raises `ValueError` if the frame has no MultiIndex.  Range filtering on outer levels is M51 work.
+- **`df.loc_range_multi_{i64, str, datetime}(start, stop)`** — innermost-level range filter on a MultiIndex (outer levels left intact).  Raises `ValueError` if the frame has no MultiIndex.  **M51 generalizes this to any level via `loc_range_level_*`** (below).
 
 See `examples/tabular_m49_codes_demo.spy` for an M49 walkthrough — builds a small ordered categorical, exercises codes-hash group_by + merge, runs `1w` / `1M` resample, and verifies `unstack` distributes both regular columns.
 
-After M49 the `tabular` v0.4 polish surface is essentially complete.  M51 should pick up `RollingWindow` chainable + `center=True` + pandas-style ordered-sort on `ColumnCategorical` + range filtering on outer MultiIndex levels.
+#### M51 additions — `RollingWindow` chainable + tabular grab-bag
+
+M51 ships the chainable `RollingWindow` class (the headline) plus four polish follow-ups.  12 new NativeFns (1069-1080).
+
+**`RollingWindow` — `df.rolling(window)` chainable** (`from tabular import RollingWindow`):
+
+```
+df.rolling(window: i64) -> RollingWindow          # window >= 1, else ValueError
+rw.center(flag: bool)   -> RollingWindow          # builder; default false
+rw.min_periods(n: i64)  -> RollingWindow          # builder; n >= 1, else ValueError; default = window
+rw.mean() / rw.sum() / rw.std() / rw.min() / rw.max() -> DataFrame
+rw.agg(specs: List[Tuple[str, str]])              -> DataFrame    # each (col, op) -> column "{col}_{op}"
+```
+
+`.center` / `.min_periods` are immutable builders (return a NEW `RollingWindow`), so chain freely: `df.rolling(7).center(true).min_periods(1).mean()`.  The terminal methods apply the rolling reduction to every column that supports the op and **preserve the parent's index verbatim** (RangeIndex / single-col / MultiIndex all carry through unchanged — same row count, same order).
+
+Output dtype rules: i64 column → `sum`/`min`/`max` stay `ColumnI64`, `mean`/`std` → `ColumnF64`; f64 column → all ops `ColumnF64`; datetime column → only `min`/`max` (→ `ColumnDateTime`), `sum`/`mean`/`std` drop the column.  Non-numeric columns (str / bool) are always dropped from `mean/sum/std/min/max` output (matching pandas).  `agg` raises `ValueError` if a named column is missing, the op is unknown, or the op is unsupported for the column's dtype.
+
+**Window / center convention** (verified against pandas): with `offset = (window - 1) / 2` (integer division), the inclusive window for output position `i` is `[i + (offset if center else 0) - window + 1, i + (offset if center else 0)]`, clipped to `[0, n-1]`.  A cell with fewer than `min_periods` non-null values in its window is null.  Because the default `min_periods == window`, the trailing edge (trailing windows) and BOTH ends (centered windows) are null until the window fills.  See §11.4x.
+
+**`df.loc_range_level_{i64, str, datetime}(level: i64, start, stop)`** — range filter on a chosen MultiIndex level (`level = 0` is outermost), generalizing M49's innermost-only `loc_range_multi_*`.  Other levels + all columns carry through on every kept row.  Raises `ValueError` if the frame has no MultiIndex, `level` is out of range, or the chosen level's dtype doesn't match the method.
+
+**Categorical sort** (`DataFrame.sort_by` on a `ColumnCategorical` column): sorts by **code** = position in `categories[]`, matching pandas — NOT lexical order.  So an ordered categorical with `categories ["low","mid","high"]` sorts `low < mid < high`, not alphabetically.  (Previously raised `ValueError`.)  Note the sorted categorical column is materialized as a `ColumnI64` of codes in the output (a v1 `m37_column_take` limitation — the companion columns reorder correctly; query the categories via the pre-sort column if you need the labels).
+
+**`is_ordered` is now an explicit bit** (Phase B): see the `cc.is_ordered()` note above + §11.36.
+
+See `examples/tabular_m51_rolling_demo.spy` for an M51 walkthrough.
+
+After M51 the `tabular` v0.4 polish surface is essentially complete.
 
 #### M50a additions — `tabular.serve` HTTP transport + minimal browser-tab UI
 
@@ -2672,16 +2700,22 @@ M44a shipped MultiIndex storage + multi-column `group_by` promotion + minimal pr
 
 M40 shipped `df.iloc(start, stop)` with an explicit "negative indices raise `ValueError`" contract.  **M47 lifts that contract**: `iloc` now accepts Python-style negative indices on both bounds (`-1` = last row, `-N` = `nrows - N`).  Mixed positive + negative is fine (`iloc(-3, nrows)` = last 3 rows; `iloc(-5, -1)` = rows `[nrows-5, nrows-1)`).  Out-of-range positive bounds still clamp silently to `[0, nrows]` — only the explicit-rejection contract changed.  The same semantics apply to both bounds of `df.iloc_2d(row_start, row_stop, col_start, col_stop)` on both axes.
 
-### 11.36 `tabular.ColumnCategorical` sort uses alphabetical string ordering (post-M49 nuance)
+### 11.36 `tabular.ColumnCategorical` sort follows category order; `is_ordered` is an explicit bit (post-M51)
 
-`ColumnCategorical` ships in M47 with a v1 limitation: any op that needs to compare two categorical cells (e.g. `sort_by` on a frame whose key column is categorical) compares **the materialized strings alphabetically**, NOT the `categories[]` declaration order.  This matches the v1 to_strings() coercion contract.  M49 ships codes-hash for `group_by` and `merge` (transparent, no API change — see §11.38), and adds `cc.is_ordered() -> bool` so callers can detect explicit-categories builds, but the sort itself still uses alphabetical string ordering.  Pandas's "ordered categorical" sort semantics (where the order of `categories[]` is meaningful for comparison) is **M51 work**.
+**Sort (M51 Phase C):** `DataFrame.sort_by` on a `ColumnCategorical` column now sorts by **code** = position in `categories[]`, matching pandas — NOT alphabetical/lexical order.  An ordered categorical with `categories ["low","mid","high"]` sorts `low < mid < high`.  (M47-M49 raised `ValueError` for categorical sort; this is now supported.)  Caveat: the sorted categorical column is materialized as a `ColumnI64` of codes in the output frame (a v1 `m37_column_take` downgrade — the companion columns reorder correctly, but if you need the post-sort category labels, read them from the pre-sort categorical via the permutation, or re-build the categorical).
 
-**Workarounds for ordered sort in M49:**
+**`is_ordered` (M51 Phase B):** `cc.is_ordered() -> bool` is now backed by an **explicit stored payload bit** (the `ColumnCategorical` payload grew 32 → 40 bytes), not the M49 heuristic.  It returns true for categoricals built via `col_categorical_ordered` / `col_categorical_from_codes` and false for `col_categorical` / `col_categorical_with_nulls`.  The old heuristic ("some category never referenced by a code") gave the wrong answer for an ordered categorical whose categories are all used (false negative) and for an unordered build with an explicit category list; the explicit bit fixes both.
 
-1. Build a small `Dict[str, i64]` mapping each category to its desired ordinal and replace the categorical column with the i64 column for sorting.
-2. Build the categorical via `tabular.col_categorical_ordered(values, categories)`, call `cc.codes()` to materialize the codes column, sort on that, and use the resulting permutation to reorder the rest of the frame.
+### 11.39 `tabular.RollingWindow` — center convention, default min_periods, dropped columns (M51)
 
-`cc.is_ordered()` heuristic: returns true iff `categories[]` has unreferenced entries (the signature of an explicit-categories build via `col_categorical_ordered` / `col_categorical_from_codes`).  A value-rich ordered categorical where every category happens to be used will return false (looks identical to the M47 first-appearance build).  Use `cc.categories()` directly when you need to inspect the ordering.
+`df.rolling(window)` returns a chainable `RollingWindow`.  Gotchas:
+
+- **Default `min_periods == window`.**  Until the window fills, output cells are null.  For a trailing window of size `w`, the first `w-1` rows are null; for a centered window, BOTH ends are null.  Pass `.min_periods(1)` to emit partial windows at the edges.
+- **`center=True` convention** (verified against pandas, odd AND even windows): with `offset = (window - 1) / 2` (integer division), the inclusive window for output position `i` is `[i + offset - window + 1, i + offset]`, clipped to `[0, n-1]`.  E.g. `[1,2,3,4,5].rolling(4, center=True, min_periods=1).mean()` = `[1.5, 2.0, 2.5, 3.5, 4.0]`.
+- **Non-numeric columns are dropped** from `mean/sum/std/min/max` output (str / bool).  Datetime columns survive only `min`/`max` (sum/mean/std drop them).  This matches pandas's "numeric only" rolling default.  `agg([(col, op)])` instead raises `ValueError` if the named column's dtype doesn't support the op.
+- **Output dtype**: i64 → `sum`/`min`/`max` stay i64, `mean`/`std` → f64; f64 → all f64; datetime `min`/`max` → datetime.
+- **Index preserved verbatim**: row order + count are unchanged, so the parent's RangeIndex / single-col index / MultiIndex all carry through untouched.
+- **Builders are immutable**: `.center(b)` / `.min_periods(n)` return a NEW `RollingWindow`; the original is unchanged.  `window < 1` (in `rolling`) and `n < 1` (in `min_periods`) raise `ValueError`.
 
 ### 11.37 `tabular.resample` calendar-arithmetic for `1M` / `1Y` (post-M49)
 

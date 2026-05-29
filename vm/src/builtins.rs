@@ -7104,6 +7104,20 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         NativeFn::M50aTabServe                       => m50a_serve_blocking(interp, args),
         NativeFn::M50aTabServeWithTimeout            => m50a_serve_with_timeout(interp, args),
 
+        // ── M51: RollingWindow chainable + outer-MultiIndex loc_range ──
+        NativeFn::M51TabDfRolling                    => m51_df_rolling(interp, args),
+        NativeFn::M51TabRolCenter                    => m51_rw_center(interp, args),
+        NativeFn::M51TabRolMinPeriods                => m51_rw_min_periods(interp, args),
+        NativeFn::M51TabRolMean                      => m51_rw_terminal(interp, args, "mean"),
+        NativeFn::M51TabRolSum                       => m51_rw_terminal(interp, args, "sum"),
+        NativeFn::M51TabRolStd                       => m51_rw_terminal(interp, args, "std"),
+        NativeFn::M51TabRolMin                       => m51_rw_terminal(interp, args, "min"),
+        NativeFn::M51TabRolMax                       => m51_rw_terminal(interp, args, "max"),
+        NativeFn::M51TabRolAgg                       => m51_rw_agg(interp, args),
+        NativeFn::M51TabDfLocRangeLevelI64           => m51_df_loc_range_level_i64(interp, args),
+        NativeFn::M51TabDfLocRangeLevelStr           => m51_df_loc_range_level_str(interp, args),
+        NativeFn::M51TabDfLocRangeLevelDateTime      => m51_df_loc_range_level_datetime(interp, args),
+
         // ── M52: GFX core ──
         NativeFn::GfxInit                            => m52_gfx_init(interp, args),
         NativeFn::GfxCreateWindow                    => m52_gfx_create_window(interp, args),
@@ -13287,6 +13301,18 @@ fn m37_df_sort_by(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError
             let vs = m37_read_list_bool(vals);
             non_null_indices.sort_by(|a, b| {
                 let cmp = vs[*a].cmp(&vs[*b]);
+                if ascending { cmp } else { cmp.reverse() }
+            });
+        }
+        // M51 Phase C: sort a ColumnCategorical by its code (= position
+        // in categories[]), matching pandas — for both ordered and
+        // unordered categoricals.  Codes live at the values slot
+        // (offset 0) and are read as i64.  Ascending code order ==
+        // categories[] order, NOT lexical order.
+        "ColumnCategorical" => {
+            let codes = m37_read_list_i64(vals);
+            non_null_indices.sort_by(|a, b| {
+                let cmp = codes[*a].cmp(&codes[*b]);
                 if ascending { cmp } else { cmp.reverse() }
             });
         }
@@ -19711,6 +19737,112 @@ fn m49_df_loc_range_multi_datetime(interp: &mut Interpreter, args: &[u64]) -> Re
     Ok(m49_assemble_loc_range_multi(interp, recv, &keep))
 }
 
+// ── M51 Phase D: loc_range_level_* on a chosen MultiIndex level ──────
+//
+// M49's loc_range_multi_* range-filters the INNERMOST level only.  M51
+// generalizes this with an explicit `level` argument (0 = outermost),
+// so a 3-level frame can be range-filtered on any one level while the
+// other levels are preserved on every kept row.  The output assembly
+// reuses M49's `m49_assemble_loc_range_multi`, which already carries
+// every level + every column through the keep mask.
+
+/// Common preamble for loc_range_level_*: validate the frame has a
+/// MultiIndex, that `level` is in range, and that the chosen level has
+/// the expected dtype.  Returns (level_col_ptr, length).
+fn m51_loc_range_level_check(
+    recv: u64,
+    level: i64,
+    method: &str,
+    expected_cls: &str,
+) -> Result<(u64, i64), VmError> {
+    let m51_levels = m44_read_index_levels(recv);
+    if m51_levels.is_empty() {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "DataFrame.{}: frame has no MultiIndex (use loc_range_* on a single-col index instead)",
+                method,
+            ),
+        });
+    }
+    if level < 0 || (level as usize) >= m51_levels.len() {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "DataFrame.{}: level {} out of range [0, {})",
+                method, level, m51_levels.len()
+            ),
+        });
+    }
+    let m51_lvl = m51_levels[level as usize];
+    let m51_cls = m38_col_class_name(m51_lvl);
+    if m51_cls != expected_cls {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "DataFrame.{}: level {} dtype is {}, expected {}",
+                method, level, m51_cls, expected_cls
+            ),
+        });
+    }
+    let (_, _, length) = m37_col_fields(m51_lvl);
+    Ok((m51_lvl, length))
+}
+
+fn m51_df_loc_range_level_i64(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let level = arg_i64(args, 1);
+    let start = arg_i64(args, 2);
+    let stop = arg_i64(args, 3);
+    let (lvl, length) = m51_loc_range_level_check(recv, level, "loc_range_level_i64", "ColumnI64")?;
+    let (vals, nulls, _) = m37_col_fields(lvl);
+    let vs = m37_read_list_i64(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut keep: Vec<bool> = Vec::with_capacity(length as usize);
+    for i in 0..length as usize {
+        if ns.get(i).copied().unwrap_or(false) { keep.push(false); continue; }
+        let v = vs.get(i).copied().unwrap_or(0);
+        keep.push(v >= start && v <= stop);
+    }
+    Ok(m49_assemble_loc_range_multi(interp, recv, &keep))
+}
+
+fn m51_df_loc_range_level_str(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let level = arg_i64(args, 1);
+    let start = arg_str(args, 2);
+    let stop = arg_str(args, 3);
+    let (lvl, length) = m51_loc_range_level_check(recv, level, "loc_range_level_str", "ColumnStr")?;
+    let (vals, nulls, _) = m37_col_fields(lvl);
+    let vs = m37_read_list_str_lst(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut keep: Vec<bool> = Vec::with_capacity(length as usize);
+    for i in 0..length as usize {
+        if ns.get(i).copied().unwrap_or(false) { keep.push(false); continue; }
+        let v = vs.get(i).cloned().unwrap_or_default();
+        keep.push(v.as_str() >= start.as_str() && v.as_str() <= stop.as_str());
+    }
+    Ok(m49_assemble_loc_range_multi(interp, recv, &keep))
+}
+
+fn m51_df_loc_range_level_datetime(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let level = arg_i64(args, 1);
+    let start = arg_i64(args, 2);
+    let stop = arg_i64(args, 3);
+    let (lvl, length) = m51_loc_range_level_check(recv, level, "loc_range_level_datetime", "ColumnDateTime")?;
+    let (vals, nulls, _) = m37_col_fields(lvl);
+    let vs = m37_read_list_i64(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut keep: Vec<bool> = Vec::with_capacity(length as usize);
+    for i in 0..length as usize {
+        if ns.get(i).copied().unwrap_or(false) { keep.push(false); continue; }
+        let v = vs.get(i).copied().unwrap_or(0);
+        keep.push(v >= start && v <= stop);
+    }
+    Ok(m49_assemble_loc_range_multi(interp, recv, &keep))
+}
+
 // ═════════════════════════════════════════════════════════════════════════
 // ── M46 Phase C — set_index_list + pivot_table extensions ────────────────
 // ═════════════════════════════════════════════════════════════════════════
@@ -20530,25 +20662,36 @@ fn m47_col_cat_categories_ptr(recv: u64) -> *const crate::object::ListRepr {
 }
 
 /// Allocate a fresh ColumnCategorical heap object.  Wraps
-/// `m34_alloc_class_obj` with the 32-byte payload (codes, nulls,
-/// length, categories) — the first three slots match the M37 layout.
+/// `m34_alloc_class_obj` with the 40-byte payload (codes, nulls,
+/// length, categories, is_ordered) — the first three slots match the
+/// M37 layout.
+///
+/// M51 Phase B: the `is_ordered` bit (offset 32) replaces the M49
+/// heuristic.  It is stored as a full 8-byte slot (0 / 1) — matching
+/// how every other bool-shaped class field in this object model is laid
+/// out (see `m34_alloc_jbool`).  The ordered constructors
+/// (`col_categorical_ordered`, `col_categorical_from_codes`) pass
+/// `ordered = true`; the plain constructors pass `false`.
 fn m47_alloc_col_categorical(
     interp: &mut Interpreter,
     codes_lst: *mut crate::object::ListRepr,
     nulls_lst: *mut crate::object::ListRepr,
     categories_lst: *mut crate::object::ListRepr,
     length: i64,
+    ordered: bool,
 ) -> *mut u8 {
-    let p = m34_alloc_class_obj(interp, "ColumnCategorical", 32);
+    let p = m34_alloc_class_obj(interp, "ColumnCategorical", 40);
     unsafe {
         let c_slot = p.add(HDR) as *mut u64;
         let n_slot = p.add(HDR + 8) as *mut u64;
         let l_slot = p.add(HDR + 16) as *mut i64;
         let cats_slot = p.add(HDR + 24) as *mut u64;
+        let ord_slot = p.add(HDR + 32) as *mut u64;
         std::ptr::write_unaligned(c_slot, codes_lst as u64);
         std::ptr::write_unaligned(n_slot, nulls_lst as u64);
         std::ptr::write_unaligned(l_slot, length);
         std::ptr::write_unaligned(cats_slot, categories_lst as u64);
+        std::ptr::write_unaligned(ord_slot, if ordered { 1u64 } else { 0u64 });
     }
     p
 }
@@ -20582,7 +20725,7 @@ fn m47_col_categorical(interp: &mut Interpreter, args: &[u64]) -> Result<u64, Vm
     let m47_nulls_lst = m37_alloc_list_bool(interp, &m47_nulls);
     let m47_cats_lst = m37_alloc_list_str(interp, &m47_cats);
     Ok(m47_alloc_col_categorical(
-        interp, m47_codes_lst, m47_nulls_lst, m47_cats_lst, m47_n as i64,
+        interp, m47_codes_lst, m47_nulls_lst, m47_cats_lst, m47_n as i64, false,
     ) as u64)
 }
 
@@ -20622,7 +20765,7 @@ fn m47_col_categorical_with_nulls(
     let m47_nulls_lst_out = m37_alloc_list_bool(interp, &m47_ns);
     let m47_cats_lst = m37_alloc_list_str(interp, &m47_cats);
     Ok(m47_alloc_col_categorical(
-        interp, m47_codes_lst, m47_nulls_lst_out, m47_cats_lst, m47_vs.len() as i64,
+        interp, m47_codes_lst, m47_nulls_lst_out, m47_cats_lst, m47_vs.len() as i64, false,
     ) as u64)
 }
 
@@ -20806,7 +20949,7 @@ fn m49_col_categorical_ordered(
     let m49_nulls_lst = m37_alloc_list_bool(interp, &m49_nulls);
     let m49_cats_lst_out = m37_alloc_list_str(interp, &m49_cats);
     Ok(m47_alloc_col_categorical(
-        interp, m49_codes_lst, m49_nulls_lst, m49_cats_lst_out, m49_n as i64,
+        interp, m49_codes_lst, m49_nulls_lst, m49_cats_lst_out, m49_n as i64, true,
     ) as u64)
 }
 
@@ -20842,38 +20985,329 @@ fn m49_col_categorical_from_codes(
     let m49_nulls_out = m37_alloc_list_bool(interp, &m49_nulls);
     let m49_cats_out = m37_alloc_list_str(interp, &m49_cats);
     Ok(m47_alloc_col_categorical(
-        interp, m49_codes_out, m49_nulls_out, m49_cats_out, m49_n as i64,
+        interp, m49_codes_out, m49_nulls_out, m49_cats_out, m49_n as i64, true,
     ) as u64)
 }
 
-/// `ColumnCategorical.is_ordered(self) -> bool`.  Heuristic: returns
-/// true iff there exists at least one category in the categories[]
-/// list that is NOT referenced by any code — i.e. categories[] has
-/// "ordering slots" beyond what would be present in a first-appearance
-/// build.  The M47 unordered constructor only adds categories for
-/// values that appear, so unused categories implies the user pinned
-/// the categories[] via col_categorical_ordered / from_codes.
+/// `ColumnCategorical.is_ordered(self) -> bool`.
 ///
-/// This is an approximate predicate — a value-rich categorical built
-/// with col_categorical_ordered where every category happens to be
-/// used will return false (looks identical to an unordered build).
-/// Pandas-style ordered-flag persistence + sort-by-categories ordering
-/// is M51 work.
+/// M51 Phase B: reads the explicit `is_ordered` payload bit at offset
+/// 32 (written by `m47_alloc_col_categorical`).  This replaces the M49
+/// heuristic ("some category never referenced by a code"), which got
+/// the wrong answer for an ordered categorical whose categories are all
+/// used, and for an unordered categorical with an explicit category
+/// list.  The bit is set by the ordered constructors
+/// (`col_categorical_ordered`, `col_categorical_from_codes`) and clear
+/// for the plain ones (`col_categorical`, `col_categorical_with_nulls`).
 fn m49_col_cat_is_ordered(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
-    let m49_recv = arg_u64(args, 0);
-    let (m49_codes_lst, _nulls_lst, _len) = m37_col_fields(m49_recv);
-    let m49_codes = m37_read_list_i64(m49_codes_lst);
-    let m49_cats_ptr = m47_col_cat_categories_ptr(m49_recv);
-    let m49_cats = m37_read_list_str_lst(m49_cats_ptr);
-    let m49_k = m49_cats.len();
-    // Are there categories never referenced by codes?
-    let mut m49_used = vec![false; m49_k];
-    for c in &m49_codes {
-        let c = *c as usize;
-        if c < m49_k { m49_used[c] = true; }
+    let m51_recv = arg_u64(args, 0);
+    let m51_obj = m51_recv as *const u8;
+    if m51_obj.is_null() {
+        return Ok(0);
     }
-    let m49_has_unused = m49_used.iter().any(|u| !u);
-    Ok(if m49_has_unused { 1 } else { 0 })
+    let m51_is_ord = unsafe {
+        std::ptr::read_unaligned(m51_obj.add(HDR + 32) as *const u64)
+    };
+    Ok(if m51_is_ord != 0 { 1 } else { 0 })
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// ── M51 Phase A — RollingWindow chainable class ──────────────────────────
+// ═════════════════════════════════════════════════════════════════════════
+//
+// `df.rolling(window)` returns a RollingWindow builder.  `.center(bool)`
+// and `.min_periods(n)` return a NEW RollingWindow with the field
+// updated (immutable-builder pattern, like pandas).  Terminal methods
+// `.mean()/.sum()/.std()/.min()/.max()` apply a rolling reduction to
+// every numeric column (min/max also keep datetime), dropping non-
+// numeric columns, and preserve the parent's index verbatim.
+// `.agg(specs)` produces one output column per (column, op) spec.
+//
+// RollingWindow payload (32 bytes): parent (DataFrame*), window (i64),
+// min_periods (i64; -1 = unset → defaults to window), center (i64; 0/1).
+//
+// Window bounds (center convention verified against pandas — see
+// LANGUAGE_GUIDE §11): with offset = (w - 1) / 2 (integer div),
+//   trailing (center=false): hi_raw = i,          lo_raw = i - w + 1
+//   centered (center=true):  hi_raw = i + offset,  lo_raw = i + offset - w + 1
+// then clipped to [0, n-1].  A cell with fewer than min_periods non-null
+// values in its window is null.
+
+/// Allocate a fresh RollingWindow heap object.
+fn m51_alloc_rolling_window(
+    interp: &mut Interpreter,
+    parent: u64,
+    window: i64,
+    min_periods: i64,
+    center: i64,
+) -> *mut u8 {
+    let p = m34_alloc_class_obj(interp, "RollingWindow", 32);
+    unsafe {
+        std::ptr::write_unaligned(p.add(HDR)      as *mut u64, parent);
+        std::ptr::write_unaligned(p.add(HDR + 8)  as *mut i64, window);
+        std::ptr::write_unaligned(p.add(HDR + 16) as *mut i64, min_periods);
+        std::ptr::write_unaligned(p.add(HDR + 24) as *mut i64, center);
+    }
+    p
+}
+
+/// Read the RollingWindow payload — (parent_df, window, min_periods, center).
+fn m51_rw_fields(recv: u64) -> (u64, i64, i64, i64) {
+    let obj = recv as *const u8;
+    if obj.is_null() {
+        return (0, 1, -1, 0);
+    }
+    unsafe {
+        let parent = std::ptr::read_unaligned(obj.add(HDR)      as *const u64);
+        let window = std::ptr::read_unaligned(obj.add(HDR + 8)  as *const i64);
+        let mp     = std::ptr::read_unaligned(obj.add(HDR + 16) as *const i64);
+        let center = std::ptr::read_unaligned(obj.add(HDR + 24) as *const i64);
+        (parent, window, mp, center)
+    }
+}
+
+/// `DataFrame.rolling(self, window: i64) -> RollingWindow`.
+fn m51_df_rolling(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let window = arg_i64(args, 1);
+    if window < 1 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("DataFrame.rolling: window must be >= 1, got {}", window),
+        });
+    }
+    Ok(m51_alloc_rolling_window(interp, recv, window, -1, 0) as u64)
+}
+
+/// `RollingWindow.center(self, flag: bool) -> RollingWindow`.
+fn m51_rw_center(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let (parent, window, mp, _center) = m51_rw_fields(recv);
+    let flag = if arg_u64(args, 1) != 0 { 1i64 } else { 0i64 };
+    Ok(m51_alloc_rolling_window(interp, parent, window, mp, flag) as u64)
+}
+
+/// `RollingWindow.min_periods(self, n: i64) -> RollingWindow`.
+fn m51_rw_min_periods(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let n = arg_i64(args, 1);
+    if n < 1 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("RollingWindow.min_periods: must be >= 1, got {}", n),
+        });
+    }
+    let (parent, window, _mp, center) = m51_rw_fields(recv);
+    Ok(m51_alloc_rolling_window(interp, parent, window, n, center) as u64)
+}
+
+/// The windowing kernel.  Applies a rolling reduction to a single
+/// numeric / datetime column and returns a new column pointer.
+/// `op` ∈ {"mean","sum","std","min","max"}.  `window` >= 1,
+/// `min_periods` >= 1.  Returns 0 if the source dtype does not support
+/// the op (datetime + sum/mean/std) so the caller can skip the column.
+fn m51_rolling_col(
+    interp: &mut Interpreter,
+    src_col: u64,
+    window: i64,
+    min_periods: i64,
+    center: bool,
+    op: &str,
+) -> u64 {
+    let src_cls = m38_col_class_name(src_col);
+    let (vals, nulls, length) = m37_col_fields(src_col);
+    let n = length as usize;
+    let w = window.max(1) as usize;
+    let mp = min_periods.max(1) as usize;
+    let offset: i64 = (window - 1) / 2;
+    let ns = m37_read_list_bool(nulls);
+
+    // Compute the inclusive [lo, hi] window bounds for output position i.
+    // Only called when n >= 1, so hi_raw >= 0 (i, offset both >= 0) and
+    // hi = min(hi_raw, n-1) is a valid index in [0, n-1].
+    let bounds = |i: usize| -> (usize, usize) {
+        let hi_raw: i64 = if center { i as i64 + offset } else { i as i64 };
+        let lo_raw: i64 = hi_raw - (w as i64) + 1;
+        let lo = lo_raw.max(0) as usize;
+        let hi = hi_raw.min((n as i64) - 1).max(0) as usize;
+        (lo, hi)
+    };
+
+    // Decide the output dtype.
+    // i64 src: sum→i64, mean/std→f64, min/max→i64
+    // f64 src: all→f64
+    // datetime src: min/max→datetime; sum/mean/std unsupported (skip).
+    let out_dtype: &str = match src_cls.as_str() {
+        "ColumnI64" => match op {
+            "mean" | "std" => "f64",
+            _ => "i64",
+        },
+        "ColumnF64" => "f64",
+        "ColumnDateTime" => match op {
+            "min" | "max" => "datetime",
+            _ => return 0, // unsupported — caller skips this column
+        },
+        _ => return 0,
+    };
+    let out_cls = m40_class_name_for_dtype(out_dtype);
+    let mut out_nulls: Vec<bool> = vec![true; n];
+
+    // Read source values once as f64 (for the float-output ops) and/or
+    // i64 (for the int / datetime ops).
+    let want_f64 = out_dtype == "f64";
+    let vs_i64: Vec<i64> = if src_cls == "ColumnF64" { Vec::new() } else { m37_read_list_i64(vals) };
+    let vs_f64: Vec<f64> = if src_cls == "ColumnF64" { m37_read_list_f64(vals) } else { Vec::new() };
+
+    if want_f64 {
+        let mut out: Vec<f64> = vec![0.0; n];
+        for i in 0..n {
+            let (lo, hi) = bounds(i);
+            if hi < lo { continue; }
+            let mut nn: Vec<f64> = Vec::with_capacity(w);
+            for j in lo..=hi {
+                if ns.get(j).copied().unwrap_or(false) { continue; }
+                let v = if src_cls == "ColumnF64" { vs_f64[j] } else { vs_i64[j] as f64 };
+                nn.push(v);
+            }
+            if nn.len() < mp { continue; }
+            out_nulls[i] = false;
+            out[i] = match op {
+                "sum"  => nn.iter().sum::<f64>(),
+                "mean" => nn.iter().sum::<f64>() / (nn.len() as f64),
+                "std"  => m47_welford_std_sample(&nn),
+                "min"  => {
+                    let mut acc = nn[0];
+                    for v in &nn[1..] {
+                        if v.is_nan() || acc.is_nan() { acc = f64::NAN; }
+                        else if *v < acc { acc = *v; }
+                    }
+                    acc
+                }
+                "max"  => {
+                    let mut acc = nn[0];
+                    for v in &nn[1..] {
+                        if v.is_nan() || acc.is_nan() { acc = f64::NAN; }
+                        else if *v > acc { acc = *v; }
+                    }
+                    acc
+                }
+                _ => 0.0,
+            };
+        }
+        let v_lst = m37_alloc_list_f64(interp, &out);
+        let n_lst = m37_alloc_list_bool(interp, &out_nulls);
+        m37_alloc_column(interp, &out_cls, v_lst, n_lst, n as i64) as u64
+    } else {
+        // i64 / datetime output (sum / min / max on i64 or datetime).
+        let mut out: Vec<i64> = vec![0; n];
+        for i in 0..n {
+            let (lo, hi) = bounds(i);
+            if hi < lo { continue; }
+            let mut nn: Vec<i64> = Vec::with_capacity(w);
+            for j in lo..=hi {
+                if ns.get(j).copied().unwrap_or(false) { continue; }
+                nn.push(vs_i64[j]);
+            }
+            if nn.len() < mp { continue; }
+            out_nulls[i] = false;
+            out[i] = match op {
+                "sum" => nn.iter().fold(0i64, |a, b| a.wrapping_add(*b)),
+                "min" => *nn.iter().min().unwrap_or(&0),
+                "max" => *nn.iter().max().unwrap_or(&0),
+                _ => 0,
+            };
+        }
+        let v_lst = m37_alloc_list_i64(interp, &out);
+        let n_lst = m37_alloc_list_bool(interp, &out_nulls);
+        m37_alloc_column(interp, &out_cls, v_lst, n_lst, n as i64) as u64
+    }
+}
+
+/// Shared body for `RollingWindow.{mean,sum,std,min,max}`.  Applies the
+/// reduction to every column that supports it (dropping the rest) and
+/// preserves the parent's index verbatim.
+fn m51_rw_terminal(
+    interp: &mut Interpreter,
+    args: &[u64],
+    op: &str,
+) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let (parent, window, mp_raw, center_i) = m51_rw_fields(recv);
+    let min_periods = if mp_raw < 0 { window } else { mp_raw };
+    let center = center_i != 0;
+    let (names_lst, _, nrows) = m37_df_fields(parent);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_ptrs = m37_df_col_ptrs(parent);
+    let mut out_names: Vec<String> = Vec::new();
+    let mut out_cols: Vec<u64> = Vec::new();
+    for (i, cp) in col_ptrs.iter().enumerate() {
+        let new_col = m51_rolling_col(interp, *cp, window, min_periods, center, op);
+        if new_col == 0 { continue; } // dropped (non-numeric, or datetime+arith)
+        out_names.push(names[i].clone());
+        out_cols.push(new_col);
+    }
+    Ok(m45_copy_multiindex_into_df(interp, parent, &out_names, &out_cols, nrows))
+}
+
+/// `RollingWindow.agg(specs: List[Tuple[str, str]]) -> DataFrame`.
+/// Each spec `(col_name, op)` yields one output column named
+/// `"{col}_{op}"` (matching GroupedDataFrame.agg's naming).
+fn m51_rw_agg(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let (parent, window, mp_raw, center_i) = m51_rw_fields(recv);
+    let min_periods = if mp_raw < 0 { window } else { mp_raw };
+    let center = center_i != 0;
+    let (names_lst, _, nrows) = m37_df_fields(parent);
+    let names = m37_read_list_str_lst(names_lst);
+    let col_ptrs = m37_df_col_ptrs(parent);
+    // Decode the spec list — same 16-byte tuple-of-two-str* layout as
+    // m38_gdf_agg.
+    let specs_ptr = arg_u64(args, 1) as *const crate::object::ListRepr;
+    let mut specs: Vec<(String, String)> = Vec::new();
+    if !specs_ptr.is_null() {
+        unsafe {
+            let len = (*specs_ptr).length;
+            let data = (*specs_ptr).data as *const u64;
+            for j in 0..len {
+                let tup = std::ptr::read_unaligned(data.add(j)) as *const u8;
+                if tup.is_null() { continue; }
+                let a = std::ptr::read_unaligned(tup.add(HDR) as *const u64) as *const StringRepr;
+                let b = std::ptr::read_unaligned(tup.add(HDR + 8) as *const u64) as *const StringRepr;
+                specs.push((read_str(a), read_str(b)));
+            }
+        }
+    }
+    let mut out_names: Vec<String> = Vec::new();
+    let mut out_cols: Vec<u64> = Vec::new();
+    for (col_name, op) in &specs {
+        let idx = match names.iter().position(|n| n == col_name) {
+            None => return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!("RollingWindow.agg: column {:?} not found", col_name),
+            }),
+            Some(i) => i,
+        };
+        if !matches!(op.as_str(), "mean" | "sum" | "std" | "min" | "max") {
+            return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!("RollingWindow.agg: unknown op {:?} (expected mean/sum/std/min/max)", op),
+            });
+        }
+        let src = col_ptrs[idx];
+        let new_col = m51_rolling_col(interp, src, window, min_periods, center, op);
+        if new_col == 0 {
+            return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!(
+                    "RollingWindow.agg: op {:?} not supported for column {:?} dtype",
+                    op, col_name
+                ),
+            });
+        }
+        out_names.push(format!("{}_{}", col_name, op));
+        out_cols.push(new_col);
+    }
+    Ok(m45_copy_multiindex_into_df(interp, parent, &out_names, &out_cols, nrows))
 }
 
 // ─────────────────────────────────────────────────────────────────────

@@ -1327,9 +1327,39 @@ pub enum NativeFn {
     /// `timeout_ms` milliseconds.  Returns 0 on clean timeout, nonzero
     /// on bind/I/O error.
     M50aTabServeWithTimeout            = 1068,
-    // 1069-1090 reserved for v1 follow-ups (M50b/M50c — sortable
-    // headers, composite filters, virtual scroll, CSV download, pivot
-    // UI).
+
+    // ── M51 (RollingWindow chainable + tabular grab-bag) ──────────────
+    // 1069-1080 used; 1081-1090 left free.  Phases B (is_ordered bit)
+    // and C (categorical sort) modify existing handlers and need no new
+    // NativeFn.
+    /// `DataFrame.rolling(self, window: i64) -> RollingWindow`.
+    M51TabDfRolling                    = 1069,
+    /// `RollingWindow.center(self, flag: bool) -> RollingWindow`.
+    M51TabRolCenter                    = 1070,
+    /// `RollingWindow.min_periods(self, n: i64) -> RollingWindow`.
+    M51TabRolMinPeriods                = 1071,
+    /// `RollingWindow.mean(self) -> DataFrame`.
+    M51TabRolMean                      = 1072,
+    /// `RollingWindow.sum(self) -> DataFrame`.
+    M51TabRolSum                       = 1073,
+    /// `RollingWindow.std(self) -> DataFrame`.
+    M51TabRolStd                       = 1074,
+    /// `RollingWindow.min(self) -> DataFrame`.
+    M51TabRolMin                       = 1075,
+    /// `RollingWindow.max(self) -> DataFrame`.
+    M51TabRolMax                       = 1076,
+    /// `RollingWindow.agg(self, specs: List[Tuple[str,str]]) -> DataFrame`.
+    M51TabRolAgg                       = 1077,
+    /// `DataFrame.loc_range_level_i64(self, level: i64, start: i64,
+    /// stop: i64) -> DataFrame` — range-filter a chosen MultiIndex level.
+    M51TabDfLocRangeLevelI64           = 1078,
+    /// `DataFrame.loc_range_level_str(self, level: i64, start: str,
+    /// stop: str) -> DataFrame`.
+    M51TabDfLocRangeLevelStr           = 1079,
+    /// `DataFrame.loc_range_level_datetime(self, level: i64, start: i64,
+    /// stop: i64) -> DataFrame`.
+    M51TabDfLocRangeLevelDateTime      = 1080,
+    // 1081-1090 reserved for further v1 tabular follow-ups.
 
     // ── 250–289: M22 P2A (argparse + collections + csv) ─────────────────
     // Phase 2 starts here.  P2A's job is to bring three high-ROI stdlib
@@ -2960,6 +2990,19 @@ impl NativeFn {
             // ── M50a (tabular.serve HTTP transport) ──────────────
             1067 => Some(Self::M50aTabServe),
             1068 => Some(Self::M50aTabServeWithTimeout),
+            // ── M51 (RollingWindow + tabular grab-bag) ───────────
+            1069 => Some(Self::M51TabDfRolling),
+            1070 => Some(Self::M51TabRolCenter),
+            1071 => Some(Self::M51TabRolMinPeriods),
+            1072 => Some(Self::M51TabRolMean),
+            1073 => Some(Self::M51TabRolSum),
+            1074 => Some(Self::M51TabRolStd),
+            1075 => Some(Self::M51TabRolMin),
+            1076 => Some(Self::M51TabRolMax),
+            1077 => Some(Self::M51TabRolAgg),
+            1078 => Some(Self::M51TabDfLocRangeLevelI64),
+            1079 => Some(Self::M51TabDfLocRangeLevelStr),
+            1080 => Some(Self::M51TabDfLocRangeLevelDateTime),
             // ── M52 (GFX core) ───────────────────────────────────
             1100 => Some(Self::GfxInit),
             1101 => Some(Self::GfxCreateWindow),

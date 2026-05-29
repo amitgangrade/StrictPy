@@ -4731,6 +4731,12 @@ impl Resolver {
         let m38_gdf_cid = self.fresh_class();
         self.class_name_to_id.insert("GroupedDataFrame".into(), m38_gdf_cid);
         let m38_gdf_ty = Ty::Class(m38_gdf_cid);
+        // ── M51: RollingWindow class id (allocated before DataFrame
+        // layout so DataFrame.rolling can reference it as its return
+        // type).  Modeled on GroupedDataFrame.
+        let m51_rw_cid = self.fresh_class();
+        self.class_name_to_id.insert("RollingWindow".into(), m51_rw_cid);
+        let m51_rw_ty = Ty::Class(m51_rw_cid);
         // ── M38: tuple (str, str) for rename / agg-spec params.
         let m38_str_pair_list = Ty::Generic {
             base: TypeCtor::List,
@@ -4816,6 +4822,12 @@ impl Resolver {
                     name: "group_by".into(),
                     params: vec![m37_list_str.clone()],
                     ret: m38_gdf_ty.clone(),
+                },
+                // ── M51 Phase A: rolling — returns a chainable RollingWindow ──
+                MethodSig {
+                    name: "rolling".into(),
+                    params: vec![m37_i64.clone()],
+                    ret: m51_rw_ty.clone(),
                 },
                 // ── M39 Phase A: typed unique accessors (one per dtype) ──
                 MethodSig {
@@ -5056,6 +5068,24 @@ impl Resolver {
                     params: vec![m37_i64.clone(), m37_i64.clone()],
                     ret: m37_df_ty.clone(),
                 },
+                // ── M51 Phase D: loc_range_level_* on a chosen MultiIndex
+                // level (0 = outermost), generalizing M49's innermost-only
+                // loc_range_multi_*.  Signature carries the level as arg 0.
+                MethodSig {
+                    name: "loc_range_level_i64".into(),
+                    params: vec![m37_i64.clone(), m37_i64.clone(), m37_i64.clone()],
+                    ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "loc_range_level_str".into(),
+                    params: vec![m37_i64.clone(), m37_str.clone(), m37_str.clone()],
+                    ret: m37_df_ty.clone(),
+                },
+                MethodSig {
+                    name: "loc_range_level_datetime".into(),
+                    params: vec![m37_i64.clone(), m37_i64.clone(), m37_i64.clone()],
+                    ret: m37_df_ty.clone(),
+                },
                 MethodSig {
                     name: "set_index_list".into(),
                     params: vec![m37_list_str.clone()],
@@ -5123,6 +5153,36 @@ impl Resolver {
                     params: vec![m38_str_pair_list.clone()],
                     ret: m37_df_ty.clone(),
                 },
+            ],
+            generics: vec![], generic_tvars: vec![],
+            is_native: false, payload_size: 32,
+        });
+
+        // ── M51: RollingWindow layout — payload carries
+        // (parent, window, min_periods, center).  parent is an i64
+        // DataFrame pointer; window/min_periods/center are i64.
+        // min_periods = -1 means "unset" (defaults to window).
+        // center = 0 (false) / 1 (true).  Total 32 bytes.  Modeled on
+        // GroupedDataFrame; users never construct it directly —
+        // `df.rolling(w)` is the only entry point.
+        self.class_layouts.insert(m51_rw_cid, ClassLayout {
+            id: m51_rw_cid, name: "RollingWindow".into(), base: None,
+            is_open: false, is_sealed: false,
+            fields: vec![
+                FieldInfo { name: "parent".into(),      ty: m37_df_ty.clone(), offset: 0 },
+                FieldInfo { name: "window".into(),      ty: m37_i64.clone(),   offset: 8 },
+                FieldInfo { name: "min_periods".into(), ty: m37_i64.clone(),   offset: 16 },
+                FieldInfo { name: "center".into(),      ty: m37_i64.clone(),   offset: 24 },
+            ],
+            methods: vec![
+                MethodSig { name: "center".into(),      params: vec![m37_bool.clone()], ret: m51_rw_ty.clone() },
+                MethodSig { name: "min_periods".into(), params: vec![m37_i64.clone()],  ret: m51_rw_ty.clone() },
+                MethodSig { name: "mean".into(), params: vec![], ret: m37_df_ty.clone() },
+                MethodSig { name: "sum".into(),  params: vec![], ret: m37_df_ty.clone() },
+                MethodSig { name: "std".into(),  params: vec![], ret: m37_df_ty.clone() },
+                MethodSig { name: "min".into(),  params: vec![], ret: m37_df_ty.clone() },
+                MethodSig { name: "max".into(),  params: vec![], ret: m37_df_ty.clone() },
+                MethodSig { name: "agg".into(),  params: vec![m38_str_pair_list.clone()], ret: m37_df_ty.clone() },
             ],
             generics: vec![], generic_tvars: vec![],
             is_native: false, payload_size: 32,
@@ -5333,6 +5393,10 @@ impl Resolver {
             // works.  Users never construct it directly; `df.group_by`
             // is the only entry point.
             ("GroupedDataFrame",  m38_gdf_cid),
+            // ── M51: RollingWindow — published so `from tabular import
+            // RollingWindow` works.  Users never construct it directly;
+            // `df.rolling(w)` is the only entry point.
+            ("RollingWindow",     m51_rw_cid),
         ] {
             m37_tabular_mod.items.push(StdlibItem {
                 name: m37_name.into(),

@@ -4837,6 +4837,19 @@ fn m41_tabular_class_method_native_id_by_name(
         ("DataFrame", "loc_range_multi_i64")      => NativeFn::M49TabDfLocRangeMultiI64       as u32,
         ("DataFrame", "loc_range_multi_str")      => NativeFn::M49TabDfLocRangeMultiStr       as u32,
         ("DataFrame", "loc_range_multi_datetime") => NativeFn::M49TabDfLocRangeMultiDateTime  as u32,
+        // ── M51: RollingWindow chainable + outer-MultiIndex loc_range ──
+        ("DataFrame", "rolling")            => NativeFn::M51TabDfRolling      as u32,
+        ("RollingWindow", "center")         => NativeFn::M51TabRolCenter      as u32,
+        ("RollingWindow", "min_periods")    => NativeFn::M51TabRolMinPeriods  as u32,
+        ("RollingWindow", "mean")           => NativeFn::M51TabRolMean        as u32,
+        ("RollingWindow", "sum")            => NativeFn::M51TabRolSum         as u32,
+        ("RollingWindow", "std")            => NativeFn::M51TabRolStd         as u32,
+        ("RollingWindow", "min")            => NativeFn::M51TabRolMin         as u32,
+        ("RollingWindow", "max")            => NativeFn::M51TabRolMax         as u32,
+        ("RollingWindow", "agg")            => NativeFn::M51TabRolAgg         as u32,
+        ("DataFrame", "loc_range_level_i64")      => NativeFn::M51TabDfLocRangeLevelI64      as u32,
+        ("DataFrame", "loc_range_level_str")      => NativeFn::M51TabDfLocRangeLevelStr      as u32,
+        ("DataFrame", "loc_range_level_datetime") => NativeFn::M51TabDfLocRangeLevelDateTime as u32,
         _ => return None,
     })
 }

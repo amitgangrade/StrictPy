@@ -1,0 +1,175 @@
+"""tabular_m51_rolling_demo.spy — M51 end-to-end walkthrough.
+
+M51 ships the chainable `RollingWindow` class on the tabular package,
+plus a tabular grab-bag: an explicit ColumnCategorical is_ordered bit,
+pandas-style categorical ordered-sort, and outer-MultiIndex
+loc_range_level_*.
+
+This demo threads a small frame through the M51 surface:
+
+  1. Build a 5-row frame (qty:i64 + price:f64).
+  2. df.rolling(3).mean() — trailing window; first 2 rows null.
+  3. df.rolling(3).center(true).mean() — centered window; both ends
+     null with the default min_periods == window.
+  4. df.rolling(3).min_periods(1).sum() — partial leading windows fill.
+  5. df.rolling(2).agg([("qty","sum"),("price","mean")]) — per-column
+     ops with "{col}_{op}" output names.
+  6. ColumnCategorical.is_ordered() — explicit bit (ordered vs plain).
+  7. df.sort_by on a categorical column follows category order.
+  8. loc_range_level_str(0, ...) on a 2-level MultiIndex (outer level).
+
+Output is deterministic so the demo-runs integration test asserts on
+every checkpoint.
+"""
+
+from tabular import Column, ColumnI64, ColumnF64, ColumnStr, ColumnCategorical
+from tabular import DataFrame, RollingWindow
+import tabular
+
+
+fn build_frame() -> DataFrame:
+    """5-row frame: qty:i64 + price:f64."""
+    qty_v: List[i64] = []
+    qty_v.append(1i64)
+    qty_v.append(2i64)
+    qty_v.append(3i64)
+    qty_v.append(4i64)
+    qty_v.append(5i64)
+    qty: ColumnI64 = tabular.col_i64_simple(qty_v)
+
+    price_v: List[f64] = []
+    price_v.append(10.0)
+    price_v.append(20.0)
+    price_v.append(30.0)
+    price_v.append(40.0)
+    price_v.append(50.0)
+    price: ColumnF64 = tabular.col_f64_simple(price_v)
+
+    cn: List[str] = []
+    cn.append("qty")
+    cn.append("price")
+    cols: List[Column] = []
+    cols.append(qty)
+    cols.append(price)
+    return tabular.from_columns(cn, cols)
+
+
+fn main() -> i32:
+    df: DataFrame = build_frame()
+    println("nrows=" + str(df.length()))
+
+    # ── Step 2: trailing rolling(3).mean() ──────────────────────────────
+    rmean: DataFrame = df.rolling(3i64).mean()
+    qcol: ColumnF64? = rmean.get_column_f64("qty")
+    if qcol is not none:
+        m0: f64? = qcol.get(0i64)
+        m2: f64? = qcol.get(2i64)
+        if m0 is none:
+            println("trail0=null")
+        if m2 is not none:
+            println("trail2=" + str(m2))
+
+    # ── Step 3: centered rolling(3).mean() ──────────────────────────────
+    cmean: DataFrame = df.rolling(3i64).center(true).mean()
+    ccol: ColumnF64? = cmean.get_column_f64("qty")
+    if ccol is not none:
+        c0: f64? = ccol.get(0i64)
+        c2: f64? = ccol.get(2i64)
+        c4: f64? = ccol.get(4i64)
+        if c0 is none:
+            println("center0=null")
+        if c2 is not none:
+            println("center2=" + str(c2))
+        if c4 is none:
+            println("center4=null")
+
+    # ── Step 4: rolling(3).min_periods(1).sum() ─────────────────────────
+    psum: DataFrame = df.rolling(3i64).min_periods(1i64).sum()
+    pcol: ColumnI64? = psum.get_column_i64("qty")
+    if pcol is not none:
+        p0: i64? = pcol.get(0i64)
+        if p0 is not none:
+            println("partial0=" + str(p0))
+
+    # ── Step 5: rolling(2).agg([...]) ───────────────────────────────────
+    specs: List[Tuple[str, str]] = []
+    specs.append(("qty", "sum"))
+    specs.append(("price", "mean"))
+    agg: DataFrame = df.rolling(2i64).agg(specs)
+    println("agg_ncols=" + str(agg.ncols()))
+    println("has_qty_sum=" + str(agg.has_column("qty_sum")))
+    println("has_price_mean=" + str(agg.has_column("price_mean")))
+
+    # ── Step 6: ColumnCategorical.is_ordered() ──────────────────────────
+    lv: List[str] = []
+    lv.append("high")
+    lv.append("low")
+    lv.append("mid")
+    lcats: List[str] = []
+    lcats.append("low")
+    lcats.append("mid")
+    lcats.append("high")
+    ordered_cat: ColumnCategorical = tabular.col_categorical_ordered(lv, lcats)
+    if ordered_cat.is_ordered():
+        println("ordered=true")
+    plain_cat: ColumnCategorical = tabular.col_categorical(lv)
+    if not plain_cat.is_ordered():
+        println("plain=false")
+
+    # ── Step 7: sort_by on a categorical follows category order ─────────
+    tag_v: List[i64] = []
+    tag_v.append(100i64)
+    tag_v.append(200i64)
+    tag_v.append(300i64)
+    tag: ColumnI64 = tabular.col_i64_simple(tag_v)
+    cn7: List[str] = []
+    cn7.append("level")
+    cn7.append("tag")
+    cs7: List[Column] = []
+    cs7.append(ordered_cat)
+    cs7.append(tag)
+    cat_df: DataFrame = tabular.from_columns(cn7, cs7)
+    sorted_df: DataFrame = cat_df.sort_by("level", true)
+    stag: ColumnI64? = sorted_df.get_column_i64("tag")
+    if stag is not none:
+        s0: i64? = stag.get(0i64)
+        if s0 is not none:
+            # low comes first (tag 200), NOT alphabetical "high".
+            println("sorted0=" + str(s0))
+
+    # ── Step 8: loc_range_level_str on outer MultiIndex level ───────────
+    outer: List[str] = []
+    outer.append("a")
+    outer.append("b")
+    outer.append("c")
+    outer.append("d")
+    inner: List[i64] = []
+    inner.append(1i64)
+    inner.append(2i64)
+    inner.append(3i64)
+    inner.append(4i64)
+    vals: List[i64] = []
+    vals.append(10i64)
+    vals.append(20i64)
+    vals.append(30i64)
+    vals.append(40i64)
+    co: ColumnStr = tabular.col_str_simple(outer)
+    ci: ColumnI64 = tabular.col_i64_simple(inner)
+    cv: ColumnI64 = tabular.col_i64_simple(vals)
+    cn8: List[str] = []
+    cn8.append("o")
+    cn8.append("i")
+    cn8.append("v")
+    cs8: List[Column] = []
+    cs8.append(co)
+    cs8.append(ci)
+    cs8.append(cv)
+    mdf: DataFrame = tabular.from_columns(cn8, cs8)
+    idx: List[str] = []
+    idx.append("o")
+    idx.append("i")
+    mdf2: DataFrame = mdf.set_index_list(idx)
+    sub: DataFrame = mdf2.loc_range_level_str(0i64, "b", "c")
+    println("loc_rows=" + str(sub.length()))
+
+    return 0
