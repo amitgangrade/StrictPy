@@ -98,6 +98,7 @@ M48_BEST_OF_OVERRIDE = {
     ("group_by_pandas_categorical","large"): 1,
     ("merge_str",                  "large"): 1,
     ("merge_cat_via_strings",      "large"): 1,
+    ("merge_cat_codes",            "large"): 1,
 }
 
 for d in (DATA_DIR, GEN_DIR, HIST_DIR):
@@ -150,6 +151,7 @@ M48_DEFAULT_ITERS = {
     "group_by_pandas_categorical": 20,
     "merge_str":                  3,
     "merge_cat_via_strings":      3,
+    "merge_cat_codes":            3,
     "unique_str":                 20,
     "unique_cat_via_strings":     20,
 }
@@ -185,6 +187,8 @@ M48_ITERS_OVERRIDE = {
     ("merge_str", "large"):                  1,
     ("merge_cat_via_strings", "medium"):     1,
     ("merge_cat_via_strings", "large"):      1,
+    ("merge_cat_codes", "medium"):           1,
+    ("merge_cat_codes", "large"):            1,
     ("unique_str", "large"):                 3,
     ("unique_cat_via_strings", "large"):     3,
     # ── M49 Phase A: medium_card_5000 ──
@@ -195,6 +199,7 @@ M48_ITERS_OVERRIDE = {
     ("group_by_pandas_categorical", "medium_card_5000"): 1,
     ("merge_str", "medium_card_5000"):                 1,
     ("merge_cat_via_strings", "medium_card_5000"):     1,
+    ("merge_cat_codes", "medium_card_5000"):           1,
     ("unique_str", "medium_card_5000"):                3,
     ("unique_cat_via_strings", "medium_card_5000"):    3,
 }
@@ -726,6 +731,90 @@ def m48_gen_merge_cat_via_strings(csv_path: Path, iters: int) -> tuple[str, str,
     return spy, py, "nrows="
 
 
+def m51_gen_merge_cat_codes(csv_path: Path, iters: int) -> tuple[str, str, str]:
+    """M51: exercise the M49 merge codes-hash FAST PATH on a categorical
+    key.  Both frames key on a ColumnCategorical built with the SAME
+    pinned categories[] (via col_categorical_ordered), so M49's merge
+    detects bit-identical category orderings and hashes on the i64 codes
+    instead of coercing to strings.  Contrast with merge_cat_via_strings,
+    where v1 coerced categoricals to their str view.
+
+    Pandas side: cast the key to a `Categorical` dtype with a fixed
+    category ordering, then merge on it (pandas merges categoricals on
+    their codes when the categories match)."""
+    csv_lit = str(csv_path).replace("\\", "\\\\")
+    spy = m48_spy_preamble(csv_path) + (
+        '    cs: ColumnStr? = df.get_column_str("category")\n'
+        '    if cs is none:\n'
+        '        println("nrows=" + str(df.length()) + " acc=0")\n'
+        '        return 0\n'
+        '    cs_v: ColumnStr = cs.fill_null("__null__")\n'
+        '    j: i64 = 0i64\n'
+        '    cs_values: List[str] = []\n'
+        '    while j < cs_v.length():\n'
+        '        opt: str? = cs_v.get(j)\n'
+        '        if opt is not none:\n'
+        '            cs_values.append(opt)\n'
+        '        else:\n'
+        '            cs_values.append("__null__")\n'
+        '        j = j + 1i64\n'
+        # Pin the categories[] ordering from the distinct values so both
+        # frames share a bit-identical category list -> codes-hash path.
+        # Dedup cs_values by first-appearance, manually (membership scan).
+        '    cats: List[str] = []\n'
+        '    p: i64 = 0i64\n'
+        '    while p < cs_v.length():\n'
+        '        vv: str? = cs_v.get(p)\n'
+        '        if vv is not none:\n'
+        '            seen: bool = false\n'
+        '            q: i64 = 0i64\n'
+        '            n_cats: i64 = len(cats)\n'
+        '            while q < n_cats:\n'
+        '                if cats[q] == vv:\n'
+        '                    seen = true\n'
+        '                q = q + 1i64\n'
+        '            if not seen:\n'
+        '                cats.append(vv)\n'
+        '        p = p + 1i64\n'
+        '    cat_a: ColumnCategorical = tabular.col_categorical_ordered(cs_values, cats)\n'
+        '    cat_b: ColumnCategorical = tabular.col_categorical_ordered(cs_values, cats)\n'
+        '    na: List[str] = []\n'
+        '    na.append("category")\n'
+        '    ca: List[Column] = []\n'
+        '    ca.append(cat_a)\n'
+        '    dfa: DataFrame = tabular.from_columns(na, ca)\n'
+        '    nb: List[str] = []\n'
+        '    nb.append("category")\n'
+        '    cb: List[Column] = []\n'
+        '    cb.append(cat_b)\n'
+        '    dfb: DataFrame = tabular.from_columns(nb, cb)\n'
+        f'    iters: i64 = {iters}i64\n'
+        '    on: List[str] = []\n'
+        '    on.append("category")\n'
+        '    i: i64 = 0i64\n'
+        '    acc: i64 = 0i64\n'
+        '    while i < iters:\n'
+        '        m: DataFrame = dfa.merge(dfb, on, "inner")\n'
+        '        acc = acc + m.length()\n'
+        '        i = i + 1i64\n'
+        '    println("nrows=" + str(df.length()) + " acc=" + str(acc))\n'
+        '    return 0\n'
+    )
+    py = m48_py_preamble(csv_path) + (
+        'cat_dtype = pd.CategoricalDtype(categories=df["category"].dropna().unique())\n'
+        'dfa = df[["category"]].copy()\n'
+        'dfa["category"] = dfa["category"].astype(cat_dtype)\n'
+        'dfb = dfa.copy()\n'
+        f'iters = {iters}\n'
+        'acc = 0\n'
+        'for _ in range(iters):\n'
+        '    m = dfa.merge(dfb, on=["category"], how="inner")\n'
+        '    acc += len(m)\n'
+        'print(f"nrows={len(df)} acc={acc}")\n'
+    )
+    return spy, py, "nrows="
+
+
 def m48_gen_unique_str(csv_path: Path, iters: int) -> tuple[str, str, str]:
     spy = m48_spy_preamble(csv_path) + (
         f'    iters: i64 = {iters}i64\n'
@@ -781,6 +870,7 @@ M48_OP_REGISTRY = {
     "group_by_pandas_categorical":("group_by pandas Categorical (codes)",  m48_gen_group_by_pandas_categorical),
     "merge_str":                  ("merge inner on category (str)",        m48_gen_merge_str),
     "merge_cat_via_strings":      ("merge inner on category (cat coerce)", m48_gen_merge_cat_via_strings),
+    "merge_cat_codes":            ("merge inner on category (codes-hash)", m51_gen_merge_cat_codes),
     "unique_str":                 ("unique str category",                  m48_gen_unique_str),
     "unique_cat_via_strings":     ("unique Categorical via to_strings",    m48_gen_unique_cat_via_strings),
 }
@@ -792,7 +882,7 @@ M48_CORE_OPS = [
 ]
 M48_CATEGORICAL_OPS = [
     "group_by_str", "group_by_cat_via_strings", "group_by_pandas_categorical",
-    "merge_str", "merge_cat_via_strings",
+    "merge_str", "merge_cat_via_strings", "merge_cat_codes",
     "unique_str", "unique_cat_via_strings",
 ]
 
