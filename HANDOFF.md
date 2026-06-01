@@ -30,23 +30,85 @@ Everything you need to resume is in:
 ## Current head
 
 - Branch: `main`
-- Latest commit: **M57 Space Shooter** (`951baa6`) — third reference game on the gfx stack
-- Tests passing: **1103 / 0 fail / 1 ignored** (M57 adds 1 compile-only test `compiler/tests/space_shooter_demo_runs.rs`)
+- Latest commit: **M58 games polish** — sqlite high scores + fullscreen/vsync + event-pump fix
+- Tests passing: **1106 / 0 fail / 1 ignored** (M58 adds 3 tests). NOTE: the `tabular.serve` tests (`m50a_tabular_serve.rs`) bind real TCP ports and **occasionally flake under the parallel full-workspace sweep** (port/timing contention) — they pass in isolation; not a regression.
 
 ## Status snapshot
 
 | Metric | Value |
 |---|---:|
-| Milestones complete on main | M0–M57 **+ M51** (M51 landed after M56 — see ordering note above) |
+| Milestones complete on main | M0–M58 **+ M51** (M51 landed after M56 — see ordering note above) |
 | **v0.2.0 release** | **Tagged at M30 (commit 121483f)** |
-| Tests | **1103** / 0 fail / 1 ignored (`cargo test --workspace --release`) |
-| Bugs | 35 / 35 / **0 deferred** + 1 known unresolved (Snake/Tetris Windows input/frame-timing quirk; see M55/M56) |
+| Tests | **1106** / 0 fail / 1 ignored (`cargo test --workspace --release`) |
+| Bugs | 35 / 35 / **0 deferred** + 1 known unresolved (Snake/Tetris/Shooter Windows input/frame-timing quirk; M58 shipped mitigations — needs a desktop play-test; see M58) |
 | Stdlib modules | 39 (no change) |
 | Stdlib classes | **26** (M51's `RollingWindow`; M52-M54's Window/Event/Image/Sound/Music/Font; the M37-M47 tabular Column/DataFrame family) |
-| Example programs | **121** (+1 M57: `examples/games/space_shooter.spy`) |
-| Reference games | **3** — Snake (M55), Tetris (M56), Space Shooter (M57), all on the `gfx`/SDL2 stack |
-| Lesson 1 streak | 40 clean-commit agents (M28 → M57). **M51 + M57 are asterisks** — delegate-blind agents (sandbox blocked builds); orchestrator-verified, not self-gated. |
+| Example programs | **122** (+1 M58: `examples/games/highscores.spy`) |
+| Reference games | **3** — Snake (M55), Tetris (M56), Space Shooter (M57), all on the `gfx`/SDL2 stack — now with sqlite high scores + fullscreen (M58) |
+| Lesson 1 streak | 41 clean-commit agents (M28 → M58). **M51 / M57 / M58 are asterisks** — delegate-blind agents (sandbox blocked builds); orchestrator-verified, not self-gated. M58's agent couldn't even commit (edits landed in the main tree). |
 | Benchmark suites | 3 (tabular suite gained the M51 `merge_cat_codes` cell) |
+
+## M58 — completed (this session — games polish, delegate-blind)
+
+Games-polish milestone (per GAMES_PLAN §6). Delegated to a sub-agent whose
+sandbox denied `cargo`/`git`/`python` entirely, so it wrote everything
+blind AND couldn't commit — its edits landed uncommitted in the **main
+working tree**, which the orchestrator then built/fixed/tested/committed.
+One blind-code bug found + fixed on integration: `resolver.rs` used
+`bool_ty` (out of scope in the gfx registration block) → changed to inline
+`Ty::Primitive(PrimTy::Bool)`. After that, clean.
+
+**Shipped:**
+1. **High-score persistence (sqlite3 / M23).** `examples/games/highscores.spy`
+   is the standalone reference (`save_score(db,game,name,score)` +
+   `top_scores(db,game,n) -> List[Tuple[str,i64]]` over
+   `scores(game,name,score,ts)`). **StrictPy v0.2 has no user-module
+   import**, so the agent **inlined `hs_*` copies into each of the three
+   games** rather than importing — game-over flow saves once (a
+   `score_saved` bool guard) and renders top-5 via `gfx.draw_text`, db
+   `strictpy_games.db` (cwd-relative). Also note: **`i64(str)` is a
+   code-point cast, not a parse** — the prelude `parse_i64` is the right
+   tool for the score column. Tests: `vm/tests/m58_highscores.rs` (real
+   temp-file sqlite round-trip, asserts score-DESC + game filtering —
+   passes) + `compiler/tests/highscores_demo_runs.rs` (compile-only).
+2. **`gfx.set_fullscreen(win, bool)` + `gfx.set_vsync(win, bool)`** —
+   NativeFn IDs **1190/1191**. `set_fullscreen` → `FullscreenType::Desktop/Off`;
+   `set_vsync` → raw FFI `SDL_RenderSetVSync(canvas.raw(), 0/1)` (the
+   `canvas.set_vsync` wrapper wasn't relied on), **best-effort no-op on
+   nonzero rc** (dummy/software renderers can't toggle at runtime — so it
+   doesn't abort CI). `ir.rs` needed NO change (gfx fns lower generically
+   via `item.native_id`). Test `vm/tests/m58_gfx_polish.rs` (dummy driver).
+3. **Event-pump thread-local fix.** `m52_gfx_poll_event` no longer
+   recreates the SDL `EventPump` every frame; a `thread_local! M58_EVENT_PUMP`
+   builds it once and reuses it (EventPump is `!Send`, so it can't live in
+   the global `Mutex` SDL context — a thread-local is its correct home).
+   Each game now calls `gfx.set_vsync(win, false)` right after
+   `create_window`.
+
+### The Windows input/frame-timing quirk — analysis (NOT yet runtime-verified)
+
+The M55/M56 "Snake moves only on key press" / "Tetris left-right also moves
+down" quirk is **interactive and Windows-only**, so it can't be reproduced
+or fixed from CI. M58's investigation identified the two most likely
+causes and shipped mitigations for both, but **a manual desktop play-test
+is required to confirm** (the real gate for M59 or whoever picks this up):
+
+- **Cause A — `present_vsync` blocking.** The renderer is built with
+  `.present_vsync()` (builtins.rs `m52_gfx_create_window` ~23772), so
+  `canvas.present()` blocks until the next vblank. Combined with the
+  games' own `time.sleep_ms` pacing this is double-pacing, and on Windows
+  a vsync-present can stall unpredictably when the window isn't the
+  compositor's focus. **Mitigation shipped:** `gfx.set_vsync(win, false)`
+  + every game calls it at startup, so frame pacing is the explicit
+  `sleep_ms` loop, not the vsync block.
+- **Cause B — event pump recreated per frame.** `poll_event` used to
+  build a fresh `EventPump` each call. **Mitigation shipped:** the
+  thread-local single pump above.
+
+If a play-test shows the quirk persists after these, the next suspects are
+(i) the per-frame `M52_SDL_CONTEXT` mutex lock ordering and (ii) whether
+the VM game loop actually runs on the SDL-init thread (SDL event handling
+is thread-affine). Both need a live debugger on the desktop binary.
 
 ## M57 — completed (this session — Space Shooter, delegate-blind)
 

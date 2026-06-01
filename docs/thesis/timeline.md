@@ -1115,6 +1115,43 @@ empirical findings, both honest data:
 
 No language/compiler changes; new pure-bench infrastructure only.
 
+## M58 — games polish: sqlite high scores + fullscreen/vsync + event-pump fix (2026-06-01)
+
+The games-stack polish milestone. Delegated to a sub-agent whose sandbox
+denied `cargo`/`git`/`python` outright, so it wrote everything blind and
+could not even commit — its edits landed uncommitted in the main working
+tree, which the orchestrator built, fixed, tested, and committed. One
+blind-code bug surfaced on the first build (`resolver.rs` referenced
+`bool_ty`, out of scope in the gfx registration block; changed to inline
+`Ty::Primitive(PrimTy::Bool)`); after that the workspace was green.
+
+Three deliverables. (1) **High-score persistence** on the M23 `sqlite3`
+stdlib: `examples/games/highscores.spy` (`save_score` / `top_scores` over a
+`scores(game,name,score,ts)` table), wired into all three games'
+game-over overlay (top-5 via `gfx.draw_text`). Because StrictPy v0.2 has no
+user-module import, the helper is inlined into each game and kept as a
+standalone reference — and the score column uses the prelude `parse_i64`,
+since `i64(str)` is a code-point cast rather than a parse. A real
+temp-file sqlite round-trip test asserts score-descending ordering and
+per-game filtering. (2) **`gfx.set_fullscreen` + `gfx.set_vsync`** natives
+(IDs 1190/1191), the latter via raw `SDL_RenderSetVSync` with a
+best-effort no-op when the renderer can't toggle at runtime. (3) An
+**event-pump fix**: `poll_event` no longer recreates the SDL `EventPump`
+every frame — a `thread_local` builds it once and reuses it (the pump is
+`!Send`, so a thread-local is its correct home).
+
+Deliverables (2) and (3), plus each game now calling `set_vsync(false)` at
+startup, are shipped **mitigations** for the unresolved M55/M56 Windows
+input/frame-timing quirk: the two leading suspects are vsync-`present`
+blocking and the per-frame pump churn, and M58 addresses both. But the
+quirk is interactive and Windows-only, so this is **not runtime-verified**
+— a manual desktop play-test remains the real gate (documented in
+HANDOFF for whoever picks up M59). After M58 the three games gain
+persistent high scores and a fullscreen toggle; the input quirk's fix is
+plausible but unconfirmed.
+
+---
+
 ## M57 — Space Shooter (third reference game on the gfx stack) (2026-06-01)
 
 The third desktop game written in StrictPy on the M52-M54 `gfx`/SDL2

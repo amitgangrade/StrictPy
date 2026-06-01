@@ -5617,6 +5617,9 @@ impl Resolver {
         const GFX_DRAW_TEXT: u32          = 1171;
         const GFX_TEXT_SIZE: u32          = 1172;
         const GFX_FREE_FONT: u32          = 1173;
+        // M58: polish — fullscreen/vsync toggles
+        const GFX_SET_FULLSCREEN: u32     = 1190;
+        const GFX_SET_VSYNC: u32          = 1191;
 
         let gfx_items = vec![
             StdlibItem {
@@ -5930,6 +5933,19 @@ impl Resolver {
                 kind: StdlibItemKind::Function,
                 ty: fn_ty(vec![font_ty.clone()], unit_ty.clone()),
                 native_id: GFX_FREE_FONT,
+            },
+            // ── M58 polish: fullscreen + vsync toggles ──────────────────
+            StdlibItem {
+                name: "set_fullscreen".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(vec![win_ty.clone(), Ty::Primitive(PrimTy::Bool)], unit_ty.clone()),
+                native_id: GFX_SET_FULLSCREEN,
+            },
+            StdlibItem {
+                name: "set_vsync".into(),
+                kind: StdlibItemKind::Function,
+                ty: fn_ty(vec![win_ty.clone(), Ty::Primitive(PrimTy::Bool)], unit_ty.clone()),
+                native_id: GFX_SET_VSYNC,
             },
         ];
 

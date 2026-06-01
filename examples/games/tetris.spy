@@ -39,7 +39,50 @@ real desktop window — run it manually on your dev box.
 import gfx
 import time
 import random
+import sqlite3
 from gfx import Window, Event, Font, Sound
+
+# ── High-score persistence (M58) ────────────────────────────────────
+#
+# StrictPy v0.2 can't import a user `.spy` module, so the shared
+# logic in examples/games/highscores.spy is inlined here (and in the
+# other two games).  See that file for the canonical reference + a
+# runnable standalone demo.  DB path is cwd-relative for testability.
+final HS_DB: str = "strictpy_games.db"
+final HS_GAME: str = "tetris"
+final HS_PLAYER: str = "PLAYER"
+
+fn hs_ensure_schema(conn: Connection) -> None:
+    conn.execute("CREATE TABLE IF NOT EXISTS scores (game TEXT, name TEXT, score INTEGER, ts INTEGER)")
+
+fn hs_save_score(game: str, name: str, score: i64) -> None:
+    conn: Connection = sqlite3.open(HS_DB)
+    hs_ensure_schema(conn)
+    params: List[str] = []
+    params.append(game)
+    params.append(name)
+    params.append(str(score))
+    params.append(str(time.now_ms()))
+    conn.execute_params("INSERT INTO scores (game, name, score, ts) VALUES (?, ?, ?, ?)", params)
+    conn.close()
+
+fn hs_top_scores(game: str, n: i64) -> List[Tuple[str, i64]]:
+    conn: Connection = sqlite3.open(HS_DB)
+    hs_ensure_schema(conn)
+    sql: str = "SELECT name, score FROM scores WHERE game = ? ORDER BY score DESC, ts ASC LIMIT " + str(n)
+    qp: List[str] = []
+    qp.append(game)
+    cur: Cursor = conn.query_params(sql, qp)
+    out: List[Tuple[str, i64]] = []
+    rows: List[List[str]] = cur.fetchall()
+    i: i32 = 0i32
+    rn: i32 = i32(i64(len(rows)))
+    while i < rn:
+        row: List[str] = rows[i]
+        out.append((row[0i32], parse_i64(row[1i32])))
+        i = i + 1i32
+    conn.close()
+    return out
 
 # ── Layout constants ────────────────────────────────────────────────
 final CELL: i32 = 30i32
@@ -165,6 +208,7 @@ final class GameState:
     last_clear_count: i32   # for the brief "flash" effect on render (M58 will animate)
     last_clear_frame_ms: i64
     game_over: bool
+    score_saved: bool       # M58: high score persisted once on game over
 
     fn __init__(self, masks: List[i32], colors: List[i32]) -> None:
         self.masks = masks
@@ -187,6 +231,7 @@ final class GameState:
         self.last_clear_count = 0i32
         self.last_clear_frame_ms = 0i64
         self.game_over = false
+        self.score_saved = false
 
 # ── Board helpers ───────────────────────────────────────────────────
 
@@ -563,6 +608,26 @@ fn render(win: Window, font: Font, state: GameState) -> None:
                       BOARD_H / 2i32 + 4i32,
                       220i32, 220i32, 220i32)
 
+        # M58: top-5 high scores, read fresh from sqlite.
+        top: List[Tuple[str, i64]] = hs_top_scores(HS_GAME, 5i64)
+        hdr: str = "HIGH SCORES"
+        szh: Tuple[i32, i32] = gfx.text_size(font, hdr)
+        ty: i32 = BOARD_H / 2i32 + 48i32
+        gfx.draw_text(win, font, hdr,
+                      (BOARD_W - szh.0) / 2i32, ty,
+                      255i32, 220i32, 120i32)
+        ti: i32 = 0i32
+        tn: i32 = i32(i64(len(top)))
+        while ti < tn:
+            te: Tuple[str, i64] = top[ti]
+            line: str = str(ti + 1i32) + ". " + te.0 + "  " + str(te.1)
+            szl: Tuple[i32, i32] = gfx.text_size(font, line)
+            gfx.draw_text(win, font, line,
+                          (BOARD_W - szl.0) / 2i32,
+                          ty + 28i32 + ti * 24i32,
+                          220i32, 220i32, 220i32)
+            ti = ti + 1i32
+
     gfx.present(win)
 
 # ── Game lifecycle ─────────────────────────────────────────────────
@@ -586,6 +651,10 @@ fn main() -> i32:
     colors: List[i32] = make_piece_colors()
 
     win: Window = gfx.create_window("Tetris — StrictPy M56", WIN_W, WIN_H)
+    # M58: disable vsync so present() never blocks — the game paces itself
+    # with time.sleep_ms below (vsync-blocking present() is a suspected
+    # cause of the Windows "moves only on key press" timing quirk).
+    gfx.set_vsync(win, false)
     font: Font = gfx.load_font("examples/games/tetris/assets/font.ttf", 22i32)
     sfx_move: Sound = gfx.load_sound("examples/games/tetris/assets/move.wav")
     sfx_rotate: Sound = gfx.load_sound("examples/games/tetris/assets/rotate.wav")
@@ -626,6 +695,11 @@ fn main() -> i32:
 
         if not running:
             break
+
+        # M58: persist the final score exactly once when the game ends.
+        if state.game_over and not state.score_saved:
+            hs_save_score(HS_GAME, HS_PLAYER, state.score)
+            state.score_saved = true
 
         # Auto-drop on its own timer.  Dual timer here is unavoidable:
         # render must run at ~30 FPS for input responsiveness, but the

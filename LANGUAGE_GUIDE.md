@@ -1747,6 +1747,17 @@ gfx.draw_image_rotated(win: Window, img: Image, dst_x: i32, dst_y: i32, dst_w: i
 
 gfx.free_image(img: Image) -> None
 # Explicitly drop/free the image texture resource. Calling other functions with this image raises ValueError.
+
+# ── M58 polish: fullscreen + vsync toggles ──
+gfx.set_fullscreen(win: Window, enabled: bool) -> None
+# Toggle borderless ("desktop") fullscreen. enabled=true → desktop
+# fullscreen, false → windowed. Raises ValueError on SDL failure.
+
+gfx.set_vsync(win: Window, enabled: bool) -> None
+# Toggle render vsync (SDL_RenderSetVSync). enabled=false lets the game
+# pace itself with time.sleep_ms instead of vsync-blocking present().
+# Best-effort: a no-op on backends that don't support runtime vsync
+# toggling (e.g. the headless dummy/software renderer).
 ```
 
 See `examples/_smoke_window.spy` and `examples/_smoke_sprite.spy` for minimal game loop and sprite examples.
@@ -3125,6 +3136,28 @@ Three patterns are new versus Snake/Tetris and worth knowing for any entity-driv
 Unlike Tetris's dual timer, Space Shooter uses a **single ~60 FPS loop** driven by a measured frame delta: `dt_ms = now - prev_ms` (clamped to 64 ms so a dragged/stalled window can't teleport everything), feed `dt_ms` to every motion update, then `time.sleep_ms(16)` to pace.  This is the right shape for continuous-motion action games; the discrete-step Snake/Tetris timers would feel choppy here.
 
 Compile-only test in `compiler/tests/space_shooter_demo_runs.rs`.
+
+### 12.9 High scores (sqlite) + fullscreen/vsync polish (M58)
+
+**High-score persistence.**  All three games now persist their final score to a shared sqlite database (`strictpy_games.db`, cwd-relative) on game over, and render the top 5 in the game-over overlay via `gfx.draw_text`.  The canonical reference is `examples/games/highscores.spy`, which exposes two functions:
+
+```python
+fn save_score(db_path: str, game: str, name: str, score: i64) -> None
+fn top_scores(db_path: str, game: str, n: i64) -> List[Tuple[str, i64]]
+```
+
+backed by a single flat table `scores(game TEXT, name TEXT, score INTEGER, ts INTEGER)` (created on first open via `CREATE TABLE IF NOT EXISTS`).  `save_score` does a parameter-bound `INSERT`; `top_scores` runs `SELECT name, score ... WHERE game = ? ORDER BY score DESC, ts ASC LIMIT n` and parses the score column with the prelude `parse_i64` (sqlite returns all columns as strings on the flat surface).  It uses the M35 typed `sqlite3.Connection` / `Cursor` classes (`sqlite3.open`, `conn.execute`, `conn.execute_params`, `conn.query_params`, `cur.fetchall`, `conn.close`).
+
+Two StrictPy gotchas this exercises:
+
+- **No user-module import.**  StrictPy v0.2 can only `import` stdlib modules — there is no way to `import highscores` from a sibling `.spy`.  So `highscores.spy` is a standalone reference + runnable demo, and each game **inlines** copies of the two helpers (prefixed `hs_*`).  If a future milestone adds user-module imports, the games should switch to importing the shared module.
+- **`i64(str)` is a char cast, not a parse.**  Casting a string with `i64(s)` converts code points; to parse a decimal string to an integer use the prelude `parse_i64(s)` (→ `I64FromStr`).  The score column comes back as `"1200"` etc., so `parse_i64` is required.
+
+Each game guards the save with a `score_saved: bool` field so the row is inserted exactly once, even though the game loop runs every frame while the overlay is shown.
+
+**Fullscreen + vsync toggles** (`gfx.set_fullscreen` / `gfx.set_vsync`, NativeFn IDs 1190/1191).  `set_fullscreen(win, true)` switches to borderless desktop fullscreen (`SDL_SetWindowFullscreen` with `FullscreenType::Desktop`); `false` returns to windowed.  `set_vsync(win, enabled)` wraps `SDL_RenderSetVSync` via raw FFI (best-effort: a no-op on backends that can't toggle vsync at runtime, including the headless dummy renderer).  All three games call `gfx.set_vsync(win, false)` right after `create_window` so `present()` never blocks on the display refresh — the games rely on their own `time.sleep_ms` frame pacing instead.  Disabling vsync (plus the M58 single long-lived `EventPump` fix in the VM's `poll_event`) is a candidate mitigation for the Windows "moves only on key press" timing quirk noted in the M55/M56 walkthroughs.
+
+Compile-only test in `compiler/tests/highscores_demo_runs.rs`; the sqlite round-trip + ordering is exercised at runtime in `vm/tests/m58_highscores.rs`, and the new natives in `vm/tests/m58_gfx_polish.rs`.
 
 **Discipline**: ship a `LANGUAGE_GUIDE.md` update in the same commit as any new language feature or stdlib module. The agent brief for any future milestone touching language surface or stdlib MUST include:
 

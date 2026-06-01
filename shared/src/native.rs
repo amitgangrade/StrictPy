@@ -2319,6 +2319,10 @@ pub enum NativeFn {
     GfxTextSize         = 1172,
     GfxFreeFont         = 1173,
 
+    // ── 1190–1199: GFX polish (M58) — fullscreen/vsync toggles ───────────
+    GfxSetFullscreen    = 1190,
+    GfxSetVsync         = 1191,
+
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
     /// encounters. The VM treats this as a runtime error.
@@ -3074,6 +3078,9 @@ impl NativeFn {
             1171 => Some(Self::GfxDrawText),
             1172 => Some(Self::GfxTextSize),
             1173 => Some(Self::GfxFreeFont),
+            // ── M58 (GFX polish) ─────────────────────────────────────
+            1190 => Some(Self::GfxSetFullscreen),
+            1191 => Some(Self::GfxSetVsync),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

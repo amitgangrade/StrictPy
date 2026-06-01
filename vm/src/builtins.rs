@@ -7161,6 +7161,10 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         NativeFn::GfxTextSize                        => m54_gfx_text_size(interp, args),
         NativeFn::GfxFreeFont                        => m54_gfx_free_font(interp, args),
 
+        // ── M58: GFX polish ──
+        NativeFn::GfxSetFullscreen                   => m58_gfx_set_fullscreen(interp, args),
+        NativeFn::GfxSetVsync                        => m58_gfx_set_vsync(interp, args),
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
@@ -23891,32 +23895,53 @@ fn m52_translate_event(interp: &mut Interpreter, event: sdl2::event::Event) -> R
     m52_create_event_obj(interp, kind, key, x, y, button)
 }
 
+// M58: SDL intends a SINGLE long-lived EventPump per process; the M52
+// implementation created+dropped a fresh pump on every frame, which is
+// both wasteful and a suspected contributor to the Windows "moves only on
+// key press" input quirk.  EventPump is `!Send`, so it cannot live in the
+// global `Mutex<Sdl>` context — a thread_local is the correct home since
+// the game loop runs on one thread.  We lazily build the pump on first
+// poll and reuse it thereafter.
+thread_local! {
+    static M58_EVENT_PUMP: std::cell::RefCell<Option<sdl2::EventPump>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn m52_gfx_poll_event(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let win_obj = arg_u64(args, 0);
     let win_ptr = p4b_read_handle(win_obj);
     m52_get_window(win_ptr as u64)?;
 
-    let guard = M52_SDL_CONTEXT.lock().unwrap();
-    let sdl = guard.as_ref().ok_or_else(|| VmError::UncaughtException {
-        type_name: "ValueError".into(),
-        message: "gfx.poll_event: gfx not initialized".into(),
-    })?;
-
-    let mut event_pump = sdl.0.event_pump().map_err(|e| VmError::UncaughtException {
-        type_name: "IOError".into(),
-        message: format!("gfx.poll_event: failed to get event pump: {}", e),
-    })?;
-
-    loop {
-        if let Some(event) = event_pump.poll_event() {
-            let event_obj = m52_translate_event(interp, event)?;
-            if event_obj != NONE_SENTINEL {
-                return Ok(event_obj);
-            }
-        } else {
-            return Ok(NONE_SENTINEL);
+    // Lazily create the long-lived EventPump once, then reuse it on every
+    // subsequent poll.  We only need the global SDL context the very first
+    // time, so the lock is dropped before we drain events.
+    M58_EVENT_PUMP.with(|cell| {
+        let mut pump_opt = cell.borrow_mut();
+        if pump_opt.is_none() {
+            let guard = M52_SDL_CONTEXT.lock().unwrap();
+            let sdl = guard.as_ref().ok_or_else(|| VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: "gfx.poll_event: gfx not initialized".into(),
+            })?;
+            let pump = sdl.0.event_pump().map_err(|e| VmError::UncaughtException {
+                type_name: "IOError".into(),
+                message: format!("gfx.poll_event: failed to get event pump: {}", e),
+            })?;
+            *pump_opt = Some(pump);
         }
-    }
+        let event_pump = pump_opt.as_mut().unwrap();
+
+        loop {
+            if let Some(event) = event_pump.poll_event() {
+                let event_obj = m52_translate_event(interp, event)?;
+                if event_obj != NONE_SENTINEL {
+                    return Ok(event_obj);
+                }
+            } else {
+                return Ok(NONE_SENTINEL);
+            }
+        }
+    })
 }
 
 fn m52_gfx_clear(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
@@ -24073,6 +24098,63 @@ fn m52_gfx_set_window_title(_interp: &mut Interpreter, args: &[u64]) -> Result<u
             message: format!("gfx.set_window_title failed: {}", e),
         })?;
     }
+    Ok(0)
+}
+
+// ── M58 — gfx stdlib (polish: fullscreen + vsync) ──
+
+// gfx.set_fullscreen(win, enabled) — toggle desktop (borderless)
+// fullscreen.  `enabled == true` → FullscreenType::Desktop; `false` →
+// FullscreenType::Off.  Modeled on m52_gfx_set_window_title's
+// window-mutation pattern.
+fn m58_gfx_set_fullscreen(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let win_obj = arg_u64(args, 0);
+    // Bools arrive as i64 0/1 in the native-call ABI.
+    let enabled = arg_i64(args, 1) != 0;
+
+    let win_ptr = p4b_read_handle(win_obj);
+    let win = m52_get_window(win_ptr as u64)?;
+
+    let mode = if enabled {
+        sdl2::video::FullscreenType::Desktop
+    } else {
+        sdl2::video::FullscreenType::Off
+    };
+
+    unsafe {
+        (*win).canvas.window_mut().set_fullscreen(mode).map_err(|e| VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("gfx.set_fullscreen failed: {}", e),
+        })?;
+    }
+    Ok(0)
+}
+
+// gfx.set_vsync(win, enabled) — toggle render vsync.  We go straight to
+// the raw FFI `SDL_RenderSetVSync` (guaranteed present in sdl2 0.37's
+// `sys` module) rather than the safe `WindowCanvas::set_vsync` wrapper,
+// so this compiles regardless of which minor of the wrapper is vendored.
+//
+// vsync is a best-effort *hint*, not a correctness requirement: some
+// backends (notably the headless `dummy`/software renderer used in CI,
+// and older drivers) don't support toggling it at runtime and return a
+// nonzero code.  We treat that as a documented no-op rather than raising
+// — the game's own `time.sleep_ms` pacing still works either way, and we
+// don't want a vsync-unsupported backend to abort an otherwise-fine game.
+fn m58_gfx_set_vsync(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let win_obj = arg_u64(args, 0);
+    let enabled = arg_i64(args, 1) != 0;
+
+    let win_ptr = p4b_read_handle(win_obj);
+    let win = m52_get_window(win_ptr as u64)?;
+
+    // SAFETY: `raw()` yields the live SDL_Renderer owned by this window's
+    // Canvas; SDL_RenderSetVSync only reads/sets renderer state.  A
+    // nonzero rc means "not supported on this backend" — ignored.
+    let _rc = unsafe {
+        let raw = (*win).canvas.raw();
+        sdl2::sys::SDL_RenderSetVSync(raw, if enabled { 1 } else { 0 })
+    };
     Ok(0)
 }
 

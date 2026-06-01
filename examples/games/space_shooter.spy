@@ -45,7 +45,49 @@ a desktop window — run it manually on your dev box.
 import gfx
 import time
 import random
+import sqlite3
 from gfx import Window, Event, Font, Sound
+
+# ── High-score persistence (M58) ────────────────────────────────────
+#
+# StrictPy v0.2 can't import a user `.spy` module, so the shared logic
+# in examples/games/highscores.spy is inlined here.  See that file for
+# the canonical reference + a runnable standalone demo.
+final HS_DB: str = "strictpy_games.db"
+final HS_GAME: str = "space_shooter"
+final HS_PLAYER: str = "PLAYER"
+
+fn hs_ensure_schema(conn: Connection) -> None:
+    conn.execute("CREATE TABLE IF NOT EXISTS scores (game TEXT, name TEXT, score INTEGER, ts INTEGER)")
+
+fn hs_save_score(game: str, name: str, score: i64) -> None:
+    conn: Connection = sqlite3.open(HS_DB)
+    hs_ensure_schema(conn)
+    params: List[str] = []
+    params.append(game)
+    params.append(name)
+    params.append(str(score))
+    params.append(str(time.now_ms()))
+    conn.execute_params("INSERT INTO scores (game, name, score, ts) VALUES (?, ?, ?, ?)", params)
+    conn.close()
+
+fn hs_top_scores(game: str, n: i64) -> List[Tuple[str, i64]]:
+    conn: Connection = sqlite3.open(HS_DB)
+    hs_ensure_schema(conn)
+    sql: str = "SELECT name, score FROM scores WHERE game = ? ORDER BY score DESC, ts ASC LIMIT " + str(n)
+    qp: List[str] = []
+    qp.append(game)
+    cur: Cursor = conn.query_params(sql, qp)
+    out: List[Tuple[str, i64]] = []
+    rows: List[List[str]] = cur.fetchall()
+    i: i32 = 0i32
+    rn: i32 = i32(i64(len(rows)))
+    while i < rn:
+        row: List[str] = rows[i]
+        out.append((row[0i32], parse_i64(row[1i32])))
+        i = i + 1i32
+    conn.close()
+    return out
 
 # ── Layout constants ─────────────────────────────────────────────────
 final WIN_W: i32 = 800i32
@@ -129,6 +171,7 @@ final class GameState:
     lives: i32
     last_spawn_ms: i64
     game_over: bool
+    score_saved: bool      # M58: high score persisted once on game over
 
     fn __init__(self) -> None:
         self.px = f64(WIN_W / 2i32 - PLAYER_W / 2i32)
@@ -144,6 +187,7 @@ final class GameState:
         self.lives = START_LIVES
         self.last_spawn_ms = 0i64
         self.game_over = false
+        self.score_saved = false
 
 # ── Starfield ────────────────────────────────────────────────────────
 
@@ -569,6 +613,26 @@ fn render(win: Window, font: Font, state: GameState, now: i64) -> None:
                       (WIN_W - sz2.0) / 2i32, WIN_H / 2i32 + 4i32,
                       220i32, 220i32, 220i32)
 
+        # M58: top-5 high scores, read fresh from sqlite.
+        top: List[Tuple[str, i64]] = hs_top_scores(HS_GAME, 5i64)
+        hdr: str = "HIGH SCORES"
+        szh: Tuple[i32, i32] = gfx.text_size(font, hdr)
+        hy: i32 = WIN_H / 2i32 + 48i32
+        gfx.draw_text(win, font, hdr,
+                      (WIN_W - szh.0) / 2i32, hy,
+                      255i32, 220i32, 120i32)
+        ti: i32 = 0i32
+        tn: i32 = i32(i64(len(top)))
+        while ti < tn:
+            te: Tuple[str, i64] = top[ti]
+            line: str = str(ti + 1i32) + ". " + te.0 + "  " + str(te.1)
+            szl: Tuple[i32, i32] = gfx.text_size(font, line)
+            gfx.draw_text(win, font, line,
+                          (WIN_W - szl.0) / 2i32,
+                          hy + 28i32 + ti * 24i32,
+                          220i32, 220i32, 220i32)
+            ti = ti + 1i32
+
     gfx.present(win)
 
 # ── Main ─────────────────────────────────────────────────────────────
@@ -579,6 +643,9 @@ fn main() -> i32:
     random.seed(time.now_ms())
 
     win: Window = gfx.create_window("Space Shooter — StrictPy M57", WIN_W, WIN_H)
+    # M58: disable vsync so present() never blocks — the loop paces itself
+    # with time.sleep_ms(FRAME_MS) below.
+    gfx.set_vsync(win, false)
     font: Font = gfx.load_font("examples/games/space_shooter/assets/font.ttf", 22i32)
     shoot: Sound = gfx.load_sound("examples/games/space_shooter/assets/shoot.wav")
     boom: Sound = gfx.load_sound("examples/games/space_shooter/assets/explosion.wav")
@@ -624,6 +691,11 @@ fn main() -> i32:
         if dt_ms > 64i64:
             dt_ms = 64i64
         prev_ms = now
+
+        # M58: persist the final score exactly once when the run ends.
+        if state.game_over and not state.score_saved:
+            hs_save_score(HS_GAME, HS_PLAYER, state.score)
+            state.score_saved = true
 
         if not state.game_over:
             step(state, dt_ms, now, boom, hit)

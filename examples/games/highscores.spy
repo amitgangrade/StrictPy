@@ -1,0 +1,110 @@
+"""highscores.spy — M58 shared high-score persistence for the games.
+
+A tiny wrapper over the M23/M35 `sqlite3` stdlib that all three reference
+games (Snake / Tetris / Space Shooter) import.  The schema is a single
+flat table keyed by game name:
+
+    scores(game TEXT, name TEXT, score INTEGER, ts INTEGER)
+
+Each game calls `save_score(...)` once on game over with a default player
+name, then `top_scores(...)` to render its game-over leaderboard.
+
+The db path is taken as an argument (the games pass "strictpy_games.db",
+which lands in the current working directory — simple and testable).
+
+API
+---
+  save_score(db_path, game, name, score) -> None
+      Open the db (creating the table if needed) and insert one row.
+  top_scores(db_path, game, n) -> List[Tuple[str, i64]]
+      Return the top-n (name, score) for `game`, highest score first.
+
+Both functions open + close their own Connection per call.  That is a
+little wasteful but keeps the surface stateless and trivial to reason
+about for the games, which only touch the db on game over.
+"""
+
+import sqlite3
+import time
+
+
+fn ensure_schema(conn: Connection) -> None:
+    # CREATE TABLE IF NOT EXISTS is idempotent, so it's safe to run on
+    # every open.
+    conn.execute("CREATE TABLE IF NOT EXISTS scores (game TEXT, name TEXT, score INTEGER, ts INTEGER)")
+
+
+fn save_score(db_path: str, game: str, name: str, score: i64) -> None:
+    conn: Connection = sqlite3.open(db_path)
+    ensure_schema(conn)
+
+    # Parameter-bound INSERT — same injection-safe shape the sqlite class
+    # demo uses.  The flat surface binds every `?` to the matching
+    # position in the params list as a string; SQLite coerces the
+    # INTEGER columns on the way in.
+    params: List[str] = []
+    params.append(game)
+    params.append(name)
+    params.append(str(score))
+    params.append(str(time.now_ms()))
+    conn.execute_params("INSERT INTO scores (game, name, score, ts) VALUES (?, ?, ?, ?)", params)
+
+    conn.close()
+
+
+fn top_scores(db_path: str, game: str, n: i64) -> List[Tuple[str, i64]]:
+    conn: Connection = sqlite3.open(db_path)
+    ensure_schema(conn)
+
+    # Bind the game filter so a quote in a game name can't break the SQL.
+    # `n` is interpolated directly — it is an internal integer, never user
+    # input, so there is no injection surface.
+    sql: str = "SELECT name, score FROM scores WHERE game = ? ORDER BY score DESC, ts ASC LIMIT " + str(n)
+    qp: List[str] = []
+    qp.append(game)
+    cur: Cursor = conn.query_params(sql, qp)
+
+    out: List[Tuple[str, i64]] = []
+    rows: List[List[str]] = cur.fetchall()
+    i: i32 = 0i32
+    rn: i32 = i32(i64(len(rows)))
+    while i < rn:
+        row: List[str] = rows[i]
+        nm: str = row[0i32]
+        # `parse_i64` is the prelude string->i64 parse (maps to the
+        # I64FromStr native).  `i64(str)` is a char/code-point cast, NOT
+        # a parse, so we must not use it here — the score column comes
+        # back from sqlite as a decimal string.
+        sc: i64 = parse_i64(row[1i32])
+        out.append((nm, sc))
+        i = i + 1i32
+
+    conn.close()
+    return out
+
+
+# ── Self-test / demo ─────────────────────────────────────────────────
+#
+# StrictPy v0.2 does NOT support importing one user `.spy` module from
+# another (only stdlib modules can be imported).  So the three games
+# carry their own inlined copies of `save_score` / `top_scores`; this
+# file is the canonical reference + a standalone, runnable demo proving
+# the sqlite round-trip works.  Run it with:
+#     ./target/release/spy examples/games/highscores.spy
+fn main() -> i32:
+    db: str = "strictpy_games_demo.db"
+
+    save_score(db, "demo", "ALICE", 500i64)
+    save_score(db, "demo", "BOB", 1200i64)
+    save_score(db, "demo", "CARA", 300i64)
+    save_score(db, "demo", "DREW", 1200i64)
+
+    top: List[Tuple[str, i64]] = top_scores(db, "demo", 3i64)
+    println("Top scores for 'demo':")
+    i: i32 = 0i32
+    n: i32 = i32(i64(len(top)))
+    while i < n:
+        entry: Tuple[str, i64] = top[i]
+        println("  " + str(i + 1i32) + ". " + entry.0 + " — " + str(entry.1))
+        i = i + 1i32
+    return 0
