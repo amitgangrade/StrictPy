@@ -40,7 +40,7 @@ Everything you need to resume is in:
 | Milestones complete on main | M0–M58 **+ M51** (M51 landed after M56 — see ordering note above) |
 | **v0.2.0 release** | **Tagged at M30 (commit 121483f)** |
 | Tests | **1106** / 0 fail / 1 ignored (`cargo test --workspace --release`) |
-| Bugs | 35 / 35 / **0 deferred** + 1 known unresolved (Snake/Tetris/Shooter Windows input/frame-timing quirk; M58 shipped mitigations — needs a desktop play-test; see M58) |
+| Bugs | 35 / 35 / **0 deferred** + **0 unresolved** — the Snake/Tetris/Shooter Windows input/frame-timing quirk is **FIXED in M58** (vsync-off + persistent event pump), **runtime-verified** by a desktop play-test of Space Shooter (plays smoothly); same shared `gfx` fix applies to Snake/Tetris. |
 | Stdlib modules | 39 (no change) |
 | Stdlib classes | **26** (M51's `RollingWindow`; M52-M54's Window/Event/Image/Sound/Music/Font; the M37-M47 tabular Column/DataFrame family) |
 | Example programs | **122** (+1 M58: `examples/games/highscores.spy`) |
@@ -85,13 +85,13 @@ One blind-code bug found + fixed on integration: `resolver.rs` used
    Each game now calls `gfx.set_vsync(win, false)` right after
    `create_window`.
 
-### The Windows input/frame-timing quirk — analysis (NOT yet runtime-verified)
+### The Windows input/frame-timing quirk — FIXED in M58 (runtime-verified)
 
-The M55/M56 "Snake moves only on key press" / "Tetris left-right also moves
-down" quirk is **interactive and Windows-only**, so it can't be reproduced
-or fixed from CI. M58's investigation identified the two most likely
-causes and shipped mitigations for both, but **a manual desktop play-test
-is required to confirm** (the real gate for M59 or whoever picks this up):
+**RESOLVED.** A desktop play-test of Space Shooter (2026-06-01) confirmed
+smooth, continuous input + steady frame rate — the M58 mitigations fixed
+the M55/M56 quirk. The fix is in the shared `gfx` layer + each game's
+`set_vsync(false)` call, so Snake and Tetris are fixed by the same change.
+The two causes and the shipped fixes (now confirmed effective):
 
 - **Cause A — `present_vsync` blocking.** The renderer is built with
   `.present_vsync()` (builtins.rs `m52_gfx_create_window` ~23772), so

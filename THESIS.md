@@ -1724,11 +1724,15 @@ the per-column null mask is a `List[bool]` at 8 bytes per boolean, plus
 the VM's uniform-8-byte list slots vs NumPy's contiguous typed buffers,
 plus un-interned strings; see [`bench/TABULAR_MEMORY_REPORT_M48b.md`](bench/TABULAR_MEMORY_REPORT_M48b.md)).
 The fix (pack the null mask; eventually a packed-column representation)
-is scoped but deferred to v0.5. (2) The M55/M56 **games have a Windows
-input/frame-timing quirk** that took several patches and is not fully
-resolved — the kind of latent issue that only surfaces when a human
-actually plays the game at 60 FPS, and a reminder that "the compile-only
-test passes" is not the same as "it plays correctly."
+is scoped but deferred to v0.5. (2) The M55/M56 **games had a Windows
+input/frame-timing quirk** — the kind of latent issue that only surfaces
+when a human actually plays the game at 60 FPS, and a reminder that "the
+compile-only test passes" is not the same as "it plays correctly." M58
+root-caused it to vsync-`present` blocking + per-frame event-pump
+recreation, shipped fixes for both (each game disables vsync; the pump is
+now a long-lived thread-local), and a desktop play-test **confirmed** the
+fix — the loop that closes here is *compile-test → ship → human play-test →
+fix → re-verify*, with the human play-test as the irreplaceable final gate.
 
 ---
 

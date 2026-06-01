@@ -1143,12 +1143,14 @@ every frame — a `thread_local` builds it once and reuses it (the pump is
 Deliverables (2) and (3), plus each game now calling `set_vsync(false)` at
 startup, are shipped **mitigations** for the unresolved M55/M56 Windows
 input/frame-timing quirk: the two leading suspects are vsync-`present`
-blocking and the per-frame pump churn, and M58 addresses both. But the
-quirk is interactive and Windows-only, so this is **not runtime-verified**
-— a manual desktop play-test remains the real gate (documented in
-HANDOFF for whoever picks up M59). After M58 the three games gain
-persistent high scores and a fullscreen toggle; the input quirk's fix is
-plausible but unconfirmed.
+blocking and the per-frame pump churn, and M58 addresses both. The quirk is
+interactive and Windows-only, so the real gate was a manual desktop
+play-test — which was done: Space Shooter plays smoothly with continuous
+input and steady frame rate, **confirming the M58 fix**. Since the three
+games share the `gfx` event/timing layer and all call `set_vsync(false)`,
+Snake and Tetris are fixed by the same change. After M58 the three games
+gain persistent high scores, a fullscreen toggle, and a resolved input
+quirk — closing the games stack's last open quality item.
 
 ---
 
