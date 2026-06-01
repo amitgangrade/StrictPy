@@ -624,6 +624,34 @@ After M39, headline numbers refresh: **794 tests passing, 103 example programs, 
 
 ---
 
+## M40–M51 — finishing the Pandas-shaped package
+
+M39 covered the common-80% of pandas. The next dozen milestones went after the long tail, one coherent slice per milestone, each a single ~1,500–2,700-LOC agent run.
+
+**M40–M46 — the index.** Real pandas is an index library that happens to hold columns. M40 added time-series + cumulative ops + null handling. M41 grew the `DataFrame` payload from 24 → 40 bytes to carry an optional single-column index (`set_index` / `resample_index` / `asof_merge_index` / `pivot_table`). M42 then made the 11 existing frame-returning methods *propagate* that index instead of dropping it. M43 closed the single-index story (group-by and reshape ops promote keys to the index). M44 added the **MultiIndex** (payload 40 → 56 bytes, two more optional slots), M45 propagated it through every op, and M46 rounded out `stack` / `unstack` / `df.loc` range lookups + outer-merge MultiIndex fallbacks. By M46 the `tabular` v1 surface was functionally complete: ~21 single-index-aware ops + ~18 MultiIndex-aware ops.
+
+**M47 — categorical + rolling.** The first new `Column` subclass since M37: `ColumnCategorical` (codes + categories, the pandas memory trick), plus 2-D `iloc`, negative indices, and rolling aggregations with Welford's online std. This milestone produced a methodology lesson — see "cross-dispatch" below.
+
+**M48–M49 — measure honestly, then win.** M48 built a comprehensive `tabular`-vs-pandas-3.0 benchmark harness (37 timed cells, RSS polling) and reported the unflattering truth: geomean 0.30× (StrictPy is faster on most cells because pandas's ~1 s import dominates small workloads), but pandas wins **11–22×** on `group_by` / `pivot_table` / `merge` at scale, because those hash strings and StrictPy was routing categoricals through a `to_strings()` materialization. M48 wrote down a *numeric* target for M49: drive the categorical group-by from 12.8 s to under 1.5 s by hashing on the integer codes directly. **M49 hit 12.8 s → 66 ms — a ~194× speedup — and at high cardinality beat pandas's own Categorical fast-path by ~14×.** Bench-first works: measure, write the target into the brief, gate the commit on hitting it.
+
+**M48b — the memory gap, explained.** The same benchmark showed StrictPy using **4–5× more peak RAM** than pandas (a large filter: 1.07 GB vs 0.20 GB). M48b root-caused it from the byte layout: the dominant cost is the per-column null mask, stored as a `List[bool]` at **8 bytes per boolean** (64× what a bit-packed mask needs), plus the VM's uniform-8-byte list slots vs NumPy's contiguous typed buffers, plus un-interned strings. The static model predicts ~4.3×, matching the measurement. The highest-leverage fix — pack the null mask — would move the gap to ~2.5–3×. No NumPy magic; just two deliberate v1 simplifications, now documented.
+
+**M50 — a DataFrame in your browser.** `tabular.serve(df, port)` boots a localhost HTTP server (hand-rolled on `std::net::TcpListener`, *zero* new crate dependencies — an ~80-line HTTP parser and an ~80-line JSON parser) and serves a bundled vanilla-DOM frontend: lazy-scroll table, column filters, group-by, an interactive pivot UI, and canvas charts. The original "I'd eventually like a desktop UI to render a DataFrame and apply filters and pivots" request, finally shipped.
+
+## M52–M56 — StrictPy writes desktop games
+
+Then a hard left turn: could a typed Python dialect host *real desktop games*? M52–M54 built a `gfx` stdlib over native SDL2 (windowing, events, drawing) plus pure-Rust audio (`rodio`) and font rendering (`fontdue`) — six new sealed classes (`Window` / `Event` / `Image` / `Sound` / `Music` / `Font`). M55 shipped **Snake** and M56 shipped **Tetris**, both written entirely in StrictPy (`.spy`), running as native 60-FPS windows with sound. Tetris encodes its seven tetrominoes as 16-bit rotation masks and runs a dual timer (render at 30 FPS, gravity on a level-scaled interval). Honest open issue: the input/frame-timing layer needed several Windows-specific patches and isn't fully nailed — the kind of thing that only shows up when you actually play the game.
+
+## M51 — out of numeric order, and a real collision
+
+M51 (the chainable `RollingWindow` follow-up to M49) got done *after* the games detour — and turned into the most instructive process story of the project. I'd delegated a full five-phase M51 to a sub-agent. When I went to push, the remote rejected it: **an independent M51 RollingWindow had already been built and pushed** to the same branch, plus an unrelated pivot fix. Two good-faith implementations of the same feature, diverged from the same commit.
+
+The resolution wasn't to force-push my version over someone else's published work. It was to **keep the published RollingWindow as canonical and layer on only the four features it lacked** — an explicit `is_ordered` bit, categorical-aware sort, outer-MultiIndex range filters, and a merge benchmark — re-numbering my NativeFn IDs to dodge the clash. The lesson is mundane and important: `git fetch` before you assume your local `main` is the world's, and reconcile rather than overwrite when two people build the same thing.
+
+After M51, headline numbers: **1,102 tests passing, 120 example programs, 39 stdlib modules, 26 stdlib classes, 0 open bugs (one known Windows input quirk in the games), 39 clean-commit agents across the games stack.** The `tabular` package is a from-scratch, statically-typed, index-aware DataFrame library with categorical columns, rolling windows, a browser UI, and a benchmark suite that's honest about where it loses.
+
+---
+
 ## What I learned
 
 ### 1. Static types make AOT compilation trivial — the hard parts of JIT'ing Python simply don't apply.
@@ -700,6 +728,18 @@ The structural pattern, observed twice across the project's late stress rounds:
 
 Both bugs are valid implementation choices that produced wrong end-user behaviour under combinations the unit tests didn't exercise. Stress tests find this class of bug; unit tests don't. The stress-test ROI curve flattens with time (M10: 17 bugs / M24: 1 / M29: 0) but **never reaches zero permanently** — there's always another combination of APIs that isn't covered yet.
 
+### 11. Classify the *shape* of a milestone, not just its size, to predict commit cadence.
+
+The Lesson-1 rule ("first commit before 60% of budget") works, but *when* a milestone first goes green depends on its shape, not its line count. Four classes emerged across M41–M51: **disjoint-handler** (independent handler bodies — clean per-phase commits at ~20%), **shared-infra** (a struct-layout or helper change every phase depends on — combined first commit at ~30–50%), **cross-dispatch** (a new sealed-class subclass forces every dispatch file to compile together — ~50–75%), and **net-new-feature** (a self-contained subsystem whose pieces only go green together — ~50–70%). M47's brief mis-classified the categorical milestone as disjoint-handler and was surprised when the first commit landed at 70% — that wasn't agent drift, it was a brief that named the wrong shape. Naming the shape up front sets the right expectation.
+
+### 12. `git fetch` before you assume your local `main` is the world's.
+
+The most instructive integration of the project happened in M51, when a sub-agent and an independent contributor built the *same* feature (a chainable RollingWindow) in parallel and both landed it. The push was rejected; reconciling meant keeping the already-published version as canonical and layering on only the non-overlapping work, re-numbering IDs to avoid the clash — *not* force-pushing one good implementation over another. When you delegate work that someone else might also be doing, the failure mode isn't a merge conflict the tooling catches; it's two complete, tested, divergent implementations of one feature. Fetch first, reconcile rather than overwrite.
+
+### 13. A sandboxed delegate ships unverified code — so the orchestrator owns verification.
+
+Late milestones ran sub-agents in isolated worktrees whose sandbox blocked every `cargo` and `python` invocation. The agent wrote ~1,900 lines of Rust *blind*, from close reading of the codebase, and it compiled on the first orchestrator build — but it could not self-gate on a green build the way Lesson 1 assumes. The pattern works, but it inverts the contract: the agent produces, the orchestrator builds, tests, benchmarks, and integrates. Budget for that explicitly rather than expecting the delegate to hand you something pre-verified.
+
 ---
 
 ## What StrictPy still can't do
@@ -728,7 +768,7 @@ The performance question is mostly answered: yes, statically typed Python can be
 - **What does async look like at scale?** M32 ships the Future-façade thread-backed surface. Closing the M29 framework's 2× gap to Flask+gunicorn means a real event loop (`mio`, `polling`, or a hand-rolled epoll/IOCP layer). The public surface is settled; the internals are v0.4.
 - **What about NumPy?** Still can't import (libpython dependency). But the `tabular` package is now the proof that a from-scratch Pandas-shaped library is feasible inside StrictPy in three focused milestones. A NumPy-shaped numeric library (BLAS-backed `f64` matrix ops) is a similar shape; the question is whether the win over `List[List[f64]]` justifies the implementation cost.
 - **Where does the static-type win flatten?** The M26 `btree` row showed where: allocation-pressured recursive workloads. Larger workloads — multi-threaded GC contention, long-running with churned heap — probably erode more of that. The `tabular` package will be the test bed for this when someone runs realistic group-by workloads on million-row frames.
-- **Does the `tabular` package have a desktop UI?** Not yet. The original design discussion (recorded in the session transcripts) pencilled in a webview-served-or-Tauri-hybrid Phase 6 — reuse the M29 web framework to serve the DataFrame as JSON, render with AG Grid or Perspective.js in a browser tab. Open question and the natural next layer.
+- **Does the `tabular` package have a desktop UI?** ~~Not yet.~~ **Shipped in M50**: `tabular.serve(df, port)` boots a hand-rolled localhost HTTP server (zero new crate deps) and serves a bundled browser frontend with a lazy-scroll table, filters, group-by, an interactive pivot UI, and canvas charts. And M52–M56 went further — a `gfx` stdlib over SDL2 now lets StrictPy open native windows and run real 60-FPS desktop games (Snake, Tetris) with sound. The "can this language host a UI?" question is answered twice over.
 - **Could it generalise to a research methodology?** The 6-day calendar-elapsed for ~40K LOC of Rust + a thesis archive + a working web framework + a Pandas-shaped data package is anecdotal. The Lesson 1 escalation pattern (numerical thresholds in agent briefs) has now held across **21 consecutive clean-commit agents** spanning M28–M39 with zero orchestrator-commit-on-behalf interventions; that's the most teachable single finding from this project, and it's now been validated at the larger end (three consecutive ~2,500-LOC single-agent milestones for the Pandas package, all clean). Whether the pattern survives outside StrictPy remains the open empirical question.
 
 After watching fib(30) drop from 931 ms to 13.1 ms across three days, then watching a web framework boot up on the same language two days later, then watching a Pandas-shaped DataFrame package ship in three more days, I'm convinced the design thesis holds: **the only good Python is a statically typed Python.** What's still open is how far that goes.

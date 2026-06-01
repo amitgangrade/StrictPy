@@ -1,12 +1,12 @@
 # StrictPy — a statically typed Python dialect, compiler, and bytecode VM
 
-*A 39-milestone, AI-orchestrated systems-language project (v0.2.0 frozen on day 5; v0.3 work began at M31 and continues through M39 with a from-scratch Pandas-shaped data package shipped in M37-M39).*
+*A ~56-milestone, AI-orchestrated systems-language project (v0.2.0 frozen on day 5; v0.3 work began at M31 and continues through M56+M51 — a from-scratch Pandas-shaped data package (M37–M51), a browser-served DataFrame UI (M50), and a native-SDL2 desktop-games stack with two playable games (M52–M56)).*
 
 **Project**: <https://github.com/amitgangrade/StrictPy>
 **Archive**: [`docs/thesis/`](docs/thesis/) — quantitative record (per-milestone CSV, 56+ verbatim agent reports, 35-entry bug catalog, 8 benchmark snapshots).
 **Spec**: [`STRICTPY_SPEC.md`](STRICTPY_SPEC.md) — frozen at v0.1 on day one; v0.2 release tagged at M30; v0.3 amendments in place through M39.
-**Date span**: 2026-05-17 → 2026-05-22 (6 calendar days, ~140+ hours of agent compute).
-**Outcome**: A working compiler + bytecode VM + Cranelift JIT that beats CPython 3.12 by **4–17×** on all 16 cells of the canonical 4-program benchmark suite and wins **28 of 30 cells** on an extended suite. **v0.2 frozen state** (at M30): 96 example programs (including a complete HTTP/1.1 + HTTPS web framework written in StrictPy user code), 36 stdlib modules, **35 bugs found, ALL 35 fixed (0 deferred)**, tagged as **v0.2.0**. **v0.3 work since**: generic classes (M31), async I/O event loop (M32), precise GC stack maps (M33), first stdlib classes — typed JsonValue tree (M34), four more stdlib classes via three parallel agents (M35), `StdlibItemKind::Class` infrastructure refactor (M36), and a from-scratch Pandas-shaped data package `tabular` covering the common-80% of pandas workflows shipped across M37 (core + IO + filter + sort), M38 (aggregations + group-by), and M39 (reshape: merge / pivot / melt / concat). **794 passing tests** at M39. **Lesson 1 methodology streak: 21 consecutive clean-commit agents** (M28 → M39, including three consecutive ~2,500-LOC single-agent milestones for the Pandas package).
+**Date span**: 2026-05-17 → 2026-06-01 (v0.2 frozen in the first 6 days at M30; v0.3 work — tabular package, desktop UI, games stack — continued across the following ~2 weeks).
+**Outcome**: A working compiler + bytecode VM + Cranelift JIT that beats CPython 3.12 by **4–17×** on all 16 cells of the canonical 4-program benchmark suite and wins **28 of 30 cells** on an extended suite. **v0.2 frozen state** (at M30): 96 example programs (including a complete HTTP/1.1 + HTTPS web framework written in StrictPy user code), 36 stdlib modules, **35 bugs found, ALL 35 fixed (0 deferred)**, tagged as **v0.2.0**. **v0.3 work since**: generic classes (M31), async I/O event loop (M32), precise GC stack maps (M33), first stdlib classes — typed JsonValue tree (M34), four more stdlib classes via three parallel agents (M35), `StdlibItemKind::Class` infrastructure refactor (M36), and a from-scratch Pandas-shaped data package `tabular` (M37–M51) that grew from the common-80% of pandas to an index-aware, MultiIndex-capable, categorical-and-rolling-window-bearing DataFrame library with a comprehensive vs-pandas-3.0 benchmark suite, a browser-served interactive UI (M50 `tabular.serve`), and a memory-cost deep-dive (M48b). The same `gfx`/SDL2 stdlib that M52–M56 added makes StrictPy host **native 60-FPS desktop games** (Snake, Tetris) written in StrictPy user code. **1,102 passing tests** post-M51; **26 stdlib classes; 120 example programs**. A standout performance result: M48 measured StrictPy's categorical group-by losing ~12× to pandas, wrote a numeric target into the next brief, and M49 hit a **~194× speedup** (12.8 s → 66 ms), beating pandas's own Categorical fast-path by ~14× at high cardinality. **Lesson 1 methodology streak: 39 clean-commit agents** across the games stack (M28 → M56).
 
 ---
 
@@ -49,16 +49,37 @@ without prelude bloat, and that the orchestrator+agent pattern can
 ship ~2,500-LOC packages in a single milestone (three consecutive
 times, all clean-commit per Lesson 1).
 
-The project's second contribution is methodological: a 39-milestone
+M40–M51 took `tabular` the rest of the way: a single- then
+multi-column index that propagates through every operation (M40–M46),
+a `ColumnCategorical` dtype and rolling-window aggregations (M47), a
+comprehensive vs-pandas-3.0 benchmark harness (M48), a categorical
+codes-hash optimization that turned a ~12× loss into a ~194× win
+(M49), a localhost HTTP server that renders a DataFrame in a browser
+tab with interactive filters/pivots/charts and zero new crate
+dependencies (M50), a chainable `RollingWindow` (M51), and a
+byte-level memory deep-dive that root-causes StrictPy's 4–5× peak-RSS
+gap to an 8-byte-per-boolean null mask carried on every column (M48b).
+The project's fifth contribution followed: M52–M56 added a `gfx`
+stdlib over native SDL2 (plus pure-Rust audio and font rendering) and
+two complete games — Snake and Tetris — written in StrictPy and
+running as native 60-FPS windows, evidence that a statically typed
+Python can host interactive desktop software, not just batch programs.
+
+The project's second contribution is methodological: a ~56-milestone
 record of how Claude Code orchestrated agent tasks, what agent briefs
 worked, what failed, and a 35-bug catalogue with root-cause analysis
 showing that **17 of 35 bugs were found by running real programs
 rather than by writing tests** — a result the archive preserves as
 the auditable record of the stress-test ROI curve. The Lesson 1
-escalation (numerical thresholds in agent briefs) has now held across
-**21 consecutive clean-commit agents** spanning M28 → M39 with zero
-orchestrator-commit-on-behalf interventions, including three
-consecutive ~2,500-LOC single-agent milestones (M37/M38/M39).
+escalation (numerical thresholds in agent briefs) held across
+**39 consecutive clean-commit agents** (M28 → M56). The longer run
+also surfaced a *taxonomy of milestone shapes* that predicts commit
+cadence (disjoint-handler / shared-infra / cross-dispatch /
+net-new-feature; §5), a genuine **parallel-work collision** where two
+agents independently built the same feature and the resolution was to
+reconcile rather than force-push (§5), and a **delegate-blind** pattern
+where a sandboxed sub-agent ships unverified code that the orchestrator
+must build, test, and integrate (§5).
 
 This document is a technical thesis aimed at compiler and systems
 engineers. It synthesises the project archive into eight chapters
@@ -1218,6 +1239,55 @@ It does NOT support claims like:
 The archive is structured to make these scope distinctions auditable
 rather than rhetorical.
 
+### 5.7 Three methodology results from the long tail (M40–M56)
+
+The v0.3 marathon — fourteen tabular milestones, a desktop-UI track,
+and a six-milestone games stack — produced three methodology findings
+that the first 39 milestones did not.
+
+**A taxonomy of milestone shapes predicts commit cadence.** Lesson 1
+("first commit before 60% of budget") works, but *when* a milestone
+first goes green depends on its structural shape, and the brief should
+name that shape. Four classes emerged and were validated repeatedly:
+
+- **disjoint-handler** — independent handler bodies; clean per-phase
+  commits, first at ~20% (M42/M43/M45/M46/M48/M49).
+- **shared-infra** — a struct-layout or shared-helper change every
+  later phase depends on; combined first commit at ~30–50% (M41/M44 —
+  e.g. the DataFrame payload growing 24→40→56 bytes for the index).
+- **cross-dispatch** — a new sealed-class subclass forces every
+  dispatch file (resolver / ir / native / builtins) to compile
+  together; first green at ~50–75% (M47's `ColumnCategorical`).
+- **net-new-feature** — a self-contained subsystem whose pieces only
+  go green together; ~50–70% (M50a's HTTP server; the games).
+
+M47 is the instructive case: its brief named the wrong shape
+(disjoint-handler), the first commit landed at 70%, and that was a
+brief-side mis-classification, not agent drift. Naming the shape up
+front sets the right expectation and keeps the streak honest.
+
+**Parallel-work collisions are a distinct failure mode from merge
+conflicts.** In M51 a delegated sub-agent and an independent
+contributor built the *same* feature — a chainable rolling-window class
+— in parallel, both diverging from the same commit, and both landed a
+complete, tested implementation. The push was rejected on a
+non-fast-forward. The correct resolution was not to force-push one good
+implementation over the other but to keep the already-published version
+canonical and layer on only the non-overlapping work, re-numbering the
+clashing native-function IDs. The lesson: when you delegate work that
+someone else might also do, `git fetch` before assuming your local
+branch is authoritative, and reconcile rather than overwrite.
+
+**A sandboxed delegate inverts the verification contract.** Late
+sub-agents ran in isolated worktrees whose sandbox denied every
+`cargo`/`python` invocation. The agent wrote ~1,900 lines of Rust blind
+(from close reading of the codebase) and it compiled on the first
+orchestrator build — but it could not self-gate on a green build the
+way Lesson 1 assumes. The pattern works, but the orchestrator, not the
+agent, owns building, testing, benchmarking, and integration. This is a
+strictly stronger demand on the orchestrator than the earlier
+worktree-isolated agents, which could at least run their own tests.
+
 ---
 
 ## 6. Findings
@@ -1647,6 +1717,18 @@ two `spy hello.spy` invocations concurrently rewrite the same
 read-only; and the cache key doesn't include a build identifier so a
 major upgrade requires manually clearing `__spycache__/`. None block
 normal use; all are listed in [`docs/thesis/milestones/m25_unified_cli.md`](docs/thesis/milestones/m25_unified_cli.md).
+
+Two v0.3-era defects are characterized but unfixed. (1) **`tabular`
+peak memory runs 4–5× pandas** at large sizes (M48b root-caused it:
+the per-column null mask is a `List[bool]` at 8 bytes per boolean, plus
+the VM's uniform-8-byte list slots vs NumPy's contiguous typed buffers,
+plus un-interned strings; see [`bench/TABULAR_MEMORY_REPORT_M48b.md`](bench/TABULAR_MEMORY_REPORT_M48b.md)).
+The fix (pack the null mask; eventually a packed-column representation)
+is scoped but deferred to v0.5. (2) The M55/M56 **games have a Windows
+input/frame-timing quirk** that took several patches and is not fully
+resolved — the kind of latent issue that only surfaces when a human
+actually plays the game at 60 FPS, and a reminder that "the compile-only
+test passes" is not the same as "it plays correctly."
 
 ---
 
