@@ -7118,6 +7118,9 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         NativeFn::M51TabRwWindow                     => m51_rw_window(interp, args),
         NativeFn::M51TabRwMinPeriods                 => m51_rw_min_periods(interp, args),
         NativeFn::M51TabRwIsCentered                 => m51_rw_is_centered(interp, args),
+        NativeFn::M51TabDfLocRangeLevelI64           => m51_df_loc_range_level_i64(interp, args),
+        NativeFn::M51TabDfLocRangeLevelStr           => m51_df_loc_range_level_str(interp, args),
+        NativeFn::M51TabDfLocRangeLevelDateTime      => m51_df_loc_range_level_datetime(interp, args),
 
         // ── M52: GFX core ──
         NativeFn::GfxInit                            => m52_gfx_init(interp, args),
@@ -13302,6 +13305,17 @@ fn m37_df_sort_by(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError
             let vs = m37_read_list_bool(vals);
             non_null_indices.sort_by(|a, b| {
                 let cmp = vs[*a].cmp(&vs[*b]);
+                if ascending { cmp } else { cmp.reverse() }
+            });
+        }
+        // M51 Phase C: sort a ColumnCategorical by its code (= position
+        // in categories[]), matching pandas — which orders a categorical
+        // by category-definition order, not lexically. Codes live at the
+        // same payload slot as values, read as i64.
+        "ColumnCategorical" => {
+            let codes = m37_read_list_i64(vals);
+            non_null_indices.sort_by(|a, b| {
+                let cmp = codes[*a].cmp(&codes[*b]);
                 if ascending { cmp } else { cmp.reverse() }
             });
         }
@@ -19744,6 +19758,103 @@ fn m49_df_loc_range_multi_datetime(interp: &mut Interpreter, args: &[u64]) -> Re
     Ok(m49_assemble_loc_range_multi(interp, recv, &keep))
 }
 
+/// M51 Phase D — common preamble for loc_range_level_*: validate the
+/// frame has a MultiIndex, that `level` is in range, and that the chosen
+/// level has the expected dtype.  Returns (level_col_ptr, length).
+fn m51_loc_range_level_check(
+    recv: u64,
+    level: i64,
+    method: &str,
+    expected_cls: &str,
+) -> Result<(u64, i64), VmError> {
+    let m51_levels = m44_read_index_levels(recv);
+    if m51_levels.is_empty() {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "DataFrame.{}: frame has no MultiIndex (use loc_range_* on a single-col index instead)",
+                method,
+            ),
+        });
+    }
+    if level < 0 || (level as usize) >= m51_levels.len() {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "DataFrame.{}: level {} out of range [0, {})",
+                method, level, m51_levels.len()
+            ),
+        });
+    }
+    let m51_lvl = m51_levels[level as usize];
+    let m51_cls = m38_col_class_name(m51_lvl);
+    if m51_cls != expected_cls {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "DataFrame.{}: level {} dtype is {}, expected {}",
+                method, level, m51_cls, expected_cls
+            ),
+        });
+    }
+    let (_, _, length) = m37_col_fields(m51_lvl);
+    Ok((m51_lvl, length))
+}
+
+fn m51_df_loc_range_level_i64(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let level = arg_i64(args, 1);
+    let start = arg_i64(args, 2);
+    let stop = arg_i64(args, 3);
+    let (lvl, length) = m51_loc_range_level_check(recv, level, "loc_range_level_i64", "ColumnI64")?;
+    let (vals, nulls, _) = m37_col_fields(lvl);
+    let vs = m37_read_list_i64(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut keep: Vec<bool> = Vec::with_capacity(length as usize);
+    for i in 0..length as usize {
+        if ns.get(i).copied().unwrap_or(false) { keep.push(false); continue; }
+        let v = vs.get(i).copied().unwrap_or(0);
+        keep.push(v >= start && v <= stop);
+    }
+    Ok(m49_assemble_loc_range_multi(interp, recv, &keep))
+}
+
+fn m51_df_loc_range_level_str(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let level = arg_i64(args, 1);
+    let start = arg_str(args, 2);
+    let stop = arg_str(args, 3);
+    let (lvl, length) = m51_loc_range_level_check(recv, level, "loc_range_level_str", "ColumnStr")?;
+    let (vals, nulls, _) = m37_col_fields(lvl);
+    let vs = m37_read_list_str_lst(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut keep: Vec<bool> = Vec::with_capacity(length as usize);
+    for i in 0..length as usize {
+        if ns.get(i).copied().unwrap_or(false) { keep.push(false); continue; }
+        let v = vs.get(i).cloned().unwrap_or_default();
+        keep.push(v.as_str() >= start.as_str() && v.as_str() <= stop.as_str());
+    }
+    Ok(m49_assemble_loc_range_multi(interp, recv, &keep))
+}
+
+fn m51_df_loc_range_level_datetime(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let recv = arg_u64(args, 0);
+    let level = arg_i64(args, 1);
+    let start = arg_i64(args, 2);
+    let stop = arg_i64(args, 3);
+    let (lvl, length) = m51_loc_range_level_check(recv, level, "loc_range_level_datetime", "ColumnDateTime")?;
+    let (vals, nulls, _) = m37_col_fields(lvl);
+    let vs = m37_read_list_i64(vals);
+    let ns = m37_read_list_bool(nulls);
+    let mut keep: Vec<bool> = Vec::with_capacity(length as usize);
+    for i in 0..length as usize {
+        if ns.get(i).copied().unwrap_or(false) { keep.push(false); continue; }
+        let v = vs.get(i).copied().unwrap_or(0);
+        keep.push(v >= start && v <= stop);
+    }
+    Ok(m49_assemble_loc_range_multi(interp, recv, &keep))
+}
+
 // ═════════════════════════════════════════════════════════════════════════
 // ── M46 Phase C — set_index_list + pivot_table extensions ────────────────
 // ═════════════════════════════════════════════════════════════════════════
@@ -20571,17 +20682,23 @@ fn m47_alloc_col_categorical(
     nulls_lst: *mut crate::object::ListRepr,
     categories_lst: *mut crate::object::ListRepr,
     length: i64,
+    ordered: bool,
 ) -> *mut u8 {
-    let p = m34_alloc_class_obj(interp, "ColumnCategorical", 32);
+    // M51 Phase B: payload is 40 bytes — (codes, nulls, length,
+    // categories, is_ordered).  The first 4 slots are the M47 layout;
+    // the is_ordered bit at offset 32 replaces the M49 heuristic.
+    let p = m34_alloc_class_obj(interp, "ColumnCategorical", 40);
     unsafe {
         let c_slot = p.add(HDR) as *mut u64;
         let n_slot = p.add(HDR + 8) as *mut u64;
         let l_slot = p.add(HDR + 16) as *mut i64;
         let cats_slot = p.add(HDR + 24) as *mut u64;
+        let ord_slot = p.add(HDR + 32) as *mut u64;
         std::ptr::write_unaligned(c_slot, codes_lst as u64);
         std::ptr::write_unaligned(n_slot, nulls_lst as u64);
         std::ptr::write_unaligned(l_slot, length);
         std::ptr::write_unaligned(cats_slot, categories_lst as u64);
+        std::ptr::write_unaligned(ord_slot, if ordered { 1u64 } else { 0u64 });
     }
     p
 }
@@ -20615,7 +20732,7 @@ fn m47_col_categorical(interp: &mut Interpreter, args: &[u64]) -> Result<u64, Vm
     let m47_nulls_lst = m37_alloc_list_bool(interp, &m47_nulls);
     let m47_cats_lst = m37_alloc_list_str(interp, &m47_cats);
     Ok(m47_alloc_col_categorical(
-        interp, m47_codes_lst, m47_nulls_lst, m47_cats_lst, m47_n as i64,
+        interp, m47_codes_lst, m47_nulls_lst, m47_cats_lst, m47_n as i64, false,
     ) as u64)
 }
 
@@ -20655,7 +20772,7 @@ fn m47_col_categorical_with_nulls(
     let m47_nulls_lst_out = m37_alloc_list_bool(interp, &m47_ns);
     let m47_cats_lst = m37_alloc_list_str(interp, &m47_cats);
     Ok(m47_alloc_col_categorical(
-        interp, m47_codes_lst, m47_nulls_lst_out, m47_cats_lst, m47_vs.len() as i64,
+        interp, m47_codes_lst, m47_nulls_lst_out, m47_cats_lst, m47_vs.len() as i64, false,
     ) as u64)
 }
 
@@ -20839,7 +20956,7 @@ fn m49_col_categorical_ordered(
     let m49_nulls_lst = m37_alloc_list_bool(interp, &m49_nulls);
     let m49_cats_lst_out = m37_alloc_list_str(interp, &m49_cats);
     Ok(m47_alloc_col_categorical(
-        interp, m49_codes_lst, m49_nulls_lst, m49_cats_lst_out, m49_n as i64,
+        interp, m49_codes_lst, m49_nulls_lst, m49_cats_lst_out, m49_n as i64, true,
     ) as u64)
 }
 
@@ -20875,7 +20992,7 @@ fn m49_col_categorical_from_codes(
     let m49_nulls_out = m37_alloc_list_bool(interp, &m49_nulls);
     let m49_cats_out = m37_alloc_list_str(interp, &m49_cats);
     Ok(m47_alloc_col_categorical(
-        interp, m49_codes_out, m49_nulls_out, m49_cats_out, m49_n as i64,
+        interp, m49_codes_out, m49_nulls_out, m49_cats_out, m49_n as i64, true,
     ) as u64)
 }
 
@@ -20893,20 +21010,20 @@ fn m49_col_categorical_from_codes(
 /// Pandas-style ordered-flag persistence + sort-by-categories ordering
 /// is M51 work.
 fn m49_col_cat_is_ordered(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
-    let m49_recv = arg_u64(args, 0);
-    let (m49_codes_lst, _nulls_lst, _len) = m37_col_fields(m49_recv);
-    let m49_codes = m37_read_list_i64(m49_codes_lst);
-    let m49_cats_ptr = m47_col_cat_categories_ptr(m49_recv);
-    let m49_cats = m37_read_list_str_lst(m49_cats_ptr);
-    let m49_k = m49_cats.len();
-    // Are there categories never referenced by codes?
-    let mut m49_used = vec![false; m49_k];
-    for c in &m49_codes {
-        let c = *c as usize;
-        if c < m49_k { m49_used[c] = true; }
+    // M51 Phase B: read the explicit is_ordered bit at offset 32
+    // (written by m47_alloc_col_categorical). Replaces the M49 heuristic
+    // that guessed "ordered" from whether some category was unreferenced
+    // — which mislabeled a plain categorical that happened to use every
+    // category.
+    let m51_recv = arg_u64(args, 0);
+    let m51_obj = m51_recv as *const u8;
+    if m51_obj.is_null() {
+        return Ok(0);
     }
-    let m49_has_unused = m49_used.iter().any(|u| !u);
-    Ok(if m49_has_unused { 1 } else { 0 })
+    let m51_is_ord = unsafe {
+        std::ptr::read_unaligned(m51_obj.add(HDR + 32) as *const u64)
+    };
+    Ok(if m51_is_ord != 0 { 1 } else { 0 })
 }
 
 // ─────────────────────────────────────────────────────────────────────

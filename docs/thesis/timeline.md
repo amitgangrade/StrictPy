@@ -1115,6 +1115,52 @@ empirical findings, both honest data:
 
 No language/compiler changes; new pure-bench infrastructure only.
 
+## M51 — `tabular` RollingWindow + grab-bag (reconciled after a collision) (2026-06-01)
+
+Completed out of numeric order — after the M52-M56 games detour — as the
+delayed M49 follow-up. Notable for a **parallel-work collision**: an
+independent M51 "chainable RollingWindow on DataFrame" was already pushed
+to origin/main (`71f697b`), along with an unrelated pivot_table
+ColumnCategorical fix (`10584f5`). The orchestrator had separately
+delegated a fuller 5-phase M51 to an agent (in an Agent-tool isolation
+worktree whose sandbox blocked all `cargo`/`python`, so the orchestrator
+built/tested/integrated everything). On discovering the push could not
+fast-forward, we did NOT force-push; per the user's decision we kept the
+**published remote RollingWindow as canonical** and layered only the four
+non-overlapping grab-bag features the remote lacked.
+
+**On main:**
+- **RollingWindow (remote)** — constructor-variant API `df.rolling(w)` /
+  `rolling_centered(w)` / `rolling_min_periods(w,mp)` /
+  `rolling_centered_min_periods(w,mp)` → terminals
+  `.sum/.mean/.min/.max/.std/.count` + accessors. NativeFn IDs 1069-1081.
+- **pivot_table categorical fix (remote)**.
+- **Grab-bag (orchestrator-layered):** explicit `ColumnCategorical.is_ordered`
+  bit (payload 32→40 bytes, replaces the M49 heuristic); `df.sort_by` on a
+  categorical sorts by code (= categories[] order) instead of erroring;
+  `df.loc_range_level_{i64,str,datetime}(level,start,stop)` generalizes
+  M49's innermost-only MI range-filter to any level (NativeFn IDs 1082-1084,
+  re-numbered from the orchestrator's original 1078-1080 to dodge the
+  remote's RollingWindow IDs); `merge_cat_codes` bench cell (codes path
+  ~88× faster than string-coercion, 0.29× vs pandas at low cardinality,
+  5.93× slower at high cardinality — open merge-perf item).
+
+Verified 1102 / 0 / 1 ignored on `cargo test --workspace --release`
+(remote RollingWindow 32 tests + 9 grab-bag tests in
+`vm/tests/m51_tabular_grabbag.rs`). The orchestrator's fuller standalone
+M51 (chainable builders + `.agg`, 1098 tests) is preserved at tag
+`m51-local-full`, not on main.
+
+**Methodology data points:** (1) a real parallel-work collision — always
+`git fetch` before assuming local main is current; reconcile rather than
+force-push when the remote has independent work. (2) The Agent-tool
+isolation-worktree sandbox denies the delegate `cargo`/`python`, so it
+ships unverified code and the orchestrator owns all build/test/bench. (3)
+`third_party/SDL2_image` (M53 games dep) is untracked, so fresh checkouts
+can't link `spy` without setting the `LIB` env var.
+
+---
+
 ## M52 — Core GFX Stdlib (Windows + Events + Drawing Primitives) (2026-05-24)
 
 Implemented the core `gfx` stdlib package in StrictPy. Exposes windowing, keyboard/mouse event polling, and 2D drawing primitives using native SDL2.

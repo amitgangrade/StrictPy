@@ -1382,6 +1382,16 @@ pub enum NativeFn {
     /// `RollingWindow.is_centered() -> bool`.  Introspection: whether
     /// the RollingWindow was constructed with center=true.
     M51TabRwIsCentered                 = 1081,
+    /// `DataFrame.loc_range_level_i64(self, level: i64, start: i64,
+    /// stop: i64) -> DataFrame` — range-filter a chosen MultiIndex level
+    /// (0 = outermost), generalizing M49's innermost-only loc_range_multi.
+    M51TabDfLocRangeLevelI64           = 1082,
+    /// `DataFrame.loc_range_level_str(self, level: i64, start: str,
+    /// stop: str) -> DataFrame`.
+    M51TabDfLocRangeLevelStr           = 1083,
+    /// `DataFrame.loc_range_level_datetime(self, level: i64, start: i64,
+    /// stop: i64) -> DataFrame`.
+    M51TabDfLocRangeLevelDateTime      = 1084,
 
     // ── 250–289: M22 P2A (argparse + collections + csv) ─────────────────
     // Phase 2 starts here.  P2A's job is to bring three high-ROI stdlib
@@ -3026,6 +3036,9 @@ impl NativeFn {
             1079 => Some(Self::M51TabRwWindow),
             1080 => Some(Self::M51TabRwMinPeriods),
             1081 => Some(Self::M51TabRwIsCentered),
+            1082 => Some(Self::M51TabDfLocRangeLevelI64),
+            1083 => Some(Self::M51TabDfLocRangeLevelStr),
+            1084 => Some(Self::M51TabDfLocRangeLevelDateTime),
             // ── M52 (GFX core) ───────────────────────────────────
             1100 => Some(Self::GfxInit),
             1101 => Some(Self::GfxCreateWindow),

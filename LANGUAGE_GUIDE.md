@@ -1535,18 +1535,19 @@ M49 ships the PRIMARY follow-up from M48's benchmark: `group_by` and `merge` on 
 
 - `tabular.col_categorical_ordered(values: List[str], categories: List[str]) -> ColumnCategorical` — pin the categories[] ordering up front.  All values must appear in categories (else `ValueError`).  Duplicate categories raise `ValueError`.  Codes are positions in `categories`.  The typical merge-on-codes workflow is `df1_cat = col_categorical_ordered(vals_a, cats)` + `df2_cat = col_categorical_ordered(vals_b, cats)` so both sides share categories[] and the codes-hash fastpath fires.
 - `tabular.col_categorical_from_codes(codes: List[i64], categories: List[str]) -> ColumnCategorical` — reverse constructor (useful for round-tripping `cc.codes()` + `cc.categories()` → back into a ColumnCategorical).  Each code must satisfy `0 <= code < len(categories)`.
-- `cc.is_ordered() -> bool` — heuristic predicate.  Returns true iff `categories[]` has unreferenced entries (the signature of an explicit-categories build).  See §11.36 for the v1 nuance.
+- `cc.is_ordered() -> bool` — returns the **explicit** ordered flag stored on the categorical (M51 Phase B replaced the old M49 heuristic with a real payload bit at offset 32).  The two M47 constructors (`col_categorical` / `col_categorical_with_nulls`) build **unordered** (`false`); the two M49 explicit-ordering constructors (`col_categorical_ordered` / `col_categorical_from_codes`) build **ordered** (`true`).  Unlike the old heuristic, an ordered categorical that happens to use every category now correctly reports `true`.
 
 **Phase D small polish**:
 
 - `df.resample(time_col, "1w", agg)` — weekly buckets (fixed-width: 7 × 86_400_000 ms).  `df.resample(time_col, "1M", agg)` and `"1Y"` — monthly / yearly buckets via calendar arithmetic (Howard Hinnant's `days_from_civil` / `civil_from_days` for proleptic Gregorian).  End-of-month clamping applies: Jan 31 + 1M = Feb 29 (leap year) or Feb 28 (non-leap).  Feb 29 + 1Y in a non-leap year clamps to Feb 28.  See §11.37.
 - **Outer-merge MultiIndex on either side** — extends M46's NaN-padded 2-level fallback (which previously fired only for dtype-mismatched single-col indexes on both sides).  Now handles three new cases: lhs MultiIndex + rhs single-col (rhs becomes the last level), lhs single-col + rhs MultiIndex (lhs becomes the first level), both MultiIndex with equal level count + matching level dtypes (stitched level-by-level).  Mismatched level counts or level dtypes falls back to RangeIndex (documented v1 limitation).
 - **`df.unstack()` distributes every regular column** (M46 only used the first).  Single-regular-column input preserves M46's `"{innermost_value}"` output naming (byte-compatible); multi-regular uses `"{innermost_value}_{source_col_name}"` (pandas behavior).
-- **`df.loc_range_multi_{i64, str, datetime}(start, stop)`** — innermost-level range filter on a MultiIndex (outer levels left intact).  Raises `ValueError` if the frame has no MultiIndex.  Range filtering on outer levels is M51 work.
+- **`df.loc_range_multi_{i64, str, datetime}(start, stop)`** — innermost-level range filter on a MultiIndex (outer levels left intact).  Raises `ValueError` if the frame has no MultiIndex.
+- **`df.loc_range_level_{i64, str, datetime}(level, start, stop)`** (M51 Phase D) — range filter on **any** chosen MultiIndex level (`level=0` is outermost), generalizing `loc_range_multi_*` (which only ever filtered the innermost level).  Inclusive `[start, stop]`; all other levels and columns are preserved through the kept rows.  Raises `ValueError` if the frame has no MultiIndex, if `level` is out of range, or if the chosen level's dtype doesn't match the method (`loc_range_level_i64` ⇒ `ColumnI64`, etc.).
 
 See `examples/tabular_m49_codes_demo.spy` for an M49 walkthrough — builds a small ordered categorical, exercises codes-hash group_by + merge, runs `1w` / `1M` resample, and verifies `unstack` distributes both regular columns.
 
-After M49 the `tabular` v0.4 polish surface is essentially complete.  M51 should pick up `RollingWindow` chainable + `center=True` + pandas-style ordered-sort on `ColumnCategorical` + range filtering on outer MultiIndex levels.
+After M49 the `tabular` v0.4 polish surface is essentially complete.  **M51 closed out the remaining items**: chainable `RollingWindow` + `center=True` (see the M51 section below), pandas-style ordered-sort on `ColumnCategorical` (`df.sort_by` on a categorical column now sorts by **category/code order**, not lexically — matching pandas; previously it raised `ValueError`), an explicit `is_ordered` bit (above), and outer-MultiIndex range filtering via `df.loc_range_level_*` (above).
 
 #### M50a additions — `tabular.serve` HTTP transport + minimal browser-tab UI
 
@@ -2715,16 +2716,15 @@ M44a shipped MultiIndex storage + multi-column `group_by` promotion + minimal pr
 
 M40 shipped `df.iloc(start, stop)` with an explicit "negative indices raise `ValueError`" contract.  **M47 lifts that contract**: `iloc` now accepts Python-style negative indices on both bounds (`-1` = last row, `-N` = `nrows - N`).  Mixed positive + negative is fine (`iloc(-3, nrows)` = last 3 rows; `iloc(-5, -1)` = rows `[nrows-5, nrows-1)`).  Out-of-range positive bounds still clamp silently to `[0, nrows]` — only the explicit-rejection contract changed.  The same semantics apply to both bounds of `df.iloc_2d(row_start, row_stop, col_start, col_stop)` on both axes.
 
-### 11.36 `tabular.ColumnCategorical` sort uses alphabetical string ordering (post-M49 nuance)
+### 11.36 `tabular.ColumnCategorical` sort + `is_ordered` (M51 resolved the M47/M49 nuances)
 
-`ColumnCategorical` ships in M47 with a v1 limitation: any op that needs to compare two categorical cells (e.g. `sort_by` on a frame whose key column is categorical) compares **the materialized strings alphabetically**, NOT the `categories[]` declaration order.  This matches the v1 to_strings() coercion contract.  M49 ships codes-hash for `group_by` and `merge` (transparent, no API change — see §11.38), and adds `cc.is_ordered() -> bool` so callers can detect explicit-categories builds, but the sort itself still uses alphabetical string ordering.  Pandas's "ordered categorical" sort semantics (where the order of `categories[]` is meaningful for comparison) is **M51 work**.
+Two M47/M49 limitations were closed in M51:
 
-**Workarounds for ordered sort in M49:**
+1. **`sort_by` on a categorical column.**  In M47/M49 this *raised `ValueError`* (categoricals weren't a supported sort dtype).  **M51 Phase C** makes `df.sort_by(col, ascending)` on a `ColumnCategorical` sort by **code** — i.e. by the `categories[]` declaration order — which is exactly what pandas does for a categorical (ordered or not).  So a categorical built with `col_categorical_ordered(values, ["low","mid","high"])` sorts `low < mid < high`, NOT alphabetically (`high < low < mid`).  (Note: the sorted output column materializes as `ColumnI64` codes — a pre-existing `m37_column_take` behavior.)
 
-1. Build a small `Dict[str, i64]` mapping each category to its desired ordinal and replace the categorical column with the i64 column for sorting.
-2. Build the categorical via `tabular.col_categorical_ordered(values, categories)`, call `cc.codes()` to materialize the codes column, sort on that, and use the resulting permutation to reorder the rest of the frame.
+2. **`cc.is_ordered()` is now exact, not a heuristic.**  M49 guessed "ordered" from whether some category was unreferenced by the codes — which mislabeled a value-rich ordered categorical that happened to use every category.  **M51 Phase B** stores an explicit `is_ordered` bit in the `ColumnCategorical` payload (32→40 bytes, offset 32): the M47 constructors set it `false`, the M49 explicit-ordering constructors (`col_categorical_ordered` / `col_categorical_from_codes`) set it `true`.  `cc.is_ordered()` reads the bit directly.
 
-`cc.is_ordered()` heuristic: returns true iff `categories[]` has unreferenced entries (the signature of an explicit-categories build via `col_categorical_ordered` / `col_categorical_from_codes`).  A value-rich ordered categorical where every category happens to be used will return false (looks identical to the M47 first-appearance build).  Use `cc.categories()` directly when you need to inspect the ordering.
+If you need a custom sort order different from `categories[]`, build a `Dict[str, i64]` of category→ordinal and sort a derived i64 column instead.
 
 ### 11.37 `tabular.resample` calendar-arithmetic for `1M` / `1Y` (post-M49)
 

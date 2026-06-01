@@ -1,4 +1,14 @@
-# Session handoff — 2026-05-24 (post-M56)
+# Session handoff — 2026-06-01 (post-M51, layered onto the M52-M56 games stack)
+
+> **Milestone-ordering + collision note:** M51 (`tabular` RollingWindow +
+> grab-bag) was finished AFTER the M52-M56 games stack — it's the delayed
+> M49 follow-up. It also involved a **parallel-work collision**: an
+> independent M51 RollingWindow was already pushed to origin/main
+> (`71f697b`) plus an unrelated pivot_table categorical fix (`10584f5`).
+> We kept the published RollingWindow as canonical and layered the four
+> non-overlapping grab-bag features on top (re-ID'd to avoid the clash).
+> The orchestrator's fuller standalone M51 is preserved at tag
+> `m51-local-full` but is NOT on main. `git log` is authoritative.
 
 ## Read this FIRST in the next session
 
@@ -11,30 +21,92 @@ Everything you need to resume is in:
 5. **`RELEASE_NOTES_v0.2.md`** — v0.2.0 freeze-point summary
 6. **`LANGUAGE_GUIDE.md`** — single source of truth for AI tools writing
    StrictPy programs (refreshed post-M56; §11 has gotchas through §11.43, §12 has games walkthroughs §12.6/§12.7)
-7. **`bench/TABULAR_BENCH_REPORT.md`** + `bench/TABULAR_BENCH_REPORT_M49.md` —
-   the StrictPy vs pandas 3.0 comparison
+7. **`bench/TABULAR_BENCH_REPORT.md`** + `_M49.md` + `_M51.md` —
+   the StrictPy vs pandas 3.0 comparison (M51 adds the `merge_cat_codes`
+   codes-hash cell)
 8. **`GAMES_PLAN.md`** — sequential plan for the M52-M58 desktop-games stack (Snake + Tetris done; Space Shooter next)
 9. **Memory file**: `C:\Users\AG\.claude\projects\C--Users-AG-CascadeProjects-PythonCompiler\memory\project_strictpy.md`
 
 ## Current head
 
 - Branch: `main`
-- Latest commit: (post-M56 — `examples/games/tetris.spy` + assets + test + LANGUAGE_GUIDE §12.7)
-- Tests passing on main: **1078** (M56 adds 1 compile-only test in `compiler/tests/tetris_demo_runs.rs`)
+- Latest commit: post-M51 grab-bag (RollingWindow `71f697b` + pivot fix `10584f5` already on origin; grab-bag layered on top)
+- Tests passing: **1102 / 0 fail / 1 ignored** (`cargo test --workspace --release`)
 
 ## Status snapshot
 
 | Metric | Value |
 |---|---:|
-| Milestones complete on main | M0–M56 |
+| Milestones complete on main | M0–M56 **+ M51** (M51 landed after the games stack — see ordering note above) |
 | **v0.2.0 release** | **Tagged at M30 (commit 121483f)** |
-| Tests | 1078 / 0 fail / 1 ignored |
+| Tests | **1102** / 0 fail / 1 ignored (`cargo test --workspace --release`) |
 | Bugs | 35 / 35 / **0 deferred** + 1 known unresolved (Snake "moves only on key press" on Windows; see M55 below) |
-| Stdlib modules | 39 (no change, `gfx` shipped in M52) |
-| Stdlib classes | 25 (M52-M54 added Window/Event/Image/Sound/Music/Font) |
-| Example programs | **118** (+1 in M56: `examples/games/tetris.spy`) |
-| Lesson 1 streak | **39 consecutive clean-commit agents** (M28 → M56) |
-| Benchmark suites | 3 |
+| Stdlib modules | 39 (no change) |
+| Stdlib classes | **26** (M51's `RollingWindow`; M52-M54's Window/Event/Image/Sound/Music/Font; the M37-M47 tabular Column/DataFrame family) |
+| Example programs | **120** (+2 M51: remote's `tabular_m51_rolling_window_demo.spy`) |
+| Lesson 1 streak | 39 clean-commit agents (M28 → M56). **M51 is an asterisk** — collision + delegate-blind agent; orchestrator-verified, not a self-gated commit (see M51 section). |
+| Benchmark suites | 3 (tabular suite gained the M51 `merge_cat_codes` cell) |
+
+## M51 — completed (this session — reconciled after a parallel-work collision)
+
+The delayed M49 follow-up. Two independent M51 RollingWindow
+implementations existed: one the orchestrator's delegated agent built
+locally, and one **already pushed to origin/main** (`71f697b`, plus an
+unrelated `10584f5` pivot_table categorical fix). Per the user's call we
+kept the **published remote RollingWindow as canonical** and layered only
+the four non-overlapping grab-bag features the remote lacked.
+
+**What's on main now (the M51 surface):**
+- **RollingWindow (remote `71f697b`)** — constructor-variant API:
+  `df.rolling(w)`, `df.rolling_centered(w)`, `df.rolling_min_periods(w,mp)`,
+  `df.rolling_centered_min_periods(w,mp)` → a `RollingWindow` with
+  terminals `.sum/.mean/.min/.max/.std/.count` + accessors
+  `.window()/.min_periods()/.is_centered()`. NativeFn IDs **1069-1081**.
+  (Note: this differs from the orchestrator's dropped design, which used
+  chainable `.center(bool)/.min_periods(n)` builders + `.agg()`.)
+- **pivot_table categorical fix (remote `10584f5`)** — pivot_table now
+  resolves ColumnCategorical index/columns axes correctly.
+- **Grab-bag layered by the orchestrator:**
+  - **Phase B** — explicit `ColumnCategorical.is_ordered` bit (payload
+    **32→40 bytes**, offset 32; replaces the M49 heuristic). Threaded
+    through `m47_alloc_col_categorical` (now takes `ordered: bool`) + its
+    4 constructor callers (M47 ⇒ false, M49 ⇒ true).
+  - **Phase C** — `df.sort_by` on a `ColumnCategorical` sorts by code
+    (= `categories[]` order); previously it raised ValueError.
+  - **Phase D** — `df.loc_range_level_{i64,str,datetime}(level,start,stop)`
+    filter any MultiIndex level (0=outermost). NativeFn IDs **1082-1084**
+    (re-numbered from the orchestrator's original 1078-1080, which the
+    remote's RollingWindow had taken).
+  - **Phase E** — `merge_cat_codes` bench cell + `bench/TABULAR_BENCH_REPORT_M51.md`
+    (codes path ~88× faster than string-coercion, 0.29× vs pandas at low
+    cardinality; 5.93× slower at 5000-distinct high cardinality = open item).
+- Grab-bag tests live in `vm/tests/m51_tabular_grabbag.rs` (9 tests);
+  RollingWindow is covered by the remote's `vm/tests/m51_rolling_window.rs`
+  (32 tests). Verified **1102 / 0 / 1 ignored** on the full workspace.
+
+**The orchestrator's fuller standalone M51** (chainable RollingWindow +
+`.agg` + all 5 phases, 1098 tests) is preserved at tag **`m51-local-full`**
+— NOT on main. If anyone wants the chainable API or `.agg`, it's there.
+
+### Integration notes worth remembering (hit during this milestone)
+
+- **Parallel-work collision is real on this repo** — always `git fetch`
+  before assuming local main is current. Two M51s diverged from `c4d034b`.
+  When the agent's isolation-worktree branch can't `--ff-only` (it
+  branched from HEAD-at-launch, behind a brief commit), `git rebase main`
+  the branch then ff. When the *remote* has independent work, do NOT
+  force-push; reconcile (here: reset local to origin, layer non-conflicting
+  pieces, re-ID clashing NativeFns).
+- **`SDL2_image.lib` link path is not in git** — `third_party/` (M53 games
+  dep) is untracked, so a fresh checkout/worktree can't link `spy`
+  (LNK1181). Fix without a rebuild: set
+  `LIB="C:\Users\AG\CascadeProjects\PythonCompiler\third_party\SDL2_image\SDL2_image-2.8.2\lib\x64;$LIB"`
+  before cargo build/test (MSVC linker reads `LIB`; doesn't change cargo
+  fingerprints). Running `bench/tabular_harness.py` rewrites
+  `bench/TABULAR_BENCH_REPORT.md` — `git checkout --` it after a subset run.
+- **Agent-tool `isolation:"worktree"` sandbox denies `cargo`/`python`** —
+  the delegated agent can't build/test, so it ships unverified code and
+  the orchestrator owns all build/test/bench/integration. Budget for it.
 
 ## M56 — completed (this session, 1 commit)
 

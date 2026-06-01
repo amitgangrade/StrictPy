@@ -4876,6 +4876,10 @@ fn m51_tabular_class_method_native_id_by_name(
             => NativeFn::M51TabDfRollingMinPeriods         as u32,
         ("DataFrame", "rolling_centered_min_periods")
             => NativeFn::M51TabDfRollingCenteredMinPeriods as u32,
+        // ── M51 Phase D: loc_range_level_* (chosen MultiIndex level) ──
+        ("DataFrame", "loc_range_level_i64")      => NativeFn::M51TabDfLocRangeLevelI64      as u32,
+        ("DataFrame", "loc_range_level_str")      => NativeFn::M51TabDfLocRangeLevelStr      as u32,
+        ("DataFrame", "loc_range_level_datetime") => NativeFn::M51TabDfLocRangeLevelDateTime as u32,
         // ── RollingWindow aggregators / introspection ──
         ("RollingWindow", "sum")         => NativeFn::M51TabRwSum         as u32,
         ("RollingWindow", "mean")        => NativeFn::M51TabRwMean        as u32,
