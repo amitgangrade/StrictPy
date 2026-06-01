@@ -11805,6 +11805,15 @@ fn m37_read_list_bool(lst: *const crate::object::ListRepr) -> Vec<bool> {
     }
 }
 
+/// M59: the single read path for a column's null mask.  Phase A keeps the
+/// existing List[bool] representation (this is just `m37_read_list_bool`);
+/// a later phase swaps the body to unpack a bit-packed representation,
+/// which is why callers must pass the column `length`.
+fn m37_read_nulls(nulls: *const crate::object::ListRepr, length: i64) -> Vec<bool> {
+    let _ = length; // reserved for the packed phase
+    m37_read_list_bool(nulls)
+}
+
 /// Read each `i64` slot out of a List[i64] into a Vec.
 fn m37_read_list_i64(lst: *const crate::object::ListRepr) -> Vec<i64> {
     if lst.is_null() {
@@ -12128,13 +12137,13 @@ fn m37_col_is_null(args: &[u64]) -> Result<u64, VmError> {
             message: format!("Column.is_null: index {} out of range (len={})", i, length),
         });
     }
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     Ok(if ns.get(i as usize).copied().unwrap_or(false) { 1 } else { 0 })
 }
 
 fn m37_col_null_count(args: &[u64]) -> Result<u64, VmError> {
-    let (_, nulls, _) = m37_col_fields(arg_u64(args, 0));
-    let ns = m37_read_list_bool(nulls);
+    let (_, nulls, length) = m37_col_fields(arg_u64(args, 0));
+    let ns = m37_read_nulls(nulls, length);
     Ok(ns.iter().filter(|b| **b).count() as u64)
 }
 
@@ -12149,7 +12158,7 @@ fn m37_col_i64_get(args: &[u64]) -> Result<u64, VmError> {
             message: format!("Column.get: index {} out of range (len={})", i, length),
         });
     }
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     if ns.get(i as usize).copied().unwrap_or(false) {
         return Ok(NONE_SENTINEL);
     }
@@ -12166,7 +12175,7 @@ fn m37_col_f64_get(args: &[u64]) -> Result<u64, VmError> {
             message: format!("Column.get: index {} out of range (len={})", i, length),
         });
     }
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     if ns.get(i as usize).copied().unwrap_or(false) {
         return Ok(NONE_SENTINEL);
     }
@@ -12183,7 +12192,7 @@ fn m37_col_str_get(args: &[u64]) -> Result<u64, VmError> {
             message: format!("Column.get: index {} out of range (len={})", i, length),
         });
     }
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     if ns.get(i as usize).copied().unwrap_or(false) {
         return Ok(NONE_SENTINEL);
     }
@@ -12206,7 +12215,7 @@ fn m37_col_bool_get(args: &[u64]) -> Result<u64, VmError> {
             message: format!("Column.get: index {} out of range (len={})", i, length),
         });
     }
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     if ns.get(i as usize).copied().unwrap_or(false) {
         return Ok(NONE_SENTINEL);
     }
@@ -12307,7 +12316,7 @@ fn m37_df_stringify(recv: u64) -> (Vec<String>, Vec<String>, Vec<Vec<String>>) {
                     _ => "unknown",
                 };
                 dtypes.push(dtype.to_string());
-                let ns = m37_read_list_bool(nulls);
+                let ns = m37_read_nulls(nulls, length);
                 let mut col_cells: Vec<String> = Vec::with_capacity(length as usize);
                 for i in 0..length as usize {
                     if ns.get(i).copied().unwrap_or(false) {
@@ -12770,7 +12779,7 @@ fn m37_col_i64_cmp(interp: &mut Interpreter, args: &[u64], op_code: u32) -> Resu
     let (vals, nulls, length) = m37_col_fields(arg_u64(args, 0));
     let x = arg_i64(args, 1);
     let vs = m37_read_list_i64(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut out_vals: Vec<bool> = Vec::with_capacity(length as usize);
     let mut out_nulls: Vec<bool> = Vec::with_capacity(length as usize);
     for i in 0..length as usize {
@@ -12794,7 +12803,7 @@ fn m37_col_f64_cmp(interp: &mut Interpreter, args: &[u64], op_code: u32) -> Resu
     let (vals, nulls, length) = m37_col_fields(arg_u64(args, 0));
     let x = arg_f64(args, 1);
     let vs = m37_read_list_f64(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut out_vals: Vec<bool> = Vec::with_capacity(length as usize);
     let mut out_nulls: Vec<bool> = Vec::with_capacity(length as usize);
     for i in 0..length as usize {
@@ -12818,7 +12827,7 @@ fn m37_col_str_cmp(interp: &mut Interpreter, args: &[u64], op_code: u32) -> Resu
     let (vals, nulls, length) = m37_col_fields(arg_u64(args, 0));
     let x = arg_str(args, 1);
     let vs = m37_read_list_str_lst(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut out_vals: Vec<bool> = Vec::with_capacity(length as usize);
     let mut out_nulls: Vec<bool> = Vec::with_capacity(length as usize);
     for i in 0..length as usize {
@@ -12848,8 +12857,8 @@ fn m37_mask_combine(interp: &mut Interpreter, args: &[u64], op_code: u32) -> Res
     }
     let avs = m37_read_list_bool(av);
     let bvs = m37_read_list_bool(bv);
-    let ans = m37_read_list_bool(an);
-    let bns = m37_read_list_bool(bn);
+    let ans = m37_read_nulls(an, al);
+    let bns = m37_read_nulls(bn, bl);
     let mut out_vals = Vec::with_capacity(al as usize);
     let mut out_nulls = Vec::with_capacity(al as usize);
     for i in 0..al as usize {
@@ -12868,7 +12877,7 @@ fn m37_mask_combine(interp: &mut Interpreter, args: &[u64], op_code: u32) -> Res
 fn m37_mask_not(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let (av, an, al) = m37_col_fields(arg_u64(args, 0));
     let avs = m37_read_list_bool(av);
-    let ans = m37_read_list_bool(an);
+    let ans = m37_read_nulls(an, al);
     let mut out_vals = Vec::with_capacity(al as usize);
     for i in 0..al as usize {
         let v = avs.get(i).copied().unwrap_or(false);
@@ -12881,9 +12890,9 @@ fn m37_mask_not(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> 
 }
 
 fn m37_mask_count_true(args: &[u64]) -> Result<u64, VmError> {
-    let (av, an, _) = m37_col_fields(arg_u64(args, 0));
+    let (av, an, al) = m37_col_fields(arg_u64(args, 0));
     let avs = m37_read_list_bool(av);
-    let ans = m37_read_list_bool(an);
+    let ans = m37_read_nulls(an, al);
     let mut count: u64 = 0;
     for (v, n) in avs.iter().zip(ans.iter()) {
         if !*n && *v { count += 1; }
@@ -12900,7 +12909,7 @@ fn m37_column_take(
     col_ptr: u64,
     indices: &[usize],
 ) -> u64 {
-    let (vals, nulls, _) = m37_col_fields(col_ptr);
+    let (vals, nulls, length) = m37_col_fields(col_ptr);
     let class_name: String = {
         let obj = col_ptr as *const u8;
         if obj.is_null() {
@@ -12913,7 +12922,7 @@ fn m37_column_take(
             }
         }
     };
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let new_nulls: Vec<bool> = indices.iter().map(|i| ns.get(*i).copied().unwrap_or(false)).collect();
     let n_lst = m37_alloc_list_bool(interp, &new_nulls);
     let len = indices.len() as i64;
@@ -13145,7 +13154,7 @@ fn m37_df_filter(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError>
         });
     }
     let mvs = m37_read_list_bool(mv);
-    let mns = m37_read_list_bool(mn);
+    let mns = m37_read_nulls(mn, ml);
     let mut keep: Vec<usize> = Vec::new();
     for i in 0..nrows as usize {
         if !mns.get(i).copied().unwrap_or(false) && mvs.get(i).copied().unwrap_or(false) {
@@ -13277,7 +13286,7 @@ fn m37_df_sort_by(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError
             }
         }
     };
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     // Partition: non-null indices (sorted by value) followed by null
     // indices (preserving their original order).  Stable sort via
     // pair-of-(value, original-index) comparison.
@@ -13416,7 +13425,7 @@ fn m38_col_i64_cmp(interp: &mut Interpreter, args: &[u64], op_code: u32) -> Resu
     let (vals, nulls, length) = m37_col_fields(arg_u64(args, 0));
     let x = arg_i64(args, 1);
     let vs = m37_read_list_i64(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut out_vals: Vec<bool> = Vec::with_capacity(length as usize);
     let mut out_nulls: Vec<bool> = Vec::with_capacity(length as usize);
     for i in 0..length as usize {
@@ -13440,7 +13449,7 @@ fn m38_col_f64_cmp(interp: &mut Interpreter, args: &[u64], op_code: u32) -> Resu
     let (vals, nulls, length) = m37_col_fields(arg_u64(args, 0));
     let x = arg_f64(args, 1);
     let vs = m37_read_list_f64(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut out_vals: Vec<bool> = Vec::with_capacity(length as usize);
     let mut out_nulls: Vec<bool> = Vec::with_capacity(length as usize);
     for i in 0..length as usize {
@@ -13465,7 +13474,7 @@ fn m38_col_i64_between(interp: &mut Interpreter, args: &[u64]) -> Result<u64, Vm
     let lo = arg_i64(args, 1);
     let hi = arg_i64(args, 2);
     let vs = m37_read_list_i64(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut out_vals: Vec<bool> = Vec::with_capacity(length as usize);
     let mut out_nulls: Vec<bool> = Vec::with_capacity(length as usize);
     for i in 0..length as usize {
@@ -13484,7 +13493,7 @@ fn m38_col_f64_between(interp: &mut Interpreter, args: &[u64]) -> Result<u64, Vm
     let lo = arg_f64(args, 1);
     let hi = arg_f64(args, 2);
     let vs = m37_read_list_f64(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut out_vals: Vec<bool> = Vec::with_capacity(length as usize);
     let mut out_nulls: Vec<bool> = Vec::with_capacity(length as usize);
     for i in 0..length as usize {
@@ -13504,7 +13513,7 @@ fn m38_col_str_affix(interp: &mut Interpreter, args: &[u64], op_code: u32) -> Re
     let (vals, nulls, length) = m37_col_fields(arg_u64(args, 0));
     let x = arg_str(args, 1);
     let vs = m37_read_list_str_lst(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut out_vals: Vec<bool> = Vec::with_capacity(length as usize);
     let mut out_nulls: Vec<bool> = Vec::with_capacity(length as usize);
     for i in 0..length as usize {
@@ -13572,7 +13581,7 @@ fn m38_df_rename(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError>
 fn m38_col_i64_non_null_values(col: u64) -> Vec<i64> {
     let (vals, nulls, length) = m37_col_fields(col);
     let vs = m37_read_list_i64(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     (0..length as usize)
         .filter(|i| !ns.get(*i).copied().unwrap_or(false))
         .map(|i| vs.get(i).copied().unwrap_or(0))
@@ -13582,7 +13591,7 @@ fn m38_col_i64_non_null_values(col: u64) -> Vec<i64> {
 fn m38_col_f64_non_null_values(col: u64) -> Vec<f64> {
     let (vals, nulls, length) = m37_col_fields(col);
     let vs = m37_read_list_f64(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     (0..length as usize)
         .filter(|i| !ns.get(*i).copied().unwrap_or(false))
         .map(|i| vs.get(i).copied().unwrap_or(0.0))
@@ -13718,7 +13727,7 @@ fn m38_col_f64_agg(args: &[u64], op_code: u32) -> Result<u64, VmError> {
 /// Shared since they all just count non-null cells.
 fn m38_col_str_count(args: &[u64]) -> Result<u64, VmError> {
     let (_, nulls, length) = m37_col_fields(arg_u64(args, 0));
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut count: u64 = 0;
     for i in 0..length as usize {
         if !ns.get(i).copied().unwrap_or(false) {
@@ -13731,7 +13740,7 @@ fn m38_col_str_count(args: &[u64]) -> Result<u64, VmError> {
 fn m38_col_str_minmax(interp: &mut Interpreter, args: &[u64], want_max: bool) -> Result<u64, VmError> {
     let (vals, nulls, length) = m37_col_fields(arg_u64(args, 0));
     let vs = m37_read_list_str_lst(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut best: Option<&String> = None;
     for i in 0..length as usize {
         if ns.get(i).copied().unwrap_or(false) {
@@ -13755,7 +13764,7 @@ fn m38_col_str_minmax(interp: &mut Interpreter, args: &[u64], want_max: bool) ->
 fn m38_col_dt_minmax(args: &[u64], want_max: bool) -> Result<u64, VmError> {
     let (vals, nulls, length) = m37_col_fields(arg_u64(args, 0));
     let vs = m37_read_list_i64(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut best: Option<i64> = None;
     for i in 0..length as usize {
         if ns.get(i).copied().unwrap_or(false) {
@@ -13807,7 +13816,7 @@ fn m38_df_describe(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmErro
         let mut rows: Vec<String> = vec![String::new(); 5];
         // count is always concrete.
         let (_, nulls, length) = m37_col_fields(*cp);
-        let ns = m37_read_list_bool(nulls);
+        let ns = m37_read_nulls(nulls, length);
         let cnt = (0..length as usize).filter(|i| !ns.get(*i).copied().unwrap_or(false)).count();
         rows[0] = cnt.to_string();
         match cls.as_str() {
@@ -13876,7 +13885,7 @@ fn m38_col_i64_fill_null(interp: &mut Interpreter, args: &[u64]) -> Result<u64, 
     let v_fill = arg_i64(args, 1);
     let (vals, nulls, length) = m37_col_fields(recv);
     let vs = m37_read_list_i64(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut new_vs: Vec<i64> = Vec::with_capacity(length as usize);
     for i in 0..length as usize {
         let n = ns.get(i).copied().unwrap_or(false);
@@ -13892,7 +13901,7 @@ fn m38_col_f64_fill_null(interp: &mut Interpreter, args: &[u64]) -> Result<u64, 
     let v_fill = arg_f64(args, 1);
     let (vals, nulls, length) = m37_col_fields(recv);
     let vs = m37_read_list_f64(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut new_vs: Vec<f64> = Vec::with_capacity(length as usize);
     for i in 0..length as usize {
         let n = ns.get(i).copied().unwrap_or(false);
@@ -13908,7 +13917,7 @@ fn m38_col_str_fill_null(interp: &mut Interpreter, args: &[u64]) -> Result<u64, 
     let v_fill = arg_str(args, 1);
     let (vals, nulls, length) = m37_col_fields(recv);
     let vs = m37_read_list_str_lst(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut new_vs: Vec<String> = Vec::with_capacity(length as usize);
     for i in 0..length as usize {
         let n = ns.get(i).copied().unwrap_or(false);
@@ -13924,7 +13933,7 @@ fn m38_col_bool_fill_null(interp: &mut Interpreter, args: &[u64]) -> Result<u64,
     let v_fill = arg_u64(args, 1) != 0;
     let (vals, nulls, length) = m37_col_fields(recv);
     let vs = m37_read_list_bool(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut new_vs: Vec<bool> = Vec::with_capacity(length as usize);
     for i in 0..length as usize {
         let n = ns.get(i).copied().unwrap_or(false);
@@ -13940,7 +13949,7 @@ fn m38_col_dt_fill_null(interp: &mut Interpreter, args: &[u64]) -> Result<u64, V
     let v_fill = arg_i64(args, 1);
     let (vals, nulls, length) = m37_col_fields(recv);
     let vs = m37_read_list_i64(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut new_vs: Vec<i64> = Vec::with_capacity(length as usize);
     for i in 0..length as usize {
         let n = ns.get(i).copied().unwrap_or(false);
@@ -14030,8 +14039,8 @@ fn m38_row_key(col_ptrs: &[u64], col_class: &[String], row: usize) -> String {
         if i > 0 {
             out.push(M38_GROUP_KEY_SEP);
         }
-        let (vals, nulls, _length) = m37_col_fields(*cp);
-        let ns = m37_read_list_bool(nulls);
+        let (vals, nulls, length) = m37_col_fields(*cp);
+        let ns = m37_read_nulls(nulls, length);
         if ns.get(row).copied().unwrap_or(false) {
             out.push_str("\x02null");
             continue;
@@ -14109,7 +14118,7 @@ const M49_NULL_CODE: i64 = i64::MIN;
 fn m49_read_codes_with_nulls(col_ptr: u64, nrows: usize) -> Vec<i64> {
     let (codes_lst, nulls_lst, _len) = m37_col_fields(col_ptr);
     let m49_codes = m37_read_list_i64(codes_lst);
-    let m49_nulls = m37_read_list_bool(nulls_lst);
+    let m49_nulls = m37_read_nulls(nulls_lst, _len);
     let mut out = Vec::with_capacity(nrows);
     for r in 0..nrows {
         if m49_nulls.get(r).copied().unwrap_or(false) {
@@ -14426,8 +14435,8 @@ fn m38_aggregate_subset(
     agg_name: &str,
 ) -> Result<u64, VmError> {
     let cls = m38_col_class_name(col);
-    let (vals, nulls, _) = m37_col_fields(col);
-    let ns = m37_read_list_bool(nulls);
+    let (vals, nulls, length) = m37_col_fields(col);
+    let ns = m37_read_nulls(nulls, length);
     // count is dtype-agnostic.
     if agg_name == "count" {
         let cnt: i64 = rows.iter().filter(|r| !ns.get(**r).copied().unwrap_or(false)).count() as i64;
@@ -14756,8 +14765,8 @@ fn m39_join_key(
         if i > 0 {
             out.push('\x01');
         }
-        let (vals, nulls, _length) = m37_col_fields(*cp);
-        let ns = m37_read_list_bool(nulls);
+        let (vals, nulls, length) = m37_col_fields(*cp);
+        let ns = m37_read_nulls(nulls, length);
         if ns.get(row).copied().unwrap_or(false) {
             return None;
         }
@@ -14846,7 +14855,7 @@ fn m39_df_unique_typed(
         return Ok(NONE_SENTINEL);
     }
     let (vals, nulls, length) = m37_col_fields(col);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let class_name = m39_class_name_for_dtype(want_dtype);
     let out_col = match want_dtype {
         "i64" | "datetime" => {
@@ -14955,7 +14964,7 @@ fn m39_df_value_counts(interp: &mut Interpreter, args: &[u64]) -> Result<u64, Vm
     };
     let col = col_ptrs[idx];
     let (vals, nulls, length) = m37_col_fields(col);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let cls = m38_col_class_name(col);
     // Walk the column, accumulating a (key_repr, count, first_row) tuple
     // per distinct value.  We dedupe via a HashMap<key_repr, slot_index>
@@ -15107,7 +15116,7 @@ fn m39_concat_rows(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmErro
             let cps = m37_df_col_ptrs(*df);
             let col = cps[c];
             let (vals, nulls, length) = m37_col_fields(col);
-            let ns = m37_read_list_bool(nulls);
+            let ns = m37_read_nulls(nulls, length);
             for i in 0..length as usize {
                 all_nulls.push(ns.get(i).copied().unwrap_or(false));
             }
@@ -15230,7 +15239,7 @@ fn m45_concat_rows_multiindex(
         for f in &per_frame_levels {
             let col = f[li];
             let (vals, nulls, length) = m37_col_fields(col);
-            let ns = m37_read_list_bool(nulls);
+            let ns = m37_read_nulls(nulls, length);
             for i in 0..length as usize {
                 all_nulls.push(ns.get(i).copied().unwrap_or(false));
             }
@@ -15319,7 +15328,7 @@ fn m43_concat_rows_index(
     let mut all_nulls: Vec<bool> = Vec::new();
     for idx in &indexes {
         let (vals, nulls, length) = m37_col_fields(*idx);
-        let ns = m37_read_list_bool(nulls);
+        let ns = m37_read_nulls(nulls, length);
         for i in 0..length as usize {
             all_nulls.push(ns.get(i).copied().unwrap_or(false));
         }
@@ -15927,10 +15936,10 @@ fn m42_merge_outer_index_column(
     r_index: u64,
     emit: &[(Option<usize>, Option<usize>)],
 ) -> u64 {
-    let (l_vals, l_nulls, _) = m37_col_fields(l_index);
-    let (r_vals, r_nulls, _) = m37_col_fields(r_index);
-    let l_ns = m37_read_list_bool(l_nulls);
-    let r_ns = m37_read_list_bool(r_nulls);
+    let (l_vals, l_nulls, l_len) = m37_col_fields(l_index);
+    let (r_vals, r_nulls, r_len) = m37_col_fields(r_index);
+    let l_ns = m37_read_nulls(l_nulls, l_len);
+    let r_ns = m37_read_nulls(r_nulls, r_len);
     let n = emit.len() as i64;
     let mut out_nulls: Vec<bool> = Vec::with_capacity(emit.len());
     let pick_null = |row: &(Option<usize>, Option<usize>),
@@ -16026,8 +16035,8 @@ fn m39_pluck_column(
     rhs_fallback_idx: Option<usize>,
     rhs_col_ptrs: &[u64],
 ) -> u64 {
-    let (vals, nulls, _) = m37_col_fields(src);
-    let src_ns = m37_read_list_bool(nulls);
+    let (vals, nulls, length) = m37_col_fields(src);
+    let src_ns = m37_read_nulls(nulls, length);
     let n = emit.len() as i64;
     let mut out_nulls: Vec<bool> = Vec::with_capacity(emit.len());
     let mut out_i64: Vec<i64> = Vec::new();
@@ -16072,12 +16081,12 @@ fn m39_pluck_column(
     }
     // Precompute fallback vectors if needed.
     let fallback_src = rhs_fallback_idx.map(|ri| rhs_col_ptrs[ri]).unwrap_or(0);
-    let (fb_vals, fb_nulls, _) = if fallback_src != 0 {
+    let (fb_vals, fb_nulls, fb_len) = if fallback_src != 0 {
         m37_col_fields(fallback_src)
     } else {
         (std::ptr::null(), std::ptr::null(), 0i64)
     };
-    let fb_ns = if !fb_nulls.is_null() { m37_read_list_bool(fb_nulls) } else { Vec::new() };
+    let fb_ns = if !fb_nulls.is_null() { m37_read_nulls(fb_nulls, fb_len) } else { Vec::new() };
     let fb_i64 = if fallback_src != 0 && (cls == "ColumnI64" || cls == "ColumnDateTime") {
         m37_read_list_i64(fb_vals)
     } else { Vec::new() };
@@ -16146,8 +16155,8 @@ fn m39_pluck_column(
 /// names from a `columns` argument's unique values in `pivot`).
 fn m39_cell_to_str(col: u64, row: usize) -> String {
     let cls = m38_col_class_name(col);
-    let (vals, nulls, _) = m37_col_fields(col);
-    let ns = m37_read_list_bool(nulls);
+    let (vals, nulls, length) = m37_col_fields(col);
+    let ns = m37_read_nulls(nulls, length);
     if ns.get(row).copied().unwrap_or(false) {
         return "null".into();
     }
@@ -16249,8 +16258,8 @@ fn m39_df_pivot(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> 
     // One column per unique `cols_name` value, dtype-matched to the
     // values column.  Build each by walking the n_index rows and
     // pulling vals_col[row_or_none].
-    let (v_vals, v_nulls, _) = m37_col_fields(vals_col);
-    let v_ns = m37_read_list_bool(v_nulls);
+    let (v_vals, v_nulls, v_len) = m37_col_fields(vals_col);
+    let v_ns = m37_read_nulls(v_nulls, v_len);
     for c in 0..n_cols {
         out_names.push(cols_keys[c].clone());
         let mut out_nulls: Vec<bool> = Vec::with_capacity(n_index);
@@ -16416,8 +16425,8 @@ fn m39_df_melt(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let mut by_var_nulls: Vec<Vec<bool>> = Vec::new();
     for vi in &val_idx {
         let src = col_ptrs[*vi];
-        let (vals, nulls, _) = m37_col_fields(src);
-        by_var_nulls.push(m37_read_list_bool(nulls));
+        let (vals, nulls, length) = m37_col_fields(src);
+        by_var_nulls.push(m37_read_nulls(nulls, length));
         match first_cls.as_str() {
             "ColumnI64" | "ColumnDateTime" => {
                 by_var_i64.push(m37_read_list_i64(vals));
@@ -16552,7 +16561,7 @@ fn m40_col_cum(
     let recv = arg_u64(args, 0);
     let (vals, nulls, length) = m37_col_fields(recv);
     let n = length as usize;
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut out_nulls: Vec<bool> = vec![false; n];
     let mut hit_null = false;
     let mut out_i64: Vec<i64> = Vec::new();
@@ -16664,8 +16673,8 @@ fn m40_df_dropna(
     let per_col_nulls: Vec<Vec<bool>> = consider
         .iter()
         .map(|i| {
-            let (_, nu, _) = m37_col_fields(col_ptrs[*i]);
-            m37_read_list_bool(nu)
+            let (_, nu, nu_len) = m37_col_fields(col_ptrs[*i]);
+            m37_read_nulls(nu, nu_len)
         })
         .collect();
     let mut keep: Vec<usize> = Vec::with_capacity(nrows as usize);
@@ -16733,7 +16742,7 @@ fn m40_df_fillna(
         }
         // Fill nulls per-dtype.
         let (vals, nulls, length) = m37_col_fields(*cp);
-        let ns = m37_read_list_bool(nulls);
+        let ns = m37_read_nulls(nulls, length);
         let n = length as usize;
         match target_dtype {
             "i64" | "datetime" => {
@@ -16927,7 +16936,7 @@ fn m40_col_rolling(
         });
     }
     let w = window as usize;
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     // For each window-end position i in w-1..n, check whether the
     // window [i-w+1..=i] contains any null cell.  Output position i
     // is null when this is true OR when i < w-1.
@@ -17272,9 +17281,9 @@ fn m40_df_resample(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmErro
         });
     }
     // 4. Find min / max non-null timestamp.
-    let (tvals, tnulls, _) = m37_col_fields(tcol);
+    let (tvals, tnulls, t_len) = m37_col_fields(tcol);
     let ts_vs = m37_read_list_i64(tvals);
-    let ts_ns = m37_read_list_bool(tnulls);
+    let ts_ns = m37_read_nulls(tnulls, t_len);
     let mut t_min: Option<i64> = None;
     let mut t_max: Option<i64> = None;
     for i in 0..nrows as usize {
@@ -17401,8 +17410,8 @@ fn m40_df_resample(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmErro
             continue; // also drop non-numeric to match the brief
         }
         out_names.push(name.clone());
-        let (svals, snulls, _) = m37_col_fields(src);
-        let s_ns = m37_read_list_bool(snulls);
+        let (svals, snulls, s_len) = m37_col_fields(src);
+        let s_ns = m37_read_nulls(snulls, s_len);
         let s_i64 = if cls == "ColumnI64" { m37_read_list_i64(svals) } else { Vec::new() };
         let s_f64 = if cls == "ColumnF64" { m37_read_list_f64(svals) } else { Vec::new() };
         if agg == "count" {
@@ -17551,12 +17560,12 @@ fn m40_df_asof_merge(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmEr
         });
     }
     // Read lhs + rhs keys.
-    let (lv, ln, _) = m37_col_fields(l_col_ptrs[l_idx]);
+    let (lv, ln, l_len_i) = m37_col_fields(l_col_ptrs[l_idx]);
     let l_vs = m37_read_list_i64(lv);
-    let l_ns = m37_read_list_bool(ln);
+    let l_ns = m37_read_nulls(ln, l_len_i);
     let (rv, rn, r_len_i) = m37_col_fields(r_col_ptrs[r_idx]);
     let r_vs = m37_read_list_i64(rv);
-    let r_ns = m37_read_list_bool(rn);
+    let r_ns = m37_read_nulls(rn, r_len_i);
     let r_len = r_len_i as usize;
     // Build a sorted index over rhs by non-null key ascending.  Null
     // rhs keys are dropped from the searchable set (we'd never want
@@ -17598,8 +17607,8 @@ fn m40_df_asof_merge(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmEr
         out_names.push(name.clone());
         let src = r_col_ptrs[i];
         let cls = m38_col_class_name(src);
-        let (svals, snulls, _) = m37_col_fields(src);
-        let s_ns = m37_read_list_bool(snulls);
+        let (svals, snulls, s_len) = m37_col_fields(src);
+        let s_ns = m37_read_nulls(snulls, s_len);
         let s_i64 = if cls == "ColumnI64" || cls == "ColumnDateTime" { m37_read_list_i64(svals) } else { Vec::new() };
         let s_f64 = if cls == "ColumnF64" { m37_read_list_f64(svals) } else { Vec::new() };
         let s_str = if cls == "ColumnStr" { m37_read_list_str_lst(svals) } else { Vec::new() };
@@ -17695,7 +17704,7 @@ fn m41_clone_column(interp: &mut Interpreter, src: u64) -> u64 {
     }
     let cls = m38_col_class_name(src);
     let (vals, nulls, length) = m37_col_fields(src);
-    let n_lst = m37_alloc_list_bool(interp, &m37_read_list_bool(nulls));
+    let n_lst = m37_alloc_list_bool(interp, &m37_read_nulls(nulls, length));
     let v_lst: *mut crate::object::ListRepr = match cls.as_str() {
         "ColumnI64" | "ColumnDateTime" => m37_alloc_list_i64(interp, &m37_read_list_i64(vals)),
         "ColumnF64" => m37_alloc_list_f64(interp, &m37_read_list_f64(vals)),
@@ -17942,7 +17951,7 @@ fn m41_sort_index_perm(col: u64, ascending: bool) -> Vec<usize> {
     let cls = m38_col_class_name(col);
     let (vals, nulls, length) = m37_col_fields(col);
     let n = length as usize;
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut perm: Vec<usize> = (0..n).collect();
     match cls.as_str() {
         "ColumnI64" | "ColumnDateTime" => {
@@ -18210,8 +18219,8 @@ fn m44_sort_multiindex_perm(level_cols: &[u64], ascending: bool) -> Vec<usize> {
     }
     let m44_snapshots: Vec<LevelVals> = level_cols.iter().map(|cp| {
         let cls = m38_col_class_name(*cp);
-        let (vals, nulls, _) = m37_col_fields(*cp);
-        let ns = m37_read_list_bool(nulls);
+        let (vals, nulls, col_len) = m37_col_fields(*cp);
+        let ns = m37_read_nulls(nulls, col_len);
         match cls.as_str() {
             "ColumnI64" | "ColumnDateTime" => LevelVals::I64 { vs: m37_read_list_i64(vals), ns },
             "ColumnF64" => LevelVals::F64 { vs: m37_read_list_f64(vals), ns },
@@ -18349,9 +18358,9 @@ fn m41_df_resample_index(interp: &mut Interpreter, args: &[u64]) -> Result<u64, 
     let (names_lst, _, nrows) = m37_df_fields(recv);
     let names = m37_read_list_str_lst(names_lst);
     let col_ptrs = m37_df_col_ptrs(recv);
-    let (tvals, tnulls, _) = m37_col_fields(index_col);
+    let (tvals, tnulls, t_len) = m37_col_fields(index_col);
     let ts_vs = m37_read_list_i64(tvals);
-    let ts_ns = m37_read_list_bool(tnulls);
+    let ts_ns = m37_read_nulls(tnulls, t_len);
     // Find min / max non-null timestamp in the index.
     let mut t_min: Option<i64> = None;
     let mut t_max: Option<i64> = None;
@@ -18408,8 +18417,8 @@ fn m41_df_resample_index(interp: &mut Interpreter, args: &[u64]) -> Result<u64, 
         let cls = m38_col_class_name(src);
         if cls != "ColumnI64" && cls != "ColumnF64" { continue; }
         out_names.push(name.clone());
-        let (svals, snulls, _) = m37_col_fields(src);
-        let s_ns = m37_read_list_bool(snulls);
+        let (svals, snulls, s_len) = m37_col_fields(src);
+        let s_ns = m37_read_nulls(snulls, s_len);
         let s_i64 = if cls == "ColumnI64" { m37_read_list_i64(svals) } else { Vec::new() };
         let s_f64 = if cls == "ColumnF64" { m37_read_list_f64(svals) } else { Vec::new() };
         if agg == "count" {
@@ -18544,12 +18553,12 @@ fn m41_df_asof_merge_index(interp: &mut Interpreter, args: &[u64]) -> Result<u64
     let rnames = m37_read_list_str_lst(rnames_lst);
     let r_col_ptrs = m37_df_col_ptrs(rhs);
     // Read key arrays.
-    let (lv, ln, _) = m37_col_fields(l_index);
+    let (lv, ln, l_len_i) = m37_col_fields(l_index);
     let l_vs = m37_read_list_i64(lv);
-    let l_ns = m37_read_list_bool(ln);
+    let l_ns = m37_read_nulls(ln, l_len_i);
     let (rv, rn, r_len_i) = m37_col_fields(r_index);
     let r_vs = m37_read_list_i64(rv);
-    let r_ns = m37_read_list_bool(rn);
+    let r_ns = m37_read_nulls(rn, r_len_i);
     let r_len = r_len_i as usize;
     // Sort rhs by non-null index ascending.
     let mut sorted: Vec<usize> = (0..r_len)
@@ -18577,8 +18586,8 @@ fn m41_df_asof_merge_index(interp: &mut Interpreter, args: &[u64]) -> Result<u64
         out_names.push(name.clone());
         let src = r_col_ptrs[i];
         let cls = m38_col_class_name(src);
-        let (svals, snulls, _) = m37_col_fields(src);
-        let s_ns = m37_read_list_bool(snulls);
+        let (svals, snulls, s_len) = m37_col_fields(src);
+        let s_ns = m37_read_nulls(snulls, s_len);
         let s_i64 = if cls == "ColumnI64" || cls == "ColumnDateTime" { m37_read_list_i64(svals) } else { Vec::new() };
         let s_f64 = if cls == "ColumnF64" { m37_read_list_f64(svals) } else { Vec::new() };
         let s_str = if cls == "ColumnStr" { m37_read_list_str_lst(svals) } else { Vec::new() };
@@ -18693,7 +18702,7 @@ fn m41_df_select_by_label_i64(interp: &mut Interpreter, args: &[u64]) -> Result<
     }
     let (vals, nulls, length) = m37_col_fields(index_col);
     let vs = m37_read_list_i64(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut found: Option<usize> = None;
     for i in 0..length as usize {
         if ns.get(i).copied().unwrap_or(false) { continue; }
@@ -18725,7 +18734,7 @@ fn m41_df_select_by_label_str(interp: &mut Interpreter, args: &[u64]) -> Result<
     }
     let (vals, nulls, length) = m37_col_fields(index_col);
     let vs = m37_read_list_str_lst(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut found: Option<usize> = None;
     for i in 0..length as usize {
         if ns.get(i).copied().unwrap_or(false) { continue; }
@@ -18758,7 +18767,7 @@ fn m41_df_select_by_label_datetime(interp: &mut Interpreter, args: &[u64]) -> Re
     }
     let (vals, nulls, length) = m37_col_fields(index_col);
     let vs = m37_read_list_i64(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut found: Option<usize> = None;
     for i in 0..length as usize {
         if ns.get(i).copied().unwrap_or(false) { continue; }
@@ -18833,8 +18842,8 @@ fn m41_df_pivot_table(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmE
     let i_cls = m38_col_class_name(i_col_p);
     let c_cls = m38_col_class_name(c_col_p);
     let i_label = |row: usize| -> Option<String> {
-        let (vals, nulls, _) = m37_col_fields(i_col_p);
-        let ns = m37_read_list_bool(nulls);
+        let (vals, nulls, col_len) = m37_col_fields(i_col_p);
+        let ns = m37_read_nulls(nulls, col_len);
         if ns.get(row).copied().unwrap_or(false) { return None; }
         Some(match i_cls.as_str() {
             "ColumnI64" | "ColumnDateTime" => m37_read_list_i64(vals).get(row).copied().unwrap_or(0).to_string(),
@@ -18855,8 +18864,8 @@ fn m41_df_pivot_table(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmE
         })
     };
     let c_label = |row: usize| -> Option<String> {
-        let (vals, nulls, _) = m37_col_fields(c_col_p);
-        let ns = m37_read_list_bool(nulls);
+        let (vals, nulls, col_len) = m37_col_fields(c_col_p);
+        let ns = m37_read_nulls(nulls, col_len);
         if ns.get(row).copied().unwrap_or(false) { return None; }
         Some(match c_cls.as_str() {
             "ColumnI64" | "ColumnDateTime" => m37_read_list_i64(vals).get(row).copied().unwrap_or(0).to_string(),
@@ -18880,8 +18889,8 @@ fn m41_df_pivot_table(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmE
     let mut col_keys: Vec<String> = Vec::new();
     let mut col_lookup: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     // For each (row_key_idx, col_key_idx) accumulate the values.
-    let (vvals, vnulls, _) = m37_col_fields(v_col_p);
-    let v_ns = m37_read_list_bool(vnulls);
+    let (vvals, vnulls, v_len) = m37_col_fields(v_col_p);
+    let v_ns = m37_read_nulls(vnulls, v_len);
     let v_i64 = if v_cls == "ColumnI64" { m37_read_list_i64(vvals) } else { Vec::new() };
     let v_f64 = if v_cls == "ColumnF64" { m37_read_list_f64(vvals) } else { Vec::new() };
     // Accumulator state per (row, col) bucket.
@@ -19112,8 +19121,8 @@ fn m41_df_pivot_table(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmE
 /// stringified) or a typed value depending on dtype.  Mirrors
 /// `m46_cell_to_value_at`.
 fn m46_cell_to_string(col_ptr: u64, row: usize) -> Option<String> {
-    let (vals, nulls, _) = m37_col_fields(col_ptr);
-    let ns = m37_read_list_bool(nulls);
+    let (vals, nulls, length) = m37_col_fields(col_ptr);
+    let ns = m37_read_nulls(nulls, length);
     if ns.get(row).copied().unwrap_or(false) {
         return None;
     }
@@ -19201,8 +19210,8 @@ fn m46_df_stack(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> 
     let mut m46_per_col: Vec<(Vec<i64>, Vec<f64>, Vec<String>, Vec<bool>, Vec<bool>)> =
         Vec::with_capacity(m46_ncols);
     for cp in &m46_col_ptrs {
-        let (vals, nulls, _) = m37_col_fields(*cp);
-        let ns = m37_read_list_bool(nulls);
+        let (vals, nulls, length) = m37_col_fields(*cp);
+        let ns = m37_read_nulls(nulls, length);
         let i64s = if m46_dtype == "ColumnI64" || m46_dtype == "ColumnDateTime" { m37_read_list_i64(vals) } else { Vec::new() };
         let f64s = if m46_dtype == "ColumnF64" { m37_read_list_f64(vals) } else { Vec::new() };
         let strs = if m46_dtype == "ColumnStr" { m37_read_list_str_lst(vals) } else { Vec::new() };
@@ -19396,8 +19405,8 @@ fn m46_df_unstack(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError
     let mut m46_out_cols: Vec<u64> = Vec::with_capacity(m46_nc * m46_col_ptrs.len());
     for (m49_src_i, &m46_val_col_ptr) in m46_col_ptrs.iter().enumerate() {
         let m46_val_cls = m38_col_class_name(m46_val_col_ptr);
-        let (m46_vals, m46_vnulls, _) = m37_col_fields(m46_val_col_ptr);
-        let m46_val_ns = m37_read_list_bool(m46_vnulls);
+        let (m46_vals, m46_vnulls, m46_val_len) = m37_col_fields(m46_val_col_ptr);
+        let m46_val_ns = m37_read_nulls(m46_vnulls, m46_val_len);
         let m46_val_i64 = if m46_val_cls == "ColumnI64" || m46_val_cls == "ColumnDateTime" { m37_read_list_i64(m46_vals) } else { Vec::new() };
         let m46_val_f64 = if m46_val_cls == "ColumnF64" { m37_read_list_f64(m46_vals) } else { Vec::new() };
         let m46_val_str = if m46_val_cls == "ColumnStr" { m37_read_list_str_lst(m46_vals) } else { Vec::new() };
@@ -19562,7 +19571,7 @@ fn m46_df_loc_range_i64(interp: &mut Interpreter, args: &[u64]) -> Result<u64, V
     let (index_col, length) = m46_loc_range_check(recv, "loc_range_i64", "ColumnI64")?;
     let (vals, nulls, _) = m37_col_fields(index_col);
     let vs = m37_read_list_i64(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut m46_keep: Vec<bool> = Vec::with_capacity(length as usize);
     for i in 0..length as usize {
         if ns.get(i).copied().unwrap_or(false) { m46_keep.push(false); continue; }
@@ -19579,7 +19588,7 @@ fn m46_df_loc_range_f64(interp: &mut Interpreter, args: &[u64]) -> Result<u64, V
     let (index_col, length) = m46_loc_range_check(recv, "loc_range_f64", "ColumnF64")?;
     let (vals, nulls, _) = m37_col_fields(index_col);
     let vs = m37_read_list_f64(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut m46_keep: Vec<bool> = Vec::with_capacity(length as usize);
     for i in 0..length as usize {
         if ns.get(i).copied().unwrap_or(false) { m46_keep.push(false); continue; }
@@ -19596,7 +19605,7 @@ fn m46_df_loc_range_str(interp: &mut Interpreter, args: &[u64]) -> Result<u64, V
     let (index_col, length) = m46_loc_range_check(recv, "loc_range_str", "ColumnStr")?;
     let (vals, nulls, _) = m37_col_fields(index_col);
     let vs = m37_read_list_str_lst(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut m46_keep: Vec<bool> = Vec::with_capacity(length as usize);
     for i in 0..length as usize {
         if ns.get(i).copied().unwrap_or(false) { m46_keep.push(false); continue; }
@@ -19613,7 +19622,7 @@ fn m46_df_loc_range_bool(interp: &mut Interpreter, args: &[u64]) -> Result<u64, 
     let (index_col, length) = m46_loc_range_check(recv, "loc_range_bool", "ColumnBool")?;
     let (vals, nulls, _) = m37_col_fields(index_col);
     let vs = m37_read_list_bool(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut m46_keep: Vec<bool> = Vec::with_capacity(length as usize);
     // For bool, false < true.  Use u8 cast for inclusive range.
     let s = if start { 1u8 } else { 0u8 };
@@ -19633,7 +19642,7 @@ fn m46_df_loc_range_datetime(interp: &mut Interpreter, args: &[u64]) -> Result<u
     let (index_col, length) = m46_loc_range_check(recv, "loc_range_datetime", "ColumnDateTime")?;
     let (vals, nulls, _) = m37_col_fields(index_col);
     let vs = m37_read_list_i64(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut m46_keep: Vec<bool> = Vec::with_capacity(length as usize);
     for i in 0..length as usize {
         if ns.get(i).copied().unwrap_or(false) { m46_keep.push(false); continue; }
@@ -19718,7 +19727,7 @@ fn m49_df_loc_range_multi_i64(interp: &mut Interpreter, args: &[u64]) -> Result<
     let (inner, length) = m49_loc_range_multi_check(recv, "loc_range_multi_i64", "ColumnI64")?;
     let (vals, nulls, _) = m37_col_fields(inner);
     let vs = m37_read_list_i64(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut keep: Vec<bool> = Vec::with_capacity(length as usize);
     for i in 0..length as usize {
         if ns.get(i).copied().unwrap_or(false) { keep.push(false); continue; }
@@ -19735,7 +19744,7 @@ fn m49_df_loc_range_multi_str(interp: &mut Interpreter, args: &[u64]) -> Result<
     let (inner, length) = m49_loc_range_multi_check(recv, "loc_range_multi_str", "ColumnStr")?;
     let (vals, nulls, _) = m37_col_fields(inner);
     let vs = m37_read_list_str_lst(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut keep: Vec<bool> = Vec::with_capacity(length as usize);
     for i in 0..length as usize {
         if ns.get(i).copied().unwrap_or(false) { keep.push(false); continue; }
@@ -19752,7 +19761,7 @@ fn m49_df_loc_range_multi_datetime(interp: &mut Interpreter, args: &[u64]) -> Re
     let (inner, length) = m49_loc_range_multi_check(recv, "loc_range_multi_datetime", "ColumnDateTime")?;
     let (vals, nulls, _) = m37_col_fields(inner);
     let vs = m37_read_list_i64(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut keep: Vec<bool> = Vec::with_capacity(length as usize);
     for i in 0..length as usize {
         if ns.get(i).copied().unwrap_or(false) { keep.push(false); continue; }
@@ -19813,7 +19822,7 @@ fn m51_df_loc_range_level_i64(interp: &mut Interpreter, args: &[u64]) -> Result<
     let (lvl, length) = m51_loc_range_level_check(recv, level, "loc_range_level_i64", "ColumnI64")?;
     let (vals, nulls, _) = m37_col_fields(lvl);
     let vs = m37_read_list_i64(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut keep: Vec<bool> = Vec::with_capacity(length as usize);
     for i in 0..length as usize {
         if ns.get(i).copied().unwrap_or(false) { keep.push(false); continue; }
@@ -19831,7 +19840,7 @@ fn m51_df_loc_range_level_str(interp: &mut Interpreter, args: &[u64]) -> Result<
     let (lvl, length) = m51_loc_range_level_check(recv, level, "loc_range_level_str", "ColumnStr")?;
     let (vals, nulls, _) = m37_col_fields(lvl);
     let vs = m37_read_list_str_lst(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut keep: Vec<bool> = Vec::with_capacity(length as usize);
     for i in 0..length as usize {
         if ns.get(i).copied().unwrap_or(false) { keep.push(false); continue; }
@@ -19849,7 +19858,7 @@ fn m51_df_loc_range_level_datetime(interp: &mut Interpreter, args: &[u64]) -> Re
     let (lvl, length) = m51_loc_range_level_check(recv, level, "loc_range_level_datetime", "ColumnDateTime")?;
     let (vals, nulls, _) = m37_col_fields(lvl);
     let vs = m37_read_list_i64(vals);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut keep: Vec<bool> = Vec::with_capacity(length as usize);
     for i in 0..length as usize {
         if ns.get(i).copied().unwrap_or(false) { keep.push(false); continue; }
@@ -20040,8 +20049,8 @@ fn m46_df_pivot_table_margins(interp: &mut Interpreter, args: &[u64]) -> Result<
     let mut m46_col_cells_i64: Vec<Vec<(i64, bool)>> = Vec::new();
     let mut m46_col_cells_f64: Vec<Vec<(f64, bool)>> = Vec::new();
     for cp in &m46_body_cols {
-        let (vals, nulls, _) = m37_col_fields(*cp);
-        let ns = m37_read_list_bool(nulls);
+        let (vals, nulls, length) = m37_col_fields(*cp);
+        let ns = m37_read_nulls(nulls, length);
         if m46_value_cls == "ColumnI64" {
             let vs = m37_read_list_i64(vals);
             let mut v: Vec<(i64, bool)> = Vec::with_capacity(m46_body_nrows as usize);
@@ -20122,8 +20131,8 @@ fn m46_df_pivot_table_margins(interp: &mut Interpreter, args: &[u64]) -> Result<
     let mut m46_out_cols: Vec<u64> = Vec::with_capacity(m46_out_names.len());
     // For each original body column, append its "All" cell.
     for ci in 0..m46_body_cols.len() {
-        let (vals, nulls, _) = m37_col_fields(m46_body_cols[ci]);
-        let ns = m37_read_list_bool(nulls);
+        let (vals, nulls, length) = m37_col_fields(m46_body_cols[ci]);
+        let ns = m37_read_nulls(nulls, length);
         let mut nu: Vec<bool> = ns;
         if m46_value_cls == "ColumnI64" {
             let mut vs: Vec<i64> = m37_read_list_i64(vals);
@@ -20146,8 +20155,8 @@ fn m46_df_pivot_table_margins(interp: &mut Interpreter, args: &[u64]) -> Result<
     // Extend the index by one row labeled "All" (stringified).
     let m46_new_index = if m46_body_idx != 0 {
         let m46_idx_cls = m38_col_class_name(m46_body_idx);
-        let (i_vals, i_nulls, _) = m37_col_fields(m46_body_idx);
-        let i_ns = m37_read_list_bool(i_nulls);
+        let (i_vals, i_nulls, i_len) = m37_col_fields(m46_body_idx);
+        let i_ns = m37_read_nulls(i_nulls, i_len);
         let mut new_nu: Vec<bool> = i_ns;
         match m46_idx_cls.as_str() {
             "ColumnStr" => {
@@ -20338,10 +20347,10 @@ fn m49_outer_multi_level(
     r_lvl: u64,
     emit: &[(Option<usize>, Option<usize>)],
 ) -> u64 {
-    let (l_vals, l_nulls, _) = m37_col_fields(l_lvl);
-    let (r_vals, r_nulls, _) = m37_col_fields(r_lvl);
-    let l_ns = m37_read_list_bool(l_nulls);
-    let r_ns = m37_read_list_bool(r_nulls);
+    let (l_vals, l_nulls, l_len) = m37_col_fields(l_lvl);
+    let (r_vals, r_nulls, r_len) = m37_col_fields(r_lvl);
+    let l_ns = m37_read_nulls(l_nulls, l_len);
+    let r_ns = m37_read_nulls(r_nulls, r_len);
     let l_i64 = if cls == "ColumnI64" || cls == "ColumnDateTime" { m37_read_list_i64(l_vals) } else { Vec::new() };
     let r_i64 = if cls == "ColumnI64" || cls == "ColumnDateTime" { m37_read_list_i64(r_vals) } else { Vec::new() };
     let l_f64 = if cls == "ColumnF64" { m37_read_list_f64(l_vals) } else { Vec::new() };
@@ -20402,8 +20411,8 @@ fn m46_outer_level_with_nulls(
     emit: &[(Option<usize>, Option<usize>)],
     take_lhs: bool,
 ) -> u64 {
-    let (vals, nulls, _) = m37_col_fields(src_col);
-    let ns = m37_read_list_bool(nulls);
+    let (vals, nulls, length) = m37_col_fields(src_col);
+    let ns = m37_read_nulls(nulls, length);
     let mut out_nulls: Vec<bool> = Vec::with_capacity(emit.len());
     let mut out_i64: Vec<i64> = Vec::new();
     let mut out_f64: Vec<f64> = Vec::new();
@@ -20507,7 +20516,7 @@ fn m47_col_rolling_min_periods(
     }
     let m47_w = m47_window as usize;
     let m47_mp = m47_min_periods as usize;
-    let m47_ns = m37_read_list_bool(m47_nulls);
+    let m47_ns = m37_read_nulls(m47_nulls, m47_length);
     // For each output position i: collect the non-null cells in the
     // backward-looking window of size up to w that ends at i (i.e. the
     // window is `[max(0, i-w+1), i]`).  Output is null if the count is
@@ -20788,7 +20797,7 @@ fn m47_col_cat_codes(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmEr
     let m47_recv = arg_u64(args, 0);
     let (m47_codes_lst, m47_nulls_lst, m47_len) = m37_col_fields(m47_recv);
     let m47_codes = m37_read_list_i64(m47_codes_lst);
-    let m47_nulls = m37_read_list_bool(m47_nulls_lst);
+    let m47_nulls = m37_read_nulls(m47_nulls_lst, m47_len);
     let m47_v_lst = m37_alloc_list_i64(interp, &m47_codes);
     let m47_n_lst = m37_alloc_list_bool(interp, &m47_nulls);
     Ok(m37_alloc_column(interp, "ColumnI64", m47_v_lst, m47_n_lst, m47_len) as u64)
@@ -20814,7 +20823,7 @@ fn m47_col_cat_to_strings(interp: &mut Interpreter, args: &[u64]) -> Result<u64,
     let m47_recv = arg_u64(args, 0);
     let (m47_codes_lst, m47_nulls_lst, m47_len) = m37_col_fields(m47_recv);
     let m47_codes = m37_read_list_i64(m47_codes_lst);
-    let m47_nulls = m37_read_list_bool(m47_nulls_lst);
+    let m47_nulls = m37_read_nulls(m47_nulls_lst, m47_len);
     let m47_cats_ptr = m47_col_cat_categories_ptr(m47_recv);
     let m47_cats = m37_read_list_str_lst(m47_cats_ptr);
     let m47_out: Vec<String> = (0..m47_len as usize).map(|i| {
@@ -20846,7 +20855,7 @@ fn m47_col_cat_get(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmErro
             ),
         });
     }
-    let m47_nulls = m37_read_list_bool(m47_nulls_lst);
+    let m47_nulls = m37_read_nulls(m47_nulls_lst, m47_len);
     if m47_nulls.get(m47_i as usize).copied().unwrap_or(false) {
         return Ok(NONE_SENTINEL);
     }
@@ -22311,7 +22320,7 @@ fn m50a_column_cells_as_json(m50a_col_ptr: u64) -> Vec<String> {
     let (vals, nulls, length) = m37_col_fields(m50a_col_ptr);
     let class_name = m50a_col_class_name(m50a_col_ptr);
     let dtype = m50a_dtype_for_class(&class_name);
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
     let mut out: Vec<String> = Vec::with_capacity(length as usize);
     for i in 0..length as usize {
         if ns.get(i).copied().unwrap_or(false) {
@@ -22637,7 +22646,7 @@ fn m50a_apply_filter(
 
     // Build the mask + nulls vector.
     let (vals, nulls, length) = m37_col_fields(col_ptr);
-    let nulls_vec = m37_read_list_bool(nulls);
+    let nulls_vec = m37_read_nulls(nulls, length);
     let n = length as usize;
 
     if !["eq", "ne", "gt", "lt", "ge", "le"].contains(&m50a_op) {
@@ -23024,7 +23033,7 @@ fn m50a_build_filter_mask(
     let class_name = m50a_col_class_name(col_ptr);
     let dtype = m50a_dtype_for_class(&class_name);
     let (vals, nulls, length) = m37_col_fields(col_ptr);
-    let nulls_vec = m37_read_list_bool(nulls);
+    let nulls_vec = m37_read_nulls(nulls, length);
     let n = length as usize;
 
     if !["eq", "ne", "gt", "lt", "ge", "le"].contains(&m50a_op) {
@@ -23489,7 +23498,7 @@ fn m51_rolling_per_column(
     let n = length as usize;
     let w = window as usize;
     let mp = min_periods.max(1) as usize;
-    let ns = m37_read_list_bool(nulls);
+    let ns = m37_read_nulls(nulls, length);
 
     // Window endpoints (inclusive [lo, hi]) for output position i.
     // For center=true the window is symmetric with the larger half on
