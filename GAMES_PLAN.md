@@ -293,7 +293,7 @@ Each milestone is a self-contained agent run. Tag them M52 onward (HANDOFF's las
 | **M54 (Complete)** | `gfx` audio + fonts + text | ~600 Rust + ~80 test Spy | shared-infra (audio init shared by SFX + music; combined Phase A at ~35%) |
 | **M55 (Complete)** | Snake game | ~400 Spy | net-new-feature (pure user code; one commit when it plays) |
 | **M56 (Complete)** | Tetris game | ~600 Spy | net-new-feature |
-| **M57** | Space Shooter | ~900 Spy | net-new-feature |
+| **M57 (Complete)** | Space Shooter | ~639 Spy (vector art, no PNG sprites) | net-new-feature |
 | **M58** | Polish: high scores via sqlite, fullscreen, settings persistence, restart-without-relaunch | ~300 Rust + ~200 Spy | shared-infra |
 
 After M52-M58 ships you have three working games + the `gfx` stdlib + an honest demonstration that StrictPy can host real desktop applications. Total estimated effort: **~4500 LOC** across ~6-7 agent sessions.

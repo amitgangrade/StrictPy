@@ -30,22 +30,54 @@ Everything you need to resume is in:
 ## Current head
 
 - Branch: `main`
-- Latest commit: post-M51 grab-bag (RollingWindow `71f697b` + pivot fix `10584f5` already on origin; grab-bag layered on top)
-- Tests passing: **1102 / 0 fail / 1 ignored** (`cargo test --workspace --release`)
+- Latest commit: **M57 Space Shooter** (`951baa6`) — third reference game on the gfx stack
+- Tests passing: **1103 / 0 fail / 1 ignored** (M57 adds 1 compile-only test `compiler/tests/space_shooter_demo_runs.rs`)
 
 ## Status snapshot
 
 | Metric | Value |
 |---|---:|
-| Milestones complete on main | M0–M56 **+ M51** (M51 landed after the games stack — see ordering note above) |
+| Milestones complete on main | M0–M57 **+ M51** (M51 landed after M56 — see ordering note above) |
 | **v0.2.0 release** | **Tagged at M30 (commit 121483f)** |
-| Tests | **1102** / 0 fail / 1 ignored (`cargo test --workspace --release`) |
-| Bugs | 35 / 35 / **0 deferred** + 1 known unresolved (Snake "moves only on key press" on Windows; see M55 below) |
+| Tests | **1103** / 0 fail / 1 ignored (`cargo test --workspace --release`) |
+| Bugs | 35 / 35 / **0 deferred** + 1 known unresolved (Snake/Tetris Windows input/frame-timing quirk; see M55/M56) |
 | Stdlib modules | 39 (no change) |
 | Stdlib classes | **26** (M51's `RollingWindow`; M52-M54's Window/Event/Image/Sound/Music/Font; the M37-M47 tabular Column/DataFrame family) |
-| Example programs | **120** (+2 M51: remote's `tabular_m51_rolling_window_demo.spy`) |
-| Lesson 1 streak | 39 clean-commit agents (M28 → M56). **M51 is an asterisk** — collision + delegate-blind agent; orchestrator-verified, not a self-gated commit (see M51 section). |
+| Example programs | **121** (+1 M57: `examples/games/space_shooter.spy`) |
+| Reference games | **3** — Snake (M55), Tetris (M56), Space Shooter (M57), all on the `gfx`/SDL2 stack |
+| Lesson 1 streak | 40 clean-commit agents (M28 → M57). **M51 + M57 are asterisks** — delegate-blind agents (sandbox blocked builds); orchestrator-verified, not self-gated. |
 | Benchmark suites | 3 (tabular suite gained the M51 `merge_cat_codes` cell) |
+
+## M57 — completed (this session — Space Shooter, delegate-blind)
+
+Third reference desktop game on the M52-M54 `gfx` stack (after M55 Snake +
+M56 Tetris). Delegated to a sub-agent in an isolation worktree whose
+sandbox again blocked all `cargo`/`python`, so it wrote **639 LOC of
+StrictPy blind** and the orchestrator built, ran the asset generator, and
+verified. Merged as `951baa6` (clean fast-forward — the agent branched
+from current main HEAD, no collision this time).
+
+- `examples/games/space_shooter.spy` (~639 LOC) — 800×600 vertical
+  shooter, **all vector art** (filled-triangle ship via `draw_line`
+  scanlines, rect enemies/bullets, ring-of-rects explosions, `draw_point`
+  parallax starfield) — deliberately **no PNG sprites / no M53 image
+  path**, so no asset-licensing concerns. 8-direction movement
+  (key_down/key_up tracked), rate-limited fire, enemy waves every ~1.1s
+  with random return fire, AABB collision, 3 lives + invuln flicker,
+  game-over overlay (R restart / Esc quit), live score, two-layer parallax.
+  Standard event-drain + despawn-by-rebuild idioms copied from snake/tetris.
+- `examples/games/space_shooter/assets/` — `_generate_assets.py` (square-
+  wave SFX, modeled on snake's) produced `shoot/explosion/hit/gameover.wav`
+  (orchestrator ran it); `font.ttf` (DejaVu CC0 copy); `CREDITS.md`.
+- `compiler/tests/space_shooter_demo_runs.rs` — compile-only test (passes
+  first try — the blind-written game typechecks cleanly).
+- `LANGUAGE_GUIDE.md` §12.8 walkthrough (entity lists, AABB, starfield).
+
+**Verification note:** compile-only test green, but like Snake/Tetris the
+game is **not runtime-verified** (interactive; can't run in CI) and the
+`gfx` Windows input/frame-timing quirk (M55/M56) may affect it — a manual
+play-test on a desktop is the real gate. M58 (games polish: high scores,
+fullscreen, the input fix) is the natural next games milestone.
 
 ## M51 — completed (this session — reconciled after a parallel-work collision)
 

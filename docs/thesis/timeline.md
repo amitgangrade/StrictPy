@@ -1115,6 +1115,37 @@ empirical findings, both honest data:
 
 No language/compiler changes; new pure-bench infrastructure only.
 
+## M57 — Space Shooter (third reference game on the gfx stack) (2026-06-01)
+
+The third desktop game written in StrictPy on the M52-M54 `gfx`/SDL2
+stack, after M55 Snake and M56 Tetris. Delegated to a sub-agent whose
+isolation-worktree sandbox blocked all `cargo`/`python` (the now-familiar
+delegate-blind pattern), so it wrote **639 LOC of StrictPy blind** and the
+orchestrator built it, ran the asset generator, and verified — the
+compile-only test passed on the **first** build, evidence that careful
+study of the two existing games is enough to write a third one sight-unseen.
+
+`examples/games/space_shooter.spy`: an 800×600 vertical shooter rendered
+entirely in **vector art** — a filled-triangle player ship (drawn as
+`draw_line` scanlines), rectangle enemies and bullets, expanding
+ring-of-rects explosions, and a two-layer parallax starfield of
+`draw_point`s. No PNG sprites, so no M53 image path and no asset-licensing
+question. Mechanics: 8-direction movement with `key_down`/`key_up`
+tracking, rate-limited firing, enemy waves every ~1.1 s with random return
+fire, AABB collision, three lives with post-hit invulnerability flicker, a
+game-over overlay (R restarts, Escape quits), and a live score. It reuses
+the established game-shape from Snake/Tetris: a `final class` game state, a
+single 60-FPS frame-delta loop, event draining, and despawn-by-rebuild for
+entity lists. SFX (`shoot`/`explosion`/`hit`/`gameover`) are square-wave
+WAVs generated deterministically by a Python helper; the font is the
+bundled DejaVu CC0 copy. Like the other two games it is compile-verified
+but not runtime-verified (interactive), and inherits the unresolved
+Windows input/frame-timing quirk. After M57 the games stack has three
+playable titles; M58 (polish: high scores, fullscreen, the input fix)
+remains.
+
+---
+
 ## M51 — `tabular` RollingWindow + grab-bag (reconciled after a collision) (2026-06-01)
 
 Completed out of numeric order — after the M52-M56 games detour — as the
