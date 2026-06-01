@@ -832,14 +832,18 @@ deep-dive queued).
    - **ColumnCategorical explicit `is_ordered` bit** — M49 uses a heuristic; M51 extends the payload (or adds a sidecar bool) to replace it.
    - Estimated: ~1500-2000 LOC. Probably classified as **shared-infra** (RollingWindow is a new helper class touched by every rolling op) or possibly **cross-dispatch** if implemented as sealed subclass.
 
-3. **M48b — Memory deep-dive** (~smaller milestone after M49):
-   - M48 found StrictPy peak RSS runs 4-5× pandas at large
-     (filter/large: 1.07 GB vs 0.20 GB). Root cause: `List<T>` per-cell
-     overhead vs NumPy contiguous buffers.
-   - Investigate: is the cell overhead all M5 List<T> header allocation,
-     or also string-handle indirection? Profile + report.
-   - Possible v0.5 path: a "packed column" representation. Not
-     scoped for M48b — just measurement.
+3. **M48b — Memory deep-dive** — ✅ **DONE** (report:
+   `bench/TABULAR_MEMORY_REPORT_M48b.md`). Root-caused the 4–5× peak-RSS
+   gap to two v1 simplifications: (a) the **null mask stored as
+   `List[bool]` at 8 bytes/bool, carried on every column** (single biggest
+   line item — 64× a bit-packed mask), and (b) the **`List<T>` uniform
+   8-byte-slot** representation vs NumPy contiguous typed buffers; plus
+   secondary **un-interned strings** and **2× list-capacity slack** on
+   filter-style ops. Static byte model predicts ~4.3× for a mixed frame,
+   matching the measured 4–5×. **Highest-leverage fix (queued for v0.5):
+   pack the null mask** (bit/byte) → moves the gap toward ~2.5–3×; the
+   holistic endgame is a packed-column representation. Investigation only;
+   no code shipped.
 
 4. **M50b — Desktop UI frontend polish** (the natural M50a follow-up).
    - ~~M50a: HTTP transport~~ **SHIPPED** (post-M50a state above).
