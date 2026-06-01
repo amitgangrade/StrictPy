@@ -1,0 +1,639 @@
+"""space_shooter.spy — M57 reference game: a complete Space Shooter in StrictPy.
+
+An 800x600 vertical shooter.  The player ship sits near the bottom,
+moves in 8 directions with the arrow keys, and fires upward with the
+space bar (rate-limited).  Enemy waves spawn at the top and fly down,
+occasionally shooting back.  AABB collision resolves player-bullet vs
+enemy, and enemy/enemy-bullet vs player.  Three lives, a parallax
+starfield, and a score counter complete the loop.
+
+Controls:
+  - Arrow keys : move the ship (8-directional, clamped to the window)
+  - Space      : fire (capped at FIRE_COOLDOWN_MS between shots)
+  - R          : restart after game over
+  - Escape     : quit
+  - The window's close button: quit
+
+Mechanics:
+  - Player bullets travel up and despawn off the top edge.
+  - Enemies spawn every SPAWN_MS at a random x along the top, fall at a
+    steady speed, despawn off the bottom, and randomly fire downward.
+  - Enemy bullets travel down and despawn off the bottom edge.
+  - Collisions (axis-aligned bounding box):
+      * player bullet vs enemy   -> enemy dies, +SCORE_PER_KILL, boom
+      * enemy vs player          -> player loses a life, brief invuln
+      * enemy bullet vs player   -> player loses a life, brief invuln
+  - Explosions are an expanding ring of points that live a few frames.
+  - 3 lives; at 0 the game is over.  R restarts, Escape quits.
+
+Architecture: a single ~60 FPS loop.  Each iteration drains all pending
+events, advances the simulation by the measured frame delta (dt_ms),
+renders, then sleeps to pace the frame.  Entities live in one
+`List[Entity]`; despawning rebuilds the list from the survivors (Spy
+lists have no in-place removal).  The two starfield layers are
+`List[Tuple[f64, f64]]` rebuilt each frame as they scroll + wrap.
+
+Run from the repo root:
+    cargo build --workspace --release   # only needed once
+    ./target/release/spy examples/games/space_shooter.spy
+
+The compile-only test in compiler/tests/space_shooter_demo_runs.rs
+verifies the file typechecks + bytecode-compiles.  Real gameplay needs
+a desktop window — run it manually on your dev box.
+"""
+
+import gfx
+import time
+import random
+from gfx import Window, Event, Font, Sound
+
+# ── Layout constants ─────────────────────────────────────────────────
+final WIN_W: i32 = 800i32
+final WIN_H: i32 = 600i32
+
+# ── Timing ───────────────────────────────────────────────────────────
+final FRAME_MS: i64 = 16i64            # ~60 FPS pacing target
+final SPAWN_MS: i64 = 1100i64          # spacing between enemy spawns
+final FIRE_COOLDOWN_MS: i64 = 320i64   # ~3 player shots per second
+final ENEMY_FIRE_MS: i64 = 900i64      # min spacing between an enemy's shots
+final INVULN_MS: i64 = 1500i64         # post-hit invulnerability window
+final EXPLOSION_MS: i64 = 360i64       # explosion lifetime
+
+# ── Gameplay tuning ──────────────────────────────────────────────────
+final PLAYER_SPEED: f64 = 0.32         # pixels per millisecond
+final PLAYER_W: i32 = 36i32
+final PLAYER_H: i32 = 30i32
+final BULLET_W: i32 = 4i32
+final BULLET_H: i32 = 12i32
+final P_BULLET_SPEED: f64 = 0.62       # up (negative vy)
+final ENEMY_W: i32 = 34i32
+final ENEMY_H: i32 = 26i32
+final ENEMY_SPEED: f64 = 0.10          # down
+final E_BULLET_W: i32 = 6i32
+final E_BULLET_H: i32 = 10i32
+final E_BULLET_SPEED: f64 = 0.24       # down
+final ENEMY_FIRE_CHANCE: f64 = 0.012   # per-enemy per-frame fire roll
+final SCORE_PER_KILL: i64 = 10i64
+final START_LIVES: i32 = 3i32
+final NUM_STARS_FAR: i32 = 70i32
+final NUM_STARS_NEAR: i32 = 40i32
+final STAR_SPEED_FAR: f64 = 0.04
+final STAR_SPEED_NEAR: f64 = 0.12
+
+# ── Entity ───────────────────────────────────────────────────────────
+#
+# One class for every moving thing.  `kind` discriminates:
+#   "enemy"    — falls down, may shoot
+#   "p_bullet" — player projectile, travels up
+#   "e_bullet" — enemy projectile, travels down
+#   "boom"     — explosion effect (no collision, animates by age)
+# The player is kept separately on GameState (single, special-cased).
+
+final class Entity:
+    kind: str
+    x: f64                 # top-left corner
+    y: f64
+    vx: f64                # pixels per millisecond
+    vy: f64
+    w: i32
+    h: i32
+    age_ms: i64            # time alive (drives explosion animation)
+    last_fire_ms: i64      # for enemies: last time they shot
+
+    fn __init__(self, kind: str, x: f64, y: f64, vx: f64, vy: f64,
+                w: i32, h: i32) -> None:
+        self.kind = kind
+        self.x = x
+        self.y = y
+        self.vx = vx
+        self.vy = vy
+        self.w = w
+        self.h = h
+        self.age_ms = 0i64
+        self.last_fire_ms = 0i64
+
+# ── Game state ───────────────────────────────────────────────────────
+
+final class GameState:
+    # Player position (top-left corner) + velocity intent from keys.
+    px: f64
+    py: f64
+    move_x: i32            # -1 / 0 / 1 from left/right keys
+    move_y: i32            # -1 / 0 / 1 from up/down keys
+    last_fire_ms: i64      # last time the player fired
+    invuln_until_ms: i64   # player is invulnerable until this time
+    entities: List[Entity]
+    stars_far: List[Tuple[f64, f64]]
+    stars_near: List[Tuple[f64, f64]]
+    score: i64
+    lives: i32
+    last_spawn_ms: i64
+    game_over: bool
+
+    fn __init__(self) -> None:
+        self.px = f64(WIN_W / 2i32 - PLAYER_W / 2i32)
+        self.py = f64(WIN_H - PLAYER_H - 24i32)
+        self.move_x = 0i32
+        self.move_y = 0i32
+        self.last_fire_ms = 0i64
+        self.invuln_until_ms = 0i64
+        self.entities = []
+        self.stars_far = []
+        self.stars_near = []
+        self.score = 0i64
+        self.lives = START_LIVES
+        self.last_spawn_ms = 0i64
+        self.game_over = false
+
+# ── Starfield ────────────────────────────────────────────────────────
+
+fn make_stars(count: i32) -> List[Tuple[f64, f64]]:
+    """Random points scattered across the window."""
+    stars: List[Tuple[f64, f64]] = []
+    i: i32 = 0i32
+    while i < count:
+        sx: f64 = random.random() * f64(WIN_W)
+        sy: f64 = random.random() * f64(WIN_H)
+        stars.append((sx, sy))
+        i = i + 1i32
+    return stars
+
+fn step_stars(stars: List[Tuple[f64, f64]], speed: f64,
+              dt_ms: i64) -> List[Tuple[f64, f64]]:
+    """Scroll a star layer down by speed*dt, wrapping at the bottom.
+    Tuples are immutable, so rebuild the list with updated positions."""
+    out: List[Tuple[f64, f64]] = []
+    dy: f64 = speed * f64(dt_ms)
+    i: i32 = 0i32
+    n: i32 = i32(i64(len(stars)))
+    while i < n:
+        star: Tuple[f64, f64] = stars[i]
+        nx: f64 = star.0
+        ny: f64 = star.1 + dy
+        if ny >= f64(WIN_H):
+            ny = ny - f64(WIN_H)
+            nx = random.random() * f64(WIN_W)
+        out.append((nx, ny))
+        i = i + 1i32
+    return out
+
+# ── New game ─────────────────────────────────────────────────────────
+
+fn new_game() -> GameState:
+    s: GameState = GameState()
+    s.stars_far = make_stars(NUM_STARS_FAR)
+    s.stars_near = make_stars(NUM_STARS_NEAR)
+    now: i64 = time.now_ms()
+    s.last_spawn_ms = now
+    s.last_fire_ms = now - FIRE_COOLDOWN_MS
+    return s
+
+# ── AABB collision ───────────────────────────────────────────────────
+
+fn aabb_overlap(ax: f64, ay: f64, aw: i32, ah: i32,
+                bx: f64, by: f64, bw: i32, bh: i32) -> bool:
+    """True iff the two axis-aligned boxes overlap.  Corners are
+    top-left; width/height are in pixels."""
+    if ax + f64(aw) <= bx:
+        return false
+    if bx + f64(bw) <= ax:
+        return false
+    if ay + f64(ah) <= by:
+        return false
+    if by + f64(bh) <= ay:
+        return false
+    return true
+
+# ── Spawning helpers ─────────────────────────────────────────────────
+
+fn spawn_enemy(state: GameState) -> None:
+    rx: f64 = random.random() * f64(WIN_W - ENEMY_W)
+    e: Entity = Entity("enemy", rx, f64(-ENEMY_H), 0.0, ENEMY_SPEED,
+                       ENEMY_W, ENEMY_H)
+    state.entities.append(e)
+
+fn spawn_player_bullet(state: GameState) -> None:
+    bx: f64 = state.px + f64(PLAYER_W / 2i32 - BULLET_W / 2i32)
+    by: f64 = state.py - f64(BULLET_H)
+    b: Entity = Entity("p_bullet", bx, by, 0.0, -P_BULLET_SPEED,
+                       BULLET_W, BULLET_H)
+    state.entities.append(b)
+
+fn spawn_enemy_bullet(state: GameState, e: Entity) -> None:
+    bx: f64 = e.x + f64(e.w / 2i32 - E_BULLET_W / 2i32)
+    by: f64 = e.y + f64(e.h)
+    b: Entity = Entity("e_bullet", bx, by, 0.0, E_BULLET_SPEED,
+                       E_BULLET_W, E_BULLET_H)
+    state.entities.append(b)
+
+fn spawn_explosion(state: GameState, cx: f64, cy: f64) -> None:
+    b: Entity = Entity("boom", cx, cy, 0.0, 0.0, 0i32, 0i32)
+    state.entities.append(b)
+
+# ── Simulation step ──────────────────────────────────────────────────
+
+fn move_player(state: GameState, dt_ms: i64) -> None:
+    d: f64 = PLAYER_SPEED * f64(dt_ms)
+    state.px = state.px + f64(state.move_x) * d
+    state.py = state.py + f64(state.move_y) * d
+    # Clamp to the window.
+    max_x: f64 = f64(WIN_W - PLAYER_W)
+    max_y: f64 = f64(WIN_H - PLAYER_H)
+    if state.px < 0.0:
+        state.px = 0.0
+    if state.px > max_x:
+        state.px = max_x
+    if state.py < 0.0:
+        state.py = 0.0
+    if state.py > max_y:
+        state.py = max_y
+
+fn try_fire(state: GameState, now: i64, shoot: Sound) -> None:
+    if (now - state.last_fire_ms) >= FIRE_COOLDOWN_MS:
+        spawn_player_bullet(state)
+        state.last_fire_ms = now
+        gfx.play_sound(shoot)
+
+fn integrate(state: GameState, dt_ms: i64, now: i64) -> None:
+    """Advance every entity, let enemies fire, and age explosions."""
+    i: i32 = 0i32
+    n: i32 = i32(i64(len(state.entities)))
+    while i < n:
+        e: Entity = state.entities[i]
+        e.x = e.x + e.vx * f64(dt_ms)
+        e.y = e.y + e.vy * f64(dt_ms)
+        e.age_ms = e.age_ms + dt_ms
+        # Enemies randomly shoot downward, rate-limited per enemy.
+        if e.kind == "enemy":
+            if (now - e.last_fire_ms) >= ENEMY_FIRE_MS:
+                if random.random() < ENEMY_FIRE_CHANCE:
+                    spawn_enemy_bullet(state, e)
+                    e.last_fire_ms = now
+        i = i + 1i32
+
+fn handle_collisions(state: GameState, now: i64,
+                     boom_sfx: Sound, hit_sfx: Sound) -> None:
+    """Player-bullet vs enemy, then enemy / enemy-bullet vs player.
+    Enemies and player bullets that collide are flagged dead and
+    filtered out in despawn()."""
+    # We mark deaths by collecting explosion spawns + a kill set via
+    # rebuilding.  Simplest: do two passes over a snapshot length.
+    n: i32 = i32(i64(len(state.entities)))
+    # Track which indices died this frame using a parallel bool list.
+    dead: List[bool] = []
+    k: i32 = 0i32
+    while k < n:
+        dead.append(false)
+        k = k + 1i32
+
+    # Pass 1: player bullets vs enemies.
+    i: i32 = 0i32
+    while i < n:
+        bullet: Entity = state.entities[i]
+        if bullet.kind == "p_bullet" and not dead[i]:
+            j: i32 = 0i32
+            while j < n:
+                enemy: Entity = state.entities[j]
+                if enemy.kind == "enemy" and not dead[j]:
+                    if aabb_overlap(bullet.x, bullet.y, bullet.w, bullet.h,
+                                    enemy.x, enemy.y, enemy.w, enemy.h):
+                        dead[i] = true
+                        dead[j] = true
+                        state.score = state.score + SCORE_PER_KILL
+                        spawn_explosion(state,
+                                        enemy.x + f64(enemy.w / 2i32),
+                                        enemy.y + f64(enemy.h / 2i32))
+                        gfx.play_sound(boom_sfx)
+                        j = n             # stop scanning enemies for this bullet
+                j = j + 1i32
+        i = i + 1i32
+
+    # Pass 2: enemies + enemy bullets vs player (unless invulnerable).
+    player_hit: bool = false
+    if now >= state.invuln_until_ms:
+        p: i32 = 0i32
+        while p < n:
+            e: Entity = state.entities[p]
+            is_threat: bool = (e.kind == "enemy") or (e.kind == "e_bullet")
+            if is_threat and not dead[p]:
+                if aabb_overlap(state.px, state.py, PLAYER_W, PLAYER_H,
+                                e.x, e.y, e.w, e.h):
+                    dead[p] = true
+                    player_hit = true
+                    spawn_explosion(state, e.x + f64(e.w / 2i32),
+                                    e.y + f64(e.h / 2i32))
+            p = p + 1i32
+
+    if player_hit:
+        state.lives = state.lives - 1i32
+        state.invuln_until_ms = now + INVULN_MS
+        spawn_explosion(state, state.px + f64(PLAYER_W / 2i32),
+                        state.py + f64(PLAYER_H / 2i32))
+        gfx.play_sound(hit_sfx)
+        if state.lives <= 0i32:
+            state.game_over = true
+
+    # Rebuild the entity list from the survivors.  `dead` was sized to
+    # the original n; explosions spawned above were appended after, so
+    # they have indices >= n and are kept (not in `dead`).
+    survivors: List[Entity] = []
+    q: i32 = 0i32
+    total: i32 = i32(i64(len(state.entities)))
+    while q < total:
+        keep: bool = true
+        if q < n:
+            keep = not dead[q]
+        if keep:
+            survivors.append(state.entities[q])
+        q = q + 1i32
+    state.entities = survivors
+
+fn despawn(state: GameState) -> None:
+    """Drop entities that have flown off-screen or whose explosion
+    animation has finished."""
+    survivors: List[Entity] = []
+    i: i32 = 0i32
+    n: i32 = i32(i64(len(state.entities)))
+    while i < n:
+        e: Entity = state.entities[i]
+        alive: bool = true
+        if e.kind == "p_bullet":
+            if e.y + f64(e.h) < 0.0:
+                alive = false
+        elif e.kind == "e_bullet":
+            if e.y > f64(WIN_H):
+                alive = false
+        elif e.kind == "enemy":
+            if e.y > f64(WIN_H):
+                alive = false
+        elif e.kind == "boom":
+            if e.age_ms >= EXPLOSION_MS:
+                alive = false
+        if alive:
+            survivors.append(e)
+        i = i + 1i32
+    state.entities = survivors
+
+fn step(state: GameState, dt_ms: i64, now: i64,
+        boom_sfx: Sound, hit_sfx: Sound) -> None:
+    move_player(state, dt_ms)
+    integrate(state, dt_ms, now)
+    # Spawn an enemy on the wave timer.
+    if (now - state.last_spawn_ms) >= SPAWN_MS:
+        spawn_enemy(state)
+        state.last_spawn_ms = now
+    handle_collisions(state, now, boom_sfx, hit_sfx)
+    despawn(state)
+    # Scroll the parallax starfield.
+    state.stars_far = step_stars(state.stars_far, STAR_SPEED_FAR, dt_ms)
+    state.stars_near = step_stars(state.stars_near, STAR_SPEED_NEAR, dt_ms)
+
+# ── Input ────────────────────────────────────────────────────────────
+
+fn on_key_down(state: GameState, key: str) -> None:
+    if key == "left":
+        state.move_x = -1i32
+    elif key == "right":
+        state.move_x = 1i32
+    elif key == "up":
+        state.move_y = -1i32
+    elif key == "down":
+        state.move_y = 1i32
+
+fn on_key_up(state: GameState, key: str) -> None:
+    # Releasing a direction key stops motion on that axis, but only if
+    # the released key matches the current intent (so holding both and
+    # releasing one keeps the other).
+    if key == "left" and state.move_x == -1i32:
+        state.move_x = 0i32
+    elif key == "right" and state.move_x == 1i32:
+        state.move_x = 0i32
+    elif key == "up" and state.move_y == -1i32:
+        state.move_y = 0i32
+    elif key == "down" and state.move_y == 1i32:
+        state.move_y = 0i32
+
+# ── Rendering ────────────────────────────────────────────────────────
+
+fn draw_stars(win: Window, stars: List[Tuple[f64, f64]],
+              r: i32, g: i32, b: i32) -> None:
+    i: i32 = 0i32
+    n: i32 = i32(i64(len(stars)))
+    while i < n:
+        star: Tuple[f64, f64] = stars[i]
+        gfx.draw_point(win, i32(star.0), i32(star.1), r, g, b, 255i32)
+        i = i + 1i32
+
+fn draw_ship(win: Window, x: i32, y: i32, dim: bool) -> None:
+    """Player ship: a filled triangle drawn as horizontal scanlines of
+    draw_line, plus a small engine block.  `dim` flickers during the
+    post-hit invulnerability window."""
+    body_r: i32 = 120i32
+    body_g: i32 = 220i32
+    body_b: i32 = 255i32
+    if dim:
+        body_r = 60i32
+        body_g = 110i32
+        body_b = 130i32
+    # Triangle: apex at top-center, base at the bottom edge.  Scanline
+    # row `ry` spans from the left slope to the right slope.
+    ry: i32 = 0i32
+    while ry < PLAYER_H:
+        half: i32 = (ry * (PLAYER_W / 2i32)) / PLAYER_H
+        cx: i32 = x + PLAYER_W / 2i32
+        gfx.draw_line(win, cx - half, y + ry, cx + half, y + ry,
+                      body_r, body_g, body_b, 255i32)
+        ry = ry + 1i32
+    # Engine glow at the tail.
+    gfx.draw_rect(win, x + PLAYER_W / 2i32 - 4i32, y + PLAYER_H - 4i32,
+                  8i32, 6i32, 255i32, 160i32, 40i32, 255i32)
+
+fn draw_explosion(win: Window, e: Entity) -> None:
+    """Expanding ring of points.  Radius grows with age; colour fades
+    from white-hot to red."""
+    frac: f64 = f64(e.age_ms) / f64(EXPLOSION_MS)
+    radius: i32 = i32(frac * 22.0) + 2i32
+    rr: i32 = 255i32
+    gg: i32 = i32((1.0 - frac) * 200.0) + 40i32
+    bb: i32 = i32((1.0 - frac) * 80.0)
+    cx: i32 = i32(e.x)
+    cy: i32 = i32(e.y)
+    # 12 points around the ring, approximated without trig via a fixed
+    # set of unit offsets scaled by radius.
+    draw_ring_point(win, cx, cy, radius, 0i32, rr, gg, bb)
+    draw_ring_point(win, cx, cy, radius, 1i32, rr, gg, bb)
+    draw_ring_point(win, cx, cy, radius, 2i32, rr, gg, bb)
+    draw_ring_point(win, cx, cy, radius, 3i32, rr, gg, bb)
+    draw_ring_point(win, cx, cy, radius, 4i32, rr, gg, bb)
+    draw_ring_point(win, cx, cy, radius, 5i32, rr, gg, bb)
+    draw_ring_point(win, cx, cy, radius, 6i32, rr, gg, bb)
+    draw_ring_point(win, cx, cy, radius, 7i32, rr, gg, bb)
+
+fn draw_ring_point(win: Window, cx: i32, cy: i32, radius: i32,
+                   octant: i32, r: i32, g: i32, b: i32) -> None:
+    """Place one filled 2x2 blob at one of 8 compass directions around
+    (cx, cy) at the given radius.  Avoids trig by using fixed offsets."""
+    dx: i32 = 0i32
+    dy: i32 = 0i32
+    half: i32 = (radius * 7i32) / 10i32     # ~radius/sqrt(2) for diagonals
+    if octant == 0i32:
+        dx = radius
+        dy = 0i32
+    elif octant == 1i32:
+        dx = half
+        dy = half
+    elif octant == 2i32:
+        dx = 0i32
+        dy = radius
+    elif octant == 3i32:
+        dx = -half
+        dy = half
+    elif octant == 4i32:
+        dx = -radius
+        dy = 0i32
+    elif octant == 5i32:
+        dx = -half
+        dy = -half
+    elif octant == 6i32:
+        dx = 0i32
+        dy = -radius
+    else:
+        dx = half
+        dy = -half
+    gfx.draw_rect(win, cx + dx - 1i32, cy + dy - 1i32, 3i32, 3i32, r, g, b, 255i32)
+
+fn render(win: Window, font: Font, state: GameState, now: i64) -> None:
+    # Deep-space background.
+    gfx.clear(win, 8i32, 8i32, 20i32)
+
+    # Parallax starfield: far layer dim, near layer bright.
+    draw_stars(win, state.stars_far, 90i32, 90i32, 120i32)
+    draw_stars(win, state.stars_near, 200i32, 200i32, 230i32)
+
+    # Entities.
+    i: i32 = 0i32
+    n: i32 = i32(i64(len(state.entities)))
+    while i < n:
+        e: Entity = state.entities[i]
+        if e.kind == "enemy":
+            gfx.draw_rect(win, i32(e.x), i32(e.y), e.w, e.h,
+                          230i32, 70i32, 70i32, 255i32)
+            gfx.draw_rect_outline(win, i32(e.x), i32(e.y), e.w, e.h,
+                                  255i32, 160i32, 160i32, 255i32)
+            # Two "eyes" so the enemy reads as facing the player.
+            gfx.draw_rect(win, i32(e.x) + 6i32, i32(e.y) + e.h - 8i32,
+                          5i32, 5i32, 255i32, 220i32, 120i32, 255i32)
+            gfx.draw_rect(win, i32(e.x) + e.w - 11i32, i32(e.y) + e.h - 8i32,
+                          5i32, 5i32, 255i32, 220i32, 120i32, 255i32)
+        elif e.kind == "p_bullet":
+            gfx.draw_rect(win, i32(e.x), i32(e.y), e.w, e.h,
+                          255i32, 240i32, 120i32, 255i32)
+        elif e.kind == "e_bullet":
+            gfx.draw_rect(win, i32(e.x), i32(e.y), e.w, e.h,
+                          255i32, 120i32, 60i32, 255i32)
+        elif e.kind == "boom":
+            draw_explosion(win, e)
+        i = i + 1i32
+
+    # Player ship — hidden one-frame-in-two during invuln for a flicker.
+    if not state.game_over:
+        invuln: bool = now < state.invuln_until_ms
+        show: bool = true
+        if invuln:
+            # Flicker at ~8 Hz: visible on even 125 ms slices.
+            slice_id: i64 = now / 125i64
+            show = (slice_id % 2i64) == 0i64
+        if show:
+            draw_ship(win, i32(state.px), i32(state.py), invuln)
+
+    # HUD: score + lives along the top.
+    gfx.draw_rect(win, 0i32, 0i32, WIN_W, 36i32, 0i32, 0i32, 0i32, 140i32)
+    score_msg: str = "Score: " + str(state.score)
+    gfx.draw_text(win, font, score_msg, 12i32, 8i32, 240i32, 240i32, 240i32)
+    lives_msg: str = "Lives: " + str(i64(state.lives))
+    lsz: Tuple[i32, i32] = gfx.text_size(font, lives_msg)
+    gfx.draw_text(win, font, lives_msg, WIN_W - lsz.0 - 12i32, 8i32,
+                  240i32, 200i32, 200i32)
+
+    # Game-over overlay.
+    if state.game_over:
+        gfx.draw_rect(win, 0i32, 0i32, WIN_W, WIN_H, 0i32, 0i32, 0i32, 190i32)
+        msg1: str = "GAME OVER"
+        sz1: Tuple[i32, i32] = gfx.text_size(font, msg1)
+        gfx.draw_text(win, font, msg1,
+                      (WIN_W - sz1.0) / 2i32, WIN_H / 2i32 - 40i32,
+                      240i32, 100i32, 100i32)
+        msg2: str = "Press R to restart, Escape to quit"
+        sz2: Tuple[i32, i32] = gfx.text_size(font, msg2)
+        gfx.draw_text(win, font, msg2,
+                      (WIN_W - sz2.0) / 2i32, WIN_H / 2i32 + 4i32,
+                      220i32, 220i32, 220i32)
+
+    gfx.present(win)
+
+# ── Main ─────────────────────────────────────────────────────────────
+
+fn main() -> i32:
+    gfx.init()
+    gfx.audio_init()
+    random.seed(time.now_ms())
+
+    win: Window = gfx.create_window("Space Shooter — StrictPy M57", WIN_W, WIN_H)
+    font: Font = gfx.load_font("examples/games/space_shooter/assets/font.ttf", 22i32)
+    shoot: Sound = gfx.load_sound("examples/games/space_shooter/assets/shoot.wav")
+    boom: Sound = gfx.load_sound("examples/games/space_shooter/assets/explosion.wav")
+    hit: Sound = gfx.load_sound("examples/games/space_shooter/assets/hit.wav")
+
+    state: GameState = new_game()
+    running: bool = true
+    prev_ms: i64 = time.now_ms()
+
+    while running:
+        # Drain all pending events.  Nullable narrowing only takes
+        # effect inside `if X is not none:` blocks (M55 finding), so we
+        # loop until poll returns none via a sentinel boolean.
+        draining: bool = true
+        while draining:
+            ev_opt: Event? = gfx.poll_event(win)
+            if ev_opt is not none:
+                if ev_opt.kind == "quit":
+                    running = false
+                elif ev_opt.kind == "key_down":
+                    if ev_opt.key == "escape":
+                        running = false
+                    elif state.game_over and ev_opt.key == "r":
+                        state = new_game()
+                        prev_ms = time.now_ms()
+                    elif not state.game_over:
+                        if ev_opt.key == "space":
+                            try_fire(state, time.now_ms(), shoot)
+                        else:
+                            on_key_down(state, ev_opt.key)
+                elif ev_opt.kind == "key_up":
+                    on_key_up(state, ev_opt.key)
+            else:
+                draining = false
+
+        if not running:
+            break
+
+        # Frame delta drives the simulation; clamp it so a stalled
+        # window (e.g. dragged) doesn't teleport everything.
+        now: i64 = time.now_ms()
+        dt_ms: i64 = now - prev_ms
+        if dt_ms > 64i64:
+            dt_ms = 64i64
+        prev_ms = now
+
+        if not state.game_over:
+            step(state, dt_ms, now, boom, hit)
+
+        render(win, font, state, now)
+        time.sleep_ms(FRAME_MS)
+
+    gfx.free_font(font)
+    gfx.free_sound(shoot)
+    gfx.free_sound(boom)
+    gfx.free_sound(hit)
+    gfx.close_window(win)
+    return 0
