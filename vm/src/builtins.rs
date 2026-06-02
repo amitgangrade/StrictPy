@@ -11810,8 +11810,35 @@ fn m37_read_list_bool(lst: *const crate::object::ListRepr) -> Vec<bool> {
 /// a later phase swaps the body to unpack a bit-packed representation,
 /// which is why callers must pass the column `length`.
 fn m37_read_nulls(nulls: *const crate::object::ListRepr, length: i64) -> Vec<bool> {
-    let _ = length; // reserved for the packed phase
-    m37_read_list_bool(nulls)
+    // M59 Phase B: a column's null mask is stored as a `List[i64]` bitset
+    // (word `i>>6`, bit `i&63`) instead of a `List[bool]` — 64x denser
+    // (1 bit/cell vs the VM's 8 bytes/cell), the dominant fix for the
+    // tabular peak-RSS gap (see bench/TABULAR_MEMORY_REPORT_M48b.md).
+    let words = m37_read_list_i64(nulls);
+    let n = length.max(0) as usize;
+    let mut out = vec![false; n];
+    for i in 0..n {
+        let w = words.get(i >> 6).copied().unwrap_or(0) as u64;
+        out[i] = (w >> (i & 63)) & 1 == 1;
+    }
+    out
+}
+
+/// M59 Phase B: pack a boolean null mask into a `List[i64]` bitset
+/// (word `i>>6`, bit `i&63`).  Every Column's nulls slot holds this packed
+/// form; read it back with `m37_read_nulls`.  The intermediate list is kept
+/// alive by the conservative GC's stack scan (same as every other
+/// `m37_alloc_list_*` temporary), so no explicit rooting is needed.
+fn m37_pack_nulls(interp: &mut Interpreter, bools: &[bool]) -> *mut crate::object::ListRepr {
+    let nwords = (bools.len() + 63) / 64;
+    let mut words = vec![0u64; nwords];
+    for (i, b) in bools.iter().enumerate() {
+        if *b {
+            words[i >> 6] |= 1u64 << (i & 63);
+        }
+    }
+    let words_i64: Vec<i64> = words.iter().map(|w| *w as i64).collect();
+    m37_alloc_list_i64(interp, &words_i64)
 }
 
 /// Read each `i64` slot out of a List[i64] into a Vec.
@@ -11921,13 +11948,16 @@ fn m37_alloc_column(
     nulls_lst: *mut crate::object::ListRepr,
     length: i64,
 ) -> *mut u8 {
+    // M59 Phase B: pack the incoming generic List[bool] null mask into a
+    // List[i64] bitset before storing it (read back via m37_read_nulls).
+    let packed_nulls = m37_pack_nulls(interp, &m37_read_list_bool(nulls_lst));
     let p = m34_alloc_class_obj(interp, name, 24);
     unsafe {
         let v_slot = p.add(HDR) as *mut u64;
         let n_slot = p.add(HDR + 8) as *mut u64;
         let l_slot = p.add(HDR + 16) as *mut i64;
         std::ptr::write_unaligned(v_slot, values_lst as u64);
-        std::ptr::write_unaligned(n_slot, nulls_lst as u64);
+        std::ptr::write_unaligned(n_slot, packed_nulls as u64);
         std::ptr::write_unaligned(l_slot, length);
     }
     p
@@ -20700,6 +20730,9 @@ fn m47_alloc_col_categorical(
     // M51 Phase B: payload is 40 bytes — (codes, nulls, length,
     // categories, is_ordered).  The first 4 slots are the M47 layout;
     // the is_ordered bit at offset 32 replaces the M49 heuristic.
+    // M59 Phase B: the nulls slot holds a packed List[i64] bitset (like
+    // every other Column), read back via m37_read_nulls.
+    let packed_nulls = m37_pack_nulls(interp, &m37_read_list_bool(nulls_lst));
     let p = m34_alloc_class_obj(interp, "ColumnCategorical", 40);
     unsafe {
         let c_slot = p.add(HDR) as *mut u64;
@@ -20708,7 +20741,7 @@ fn m47_alloc_col_categorical(
         let cats_slot = p.add(HDR + 24) as *mut u64;
         let ord_slot = p.add(HDR + 32) as *mut u64;
         std::ptr::write_unaligned(c_slot, codes_lst as u64);
-        std::ptr::write_unaligned(n_slot, nulls_lst as u64);
+        std::ptr::write_unaligned(n_slot, packed_nulls as u64);
         std::ptr::write_unaligned(l_slot, length);
         std::ptr::write_unaligned(cats_slot, categories_lst as u64);
         std::ptr::write_unaligned(ord_slot, if ordered { 1u64 } else { 0u64 });

@@ -5,6 +5,40 @@ measurement + root-cause + recommendation, as scoped in HANDOFF's priority
 queue. A "packed column" representation is the suggested v0.5 follow-up but
 is explicitly out of scope here.
 
+---
+
+## UPDATE (M59): null-mask packing implemented — and what it actually moves
+
+M59 implemented this report's #1 recommendation: the per-column null mask
+is now stored as a `List[i64]` **bitset** (1 bit/cell) instead of a
+`List[bool]` (8 bytes/cell) — **64× denser**. Phase A routed all ~100 null
+reads through one accessor (`m37_read_nulls`); Phase B flipped that accessor
++ the two column allocators (`m37_alloc_column`, `m47_alloc_col_categorical`)
+to pack/unpack the bitset. Verified correct: 785/0 on the VM suite (every
+tabular op with nulls).
+
+**Honest empirical result** (probe: hold a 1M-row × 8-i64-col `read_csv`
+frame, `bench/m59_mem_probe.spy`): the **live-heap** footprint of the null
+masks drops exactly as predicted (8 cols × 8 MB = 64 MB → ~1 MB). **But
+peak/settled process RSS barely moved** (peak 649→642 MB; settled-after-GC
+206→205 MB). Two reasons, both important:
+1. **Peak RSS is dominated by construction transients**, not held null
+   masks — `read_csv` materialises millions of `String` cells + per-column
+   accumulators, which dwarf the mask savings at the high-water mark.
+2. **The conservative-GC allocator retains freed pages** — once the smaller
+   bitset replaces the `List[bool]`, the freed 63 MB is not returned to the
+   OS, so RSS plateaus near the peak even though the *live* heap shrank.
+
+**Takeaway:** null-mask packing is a real, exact reduction in **live working
+set** (it pays off for long-held frames and reduces re-allocation pressure),
+but it does **not** by itself shrink the 4–5× **peak**-RSS gap. Closing that
+additionally requires cutting construction transients — pack directly from
+the `Vec<bool>` accumulator (skip the intermediate `List[bool]`), exact-size
+filter results, and ideally return freed pages to the OS. Those are the
+genuine peak-RSS levers; M59 is the necessary foundation under them.
+
+---
+
 ## 1. The gap, measured (M48)
 
 The M48 benchmark suite measured peak process RSS (psutil, polled every

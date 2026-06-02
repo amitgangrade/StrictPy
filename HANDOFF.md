@@ -30,14 +30,14 @@ Everything you need to resume is in:
 ## Current head
 
 - Branch: `main`
-- Latest commit: **M58 games polish** — sqlite high scores + fullscreen/vsync + event-pump fix
-- Tests passing: **1106 / 0 fail / 1 ignored** (M58 adds 3 tests). NOTE: the `tabular.serve` tests (`m50a_tabular_serve.rs`) bind real TCP ports and **occasionally flake under the parallel full-workspace sweep** (port/timing contention) — they pass in isolation; not a regression.
+- Latest commit: **M59 null-mask packing** (Phase A db61652 + Phase B) — tabular null mask now a `List[i64]` bitset (1 bit/cell vs 8 bytes)
+- Tests passing: **1106 / 0 fail / 1 ignored** (M59 is behavior-preserving — no test count change; VM crate 785/0). NOTE: the `tabular.serve` tests bind real TCP ports and **occasionally flake under the parallel full-workspace sweep** (port contention) — they pass in isolation; not a regression.
 
 ## Status snapshot
 
 | Metric | Value |
 |---|---:|
-| Milestones complete on main | M0–M58 **+ M51** (M51 landed after M56 — see ordering note above) |
+| Milestones complete on main | M0–M59 **+ M51** (M51 landed after M56 — see ordering note above) |
 | **v0.2.0 release** | **Tagged at M30 (commit 121483f)** |
 | Tests | **1106** / 0 fail / 1 ignored (`cargo test --workspace --release`) |
 | Bugs | 35 / 35 / **0 deferred** + **0 unresolved** — the Snake/Tetris/Shooter Windows input/frame-timing quirk is **FIXED in M58** (vsync-off + persistent event pump), **runtime-verified** by a desktop play-test of Space Shooter (plays smoothly); same shared `gfx` fix applies to Snake/Tetris. |
@@ -47,6 +47,39 @@ Everything you need to resume is in:
 | Reference games | **3** — Snake (M55), Tetris (M56), Space Shooter (M57), all on the `gfx`/SDL2 stack — now with sqlite high scores + fullscreen (M58) |
 | Lesson 1 streak | 41 clean-commit agents (M28 → M58). **M51 / M57 / M58 are asterisks** — delegate-blind agents (sandbox blocked builds); orchestrator-verified, not self-gated. M58's agent couldn't even commit (edits landed in the main tree). |
 | Benchmark suites | 3 (tabular suite gained the M51 `merge_cat_codes` cell) |
+
+## M59 — completed (this session — null-mask packing, phased)
+
+Acted on M48b's #1 finding: the per-column null mask is now a `List[i64]`
+**bitset** (1 bit/cell) instead of a `List[bool]` (8 bytes/cell — the VM
+stores every list element in a u64 slot). **64× denser.** Done in two
+phases (orchestrator + a delegate-blind agent for the mechanical part):
+
+- **Phase A** (`db61652`, agent + orchestrator-verified): behaviour-
+  preserving refactor routing **all ~100 null-mask reads** through one new
+  accessor `m37_read_nulls(nulls, length)` (body unchanged — still
+  `m37_read_list_bool`). Verified 785/0 (no-op). The straggler grep
+  guaranteed zero null reads bypass the accessor — the precondition for B.
+- **Phase B** (orchestrator): flipped `m37_read_nulls` to unpack a bitset
+  + added `m37_pack_nulls`; the two column allocators (`m37_alloc_column`,
+  `m47_alloc_col_categorical`) now pack their incoming `List[bool]` nulls
+  into the bitset before storing. ColumnBool **values** stay generic (only
+  nulls packed). GC-safe: `List[i64]` is an existing value-list; intermediates
+  kept by the conservative GC's stack scan. Verified **785/0** (every
+  tabular op with nulls is correct on the packed representation).
+
+**Honest result — important.** The live-heap null-mask reduction is exact
+(probe: 1M×8-i64 frame, masks 64 MB → ~1 MB). **But peak/settled process
+RSS barely moved** (peak 649→642 MB, settled 206→205 MB) because (1) peak is
+dominated by construction transients (read_csv's millions of `String`
+cells), not held masks, and (2) the conservative-GC allocator **retains
+freed pages** so RSS doesn't drop to live-heap level. So M59 shrinks the
+**live working set** (helps long-held frames) but does **NOT** by itself
+close the 4–5× **peak**-RSS gap. The remaining peak levers (a future
+milestone): pack directly from the `Vec<bool>` accumulator (skip the
+intermediate `List[bool]`), exact-size filter results, return freed pages
+to the OS. Full write-up + numbers in `bench/TABULAR_MEMORY_REPORT_M48b.md`
+(UPDATE section). Probe tools: `bench/m59_mem_probe.spy` + `bench/m59_measure.py`.
 
 ## M58 — completed (this session — games polish, delegate-blind)
 

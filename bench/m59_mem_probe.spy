@@ -1,0 +1,41 @@
+"""M59 memory probe: load a large 8-column i64 frame and hold it so an
+external RSS poller can sample the peak. The null masks dominate the
+difference between the pre-M59 List[bool] (8 bytes/cell) representation
+and the M59 List[i64] bitset (1 bit/cell)."""
+
+import tabular
+import time
+from tabular import DataFrame
+
+fn churn() -> i64:
+    # Allocate a large throwaway list (dropped at return) to apply heap
+    # pressure and force GC cycles, so the read_csv null-mask transients
+    # get reclaimed before we sample the settled held-frame RSS.
+    junk: List[i64] = []
+    k: i64 = 0
+    while k < 2000000i64:
+        junk.append(k)
+        k = k + 1i64
+    return k
+
+fn main() -> i32:
+    schema: List[Tuple[str, str]] = []
+    schema.append(("c0", "i64"))
+    schema.append(("c1", "i64"))
+    schema.append(("c2", "i64"))
+    schema.append(("c3", "i64"))
+    schema.append(("c4", "i64"))
+    schema.append(("c5", "i64"))
+    schema.append(("c6", "i64"))
+    schema.append(("c7", "i64"))
+    df: DataFrame = tabular.read_csv("bench/data/m59_probe.csv", schema)
+    println("nrows=" + str(df.length()))
+    # Force GC to reclaim read_csv's null-mask transients before sampling.
+    c: i64 = 0
+    while c < 4i64:
+        println("churn=" + str(churn()))
+        c = c + 1i64
+    # df is still alive here; sample its SETTLED footprint during this hold.
+    time.sleep_ms(2500i64)
+    println("held nrows=" + str(df.length()))
+    return 0

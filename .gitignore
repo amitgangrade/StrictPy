@@ -38,3 +38,8 @@ __pycache__/
 # a tempdir (M38 follow-up); for now ignore the artifact.
 /_tabular_demo.csv
 
+
+# M59 memory probe (regenerable) + game runtime artifacts + graphify output
+bench/data/m59_probe.csv
+strictpy_games.db
+graphify-out/
