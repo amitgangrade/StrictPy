@@ -20,6 +20,7 @@ pub mod codegen;
 pub mod error;
 pub mod ir;
 pub mod lexer;
+pub mod modules;
 pub mod optimize;
 pub mod opts;
 pub mod parser;
@@ -47,22 +48,17 @@ pub fn compile_file(input: &Path, output: &Path) -> Result<(), CompileError> {
 
 /// Compile in-memory source to a `.spyc` byte buffer. Useful for tests that
 /// want to avoid touching the filesystem.
-pub fn compile_source(_file_name: String, source: &str) -> Result<Vec<u8>, CompileError> {
-    // ── M1: Lexer ────────────────────────────────────────────────────────
-    let mut lexer = lexer::Lexer::new(source);
-    let mut tokens = Vec::new();
-    loop {
-        let tok = lexer.next_token()?;
-        let is_eof = matches!(tok.kind, lexer::TokenKind::Eof);
-        tokens.push(tok);
-        if is_eof {
-            break;
-        }
-    }
-
-    // ── M1: Parser ───────────────────────────────────────────────────────
-    let mut parser = parser::Parser::new(tokens);
-    let module: Module = parser.parse_module()?;
+///
+/// `file_name` is the on-disk path of `source` (or a synthetic name). It is
+/// used as the root for **relative user-module import resolution** (M60):
+/// `import foo` resolves to `<dir-of-file_name>/foo.spy`, `import pkg.mod`
+/// to `<dir>/pkg/mod.spy`. Imported sibling modules are parsed, namespaced,
+/// and merged into a single compilation unit before resolution. If a path
+/// has no on-disk directory (inline `-c` code, bare snippet names), no user
+/// modules are reachable and behavior is identical to a single-file compile.
+pub fn compile_source(file_name: String, source: &str) -> Result<Vec<u8>, CompileError> {
+    // ── M60: parse + resolve user-module imports into one merged module ───
+    let module: Module = modules::resolve_and_merge(&file_name, source)?;
 
     // ── M2: Resolver ─────────────────────────────────────────────────────
     let resolved = resolver::Resolver::new().resolve(module)?;

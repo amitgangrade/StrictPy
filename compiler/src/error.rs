@@ -119,4 +119,6 @@ pub mod codes {
     /// `from x import y` where module `x` has no item named `y`,
     /// or `x.y` where `x` is a module but has no such attribute (M19).
     pub const LINK_NO_SUCH_MODULE_ITEM: ErrorCode = "E4002";
+    /// Circular user-module import detected (M60). ImportError-style.
+    pub const LINK_CIRCULAR_IMPORT: ErrorCode = "E4003";
 }

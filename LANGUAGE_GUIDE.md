@@ -411,7 +411,58 @@ You can import:
 - Stdlib classes via `from json import JsonValue` etc. — also `from re import Pattern`, `from sqlite3 import Connection, Cursor`, `from hashlib import Hasher`. M36 publishes these as proper module items rather than the M34/M35 prelude flatten, so a `from <mod> import <ClassName> as <Alias>` aliases the class cleanly. The bare class names also remain reachable after `import json` / `import re` / `import sqlite3` / `import hashlib` for back-compat with the M34/M35 surface.
 - Prelude classes directly: `from threading import Thread`
 
-You CANNOT import user-defined `.spy` modules in v0.3 (deferred to v0.4).
+You can also import **user-defined sibling `.spy` modules** (M60) — see the
+"User-module imports" subsection immediately below.
+
+### User-module imports (M60)
+
+You can import other `.spy` files that sit next to the importing file. Paths
+resolve **relative to the importing file's own directory**:
+
+```python
+# project/main.spy
+import mathutil                 # -> project/mathutil.spy
+from strutil import shout       # named import from project/strutil.spy
+import pkg.geo                  # -> project/pkg/geo.spy  (dotted subpackage)
+
+fn main() -> i32:
+    println(str(mathutil.add(2, 3)))        # qualified function call
+    println(str(mathutil.GOLDEN))           # qualified top-level constant
+    c: mathutil.Counter = mathutil.Counter(10)   # qualified type + ctor
+    c.bump(5)
+    println(shout("hi"))                     # from-imported name, bare
+    println(str(pkg.geo.area(4, 5)))         # dotted access
+    return 0
+```
+
+Rules and semantics:
+
+- **Resolution.** `import foo` → `<dir>/foo.spy`; `import pkg.mod` →
+  `<dir>/pkg/mod.spy`. A directory is a *package* simply by containing `.spy`
+  files — there is no `__init__` requirement. If no matching `.spy` file
+  exists, the name falls through to the stdlib import path (so `import math`
+  etc. are unaffected).
+- **Access forms.** After `import foo` use the qualified form
+  `foo.func(...)`, `foo.Class(...)`, `foo.CONST`, and the qualified type
+  `x: foo.Class`. After `from foo import a, B [as C]` use the bare names
+  (`a()`, `B`, `C`).
+- **Exports.** v1 rule: *every* top-level definition (functions, classes,
+  protocols, `final`/`let` globals, type aliases) is importable. There is no
+  `__all__`.
+- **Real types across boundaries.** Imported functions, classes, generics,
+  and globals keep their real declared types — the type checker resolves them
+  exactly as if they were declared locally.
+- **Circular imports** are detected at compile time and raise a clear
+  `error[E4003]: circular import detected: a -> b -> a` (ImportError-style)
+  instead of hanging.
+- **Implementation note.** Imports are resolved and the whole module graph is
+  merged into one compilation unit at compile time, with each module's
+  top-level names namespaced to avoid collisions. Cross-module calls are
+  therefore ordinary intra-module calls at run time and work identically
+  under the interpreter and the JIT.
+
+A complete runnable example lives at `examples/modules_demo/` (`main.spy`
+plus sibling `mathutil.spy` / `strutil.spy`).
 
 ---
 
@@ -3150,7 +3201,7 @@ backed by a single flat table `scores(game TEXT, name TEXT, score INTEGER, ts IN
 
 Two StrictPy gotchas this exercises:
 
-- **No user-module import.**  StrictPy v0.2 can only `import` stdlib modules — there is no way to `import highscores` from a sibling `.spy`.  So `highscores.spy` is a standalone reference + runnable demo, and each game **inlines** copies of the two helpers (prefixed `hs_*`).  If a future milestone adds user-module imports, the games should switch to importing the shared module.
+- **User-module imports (M60).**  StrictPy now supports importing sibling `.spy` modules (`import highscores` / `from highscores import ...`), resolved relative to the importing file's directory — see §3's "User-module imports" subsection. The games currently still **inline** copies of the two highscore helpers (prefixed `hs_*`) for historical reasons; with M60 they could instead import a shared `highscores.spy`.
 - **`i64(str)` is a char cast, not a parse.**  Casting a string with `i64(s)` converts code points; to parse a decimal string to an integer use the prelude `parse_i64(s)` (→ `I64FromStr`).  The score column comes back as `"1200"` etc., so `parse_i64` is required.
 
 Each game guards the save with a `score_saved: bool` field so the row is inserted exactly once, even though the game loop runs every frame while the overlay is shown.
