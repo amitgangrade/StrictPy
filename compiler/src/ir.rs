@@ -3859,6 +3859,54 @@ fn lower_call(
                             );
                         }
                     }
+                    // M61a: higher-order builtins. `map(fn, xs)` and
+                    // `filter(fn, xs)` lower 1:1 to their NativeFn with
+                    // `[closure, list]`; `reduce(fn, xs, init)` to
+                    // `[closure, list, init]`. The closure value is already
+                    // in `arg_vs[0]` (a ClosureNew pointer or a captured
+                    // function value). The VM re-enters the interpreter per
+                    // element via `call_callable`.
+                    if name == "map" || name == "filter" || name == "reduce" {
+                        let nid = match name.as_str() {
+                            "map" => NativeFn::Map as u32,
+                            "filter" => NativeFn::Filter as u32,
+                            _ => NativeFn::Reduce as u32,
+                        };
+                        return fb.push_value(
+                            ret_ty,
+                            ValueKind::Op {
+                                op: IROp::NativeCall { native_id: nid },
+                                args: arg_vs,
+                            },
+                        );
+                    }
+                    // `sorted_by(xs, key_fn)` → NativeFn::SortedBy with
+                    // `[list, closure, key_tag]`. The trailing tag tells the
+                    // VM how to compare the keys `key_fn` returns; infer it
+                    // from the key fn's return type.
+                    if name == "sorted_by" && args.len() == 2 {
+                        let key_fn_ty = ctx.expr_ty(expr_span(&args[1].value));
+                        let key_ret = match &key_fn_ty {
+                            Ty::Function { ret, .. } => (**ret).clone(),
+                            other => other.clone(),
+                        };
+                        let tag = sort_type_tag_for(&key_ret);
+                        let tag_v = fb.push_value(
+                            Ty::Primitive(PrimTy::I64),
+                            ValueKind::Const(IRConst::I64(tag as i64)),
+                        );
+                        // arg_vs is [xs, key_fn]; NativeFn wants
+                        // [list, closure, key_tag].
+                        let mut sb_args = arg_vs;
+                        sb_args.push(tag_v);
+                        return fb.push_value(
+                            ret_ty,
+                            ValueKind::Op {
+                                op: IROp::NativeCall { native_id: NativeFn::SortedBy as u32 },
+                                args: sb_args,
+                            },
+                        );
+                    }
                     // Otherwise a native.
                     let nid = NativeFn::from_name(name)
                         .map(|n| n as u32)
@@ -4359,6 +4407,35 @@ fn lower_method_call(
                     args: arg_vs,
                 },
             );
+        }
+    }
+
+    // M61a: `xs.sort_by(key_fn)` over `List[T]` — in-place sort by a user
+    // key function. NativeFn::ListSortBy wants [list, closure, key_tag];
+    // `arg_vs` is already [list, closure], so append the key-type tag
+    // inferred from the key fn's return type.
+    if method == "sort_by" {
+        if let Ty::Generic { base: TypeCtor::List, .. } = &recv_ty {
+            if let Some(key_arg) = args.first() {
+                let key_fn_ty = ctx.expr_ty(expr_span(&key_arg.value));
+                let key_ret = match &key_fn_ty {
+                    Ty::Function { ret, .. } => (**ret).clone(),
+                    other => other.clone(),
+                };
+                let tag = sort_type_tag_for(&key_ret);
+                let tag_v = fb.push_value(
+                    Ty::Primitive(PrimTy::I64),
+                    ValueKind::Const(IRConst::I64(tag as i64)),
+                );
+                arg_vs.push(tag_v);
+                return fb.push_value(
+                    ret_ty,
+                    ValueKind::Op {
+                        op: IROp::NativeCall { native_id: NativeFn::ListSortBy as u32 },
+                        args: arg_vs,
+                    },
+                );
+            }
         }
     }
 

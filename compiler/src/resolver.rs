@@ -6054,6 +6054,17 @@ impl Resolver {
             // the type-checker's tailored `sorted` handling below — same
             // pattern as `abs` / `min` / `max`.
             ("sorted",  Ty::Function { params: vec![], ret: Box::new(Ty::Never) }),
+            // M61a: higher-order builtins — user callbacks now cross the
+            // NativeFn boundary. Sentinel signatures (no params, Never ret);
+            // the type-checker replaces them with tailored handling (see
+            // synth_call: map/filter/reduce/sorted_by) and the IR lowerer
+            // emits the right NativeCall + closure-arg ordering + key tag.
+            // All forms are positional; `key=`/default forms are a later
+            // milestone.
+            ("map",       Ty::Function { params: vec![], ret: Box::new(Ty::Never) }),
+            ("filter",    Ty::Function { params: vec![], ret: Box::new(Ty::Never) }),
+            ("reduce",    Ty::Function { params: vec![], ret: Box::new(Ty::Never) }),
+            ("sorted_by", Ty::Function { params: vec![], ret: Box::new(Ty::Never) }),
             // M16: `isinstance(x, T)` — runtime class check. The second
             // argument names a user class (not a value). The typechecker
             // and IR lowerer treat this call specially; the sentinel

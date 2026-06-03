@@ -125,6 +125,30 @@ pub enum NativeFn {
     // last element; trap with IndexError on empty.
     ListPop    = 107,
 
+    // ── M61a: higher-order builtins (user callbacks across the NativeFn
+    //    boundary). Each takes a StrictPy closure value (a `ClosureRepr`
+    //    pointer) as a positional argument and the VM re-enters the
+    //    interpreter to invoke it per element. Keyword/`key=`/default forms
+    //    are deferred to a later Wave-2 milestone; everything here is
+    //    positional. See vm/src/builtins.rs and the re-entrant
+    //    `Interpreter::call_callable` helper in vm/src/interp.rs.
+    /// `map(fn, xs)` — args: `[closure_ptr, list_ptr]`. Returns a fresh list
+    /// of `fn(x)` for each `x` in `xs`. Element types are erased (raw u64
+    /// slots), so no type-tag operand is needed.
+    Map        = 108,
+    /// `filter(fn, xs)` — args: `[closure_ptr, list_ptr]`. `fn` returns bool.
+    Filter     = 109,
+    /// `reduce(fn, xs, init)` — args: `[closure_ptr, list_ptr, init_u64]`.
+    /// Left fold: `acc = fn(acc, x)` starting from `init`.
+    Reduce     = 110,
+    /// `sorted_by(xs, key_fn)` — args: `[list_ptr, closure_ptr, key_tag_u32]`.
+    /// Returns a fresh list sorted by the comparable key `key_fn(x)`; the
+    /// trailing type-tag picks the key comparator (TypeTag::I64/F64/Ref).
+    SortedBy   = 111,
+    /// In-place `xs.sort_by(key_fn)` — args:
+    /// `[list_ptr, closure_ptr, key_tag_u32]`.
+    ListSortBy = 112,
+
     // ── 130–149: `sys` module (M19) ─────────────────────────────────────
     // Foundation milestone for a real stdlib: the import-resolver and
     // module-attribute typecheck were both new in M19 (no built-in
@@ -2405,6 +2429,12 @@ impl NativeFn {
             106 => Some(Self::ListSorted),
             // real-world: fix — see `ListPop` definition above.
             107 => Some(Self::ListPop),
+            // M61a: higher-order builtins.
+            108 => Some(Self::Map),
+            109 => Some(Self::Filter),
+            110 => Some(Self::Reduce),
+            111 => Some(Self::SortedBy),
+            112 => Some(Self::ListSortBy),
             // M19: sys module.
             130 => Some(Self::SysArgv),
             131 => Some(Self::SysExit),
@@ -3154,6 +3184,16 @@ impl NativeFn {
             // top-level lower_call path.
             "sort"        => Some(Self::ListSort),
             "sorted"      => Some(Self::ListSorted),
+            // M61a: higher-order builtins. `map`/`filter`/`reduce`/
+            // `sorted_by` are special-cased in the IR lowerer (closure-arg
+            // ordering + key-type tag), but registering them here keeps the
+            // name table complete. `sort_by` dispatches via the method-call
+            // path (resolve_native_method on List receivers).
+            "map"         => Some(Self::Map),
+            "filter"      => Some(Self::Filter),
+            "reduce"      => Some(Self::Reduce),
+            "sorted_by"   => Some(Self::SortedBy),
+            "sort_by"     => Some(Self::ListSortBy),
             // real-world: fix — `xs.pop()` lowered through the method
             // dispatcher. The receiver is implicit (the list pointer),
             // so the IR appends it as the first argument before the call.
