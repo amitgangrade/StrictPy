@@ -43,6 +43,9 @@ fn write(dir: &Path, rel: &str, contents: &str) -> PathBuf {
 /// run it, returning (exit_code, stdout).
 fn compile_and_run(dir: &Path, main: &Path) -> (i32, String) {
     let out = dir.join("__spycache__").join("main.spyc");
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent).expect("create __spycache__ dir");
+    }
     compile_file(main, &out).unwrap_or_else(|e| panic!("compile error: {e}"));
     run_file_capture(&out).expect("run")
 }
@@ -56,7 +59,7 @@ fn basic_import_qualified_access() {
         &dir,
         "mathutil.spy",
         "\
-ANSWER: i64 = 42
+final ANSWER: i64 = 42
 
 fn add(a: i64, b: i64) -> i64:
     return a + b

@@ -1,6 +1,6 @@
 # strutil.spy — sibling user module providing string helpers (M60).
 
-EXCLAIM: str = "!"
+final EXCLAIM: str = "!"
 
 fn shout(s: str) -> str:
     return s + EXCLAIM

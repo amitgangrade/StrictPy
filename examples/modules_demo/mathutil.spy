@@ -3,7 +3,7 @@
 # Demonstrates: top-level function, a top-level `final` constant, and a
 # cross-module class that main.spy constructs and calls methods on.
 
-GOLDEN: i64 = 1618
+final GOLDEN: i64 = 1618
 
 fn add(a: i64, b: i64) -> i64:
     return a + b
