@@ -1,0 +1,27 @@
+# mathutil.spy — a sibling user module imported by main.spy (M60).
+#
+# Demonstrates: top-level function, a top-level `final` constant, and a
+# cross-module class that main.spy constructs and calls methods on.
+
+GOLDEN: i64 = 1618
+
+fn add(a: i64, b: i64) -> i64:
+    return a + b
+
+fn square(x: i64) -> i64:
+    # Internal call to a sibling top-level function in the same module:
+    # this must keep resolving to *this* module's `add` after merging.
+    return mul(x, x)
+
+fn mul(a: i64, b: i64) -> i64:
+    return a * b
+
+final class Counter:
+    value: i64
+    fn __init__(self, start: i64) -> None:
+        self.value = start
+    fn bump(self, by: i64) -> i64:
+        self.value = add(self.value, by)
+        return self.value
+    fn get(self) -> i64:
+        return self.value
