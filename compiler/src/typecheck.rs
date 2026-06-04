@@ -1124,6 +1124,136 @@ impl TypeChecker {
                     return Err(type_err(span, codes::TYPE_MISMATCH,
                         format!("sorted expects a List, got {}", t.display())));
                 }
+                // M61a: higher-order builtins. User callbacks now cross the
+                // NativeFn boundary, so these take a closure value plus a
+                // List and re-enter the interpreter per element. All forms
+                // are positional; `key=`/default forms come later.
+                //
+                //   map(fn: T -> U, xs: List[T]) -> List[U]
+                "map" => {
+                    if args.len() != 2 {
+                        return Err(type_err(span, codes::TYPE_ARITY,
+                            "map takes 2 arguments: (fn, xs)".into()));
+                    }
+                    let xs_ty = self.synth_expr(&args[1].value, env, ctx, r)?;
+                    let elem = match &xs_ty {
+                        Ty::Generic { base: TypeCtor::List, args: a } if a.len() == 1 => a[0].clone(),
+                        _ => return Err(type_err(span, codes::TYPE_MISMATCH,
+                            format!("map: second argument must be a List, got {}", xs_ty.display()))),
+                    };
+                    // Check the callback against `T -> U`, inferring U from its
+                    // declared return type.
+                    let fn_ty = self.synth_expr(&args[0].value, env, ctx, r)?;
+                    let u = match &fn_ty {
+                        Ty::Function { params, ret } if params.len() == 1 => {
+                            if !type_assignable(&elem, &params[0]) {
+                                return Err(type_err(span, codes::TYPE_MISMATCH,
+                                    format!("map: callback expects {} but list elements are {}",
+                                            params[0].display(), elem.display())));
+                            }
+                            (**ret).clone()
+                        }
+                        _ => return Err(type_err(span, codes::TYPE_MISMATCH,
+                            "map: first argument must be a 1-parameter function".into())),
+                    };
+                    return Ok(Ty::Generic { base: TypeCtor::List, args: vec![u] });
+                }
+                //   filter(fn: T -> bool, xs: List[T]) -> List[T]
+                "filter" => {
+                    if args.len() != 2 {
+                        return Err(type_err(span, codes::TYPE_ARITY,
+                            "filter takes 2 arguments: (fn, xs)".into()));
+                    }
+                    let xs_ty = self.synth_expr(&args[1].value, env, ctx, r)?;
+                    let elem = match &xs_ty {
+                        Ty::Generic { base: TypeCtor::List, args: a } if a.len() == 1 => a[0].clone(),
+                        _ => return Err(type_err(span, codes::TYPE_MISMATCH,
+                            format!("filter: second argument must be a List, got {}", xs_ty.display()))),
+                    };
+                    let fn_ty = self.synth_expr(&args[0].value, env, ctx, r)?;
+                    match &fn_ty {
+                        Ty::Function { params, ret } if params.len() == 1 => {
+                            if !type_assignable(&elem, &params[0]) {
+                                return Err(type_err(span, codes::TYPE_MISMATCH,
+                                    format!("filter: predicate expects {} but list elements are {}",
+                                            params[0].display(), elem.display())));
+                            }
+                            if !matches!(**ret, Ty::Primitive(PrimTy::Bool)) {
+                                return Err(type_err(span, codes::TYPE_MISMATCH,
+                                    format!("filter: predicate must return bool, got {}", ret.display())));
+                            }
+                        }
+                        _ => return Err(type_err(span, codes::TYPE_MISMATCH,
+                            "filter: first argument must be a 1-parameter function".into())),
+                    }
+                    return Ok(Ty::Generic { base: TypeCtor::List, args: vec![elem] });
+                }
+                //   reduce(fn: (U, T) -> U, xs: List[T], init: U) -> U
+                "reduce" => {
+                    if args.len() != 3 {
+                        return Err(type_err(span, codes::TYPE_ARITY,
+                            "reduce takes 3 arguments: (fn, xs, init)".into()));
+                    }
+                    let xs_ty = self.synth_expr(&args[1].value, env, ctx, r)?;
+                    let elem = match &xs_ty {
+                        Ty::Generic { base: TypeCtor::List, args: a } if a.len() == 1 => a[0].clone(),
+                        _ => return Err(type_err(span, codes::TYPE_MISMATCH,
+                            format!("reduce: second argument must be a List, got {}", xs_ty.display()))),
+                    };
+                    let fn_ty = self.synth_expr(&args[0].value, env, ctx, r)?;
+                    let acc_ty = match &fn_ty {
+                        Ty::Function { params, ret } if params.len() == 2 => {
+                            // The accumulator type U is the callback's first
+                            // param. Check `init` against it so unsuffixed int
+                            // literals (e.g. `reduce(..., 0)`) take width U.
+                            let _ = self.check_expr(&args[2].value, &params[0], env, ctx, r)?;
+                            if !type_assignable(&elem, &params[1]) {
+                                return Err(type_err(span, codes::TYPE_MISMATCH,
+                                    format!("reduce: list elements {} not assignable to callback param {}",
+                                            elem.display(), params[1].display())));
+                            }
+                            if !type_assignable(ret, &params[0]) {
+                                return Err(type_err(span, codes::TYPE_MISMATCH,
+                                    format!("reduce: callback returns {} but accumulator is {}",
+                                            ret.display(), params[0].display())));
+                            }
+                            params[0].clone()
+                        }
+                        _ => return Err(type_err(span, codes::TYPE_MISMATCH,
+                            "reduce: first argument must be a 2-parameter function".into())),
+                    };
+                    return Ok(acc_ty);
+                }
+                //   sorted_by(xs: List[T], key_fn: T -> K) -> List[T]
+                "sorted_by" => {
+                    if args.len() != 2 {
+                        return Err(type_err(span, codes::TYPE_ARITY,
+                            "sorted_by takes 2 arguments: (xs, key_fn)".into()));
+                    }
+                    let xs_ty = self.synth_expr(&args[0].value, env, ctx, r)?;
+                    let elem = match &xs_ty {
+                        Ty::Generic { base: TypeCtor::List, args: a } if a.len() == 1 => a[0].clone(),
+                        _ => return Err(type_err(span, codes::TYPE_MISMATCH,
+                            format!("sorted_by: first argument must be a List, got {}", xs_ty.display()))),
+                    };
+                    let fn_ty = self.synth_expr(&args[1].value, env, ctx, r)?;
+                    match &fn_ty {
+                        Ty::Function { params, ret } if params.len() == 1 => {
+                            if !type_assignable(&elem, &params[0]) {
+                                return Err(type_err(span, codes::TYPE_MISMATCH,
+                                    format!("sorted_by: key fn expects {} but list elements are {}",
+                                            params[0].display(), elem.display())));
+                            }
+                            if !is_comparable_key_ty(ret) {
+                                return Err(type_err(span, codes::TYPE_MISMATCH,
+                                    format!("sorted_by: key must be i64/f64/str, got {}", ret.display())));
+                            }
+                        }
+                        _ => return Err(type_err(span, codes::TYPE_MISMATCH,
+                            "sorted_by: second argument must be a 1-parameter function".into())),
+                    }
+                    return Ok(Ty::Generic { base: TypeCtor::List, args: vec![elem] });
+                }
                 "assert" => {
                     if args.is_empty() {
                         return Err(type_err(span, codes::TYPE_ARITY,
@@ -1546,6 +1676,32 @@ impl TypeChecker {
                 }
                 return Ok(Ty::Primitive(PrimTy::Unit));
             }
+            // M61a: in-place sort by a user key function. `key_fn: T -> K`
+            // where K is a comparable primitive (i64/f64/str). Returns None.
+            (Ty::Generic { base: TypeCtor::List, args: a }, "sort_by") if a.len() == 1 => {
+                if args.len() != 1 {
+                    return Err(type_err(span, codes::TYPE_ARITY,
+                        "List.sort_by takes 1 argument: (key_fn)".into()));
+                }
+                let elem = a[0].clone();
+                let fn_ty = self.synth_expr(&args[0].value, env, ctx, r)?;
+                match &fn_ty {
+                    Ty::Function { params, ret } if params.len() == 1 => {
+                        if !type_assignable(&elem, &params[0]) {
+                            return Err(type_err(span, codes::TYPE_MISMATCH,
+                                format!("sort_by: key fn expects {} but list elements are {}",
+                                        params[0].display(), elem.display())));
+                        }
+                        if !is_comparable_key_ty(ret) {
+                            return Err(type_err(span, codes::TYPE_MISMATCH,
+                                format!("sort_by: key must be i64/f64/str, got {}", ret.display())));
+                        }
+                    }
+                    _ => return Err(type_err(span, codes::TYPE_MISMATCH,
+                        "sort_by: argument must be a 1-parameter function".into())),
+                }
+                return Ok(Ty::Primitive(PrimTy::Unit));
+            }
             // real-world: fix — `xs.pop()` removes and returns the last
             // element of a List[T]. Empty list traps with IndexError at
             // runtime. Mirrors Python's list.pop() (no-arg form).
@@ -1849,6 +2005,37 @@ fn prim_from_name_unchecked(name: &str) -> PrimTy {
 }
 
 /// Least-upper-bound (just enough to make tests pass).
+/// M61a: is a value of type `from` acceptable where `to` is expected?
+/// Used by the higher-order builtins (`map`/`filter`/`reduce`/`sorted_by`)
+/// to check the user callback's parameter/return types against the list
+/// element / accumulator types. Permissive on numeric widths and nullable
+/// widening (same policy `lub` encodes); the runtime is the final guard.
+fn type_assignable(from: &Ty, to: &Ty) -> bool {
+    if ty_eq(from, to) {
+        return true;
+    }
+    // `lub` returning `to` (or a supertype) means `from` widens into `to`.
+    match lub(from, to) {
+        Some(l) => ty_eq(&l, to) || is_subtype_trivial(from, to),
+        None => false,
+    }
+}
+
+/// M61a: a key for `sorted_by`/`sort_by` must be a comparable primitive —
+/// an integer/float width or `str`. (This sidesteps full comparator
+/// generics; key-based ordering is enough for v1.)
+fn is_comparable_key_ty(ty: &Ty) -> bool {
+    matches!(
+        ty,
+        Ty::Primitive(
+            PrimTy::I8 | PrimTy::I16 | PrimTy::I32 | PrimTy::I64
+                | PrimTy::U8 | PrimTy::U16 | PrimTy::U32 | PrimTy::U64
+                | PrimTy::F32 | PrimTy::F64
+                | PrimTy::Str
+        )
+    )
+}
+
 fn lub(a: &Ty, b: &Ty) -> Option<Ty> {
     if ty_eq(a, b) { return Some(a.clone()); }
     if is_subtype_trivial(a, b) { return Some(b.clone()); }

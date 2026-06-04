@@ -1,0 +1,92 @@
+"""M61a demo: user callbacks across the NativeFn boundary.
+
+Before M61a, function values were first-class *within* StrictPy (you could
+store a closure in a local, pass it to another user function, return it),
+but they could not cross into a native stdlib function — there was no way
+for Rust code to call back into the interpreter to invoke a user closure.
+
+This example exercises the four positional higher-order builtins that ship
+the re-entrancy mechanism:
+
+  * map(fn, xs)          — apply a closure to every element.
+  * filter(fn, xs)       — keep elements for which a predicate is true.
+  * reduce(fn, xs, init) — left-fold to a single value.
+  * sorted_by(xs, key)   — fresh list ordered by a primitive key, plus the
+                           in-place `xs.sort_by(key)` method.
+
+It deliberately uses *closures that capture an enclosing variable* (e.g.
+`factor`, `threshold`) to prove that real closures — not just top-level
+functions — cross the boundary.
+
+All forms are positional; keyword/`key=`/default forms come in a later
+milestone. Output is deterministic so the Rust acceptance test can assert
+on it.
+"""
+
+# A tiny record so we can sort structured values by a key function.
+final class Person:
+    name: str
+    age: i32
+
+    fn __init__(self, name: str, age: i32) -> None:
+        self.name = name
+        self.age = age
+
+
+fn main() -> i32:
+    nums: List[i64] = [5, 2, 8, 1, 9, 3, 7, 4, 6]
+
+    # ── map with a capturing closure ────────────────────────────────────
+    # `factor` is captured from the enclosing scope.
+    factor: i64 = 10
+    scaled: List[i64] = map(fn(x: i64) -> i64: x * factor, nums)
+    print("scaled:")
+    for v: i64 in scaled:
+        print(" " + str(v))
+    println("")
+
+    # ── filter with a capturing predicate ───────────────────────────────
+    threshold: i64 = 4
+    big: List[i64] = filter(fn(x: i64) -> bool: x > threshold, nums)
+    print("big:")
+    for v: i64 in big:
+        print(" " + str(v))
+    println("")
+
+    # ── reduce: sum and product ─────────────────────────────────────────
+    total: i64 = reduce(fn(acc: i64, x: i64) -> i64: acc + x, nums, 0)
+    println("sum=" + str(total))
+
+    product: i64 = reduce(fn(acc: i64, x: i64) -> i64: acc * x, nums, 1)
+    println("product=" + str(product))
+
+    # ── sorted_by: order records by a key function ──────────────────────
+    people: List[Person] = [
+        Person("Carol", 30),
+        Person("Alice", 42),
+        Person("Bob", 19),
+        Person("Dave", 30),
+    ]
+
+    # Sort a fresh copy by age (i32 key — widened to the i64 comparator).
+    by_age: List[Person] = sorted_by(people, fn(p: Person) -> i64: i64(p.age))
+    print("by_age:")
+    for p: Person in by_age:
+        print(" " + p.name + "(" + str(p.age) + ")")
+    println("")
+
+    # Sort a fresh copy by name (str key).
+    by_name: List[Person] = sorted_by(people, fn(p: Person) -> str: p.name)
+    print("by_name:")
+    for p2: Person in by_name:
+        print(" " + p2.name)
+    println("")
+
+    # In-place sort by name length (i64 key).
+    people.sort_by(fn(p: Person) -> i64: i64(p.name.len()))
+    print("by_name_len:")
+    for p3: Person in people:
+        print(" " + p3.name)
+    println("")
+
+    return 0

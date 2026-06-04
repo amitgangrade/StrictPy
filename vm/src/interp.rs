@@ -666,6 +666,18 @@ pub struct Interpreter {
     ///   next = (state * 1103515245 + 12345) mod 2^31
     /// `random.seed(s)` overwrites this; default is `0` (deterministic).
     pub(crate) random_lcg_state: i64,
+
+    /// M61a: temporary GC roots for native code that holds heap pointers
+    /// across a re-entrant call into the interpreter. The higher-order
+    /// builtins (`map`/`filter`/`reduce`/`sorted_by`) build intermediate
+    /// lists in Rust locals while invoking a user closure per element; that
+    /// closure call can allocate and trigger a collection. Those locals are
+    /// not in any frame's register file, so without rooting them here a
+    /// collection could free the in-flight list, closure, or accumulator.
+    /// `maybe_collect` scans this vec as an extra root window. Native code
+    /// pushes pointers before the callback loop and pops them after (see
+    /// `with_temp_roots`).
+    pub(crate) temp_roots: Vec<u64>,
 }
 
 impl Interpreter {
@@ -695,6 +707,7 @@ impl Interpreter {
             sys_argv_cache: None,
             monotonic_start: std::time::Instant::now(),
             random_lcg_state: 0,
+            temp_roots: Vec::new(),
         }
     }
 
@@ -773,6 +786,42 @@ impl Interpreter {
         full.extend_from_slice(captures);
         full.extend_from_slice(args);
         self.invoke(fn_id, &full)
+    }
+
+    /// M61a: re-entrantly invoke a StrictPy callable value (a `ClosureRepr`
+    /// pointer, as produced by a lambda or a captured function value) with
+    /// `args`, returning its raw 64-bit result. This is the core mechanism
+    /// that lets a `NativeFn` (Rust) call back into the interpreter — e.g.
+    /// `map`/`filter`/`reduce`/`sorted_by` applying a user predicate per
+    /// element.
+    ///
+    /// The closure's inline captures are read out and prepended to `args`
+    /// exactly as `Opcode::ClosureCall` does, so closures that capture an
+    /// enclosing variable behave identically whether invoked from bytecode
+    /// or from native code.
+    ///
+    /// GC note: this pushes a fresh call frame whose register file roots the
+    /// captures + args for the duration of the body. Callers must separately
+    /// keep any *other* live pointers (the result list being built, the
+    /// accumulator, the closure pointer itself) reachable by parking them in
+    /// `self.temp_roots`, which `maybe_collect` scans as an extra root window.
+    pub fn call_callable(&mut self, closure_ptr: u64, args: &[u64]) -> Result<u64, VmError> {
+        let cp = closure_ptr as *const crate::object::ClosureRepr;
+        if cp.is_null() {
+            return Err(VmError::UncaughtException {
+                type_name: "NullPointerError".into(),
+                message: "call on null callable".into(),
+            });
+        }
+        let (fn_id, n_cap) = unsafe { ((*cp).fn_id, (*cp).capture_n) };
+        let cap_base = unsafe {
+            (cp as *const u8).add(std::mem::size_of::<crate::object::ClosureRepr>()) as *const u64
+        };
+        let mut captures: Vec<u64> = Vec::with_capacity(n_cap as usize);
+        for i in 0..n_cap as usize {
+            captures.push(unsafe { std::ptr::read_unaligned(cap_base.add(i)) });
+        }
+        self.invoke_with_captures(fn_id, &captures, args)
     }
 
     /// Drive the interpreter until the call stack shrinks below
@@ -2572,6 +2621,12 @@ impl Interpreter {
             .iter()
             .map(|f| f.registers.as_slice())
             .collect();
+        // M61a: root any heap pointers a NativeFn parked across a
+        // re-entrant interpreter call (the higher-order builtins'
+        // in-flight result list, source list, closure, and accumulator).
+        if !self.temp_roots.is_empty() {
+            roots.push(self.temp_roots.as_slice());
+        }
         // Also root every value living in a dict side-table — those values
         // might be StringRepr pointers or other heap objects with no other
         // root. (Channel payloads do not need rooting: every payload was

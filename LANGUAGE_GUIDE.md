@@ -262,7 +262,7 @@ let f = fn(x: i32) -> i32:
 let doubled: i32 = f(21)
 ```
 
-Note: function values are first-class but cannot cross the `NativeFn` boundary (you can't pass a user-defined function as an argument to a stdlib function that expects a callback — that's a v0.4 limit).
+Note: function values are first-class and (as of M61a) **can** cross the `NativeFn` boundary — you can pass a user-defined closure to a stdlib function that takes a callback. The prelude ships positional higher-order builtins built on this: `map`, `filter`, `reduce`, `sorted_by`, and the in-place `list.sort_by`. See §6 for signatures and examples. (Keyword/`key=`/default-argument forms of these are a later milestone; the v1 forms are positional only.)
 
 ### 3.9 Class definitions
 
@@ -2032,6 +2032,52 @@ max_f64(a: f64, b: f64) -> f64
 str(42) + " items"                       # str(x) coerces any type
 ```
 
+#### Higher-order builtins (M61a — user callbacks across the NativeFn boundary)
+
+User closures are first-class and can be passed to these native builtins,
+which call back into the interpreter to invoke the closure per element. The
+callback may be a lambda that **captures** an enclosing variable, not just a
+top-level function.
+
+```python
+map(fn: T -> U,        xs: List[T])          -> List[U]   # apply fn to each
+filter(fn: T -> bool,  xs: List[T])          -> List[T]   # keep where true
+reduce(fn: (U, T) -> U, xs: List[T], init: U) -> U        # left fold
+sorted_by(xs: List[T], key_fn: T -> K)       -> List[T]   # fresh, ordered copy
+```
+
+`K` (the `sorted_by` / `sort_by` key) must be a comparable primitive:
+`i64` / `f64` / `str` (narrower integer/float widths widen to these).
+`map` / `filter` / `reduce` element/accumulator types are fully generic.
+
+```python
+fn main() -> i32:
+    nums: List[i64] = [5, 2, 8, 1, 9]
+
+    # map with a *capturing* closure:
+    factor: i64 = 10
+    scaled: List[i64] = map(fn(x: i64) -> i64: x * factor, nums)   # [50,20,80,10,90]
+
+    # filter with a capturing predicate:
+    lo: i64 = 4
+    big: List[i64] = filter(fn(x: i64) -> bool: x > lo, nums)      # [5,8,9]
+
+    # reduce to a sum and a product:
+    total: i64 = reduce(fn(acc: i64, x: i64) -> i64: acc + x, nums, 0)   # 25
+    prod:  i64 = reduce(fn(acc: i64, x: i64) -> i64: acc * x, nums, 1)   # 720
+
+    # sort a fresh copy by a string key, or in place by a numeric key:
+    words: List[str] = ["pear", "fig", "apple"]
+    by_name: List[str] = sorted_by(words, fn(w: str) -> str: w)
+    words.sort_by(fn(w: str) -> i64: i64(w.len()))                 # in place, by length
+    return 0
+```
+
+> **Positional only (for now).** These v1 forms take their arguments
+> positionally. Keyword forms (e.g. `sorted_by(xs, key=...)`) and default
+> arguments are a separate later milestone; they will layer on top of these
+> same builtins without changing the positional behaviour.
+
 ### 6.2 Prelude classes
 
 These are available without import:
@@ -2057,8 +2103,11 @@ These are available without import:
 xs.append(v: T) -> None
 xs.pop() -> T                            # raises IndexError on empty
 xs.length() -> i64                       # or len(xs)
-xs.sort() -> None                        # in-place
+xs.sort() -> None                        # in-place (element ∈ {i64,f64,str})
 xs.sorted() -> List[T]                   # returns copy
+xs.sort_by(key_fn: T -> K) -> None       # M61a: in-place, K ∈ {i64,f64,str}
+sorted_by(xs, key_fn: T -> K) -> List[T] # M61a: returns a sorted copy
+map(fn, xs) / filter(fn, xs) / reduce(fn, xs, init)   # M61a, see §6.1
 xs[i]                                    # subscript; raises IndexError if oob
 xs[i] = v                                # in-place
 for x in xs: ...
