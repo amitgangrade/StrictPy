@@ -136,7 +136,7 @@ fn main() -> i32:
         print(str(y))
     println(\"\")
     # Sort descending by negating the key.
-    d: List[i64] = sorted_by(xs, fn(v: i64) -> i64: 0 - v)
+    d: List[i64] = sorted_by(xs, fn(v: i64) -> i64: 0i64 - v)
     for z: i64 in d:
         print(str(z))
     println(\"\")
