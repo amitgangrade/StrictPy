@@ -169,6 +169,12 @@ impl TypeChecker {
         // pre-loaded via name lookup against ctx.base_types using their symbol ids:
         // we find them by scanning the symbol table for `Param` symbols whose
         // def_span equals each `p.span`.
+        // M61b: a non-default parameter may not follow a defaulted one. Skip
+        // the implicit `self` of methods/constructors.
+        let skip_self = matches!(f.params.first(), Some(p) if p.name == "self") as usize;
+        crate::argbind::check_default_order(
+            &f.params, skip_self, &format!("`{}`", f.name),
+        )?;
         let mut env = Env::default();
         for p in &f.params {
             for sym in &r.symbols.symbols {
@@ -180,6 +186,23 @@ impl TypeChecker {
                         env.types.insert(sym.id, t.clone());
                     }
                     break;
+                }
+            }
+        }
+        // M61b: type-check each parameter default against its declared type.
+        // Defaults are evaluated at call time *before* parameters bind, so
+        // they are checked in an empty local env (they may reference top-level
+        // `final` constants and literals, but not other parameters).
+        let default_env = Env::default();
+        for p in &f.params {
+            if let Some(def) = &p.default {
+                let pkey = ast_type_span(&p.ty);
+                let pty = r.ast_type_to_ty.get(&pkey).cloned().unwrap_or(Ty::Never);
+                let got = self.check_or_synth(def, Some(&pty), &default_env, ctx, r)?;
+                if !is_subtype(&got, &pty, &ctx.ty_ctx()) {
+                    return Err(type_err(p.span, codes::TYPE_MISMATCH,
+                        format!("default for parameter `{}`: expected {}, got {}",
+                                p.name, pty.display(), got.display())));
                 }
             }
         }
@@ -1068,6 +1091,34 @@ impl TypeChecker {
         }
     }
 
+    /// M61b: validate a call's positional + keyword arguments against a
+    /// callee's declared parameters and type-check each supplied argument
+    /// against its parameter type. `ast_params` provides names + defaults
+    /// (post-`self`); `param_tys` are the matching semantic parameter types
+    /// (same length, same order). Omitted parameters fall back to their
+    /// declared default, which was already checked at declaration time.
+    fn check_call_binding(
+        &mut self,
+        ast_params: &[ast::Param],
+        param_tys: &[Ty],
+        args: &[Arg],
+        span: Span,
+        desc: &str,
+        env: &Env,
+        ctx: &Ctx,
+        r: &ResolvedModule,
+    ) -> Result<(), CompileError> {
+        let infos = crate::argbind::ParamInfo::from_params(ast_params);
+        let slots = crate::argbind::bind(&infos, args, span, desc)?;
+        for (pidx, slot) in slots.iter().enumerate() {
+            if let crate::argbind::Slot::Arg(ai) = slot {
+                let pt = param_tys.get(pidx).cloned().unwrap_or(Ty::Never);
+                let _ = self.check_expr(&args[*ai].value, &pt, env, ctx, r)?;
+            }
+        }
+        Ok(())
+    }
+
     fn synth_call(&mut self, callee: &Expr, args: &[Arg], span: Span,
                   env: &Env, ctx: &Ctx, r: &ResolvedModule) -> Result<Ty, CompileError>
     {
@@ -1213,6 +1264,29 @@ impl TypeChecker {
                 }
             }
         }
+        // M61b: non-generic user free function — bind positional + keyword
+        // arguments against the declared parameters, filling defaults. We use
+        // the AST parameter list (names + defaults) plus the resolved
+        // signature's parameter types.
+        if let Expr::Ident { name, .. } = callee {
+            if let Some(sid) = r.symbols.lookup(r.module_scope, name) {
+                if matches!(r.symbols.get(sid).kind, SymbolKind::Function) {
+                    if let Some(sig) = r.function_sigs.get(&sid).cloned() {
+                        if sig.generic_tvars.is_empty() {
+                            if let Some(ast_params) = ast_free_fn_params(r, name) {
+                                let param_tys: Vec<Ty> =
+                                    sig.params.iter().map(|(_, t)| t.clone()).collect();
+                                self.check_call_binding(
+                                    ast_params, &param_tys, args, span,
+                                    &format!("function `{name}`"), env, ctx, r,
+                                )?;
+                                return Ok(sig.ret.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // Generic callee.
         let cty = self.synth_expr(callee, env, ctx, r)?;
         match cty {
@@ -1241,6 +1315,15 @@ impl TypeChecker {
                         );
                     }
                     if let Some(init) = cl.methods.iter().find(|m| m.name == "__init__") {
+                        // M61b: default + keyword binding when we can recover
+                        // the constructor's AST parameters (names + defaults).
+                        if let Some(ast_params) = ast_ctor_params(r, &cl.name) {
+                            let desc = format!("constructor of `{}`", cl.name);
+                            self.check_call_binding(
+                                ast_params, &init.params, args, span, &desc, env, ctx, r,
+                            )?;
+                            return Ok(Ty::Class(cid));
+                        }
                         if args.len() != init.params.len() {
                             return Err(type_err(span, codes::TYPE_ARITY,
                                 format!("constructor of `{}` expects {} args, got {}",
@@ -1677,6 +1760,19 @@ impl TypeChecker {
             while let Some(c) = cur {
                 if let Some(cl) = ctx.classes.get(&c) {
                     if let Some(m) = cl.methods.iter().find(|m| m.name == method) {
+                        let ret_ty = subst_ty(&m.ret, &recv_subst);
+                        // M61b: default + keyword binding when we can recover
+                        // the method's AST parameters. `recv_subst` specialises
+                        // generic-class method param types before checking.
+                        if let Some(ast_params) = ast_method_params(r, &cl.name, method) {
+                            let param_tys: Vec<Ty> =
+                                m.params.iter().map(|pt| subst_ty(pt, &recv_subst)).collect();
+                            let desc = format!("method `{method}`");
+                            self.check_call_binding(
+                                ast_params, &param_tys, args, span, &desc, env, ctx, r,
+                            )?;
+                            return Ok(ret_ty);
+                        }
                         if args.len() != m.params.len() {
                             return Err(type_err(span, codes::TYPE_ARITY,
                                 format!("method `{}` expects {} args, got {}", method, m.params.len(), args.len())));
@@ -1685,7 +1781,7 @@ impl TypeChecker {
                             let expected = subst_ty(pt, &recv_subst);
                             let _ = self.check_expr(&a.value, &expected, env, ctx, r)?;
                         }
-                        return Ok(subst_ty(&m.ret, &recv_subst));
+                        return Ok(ret_ty);
                     }
                     cur = cl.base;
                 } else { break; }
@@ -1784,6 +1880,68 @@ impl TypeChecker {
 fn type_err(span: Span, code: ErrorCode, message: String) -> CompileError {
     CompileError::Type {
         file: String::new(), line: span.line, col: span.col, code, message,
+    }
+}
+
+// ── M61b: AST parameter lookup for default + keyword binding ──────────────
+//
+// The semantic `FunctionSig` / `MethodSig` carry parameter *types* but not
+// names or default expressions, so the call binder ([`argbind`]) recovers the
+// declared parameters from the original AST. These helpers find the relevant
+// `&[ast::Param]`, with `self` already stripped for methods/constructors so
+// the slice lines up 1:1 with the call's argument list.
+
+/// AST parameters of a free function by name (module-level decls only).
+fn ast_free_fn_params<'a>(r: &'a ResolvedModule, name: &str) -> Option<&'a [ast::Param]> {
+    for d in &r.module.decls {
+        if let TopDecl::Func(f) = d {
+            if f.name == name {
+                return Some(&f.params);
+            }
+        }
+    }
+    None
+}
+
+/// AST parameters (minus `self`) of a class's `__init__`, by class name.
+fn ast_ctor_params<'a>(r: &'a ResolvedModule, class_name: &str) -> Option<&'a [ast::Param]> {
+    for d in &r.module.decls {
+        if let TopDecl::Class(c) = d {
+            if c.name == class_name {
+                if let Some(init) = &c.init {
+                    return Some(strip_self(&init.params));
+                }
+                return None;
+            }
+        }
+    }
+    None
+}
+
+/// AST parameters (minus `self`) of a named method on a class, walking the
+/// inheritance chain by class name.
+fn ast_method_params<'a>(
+    r: &'a ResolvedModule,
+    class_name: &str,
+    method: &str,
+) -> Option<&'a [ast::Param]> {
+    for d in &r.module.decls {
+        if let TopDecl::Class(c) = d {
+            if c.name == class_name {
+                if let Some(m) = c.methods.iter().find(|m| m.name == method) {
+                    return Some(strip_self(&m.params));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Drop a leading implicit `self` parameter, if present.
+fn strip_self(params: &[ast::Param]) -> &[ast::Param] {
+    match params.first() {
+        Some(p) if p.name == "self" => &params[1..],
+        _ => params,
     }
 }
 

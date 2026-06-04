@@ -3472,6 +3472,138 @@ fn find_value_ty(fb: &FuncBuilder, v: ValueId) -> Option<Ty> {
     None
 }
 
+// ── M61b: call-site argument normalisation ───────────────────────────────
+//
+// At lowering time we rewrite a call's argument list — a mix of positional
+// and `name=value` keyword arguments, possibly with omitted trailing
+// parameters — into a flat positional list in declaration order, with each
+// omitted parameter replaced by its declared default expression. The rest of
+// `lower_call` then sees the existing all-positional ABI unchanged.
+//
+// The binding decisions were already validated by the type checker (same
+// [`argbind`] algorithm), so any error here would be an internal
+// inconsistency; we fall back to the original args rather than panicking.
+
+/// AST parameters of an `Ident` callee that is a user free function or a
+/// constructor (`__init__`), with `self` stripped. Returns `None` for
+/// builtins, lambdas, native classes, etc. — those stay positional.
+fn callee_ast_params(ctx: &LowerCtx, callee: &Expr) -> Option<Vec<ast::Param>> {
+    let name = match callee {
+        Expr::Ident { name, .. } => name,
+        _ => return None,
+    };
+    let r = &ctx.typed.resolved;
+    let sid = r.symbols.lookup(r.module_scope, name)?;
+    match r.symbols.get(sid).kind {
+        SymbolKind::Function => {
+            for d in &r.module.decls {
+                if let TopDecl::Func(f) = d {
+                    if &f.name == name {
+                        return Some(f.params.clone());
+                    }
+                }
+            }
+            None
+        }
+        SymbolKind::Class => {
+            for d in &r.module.decls {
+                if let TopDecl::Class(c) = d {
+                    if &c.name == name {
+                        let init = c.init.as_ref()?;
+                        let params = &init.params;
+                        let stripped = match params.first() {
+                            Some(p) if p.name == "self" => params[1..].to_vec(),
+                            _ => params.clone(),
+                        };
+                        return Some(stripped);
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Normalise a call's args into positional order, materialising defaults for
+/// omitted parameters. Returns `None` when no rewrite is needed (all
+/// positional and already in order) or when the callee's params can't be
+/// recovered (builtins etc.), so the caller keeps the original slice.
+fn normalize_call_args(ctx: &LowerCtx, callee: &Expr, args: &[ast::Arg]) -> Option<Vec<ast::Arg>> {
+    let params = callee_ast_params(ctx, callee)?;
+    // Fast path: every arg positional and count matches — nothing to do.
+    let all_positional = args.iter().all(|a| a.name.is_none());
+    if all_positional && args.len() == params.len() {
+        return None;
+    }
+    let infos = crate::argbind::ParamInfo::from_params(&params);
+    let span = args.first().map(|a| a.span).unwrap_or(Span::DUMMY);
+    let slots = crate::argbind::bind(&infos, args, span, "call").ok()?;
+    let mut out: Vec<ast::Arg> = Vec::with_capacity(slots.len());
+    for (pidx, slot) in slots.iter().enumerate() {
+        match slot {
+            crate::argbind::Slot::Arg(ai) => {
+                // Strip the keyword label; downstream only cares about value.
+                out.push(ast::Arg { name: None, value: args[*ai].value.clone(), span: args[*ai].span });
+            }
+            crate::argbind::Slot::Default => {
+                let def = params[pidx].default.clone()?;
+                let dspan = expr_span(&def);
+                out.push(ast::Arg { name: None, value: def, span: dspan });
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Like [`normalize_call_args`] but for a user-class method, resolved by the
+/// receiver's class name (walking the inheritance chain).
+fn normalize_method_args(
+    ctx: &LowerCtx,
+    class_name: &str,
+    method: &str,
+    args: &[ast::Arg],
+) -> Option<Vec<ast::Arg>> {
+    let r = &ctx.typed.resolved;
+    let mut found: Option<Vec<ast::Param>> = None;
+    for d in &r.module.decls {
+        if let TopDecl::Class(c) = d {
+            if c.name == class_name {
+                if let Some(m) = c.methods.iter().find(|m| m.name == method) {
+                    let params = &m.params;
+                    found = Some(match params.first() {
+                        Some(p) if p.name == "self" => params[1..].to_vec(),
+                        _ => params.clone(),
+                    });
+                }
+                break;
+            }
+        }
+    }
+    let params = found?;
+    let all_positional = args.iter().all(|a| a.name.is_none());
+    if all_positional && args.len() == params.len() {
+        return None;
+    }
+    let infos = crate::argbind::ParamInfo::from_params(&params);
+    let span = args.first().map(|a| a.span).unwrap_or(Span::DUMMY);
+    let slots = crate::argbind::bind(&infos, args, span, "method call").ok()?;
+    let mut out: Vec<ast::Arg> = Vec::with_capacity(slots.len());
+    for (pidx, slot) in slots.iter().enumerate() {
+        match slot {
+            crate::argbind::Slot::Arg(ai) => {
+                out.push(ast::Arg { name: None, value: args[*ai].value.clone(), span: args[*ai].span });
+            }
+            crate::argbind::Slot::Default => {
+                let def = params[pidx].default.clone()?;
+                let dspan = expr_span(&def);
+                out.push(ast::Arg { name: None, value: def, span: dspan });
+            }
+        }
+    }
+    Some(out)
+}
+
 fn lower_call(
     fb: &mut FuncBuilder,
     ctx: &mut LowerCtx,
@@ -3480,6 +3612,11 @@ fn lower_call(
     span: Span,
 ) -> ValueId {
     let ret_ty = ctx.expr_ty(span);
+
+    // M61b: rewrite keyword / defaulted calls into positional form before any
+    // arg lowering, so every existing call path below sees the unchanged ABI.
+    let normalized = normalize_call_args(ctx, callee, args);
+    let args: &[ast::Arg] = normalized.as_deref().unwrap_or(args);
 
     // M19: namespaced stdlib call — `sys.exit(0)`.  Detect *before* the
     // generic Ident handling so the callee's Attr isn't lowered as a
@@ -4110,8 +4247,22 @@ fn lower_method_call(
         }
     }
 
-    let recv = lower_expr(fb, ctx, receiver);
     let recv_ty = ctx.expr_ty(expr_span(receiver));
+    // M61b: rewrite keyword / defaulted user-method calls into positional
+    // form before lowering args. Builtin / native methods don't carry AST
+    // params and stay positional.
+    let recv_class_name = match &recv_ty {
+        Ty::Class(cid) | Ty::Generic { base: TypeCtor::Class(cid), .. } => {
+            ctx.class_layouts.get(cid).map(|l| l.name.clone())
+        }
+        _ => None,
+    };
+    let normalized_m = recv_class_name
+        .as_deref()
+        .and_then(|cn| normalize_method_args(ctx, cn, method, args));
+    let args: &[ast::Arg] = normalized_m.as_deref().unwrap_or(args);
+
+    let recv = lower_expr(fb, ctx, receiver);
     let mut arg_vs = vec![recv];
     for a in args {
         arg_vs.push(lower_expr(fb, ctx, &a.value));
