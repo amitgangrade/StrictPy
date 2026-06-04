@@ -173,6 +173,70 @@ pub fn ty_eq(a: &Ty, b: &Ty) -> bool {
     }
 }
 
+/// M63b: a built-in protocol bound declarable on a generic type parameter,
+/// e.g. `[T: Comparable]`. v1 ships a fixed set of structural bounds satisfied
+/// only by built-in primitive / `str` / `char` types — there is no user-level
+/// trait/impl mechanism yet (user classes cannot satisfy a bound).
+///
+/// Which built-in types satisfy each bound:
+///   * `Comparable` — `i8..i64`, `u8..u64`, `f32`, `f64`, `char`, `str`
+///     (enables `<`, `<=`, `>`, `>=` inside a bounded generic body).
+///   * `Equatable`  — every `Comparable` type plus `bool`
+///     (enables `==`, `!=`).
+///   * `Printable`  — every primitive plus `str` / `char`
+///     (enables `str(x)` / display).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BoundKind {
+    Comparable,
+    Equatable,
+    Printable,
+}
+
+impl BoundKind {
+    /// Map a bound type name (`Comparable`, `Equatable`, `Printable`,
+    /// `Display`) to a [`BoundKind`]. Returns `None` for any other name so the
+    /// resolver can reject unknown bounds.
+    pub fn from_name(name: &str) -> Option<BoundKind> {
+        match name {
+            "Comparable" => Some(BoundKind::Comparable),
+            "Equatable" => Some(BoundKind::Equatable),
+            "Printable" | "Display" => Some(BoundKind::Printable),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            BoundKind::Comparable => "Comparable",
+            BoundKind::Equatable => "Equatable",
+            BoundKind::Printable => "Printable",
+        }
+    }
+
+    /// Does the concrete type `t` satisfy this bound? Only built-in
+    /// primitive / `str` / `char` types can — user classes, protocols,
+    /// generics, tuples, etc. never satisfy a v1 bound.
+    pub fn satisfied_by(self, t: &Ty) -> bool {
+        let p = match t {
+            Ty::Primitive(p) => *p,
+            _ => return false,
+        };
+        match self {
+            BoundKind::Comparable => {
+                p.is_numeric() || matches!(p, PrimTy::Str | PrimTy::Char)
+            }
+            BoundKind::Equatable => {
+                p.is_numeric()
+                    || matches!(p, PrimTy::Str | PrimTy::Char | PrimTy::Bool)
+            }
+            BoundKind::Printable => {
+                p.is_numeric()
+                    || matches!(p, PrimTy::Str | PrimTy::Char | PrimTy::Bool)
+            }
+        }
+    }
+}
+
 /// Field record inside a class layout.
 #[derive(Debug, Clone)]
 pub struct FieldInfo {
