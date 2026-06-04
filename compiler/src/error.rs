@@ -109,6 +109,11 @@ pub mod codes {
     pub const TYPE_NULLABLE_USE: ErrorCode = "E2013";
     /// Cannot subclass a `final` class (spec §5.5 / §1.3).
     pub const TYPE_SUBCLASS_FINAL: ErrorCode = "E2014";
+    /// M63b: a generic type argument does not satisfy the declared bound on its
+    /// type parameter, e.g. `max2[Foo](...)` where `Foo` is not `Comparable`;
+    /// or use of a bound-gated operation (`<`, `==`, ...) on an *unbounded*
+    /// type parameter.
+    pub const TYPE_UNSATISFIED_BOUND: ErrorCode = "E2015";
 
     // ── E3xxx: semantic ──────────────────────────────────────────────────
     pub const SEM_NONEXHAUSTIVE_MATCH: ErrorCode = "E3001";

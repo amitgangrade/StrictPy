@@ -14,7 +14,7 @@ test asserts on the `OK:` prefix.
 
 Algorithms shipped:
 
-  * `find_first[T](xs, target) -> i32`     — linear search; -1 on miss.
+  * `find_first[T: Equatable](xs, target) -> i32` — linear search; -1 on miss.
   * `safe_index[T](xs, i) -> T?`           — bounds-check via try/except
                                               wrapping native IndexError.
   * `enumerate[T](xs) -> List[Tuple[i32, T]]` — index-value pairs.
@@ -23,9 +23,9 @@ Algorithms shipped:
   * `unzip[A, B](pairs) -> Tuple[List[A], List[B]]` — inverse of zip;
                                               hammers tuple-of-class-ref
                                               and a return-position tuple.
-  * `binary_search[T](xs, target) -> i32`  — sorted-list search; raises
-                                              IndexError when missing.
-  * `merge_sorted[T](a, b) -> List[T]`     — classic two-pointer merge.
+  * `binary_search[T: Comparable](xs, target) -> i32` — sorted-list search;
+                                              raises IndexError when missing.
+  * `merge_sorted[T: Comparable](a, b) -> List[T]` — classic two-pointer merge.
   * `split_half[T](xs) -> Tuple[List[T], List[T]]` — heavy: generic +
                                               tuple-return + transitive.
 
@@ -57,7 +57,7 @@ final class Item:
 
 # ── Generic algorithms ─────────────────────────────────────────────────
 
-fn find_first[T](xs: List[T], target: T) -> i32:
+fn find_first[T: Equatable](xs: List[T], target: T) -> i32:
     """Linear search; returns the i32 index of the first equal element
     or -1 if none. The bounds-check exists to exercise short-circuit
     `and` (M13) in a generic body: `i < n and xs[i] == target`. Without
@@ -119,7 +119,7 @@ fn unzip[A, B](pairs: List[Tuple[A, B]]) -> Tuple[List[A], List[B]]:
         i = i + 1
     return (xs, ys)
 
-fn binary_search[T](xs: List[T], target: T) -> i32:
+fn binary_search[T: Comparable](xs: List[T], target: T) -> i32:
     """Standard binary search over a sorted list. Raises IndexError if
     the target is missing; callers below catch it via try/except.
     Operator `<` is per-instantiation (ILt for i32, FLt for f64)."""
@@ -136,7 +136,7 @@ fn binary_search[T](xs: List[T], target: T) -> i32:
             hi = mid - 1
     raise IndexError("binary_search: target not found")
 
-fn merge_sorted[T](a: List[T], b: List[T]) -> List[T]:
+fn merge_sorted[T: Comparable](a: List[T], b: List[T]) -> List[T]:
     """Classic two-pointer merge of two sorted lists. Per-instantiation
     `<` binds to ILt / FLt / StrConcat-friendly ops by element type."""
     out: List[T] = []

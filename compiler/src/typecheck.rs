@@ -20,7 +20,7 @@ use crate::ast::{
 use crate::error::{codes, CompileError, ErrorCode};
 use crate::resolver::{FunctionSig, ResolvedModule, SymbolId, SymbolKind};
 use crate::types::{
-    is_subtype, is_subtype_trivial, ty_eq, ClassId, ClassLayout, PrimTy, ProtoId,
+    is_subtype, is_subtype_trivial, ty_eq, BoundKind, ClassId, ClassLayout, PrimTy, ProtoId,
     ProtocolInfo, Ty, TypeContext, TypeCtor, TypeVarId,
 };
 
@@ -1001,8 +1001,33 @@ impl TypeChecker {
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 let lt = self.synth_expr(lhs, env, ctx, r)?;
                 let rt = self.check_or_synth(rhs, Some(&lt), env, ctx, r)?;
-                // M17: defer comparison-shape checks inside generic bodies
-                // (see Add/Sub/... arm for the same pattern).
+                // M63b: comparison inside a generic body is only legal when the
+                // type parameter carries the matching bound. Ordering
+                // (`<`, `<=`, `>`, `>=`) requires `Comparable`; equality
+                // (`==`, `!=`) requires `Equatable` (a `Comparable` parameter
+                // is implicitly `Equatable` too). An *unbounded* `T` is
+                // rejected here — this is the negative case from the spec.
+                // (M17 used to defer all of these unconditionally.)
+                for opnd in [&lt, &rt] {
+                    if let Ty::Var(tv) = opnd {
+                        let needs_order = matches!(
+                            op,
+                            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+                        );
+                        let ok = match r.generic_bounds.get(tv) {
+                            Some(BoundKind::Comparable) => true,
+                            Some(BoundKind::Equatable) => !needs_order,
+                            _ => false,
+                        };
+                        if !ok {
+                            let needed = if needs_order { "Comparable" } else { "Equatable" };
+                            return Err(type_err(span, codes::TYPE_UNSATISFIED_BOUND,
+                                format!(
+                                    "`{:?}` requires the type parameter to be `{}`; add a bound like `[T: {}]`",
+                                    op, needed, needed)));
+                        }
+                    }
+                }
                 if matches!(lt, Ty::Var(_)) || matches!(rt, Ty::Var(_)) {
                     return Ok(Ty::Primitive(PrimTy::Bool));
                 }
@@ -1528,6 +1553,9 @@ impl TypeChecker {
                 }
             }
         }
+        // M63b: every solved type argument must satisfy the bound (if any)
+        // declared on its type parameter.
+        check_bounds_satisfied(&sig.generic_tvars, &type_args, &sig.name, span, r)?;
         // Step 3: record the instantiation (de-duped by mangled key).
         let key = mangle_args_key(&type_args);
         if self.instantiation_keys.insert((sid, key)) {
@@ -1637,6 +1665,8 @@ impl TypeChecker {
                 }
             }
         }
+        // M63b: enforce declared bounds on the class type parameters.
+        check_bounds_satisfied(&cl.generic_tvars, &type_args, &cl.name, span, r)?;
         let key = mangle_args_key(&type_args);
         if self.class_instantiation_keys.insert((cid, key)) {
             self.class_instantiations.push((cid, type_args.clone()));
@@ -1940,6 +1970,62 @@ impl TypeChecker {
 fn type_err(span: Span, code: ErrorCode, message: String) -> CompileError {
     CompileError::Type {
         file: String::new(), line: span.line, col: span.col, code, message,
+    }
+}
+
+/// M63b: verify each concrete type argument satisfies the bound (if any)
+/// declared on the matching generic type parameter. `tvars` and `type_args`
+/// are parallel (declaration order); bounds are looked up in
+/// `r.generic_bounds` by tvar id. A type that does not satisfy its bound
+/// yields `E2015`. Type parameters without a declared bound are unconstrained.
+fn check_bounds_satisfied(
+    tvars: &[TypeVarId],
+    type_args: &[Ty],
+    owner: &str,
+    span: Span,
+    r: &ResolvedModule,
+) -> Result<(), CompileError> {
+    for (tv, arg) in tvars.iter().zip(type_args.iter()) {
+        if let Some(bound) = r.generic_bounds.get(tv) {
+            // A concrete primitive must satisfy the bound directly. A type
+            // argument that is *itself* a bounded type variable (transitive
+            // instantiation, e.g. `quicksort[T: Comparable]` forwarding `T`
+            // into `partition[T: Comparable]`) satisfies the requirement when
+            // the caller's bound is at least as strong — modelled here by
+            // requiring the same bound. Unbounded vars fail.
+            let ok = match arg {
+                Ty::Var(arg_tv) => bound_implies(r.generic_bounds.get(arg_tv).copied(), *bound),
+                _ => bound.satisfied_by(arg),
+            };
+            if !ok {
+                return Err(type_err(
+                    span,
+                    codes::TYPE_UNSATISFIED_BOUND,
+                    format!(
+                        "type `{}` does not satisfy bound `{}` required by `{}`",
+                        arg.display(),
+                        bound.name(),
+                        owner
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// M63b: does a type parameter carrying `have` satisfy a requirement for
+/// `need`? `Comparable` implies `Equatable` and `Printable`; `Equatable`
+/// implies only `Equatable`; an unbounded parameter (`have == None`) implies
+/// nothing.
+fn bound_implies(have: Option<BoundKind>, need: BoundKind) -> bool {
+    match have {
+        None => false,
+        Some(h) if h == need => true,
+        Some(BoundKind::Comparable) => {
+            matches!(need, BoundKind::Equatable | BoundKind::Printable)
+        }
+        Some(_) => false,
     }
 }
 

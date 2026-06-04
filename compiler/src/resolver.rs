@@ -7,13 +7,13 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
-    self, Block, ClassDecl, ClassModifier, ConstDecl, Expr, FuncDecl, ImportItem, Lvalue,
-    Module, ProtocolDecl, Span, Stmt, TopDecl, TypeAliasDecl,
+    self, Block, ClassDecl, ClassModifier, ConstDecl, Expr, FuncDecl, GenericParam, ImportItem,
+    Lvalue, Module, ProtocolDecl, Span, Stmt, TopDecl, TypeAliasDecl,
 };
 use crate::error::{codes, CompileError, ErrorCode};
 use crate::types::{
-    ClassId, ClassLayout, FieldInfo, MethodSig, PrimTy, ProtoId, ProtocolInfo, Ty, TypeCtor,
-    TypeVarId,
+    BoundKind, ClassId, ClassLayout, FieldInfo, MethodSig, PrimTy, ProtoId, ProtocolInfo, Ty,
+    TypeCtor, TypeVarId,
 };
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -164,6 +164,14 @@ pub struct ResolvedModule {
     /// symbol back to the underlying stdlib module name. Lets the
     /// typechecker recover the module from a renamed alias.
     pub module_alias: HashMap<SymbolId, String>,
+    /// M63b: declared bound (e.g. `Comparable`) for each generic type
+    /// parameter, keyed by its [`TypeVarId`]. Populated when the resolver
+    /// allocates a tvar for a `[T: Bound]` parameter on a function or class.
+    /// Type parameters without a bound have no entry. The type-checker
+    /// consults this to (a) gate bound-only operations like `<` inside generic
+    /// bodies and (b) enforce that concrete type arguments satisfy the bound
+    /// at every instantiation site.
+    pub generic_bounds: HashMap<TypeVarId, BoundKind>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -280,6 +288,8 @@ pub struct Resolver {
     import_item: HashMap<SymbolId, StdlibItem>,
     /// M19: see `ResolvedModule::module_alias`.
     module_alias: HashMap<SymbolId, String>,
+    /// M63b: see `ResolvedModule::generic_bounds`.
+    generic_bounds: HashMap<TypeVarId, BoundKind>,
 }
 
 impl Resolver {
@@ -391,7 +401,57 @@ impl Resolver {
             stdlib_modules: self.stdlib_modules,
             import_item: self.import_item,
             module_alias: self.module_alias,
+            generic_bounds: self.generic_bounds,
         })
+    }
+
+    /// M63b: resolve the declared bound(s) on a generic parameter to a
+    /// [`BoundKind`] and record it under `tv`. Only a single bound is
+    /// supported in v1; a multi-bound `[T: A + B]` is rejected. An unknown
+    /// bound name (anything other than `Comparable` / `Equatable` /
+    /// `Printable` / `Display`) is rejected so typos surface early.
+    fn record_generic_bound(
+        &mut self,
+        tv: TypeVarId,
+        g: &GenericParam,
+    ) -> Result<(), CompileError> {
+        if g.bounds.is_empty() {
+            return Ok(());
+        }
+        if g.bounds.len() > 1 {
+            return Err(Self::err_at(
+                g.span,
+                codes::RESOLVE_UNKNOWN_TYPE,
+                format!(
+                    "type parameter `{}` declares multiple bounds; only a single bound is supported",
+                    g.name
+                ),
+            ));
+        }
+        let bound_name = match &g.bounds[0] {
+            ast::Type::Named { name, .. } => name.clone(),
+            _ => {
+                return Err(Self::err_at(
+                    g.span,
+                    codes::RESOLVE_UNKNOWN_TYPE,
+                    format!("type parameter `{}` has an unsupported bound form", g.name),
+                ));
+            }
+        };
+        match BoundKind::from_name(&bound_name) {
+            Some(bk) => {
+                self.generic_bounds.insert(tv, bk);
+                Ok(())
+            }
+            None => Err(Self::err_at(
+                g.span,
+                codes::RESOLVE_UNKNOWN_TYPE,
+                format!(
+                    "unknown bound `{}` on type parameter `{}`; built-in bounds are Comparable, Equatable, Printable",
+                    bound_name, g.name
+                ),
+            )),
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -6944,6 +7004,8 @@ impl Resolver {
             for g in &c.generics {
                 let tv = self.fresh_tvar();
                 generic_tvars.push(tv);
+                // M63b: record the declared bound (if any) under this tvar.
+                self.record_generic_bound(tv, g)?;
                 self.make_symbol(gscope, &g.name, SymbolKind::TypeAlias, g.span,
                                   Some(Ty::Var(tv)));
             }
@@ -7204,6 +7266,8 @@ impl Resolver {
             for g in &f.generics {
                 let tv = self.fresh_tvar();
                 generic_tvars.push(tv);
+                // M63b: record the declared bound (if any) under this tvar.
+                self.record_generic_bound(tv, g)?;
                 self.make_symbol(s, &g.name, SymbolKind::TypeAlias, g.span,
                                  Some(Ty::Var(tv)));
             }

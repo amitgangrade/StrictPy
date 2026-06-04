@@ -334,7 +334,7 @@ let p: Pair[str, i32] = Pair("count", 99i32)
 - Default values for fields are NOT supported — initialize in `__init__`.
 - Decorators on classes/methods don't exist.
 - `@property` / `@staticmethod` / `@classmethod` don't exist.
-- `class Box[T: Comparable]:` (bounded generics) — v0.4.
+- `class Box[T: Comparable]:` (bounded generics) — supported since M63b; built-in bounds are `Comparable` / `Equatable` / `Printable`, satisfied only by primitive / `str` / `char` types (see §10.3).
 - Explicit type-arg syntax `Box[i64](v)` — v0.4. Use constructor-site inference.
 
 ### 3.10 Exception handling
@@ -2517,16 +2517,17 @@ fn make_pair[K, V](k: K, v: V) -> Tuple[K, V]:
 
 let p: Tuple[str, i64] = make_pair("count", 99i64)
 
-# Operators on T are constrained by per-instantiation re-typecheck:
-fn max_of[T](a: T, b: T) -> T:
-    if a > b:                            # ERROR if T doesn't support `>`
+# Operators on a bare T are REJECTED — declare a bound (see §10.3):
+fn max_of[T: Comparable](a: T, b: T) -> T:
+    if a > b:                            # OK: T is Comparable
         return a
     else:
         return b
 
 let m: i64 = max_of(1i64, 2i64)           # OK
 let m2: str = max_of("a", "b")            # OK
-# max_of(SomeUserClass(...), SomeUserClass(...))   # ERROR if class has no >
+# fn bad[T](a: T, b: T) -> T:
+#     if a > b: ...                       # ERROR E2015: `>` needs `[T: Comparable]`
 ```
 
 ### 10.2 Generic classes (M31)
@@ -2556,9 +2557,59 @@ final class Pair[K, V]:
 let p: Pair[str, i32] = Pair("count", 99i32)
 ```
 
-**v0.3 limits on generic classes**:
+### 10.3 Bounded (constrained) generics (M63b)
+
+A type parameter may carry a single **bound** — a built-in protocol that the
+concrete type argument must satisfy. A bound does two things: it *enables* the
+bound's operations inside the generic body, and it is *enforced* at every
+instantiation site.
+
+```python
+fn max2[T: Comparable](a: T, b: T) -> T:
+    if a < b:                            # OK: `<` enabled by the Comparable bound
+        return b
+    return a
+
+let mi: i64 = max2(3i64, 9i64)            # OK — i64 is Comparable
+let ms: str = max2("a", "z")             # OK — str is Comparable
+
+# Bounds also apply to generic classes:
+final class Sorted[T: Comparable]:
+    lo: T
+    hi: T
+    fn __init__(self, a: T, b: T) -> None:
+        if a < b:
+            self.lo = a; self.hi = b
+        else:
+            self.lo = b; self.hi = a
+```
+
+**Syntax** — `[T: Bound]`. Exactly one bound per parameter (no `[T: A + B]`).
+
+**Built-in bounds and the types that satisfy them** (only primitive / `str` /
+`char` types satisfy a bound — there is no user trait/impl system yet, so a
+user-defined class can never satisfy a bound):
+
+| Bound        | Enables                | Satisfied by                                            |
+|--------------|------------------------|---------------------------------------------------------|
+| `Comparable` | `<`, `<=`, `>`, `>=` (and `==`/`!=`) | `i8`..`i64`, `u8`..`u64`, `f32`, `f64`, `char`, `str` |
+| `Equatable`  | `==`, `!=`             | every `Comparable` type **plus** `bool`                 |
+| `Printable` (alias `Display`) | `str(x)` / display | every primitive plus `str` / `char`         |
+
+`Comparable` implies `Equatable` (and `Printable`); an `Equatable`-only
+parameter may use `==`/`!=` but **not** ordering.
+
+**Enforcement** — using a bound-gated operator (`<`, `==`, …) on an
+*unbounded* `[T]` is a compile error (`E2015`). Instantiating a bounded
+generic with a type that does not satisfy the bound (e.g. a user class for
+`[T: Comparable]`) is also `E2015`. Enforcement happens at call-site
+inference (free functions), constructor-site inference (classes), and across
+user-module-imported generics.
+
+**v0.4 limits on generics**:
 - No explicit type-argument syntax — `Box[i64](v)` does NOT work; use constructor-site inference.
-- No bounded generics (`T: Comparable`) — operators on T are checked per instantiation.
+- A single bound per type parameter; no multi-bound `[T: A + B]`.
+- User-defined classes cannot satisfy a bound (no trait/impl system).
 - No subclassing a parameterised class.
 - No variance markers.
 - Higher-kinded types (`F[_]`) not supported.
