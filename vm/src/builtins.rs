@@ -103,6 +103,19 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             let p = interp.alloc_string(&format!("{a}{b}"));
             Ok(p as u64)
         }
+        // Lexicographic string comparison backing the `<` / `<=` / `>` /
+        // `>=` operators on `str`. Returns i64 (-1 / 0 / 1); the IR lowering
+        // compares the result against 0 with the signed integer relop.
+        NativeFn::StrCmp => {
+            let a = arg_str(args, 0);
+            let b = arg_str(args, 1);
+            let ord: i64 = match a.cmp(&b) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            };
+            Ok(ord as u64)
+        }
         NativeFn::StrSlice => {
             let s = arg_str(args, 0);
             let start = arg_u64(args, 1) as usize;

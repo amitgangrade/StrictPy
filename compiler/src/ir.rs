@@ -3072,6 +3072,31 @@ fn emit_binop(
             }
             if is_float { IROp::FNe } else { IROp::INe }
         }
+        // String ordering. Before this, `Lt`/`Le`/`Gt`/`Ge` had no `is_str`
+        // branch and fell through to the integer `ILt`/`ILe`/`IGt`/`IGe`,
+        // which compares the two heap-pointer u64s — meaningless for content
+        // ordering (same bug class as BUG-034 `str !=`, BUG-008 `is not`,
+        // BUG-039 `in`). Lower as `StrCmp(l, r) <relop> 0`.
+        AstBinOp::Lt | AstBinOp::Le | AstBinOp::Gt | AstBinOp::Ge if is_str => {
+            let cmp = fb.push_value(
+                Ty::Primitive(PrimTy::I64),
+                ValueKind::Op {
+                    op: IROp::NativeCall { native_id: NativeFn::StrCmp as u32 },
+                    args: vec![l, r],
+                },
+            );
+            let zero = fb.push_value(
+                Ty::Primitive(PrimTy::I64),
+                ValueKind::Const(IRConst::I64(0)),
+            );
+            let relop = match op {
+                AstBinOp::Lt => IROp::ILt,
+                AstBinOp::Le => IROp::ILe,
+                AstBinOp::Gt => IROp::IGt,
+                _ => IROp::IGe,
+            };
+            return fb.push_value(ty, ValueKind::Op { op: relop, args: vec![cmp, zero] });
+        }
         AstBinOp::Lt => if is_float { IROp::FLt } else { IROp::ILt },
         AstBinOp::Le => if is_float { IROp::FLe } else { IROp::ILe },
         AstBinOp::Gt => if is_float { IROp::FGt } else { IROp::IGt },

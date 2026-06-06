@@ -148,6 +148,14 @@ pub enum NativeFn {
     /// In-place `xs.sort_by(key_fn)` — args:
     /// `[list_ptr, closure_ptr, key_tag_u32]`.
     ListSortBy = 112,
+    /// `StrCmp(a, b) -> i64` — lexicographic comparison of two StrictPy
+    /// strings: negative if `a < b`, zero if equal, positive if `a > b`.
+    /// Compiler-internal: the IR lowering of the `<` / `<=` / `>` / `>=`
+    /// operators on `str` operands emits `StrCmp(a, b) <relop> 0`. Before
+    /// this, those operators had no `is_str` branch and fell through to the
+    /// integer `ILt`/`ILe`/`IGt`/`IGe`, comparing the two heap-pointer u64s
+    /// (same bug class as BUG-034 `str !=`).
+    StrCmp     = 113,
 
     // ── 130–149: `sys` module (M19) ─────────────────────────────────────
     // Foundation milestone for a real stdlib: the import-resolver and
@@ -2435,6 +2443,7 @@ impl NativeFn {
             110 => Some(Self::Reduce),
             111 => Some(Self::SortedBy),
             112 => Some(Self::ListSortBy),
+            113 => Some(Self::StrCmp),
             // M19: sys module.
             130 => Some(Self::SysArgv),
             131 => Some(Self::SysExit),
