@@ -2130,34 +2130,53 @@ fn lower_try(
 
     // Allocate handler blocks AND their bind slots up front, so the TryEnter
     // operand can reference them.
+    //
+    // M63a: the VM's handler matcher (`interp::propagate_exception`) compares
+    // the raised exception's `type_name` string against each arm's filter for
+    // *exact* equality (with `"Exception"` as a catch-all).  To make
+    // `except Base` also catch a raised `Derived` — where `Derived` subclasses
+    // `Base` — we expand a single source `except` clause into one VM arm per
+    // matching type name: the filter class itself plus every user exception
+    // class that transitively descends from it.  All expanded arms for one
+    // clause share the same handler block and bind slot, and we keep them
+    // contiguous and in source-clause order so the VM's first-match scan
+    // preserves Python's "first matching except wins" semantics.  The
+    // `"Exception"` catch-all needs no expansion (the VM matches it against
+    // anything), and built-in exception aliases are handled VM-side.
     let mut handler_blocks: Vec<BlockId> = Vec::with_capacity(handlers.len());
-    let mut bind_slots: Vec<u32> = Vec::with_capacity(handlers.len());
-    let mut filter_idxs: Vec<u32> = Vec::with_capacity(handlers.len());
+    let mut arms: Vec<TryHandlerArm> = Vec::with_capacity(handlers.len());
     for h in handlers {
-        handler_blocks.push(fb.new_block());
-        let filter_name = exception_filter_name(&h.exc_ty);
-        let idx = ctx.intern(&filter_name);
-        filter_idxs.push(idx);
-        if let Some(name) = &h.binding {
+        let block = fb.new_block();
+        handler_blocks.push(block);
+        let bind_slot = if let Some(name) = &h.binding {
             // Bind slot type: the caught exception class (best-effort —
             // pulled from the AST type via the resolver's type lookup).
             let slot_ty = exception_filter_ty(ctx, &h.exc_ty);
-            let slot = fb.alloc_slot(name, slot_ty);
-            bind_slots.push(slot as u32);
+            fb.alloc_slot(name, slot_ty) as u32
         } else {
-            bind_slots.push(u32::MAX);
+            u32::MAX
+        };
+        let filter_name = exception_filter_name(&h.exc_ty);
+        // Names this clause should match: the filter itself, then (unless it's
+        // the universal catch-all) every subclass of it discovered in the
+        // module's class layouts.
+        let mut match_names: Vec<String> = vec![filter_name.clone()];
+        if filter_name != "Exception" {
+            for sub in exception_subclass_names(ctx, &filter_name) {
+                if !match_names.contains(&sub) {
+                    match_names.push(sub);
+                }
+            }
+        }
+        for mn in match_names {
+            let idx = ctx.intern(&mn);
+            arms.push(TryHandlerArm {
+                filter_str_idx: idx,
+                handler_block: block,
+                bind_slot,
+            });
         }
     }
-
-    let arms: Vec<TryHandlerArm> = handlers
-        .iter()
-        .enumerate()
-        .map(|(i, _)| TryHandlerArm {
-            filter_str_idx: filter_idxs[i],
-            handler_block: handler_blocks[i],
-            bind_slot: bind_slots[i],
-        })
-        .collect();
 
     // Emit the TryEnter as the first instruction of the current block.
     fb.push_value(
@@ -2271,6 +2290,47 @@ fn exception_filter_name(ty: &ast::Type) -> String {
     } else {
         "Exception".into()
     }
+}
+
+/// M63a: collect the names of every class in the module whose `base` chain
+/// transitively reaches the class named `filter_name` (excluding `filter_name`
+/// itself).  Used by `lower_try` to expand a single `except Base` clause into
+/// one VM handler arm per matching `Derived` type, so the VM's exact-string
+/// matcher catches subclasses.  Order is deterministic (sorted by class id)
+/// so bytecode output is stable across runs.
+fn exception_subclass_names(ctx: &LowerCtx, filter_name: &str) -> Vec<String> {
+    // Resolve the filter class id (a user or built-in exception class).
+    let base_cid = ctx
+        .class_layouts
+        .iter()
+        .find(|(_, l)| l.name == filter_name)
+        .map(|(id, _)| *id);
+    let base_cid = match base_cid {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+    let mut hits: Vec<(u32, String)> = Vec::new();
+    for (cid, layout) in ctx.class_layouts.iter() {
+        if *cid == base_cid {
+            continue;
+        }
+        // Walk this class's ancestry; record it if `base_cid` is an ancestor.
+        let mut cur = layout.base;
+        let mut depth = 0;
+        while let Some(anc) = cur {
+            if anc == base_cid {
+                hits.push((cid.0, layout.name.clone()));
+                break;
+            }
+            cur = ctx.class_layouts.get(&anc).and_then(|l| l.base);
+            depth += 1;
+            if depth > 1024 {
+                break; // defensive cycle guard
+            }
+        }
+    }
+    hits.sort_by_key(|(id, _)| *id);
+    hits.into_iter().map(|(_, name)| name).collect()
 }
 
 /// Resolve the static type used for the exception-binding slot. Pulled from
@@ -3852,6 +3912,29 @@ fn lower_call(
                             Ty::Class(cid),
                             ValueKind::Op { op: IROp::Alloc { class_id: tid }, args: vec![] },
                         );
+                        // M63a: every user-defined exception subclass carries
+                        // an inherited `type_name` field at offset 0 (from the
+                        // built-in `Exception` base).  Stamp it with the
+                        // concrete class name *before* running `__init__`, so a
+                        // later `raise inst` / `Throw` reads the right tag and
+                        // the top-level handler / `except X` matching sees the
+                        // correct type — identical to how built-in exceptions
+                        // are materialised in `lower_raise`.  The user's
+                        // `__init__` populates `message` (offset 8) and any
+                        // extra fields.
+                        if crate::types::class_is_exception(cid, ctx.class_layouts) {
+                            let tname_v = fb.push_value(
+                                Ty::Primitive(PrimTy::Str),
+                                ValueKind::Const(IRConst::Str(name.clone())),
+                            );
+                            fb.push_value(
+                                Ty::Primitive(PrimTy::Unit),
+                                ValueKind::Op {
+                                    op: IROp::Store { offset: 0 },
+                                    args: vec![alloc, tname_v],
+                                },
+                            );
+                        }
                         // M34: JsonValue subclass constructors — these
                         // have no user-level `__init__`; we synthesise
                         // initialisation by calling the matching

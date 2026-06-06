@@ -529,9 +529,39 @@ impl TypeChecker {
                             // Note the exception-call span too so IR can identify it.
                             return Ok(());
                         }
+                        // M63a: `raise MyError(args...)` where `MyError` is a
+                        // user-defined class.  It must transitively descend
+                        // from the built-in `Exception` base; otherwise only
+                        // exception types may be raised.  We type-check the
+                        // constructor call through the normal class path (which
+                        // validates the `__init__` arity / argument types and
+                        // records `expr_types[name] = Ty::Class(cid)` for IR).
+                        if let Some(sid) = r.symbols.lookup(r.module_scope, name) {
+                            if let Some(cid) = r.symbols.get(sid).class_id {
+                                if !crate::types::class_is_exception(cid, ctx.classes) {
+                                    return Err(type_err(*span, codes::TYPE_NOT_AN_EXCEPTION,
+                                        format!("cannot raise `{}`: only subclasses of `Exception` \
+                                                 may be raised", name)));
+                                }
+                                // Exception subclass — fall through to the
+                                // normal constructor type-check below.
+                            }
+                        }
                     }
                 }
-                let _ = self.check_or_synth(exc, None, env, ctx, r)?;
+                // M63a: type-check the raised expression (a user-exception
+                // constructor call, or a bound exception value being
+                // re-raised).  For a value being raised directly we require it
+                // to be an exception-typed class so a stray `raise 42` is
+                // rejected at compile time.
+                let raised_ty = self.check_or_synth(exc, None, env, ctx, r)?;
+                if let Ty::Class(cid) = &raised_ty {
+                    if !crate::types::class_is_exception(*cid, ctx.classes) {
+                        return Err(type_err(*span, codes::TYPE_NOT_AN_EXCEPTION,
+                            "cannot raise a non-exception value: only subclasses of \
+                             `Exception` may be raised".into()));
+                    }
+                }
             }
             Stmt::Assert { cond, msg, span } => {
                 // The example syntax `assert(cond, msg)` parses as `assert <tuple>`.

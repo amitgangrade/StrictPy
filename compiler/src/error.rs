@@ -131,6 +131,12 @@ pub mod codes {
     /// declaration.
     pub const TYPE_DEFAULT_ORDER: ErrorCode = "E2019";
 
+    // ── M63a: user-defined exception subclasses ───────────────────────────
+    /// `raise X(...)` (or `except X`) where `X` is a class that is not, and
+    /// does not transitively descend from, the built-in `Exception` base.
+    /// Only exception types may be raised or caught.
+    pub const TYPE_NOT_AN_EXCEPTION: ErrorCode = "E2050";
+
     // ── E3xxx: semantic ──────────────────────────────────────────────────
     pub const SEM_NONEXHAUSTIVE_MATCH: ErrorCode = "E3001";
     pub const SEM_UNREACHABLE: ErrorCode = "E3002";

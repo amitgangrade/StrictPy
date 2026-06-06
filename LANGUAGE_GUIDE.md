@@ -59,7 +59,7 @@ StrictPy is **Python-syntax with mandatory static typing**. The compiler rejects
 - `T?` means "T or none". The type checker narrows `T?` to `T` inside `if x is not none:` branches.
 - Generic free functions (M17): `fn id[T](x: T) -> T:`. Generic classes (M31): `class Box[T]:` / `class Pair[K, V]:`.
 - The `match` keyword + `case Constructor()` patterns work for sealed-class destructuring (M16).
-- Exception handling: `try` / `except <name> as e:` / `finally` (M15). The 10 built-in exception names are listed in §3.10. User-defined exception subclasses are NOT supported in v0.3.
+- Exception handling: `try` / `except <name> as e:` / `finally` (M15). The 10 built-in exception names are listed in §3.10. User-defined exception subclasses (M63a): subclass `Exception` (or any built-in exception) with `class MyError(Exception):`, `raise MyError(...)`, and catch with subclass matching. See §3.10.
 - Mandatory `main() -> i32` entry point in any program you intend to run.
 - Default argument values and keyword arguments (M61b): `fn f(a: i32, b: i32 = 1)`, called as `f(1)`, `f(1, 2)`, or `f(a=1, b=2)`. See §3's "Default & keyword arguments".
 
@@ -403,7 +403,7 @@ fn divide(a: i32, b: i32) -> i32:
     return a / b
 ```
 
-**Built-in exception names** (v0.3 ships these 10; user-defined subclasses are v0.4):
+**Built-in exception names** (these 10 are always in scope):
 
 ```
 Exception (catches everything below it)
@@ -419,6 +419,73 @@ Exception (catches everything below it)
 ```
 
 `sys.exit(code)` raises a separate non-catchable termination (won't be caught by `except Exception`; matches Python's `SystemExit` derived from `BaseException`).
+
+#### User-defined exception subclasses (M63a)
+
+You can declare your own exception types by subclassing the built-in
+`Exception` base — or any built-in exception such as `ValueError`. Mark the
+class `open` if you want to subclass it further (a `final` class, the
+default, cannot be subclassed):
+
+```python
+# A base application error. `open` so it can be subclassed.
+open class AppError(Exception):
+    fn __init__(self, message: str) -> None:
+        self.message = message          # `message` is inherited from Exception
+
+# A derived error that adds a field of its own.
+final class ParseError(AppError):
+    position: i32
+
+    fn __init__(self, message: str, position: i32) -> None:
+        self.message = message
+        self.position = position
+
+fn parse(bad: bool) -> i32:
+    if bad:
+        raise ParseError("unexpected token", 7i32)
+    return 0
+
+fn main() -> i32:
+    # Catch by the exact type; read the inherited `message` field AND the
+    # subclass-specific `position` field.
+    try:
+        n: i32 = parse(true)
+    except ParseError as e:
+        println("parse error: " + e.message + " @ " + str(e.position))
+
+    # Subclass matching: a base-class `except AppError` clause also catches a
+    # raised `ParseError`, and `except Exception` catches any user exception.
+    try:
+        n2: i32 = parse(true)
+    except AppError as e:
+        println("app error: " + e.message)
+    return 0
+```
+
+Rules and semantics:
+
+- **Declaration.** A user exception is an ordinary class whose base chain
+  reaches `Exception`. Single inheritance only (StrictPy has no multiple
+  inheritance). Use `open class` / `sealed class` on any exception you intend
+  to subclass; `final` (the default) cannot be subclassed.
+- **Fields.** Every exception inherits `type_name: str` (the runtime tag,
+  set automatically to the class name) and `message: str` from `Exception`.
+  Set `self.message = ...` in your `__init__`; add extra fields freely. All
+  fields are readable on the bound `e` inside a handler.
+- **Raise.** `raise MyError(args...)` constructs an instance via your
+  `__init__` and raises it. `e.type_name` is the concrete class name.
+- **Catch + subclass matching.** `except Base as e:` catches a raised value
+  of `Base` *or any subclass of `Base`* (Python semantics). `except Exception`
+  catches every user exception. The first matching `except` clause wins in
+  source order, exactly as with built-in exceptions.
+- **Re-raise.** `raise e` inside a handler re-raises the caught exception so
+  an outer `try` can catch it.
+- **Propagation.** An uncaught user exception propagates to the top level and
+  terminates the program with `uncaught exception: <TypeName>: <message>`,
+  just like the built-ins.
+- **Only exceptions may be raised.** `raise SomeNonExceptionClass(...)` is a
+  compile error (`E2050`).
 
 ### 3.11 Pattern matching
 
@@ -2134,7 +2201,7 @@ These are available without import:
 | `Channel[T]` | Thread-safe queue | M5 |
 | `Thread` | OS thread | M6 |
 | `io.File` | Open file handle (via `open()` or `with open(...)`) | M5 |
-| 10 exception names | See §3.10 | M15 |
+| 10 exception names + user subclasses | See §3.10 | M15 / M63a |
 
 **Stdlib classes are module-scoped.** `JsonValue` + 6 subclasses (`JNull` / `JBool` / `JInt` / `JFloat` / `JString` / `JList` / `JObject`), `Pattern`, `Connection` + `Cursor`, and `Hasher` are stdlib classes — import them from their home modules (`from json import JsonValue`, `from re import Pattern`, `from sqlite3 import Connection, Cursor`, `from hashlib import Hasher`). Pre-M36 these flattened into the prelude; M36 moved the metadata into the stdlib-module table. The bare names still resolve after a plain `import json` / `import re` / `import sqlite3` / `import hashlib` for back-compat with the M34/M35 test surface, but new code should prefer the explicit `from <mod> import` form.
 
@@ -2769,9 +2836,14 @@ except IOError as e:
 
 Actually... let me check. The actual behaviour depends on whether the raise happens inside the with body or in `open()`. Wrapping in `try` works either way; the issue is more nuanced. Safest pattern: always wrap with-blocks that touch IO in `try`/`except IOError`.
 
-### 11.9 No user-defined exception subclasses
+### 11.9 User-defined exception subclasses (now supported — M63a)
 
-The 10 built-in exception names (§3.10) are all you get in v0.3. `class MyError(Exception):` parses but the resolver rejects it.
+You *can* declare your own exception types: `class MyError(Exception):` (or
+subclass a built-in like `ValueError`). Raise with `raise MyError(...)` and
+catch with subclass matching (`except Base` catches a raised `Derived`). See
+§3.10 "User-defined exception subclasses". Constraints: single inheritance
+only; mark a class `open`/`sealed` to subclass it further; only types that
+descend from `Exception` may be raised (`raise <non-exception>` is `E2050`).
 
 ### 11.10 No async/await syntax
 
