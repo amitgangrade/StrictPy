@@ -1,0 +1,73 @@
+"""M63a — user-defined exception subclasses.
+
+StrictPy lets you declare your own exception types by subclassing the built-in
+`Exception` (or any built-in exception such as `ValueError`).  An exception
+subclass:
+
+  * is declared `open class` if you want to subclass it further;
+  * inherits the `message: str` field from `Exception` (set it in `__init__`);
+  * may carry extra fields of its own (here `ParseError.position`);
+  * is raised with `raise MyError(...)` and caught with `except MyError as e:`.
+
+Subclass matching follows Python: an `except Base` clause also catches any
+`Derived` raised value, and `except Exception` catches every user exception.
+"""
+
+# A base application error.  `open` so it can be subclassed below.
+open class AppError(Exception):
+    fn __init__(self, message: str) -> None:
+        self.message = message
+
+# A derived error that adds a field of its own.
+final class ParseError(AppError):
+    position: i32
+
+    fn __init__(self, message: str, position: i32) -> None:
+        self.message = message
+        self.position = position
+
+# Raise the derived exception unconditionally.
+fn parse(bad: bool) -> i32:
+    if bad:
+        raise ParseError("unexpected token", 7i32)
+    return 0
+
+# Raise the base exception.
+fn run_app(fail: bool) -> i32:
+    if fail:
+        raise AppError("boom")
+    return 0
+
+fn main() -> i32:
+    # 1) Catch an exception by its own type and read the inherited `message`
+    #    field plus the subclass-specific `position` field.
+    try:
+        r1: i32 = parse(true)
+        println("no error")
+    except ParseError as e:
+        println("caught ParseError: " + e.message + " @ " + str(e.position))
+
+    # 2) A base-class `except AppError` clause catches the derived ParseError.
+    try:
+        r2: i32 = parse(true)
+    except AppError as e:
+        println("base clause caught: " + e.message)
+
+    # 3) `except Exception` catches any user exception type.
+    try:
+        r3: i32 = run_app(true)
+    except Exception as e:
+        println("except Exception caught: " + e.message)
+
+    # 4) Re-raise inside a handler, caught by an outer try.
+    try:
+        try:
+            r4: i32 = run_app(true)
+        except AppError as e:
+            println("inner handler, re-raising: " + e.message)
+            raise e
+    except Exception as e:
+        println("outer handler caught re-raise: " + e.message)
+
+    println("done")
+    return 0
