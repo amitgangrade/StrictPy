@@ -20,7 +20,7 @@ use crate::ast::{
 use crate::error::{codes, CompileError, ErrorCode};
 use crate::resolver::{FunctionSig, ResolvedModule, SymbolId, SymbolKind};
 use crate::types::{
-    is_subtype, is_subtype_trivial, ty_eq, ClassId, ClassLayout, PrimTy, ProtoId,
+    is_subtype, is_subtype_trivial, ty_eq, BoundKind, ClassId, ClassLayout, PrimTy, ProtoId,
     ProtocolInfo, Ty, TypeContext, TypeCtor, TypeVarId,
 };
 
@@ -169,6 +169,12 @@ impl TypeChecker {
         // pre-loaded via name lookup against ctx.base_types using their symbol ids:
         // we find them by scanning the symbol table for `Param` symbols whose
         // def_span equals each `p.span`.
+        // M61b: a non-default parameter may not follow a defaulted one. Skip
+        // the implicit `self` of methods/constructors.
+        let skip_self = matches!(f.params.first(), Some(p) if p.name == "self") as usize;
+        crate::argbind::check_default_order(
+            &f.params, skip_self, &format!("`{}`", f.name),
+        )?;
         let mut env = Env::default();
         for p in &f.params {
             for sym in &r.symbols.symbols {
@@ -180,6 +186,23 @@ impl TypeChecker {
                         env.types.insert(sym.id, t.clone());
                     }
                     break;
+                }
+            }
+        }
+        // M61b: type-check each parameter default against its declared type.
+        // Defaults are evaluated at call time *before* parameters bind, so
+        // they are checked in an empty local env (they may reference top-level
+        // `final` constants and literals, but not other parameters).
+        let default_env = Env::default();
+        for p in &f.params {
+            if let Some(def) = &p.default {
+                let pkey = ast_type_span(&p.ty);
+                let pty = r.ast_type_to_ty.get(&pkey).cloned().unwrap_or(Ty::Never);
+                let got = self.check_or_synth(def, Some(&pty), &default_env, ctx, r)?;
+                if !is_subtype(&got, &pty, &ctx.ty_ctx()) {
+                    return Err(type_err(p.span, codes::TYPE_MISMATCH,
+                        format!("default for parameter `{}`: expected {}, got {}",
+                                p.name, pty.display(), got.display())));
                 }
             }
         }
@@ -1001,8 +1024,33 @@ impl TypeChecker {
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 let lt = self.synth_expr(lhs, env, ctx, r)?;
                 let rt = self.check_or_synth(rhs, Some(&lt), env, ctx, r)?;
-                // M17: defer comparison-shape checks inside generic bodies
-                // (see Add/Sub/... arm for the same pattern).
+                // M63b: comparison inside a generic body is only legal when the
+                // type parameter carries the matching bound. Ordering
+                // (`<`, `<=`, `>`, `>=`) requires `Comparable`; equality
+                // (`==`, `!=`) requires `Equatable` (a `Comparable` parameter
+                // is implicitly `Equatable` too). An *unbounded* `T` is
+                // rejected here — this is the negative case from the spec.
+                // (M17 used to defer all of these unconditionally.)
+                for opnd in [&lt, &rt] {
+                    if let Ty::Var(tv) = opnd {
+                        let needs_order = matches!(
+                            op,
+                            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+                        );
+                        let ok = match r.generic_bounds.get(tv) {
+                            Some(BoundKind::Comparable) => true,
+                            Some(BoundKind::Equatable) => !needs_order,
+                            _ => false,
+                        };
+                        if !ok {
+                            let needed = if needs_order { "Comparable" } else { "Equatable" };
+                            return Err(type_err(span, codes::TYPE_UNSATISFIED_BOUND,
+                                format!(
+                                    "`{:?}` requires the type parameter to be `{}`; add a bound like `[T: {}]`",
+                                    op, needed, needed)));
+                        }
+                    }
+                }
                 if matches!(lt, Ty::Var(_)) || matches!(rt, Ty::Var(_)) {
                     return Ok(Ty::Primitive(PrimTy::Bool));
                 }
@@ -1068,6 +1116,34 @@ impl TypeChecker {
         }
     }
 
+    /// M61b: validate a call's positional + keyword arguments against a
+    /// callee's declared parameters and type-check each supplied argument
+    /// against its parameter type. `ast_params` provides names + defaults
+    /// (post-`self`); `param_tys` are the matching semantic parameter types
+    /// (same length, same order). Omitted parameters fall back to their
+    /// declared default, which was already checked at declaration time.
+    fn check_call_binding(
+        &mut self,
+        ast_params: &[ast::Param],
+        param_tys: &[Ty],
+        args: &[Arg],
+        span: Span,
+        desc: &str,
+        env: &Env,
+        ctx: &Ctx,
+        r: &ResolvedModule,
+    ) -> Result<(), CompileError> {
+        let infos = crate::argbind::ParamInfo::from_params(ast_params);
+        let slots = crate::argbind::bind(&infos, args, span, desc)?;
+        for (pidx, slot) in slots.iter().enumerate() {
+            if let crate::argbind::Slot::Arg(ai) = slot {
+                let pt = param_tys.get(pidx).cloned().unwrap_or(Ty::Never);
+                let _ = self.check_expr(&args[*ai].value, &pt, env, ctx, r)?;
+            }
+        }
+        Ok(())
+    }
+
     fn synth_call(&mut self, callee: &Expr, args: &[Arg], span: Span,
                   env: &Env, ctx: &Ctx, r: &ResolvedModule) -> Result<Ty, CompileError>
     {
@@ -1123,6 +1199,136 @@ impl TypeChecker {
                     }
                     return Err(type_err(span, codes::TYPE_MISMATCH,
                         format!("sorted expects a List, got {}", t.display())));
+                }
+                // M61a: higher-order builtins. User callbacks now cross the
+                // NativeFn boundary, so these take a closure value plus a
+                // List and re-enter the interpreter per element. All forms
+                // are positional; `key=`/default forms come later.
+                //
+                //   map(fn: T -> U, xs: List[T]) -> List[U]
+                "map" => {
+                    if args.len() != 2 {
+                        return Err(type_err(span, codes::TYPE_ARITY,
+                            "map takes 2 arguments: (fn, xs)".into()));
+                    }
+                    let xs_ty = self.synth_expr(&args[1].value, env, ctx, r)?;
+                    let elem = match &xs_ty {
+                        Ty::Generic { base: TypeCtor::List, args: a } if a.len() == 1 => a[0].clone(),
+                        _ => return Err(type_err(span, codes::TYPE_MISMATCH,
+                            format!("map: second argument must be a List, got {}", xs_ty.display()))),
+                    };
+                    // Check the callback against `T -> U`, inferring U from its
+                    // declared return type.
+                    let fn_ty = self.synth_expr(&args[0].value, env, ctx, r)?;
+                    let u = match &fn_ty {
+                        Ty::Function { params, ret } if params.len() == 1 => {
+                            if !type_assignable(&elem, &params[0]) {
+                                return Err(type_err(span, codes::TYPE_MISMATCH,
+                                    format!("map: callback expects {} but list elements are {}",
+                                            params[0].display(), elem.display())));
+                            }
+                            (**ret).clone()
+                        }
+                        _ => return Err(type_err(span, codes::TYPE_MISMATCH,
+                            "map: first argument must be a 1-parameter function".into())),
+                    };
+                    return Ok(Ty::Generic { base: TypeCtor::List, args: vec![u] });
+                }
+                //   filter(fn: T -> bool, xs: List[T]) -> List[T]
+                "filter" => {
+                    if args.len() != 2 {
+                        return Err(type_err(span, codes::TYPE_ARITY,
+                            "filter takes 2 arguments: (fn, xs)".into()));
+                    }
+                    let xs_ty = self.synth_expr(&args[1].value, env, ctx, r)?;
+                    let elem = match &xs_ty {
+                        Ty::Generic { base: TypeCtor::List, args: a } if a.len() == 1 => a[0].clone(),
+                        _ => return Err(type_err(span, codes::TYPE_MISMATCH,
+                            format!("filter: second argument must be a List, got {}", xs_ty.display()))),
+                    };
+                    let fn_ty = self.synth_expr(&args[0].value, env, ctx, r)?;
+                    match &fn_ty {
+                        Ty::Function { params, ret } if params.len() == 1 => {
+                            if !type_assignable(&elem, &params[0]) {
+                                return Err(type_err(span, codes::TYPE_MISMATCH,
+                                    format!("filter: predicate expects {} but list elements are {}",
+                                            params[0].display(), elem.display())));
+                            }
+                            if !matches!(**ret, Ty::Primitive(PrimTy::Bool)) {
+                                return Err(type_err(span, codes::TYPE_MISMATCH,
+                                    format!("filter: predicate must return bool, got {}", ret.display())));
+                            }
+                        }
+                        _ => return Err(type_err(span, codes::TYPE_MISMATCH,
+                            "filter: first argument must be a 1-parameter function".into())),
+                    }
+                    return Ok(Ty::Generic { base: TypeCtor::List, args: vec![elem] });
+                }
+                //   reduce(fn: (U, T) -> U, xs: List[T], init: U) -> U
+                "reduce" => {
+                    if args.len() != 3 {
+                        return Err(type_err(span, codes::TYPE_ARITY,
+                            "reduce takes 3 arguments: (fn, xs, init)".into()));
+                    }
+                    let xs_ty = self.synth_expr(&args[1].value, env, ctx, r)?;
+                    let elem = match &xs_ty {
+                        Ty::Generic { base: TypeCtor::List, args: a } if a.len() == 1 => a[0].clone(),
+                        _ => return Err(type_err(span, codes::TYPE_MISMATCH,
+                            format!("reduce: second argument must be a List, got {}", xs_ty.display()))),
+                    };
+                    let fn_ty = self.synth_expr(&args[0].value, env, ctx, r)?;
+                    let acc_ty = match &fn_ty {
+                        Ty::Function { params, ret } if params.len() == 2 => {
+                            // The accumulator type U is the callback's first
+                            // param. Check `init` against it so unsuffixed int
+                            // literals (e.g. `reduce(..., 0)`) take width U.
+                            let _ = self.check_expr(&args[2].value, &params[0], env, ctx, r)?;
+                            if !type_assignable(&elem, &params[1]) {
+                                return Err(type_err(span, codes::TYPE_MISMATCH,
+                                    format!("reduce: list elements {} not assignable to callback param {}",
+                                            elem.display(), params[1].display())));
+                            }
+                            if !type_assignable(ret, &params[0]) {
+                                return Err(type_err(span, codes::TYPE_MISMATCH,
+                                    format!("reduce: callback returns {} but accumulator is {}",
+                                            ret.display(), params[0].display())));
+                            }
+                            params[0].clone()
+                        }
+                        _ => return Err(type_err(span, codes::TYPE_MISMATCH,
+                            "reduce: first argument must be a 2-parameter function".into())),
+                    };
+                    return Ok(acc_ty);
+                }
+                //   sorted_by(xs: List[T], key_fn: T -> K) -> List[T]
+                "sorted_by" => {
+                    if args.len() != 2 {
+                        return Err(type_err(span, codes::TYPE_ARITY,
+                            "sorted_by takes 2 arguments: (xs, key_fn)".into()));
+                    }
+                    let xs_ty = self.synth_expr(&args[0].value, env, ctx, r)?;
+                    let elem = match &xs_ty {
+                        Ty::Generic { base: TypeCtor::List, args: a } if a.len() == 1 => a[0].clone(),
+                        _ => return Err(type_err(span, codes::TYPE_MISMATCH,
+                            format!("sorted_by: first argument must be a List, got {}", xs_ty.display()))),
+                    };
+                    let fn_ty = self.synth_expr(&args[1].value, env, ctx, r)?;
+                    match &fn_ty {
+                        Ty::Function { params, ret } if params.len() == 1 => {
+                            if !type_assignable(&elem, &params[0]) {
+                                return Err(type_err(span, codes::TYPE_MISMATCH,
+                                    format!("sorted_by: key fn expects {} but list elements are {}",
+                                            params[0].display(), elem.display())));
+                            }
+                            if !is_comparable_key_ty(ret) {
+                                return Err(type_err(span, codes::TYPE_MISMATCH,
+                                    format!("sorted_by: key must be i64/f64/str, got {}", ret.display())));
+                            }
+                        }
+                        _ => return Err(type_err(span, codes::TYPE_MISMATCH,
+                            "sorted_by: second argument must be a 1-parameter function".into())),
+                    }
+                    return Ok(Ty::Generic { base: TypeCtor::List, args: vec![elem] });
                 }
                 "assert" => {
                     if args.is_empty() {
@@ -1213,6 +1419,29 @@ impl TypeChecker {
                 }
             }
         }
+        // M61b: non-generic user free function — bind positional + keyword
+        // arguments against the declared parameters, filling defaults. We use
+        // the AST parameter list (names + defaults) plus the resolved
+        // signature's parameter types.
+        if let Expr::Ident { name, .. } = callee {
+            if let Some(sid) = r.symbols.lookup(r.module_scope, name) {
+                if matches!(r.symbols.get(sid).kind, SymbolKind::Function) {
+                    if let Some(sig) = r.function_sigs.get(&sid).cloned() {
+                        if sig.generic_tvars.is_empty() {
+                            if let Some(ast_params) = ast_free_fn_params(r, name) {
+                                let param_tys: Vec<Ty> =
+                                    sig.params.iter().map(|(_, t)| t.clone()).collect();
+                                self.check_call_binding(
+                                    ast_params, &param_tys, args, span,
+                                    &format!("function `{name}`"), env, ctx, r,
+                                )?;
+                                return Ok(sig.ret.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // Generic callee.
         let cty = self.synth_expr(callee, env, ctx, r)?;
         match cty {
@@ -1241,6 +1470,15 @@ impl TypeChecker {
                         );
                     }
                     if let Some(init) = cl.methods.iter().find(|m| m.name == "__init__") {
+                        // M61b: default + keyword binding when we can recover
+                        // the constructor's AST parameters (names + defaults).
+                        if let Some(ast_params) = ast_ctor_params(r, &cl.name) {
+                            let desc = format!("constructor of `{}`", cl.name);
+                            self.check_call_binding(
+                                ast_params, &init.params, args, span, &desc, env, ctx, r,
+                            )?;
+                            return Ok(Ty::Class(cid));
+                        }
                         if args.len() != init.params.len() {
                             return Err(type_err(span, codes::TYPE_ARITY,
                                 format!("constructor of `{}` expects {} args, got {}",
@@ -1398,6 +1636,9 @@ impl TypeChecker {
                 }
             }
         }
+        // M63b: every solved type argument must satisfy the bound (if any)
+        // declared on its type parameter.
+        check_bounds_satisfied(&sig.generic_tvars, &type_args, &sig.name, span, r)?;
         // Step 3: record the instantiation (de-duped by mangled key).
         let key = mangle_args_key(&type_args);
         if self.instantiation_keys.insert((sid, key)) {
@@ -1507,6 +1748,8 @@ impl TypeChecker {
                 }
             }
         }
+        // M63b: enforce declared bounds on the class type parameters.
+        check_bounds_satisfied(&cl.generic_tvars, &type_args, &cl.name, span, r)?;
         let key = mangle_args_key(&type_args);
         if self.class_instantiation_keys.insert((cid, key)) {
             self.class_instantiations.push((cid, type_args.clone()));
@@ -1543,6 +1786,32 @@ impl TypeChecker {
                 if !args.is_empty() {
                     return Err(type_err(span, codes::TYPE_ARITY,
                         "List.sort takes no arguments in v1".into()));
+                }
+                return Ok(Ty::Primitive(PrimTy::Unit));
+            }
+            // M61a: in-place sort by a user key function. `key_fn: T -> K`
+            // where K is a comparable primitive (i64/f64/str). Returns None.
+            (Ty::Generic { base: TypeCtor::List, args: a }, "sort_by") if a.len() == 1 => {
+                if args.len() != 1 {
+                    return Err(type_err(span, codes::TYPE_ARITY,
+                        "List.sort_by takes 1 argument: (key_fn)".into()));
+                }
+                let elem = a[0].clone();
+                let fn_ty = self.synth_expr(&args[0].value, env, ctx, r)?;
+                match &fn_ty {
+                    Ty::Function { params, ret } if params.len() == 1 => {
+                        if !type_assignable(&elem, &params[0]) {
+                            return Err(type_err(span, codes::TYPE_MISMATCH,
+                                format!("sort_by: key fn expects {} but list elements are {}",
+                                        params[0].display(), elem.display())));
+                        }
+                        if !is_comparable_key_ty(ret) {
+                            return Err(type_err(span, codes::TYPE_MISMATCH,
+                                format!("sort_by: key must be i64/f64/str, got {}", ret.display())));
+                        }
+                    }
+                    _ => return Err(type_err(span, codes::TYPE_MISMATCH,
+                        "sort_by: argument must be a 1-parameter function".into())),
                 }
                 return Ok(Ty::Primitive(PrimTy::Unit));
             }
@@ -1677,6 +1946,19 @@ impl TypeChecker {
             while let Some(c) = cur {
                 if let Some(cl) = ctx.classes.get(&c) {
                     if let Some(m) = cl.methods.iter().find(|m| m.name == method) {
+                        let ret_ty = subst_ty(&m.ret, &recv_subst);
+                        // M61b: default + keyword binding when we can recover
+                        // the method's AST parameters. `recv_subst` specialises
+                        // generic-class method param types before checking.
+                        if let Some(ast_params) = ast_method_params(r, &cl.name, method) {
+                            let param_tys: Vec<Ty> =
+                                m.params.iter().map(|pt| subst_ty(pt, &recv_subst)).collect();
+                            let desc = format!("method `{method}`");
+                            self.check_call_binding(
+                                ast_params, &param_tys, args, span, &desc, env, ctx, r,
+                            )?;
+                            return Ok(ret_ty);
+                        }
                         if args.len() != m.params.len() {
                             return Err(type_err(span, codes::TYPE_ARITY,
                                 format!("method `{}` expects {} args, got {}", method, m.params.len(), args.len())));
@@ -1685,7 +1967,7 @@ impl TypeChecker {
                             let expected = subst_ty(pt, &recv_subst);
                             let _ = self.check_expr(&a.value, &expected, env, ctx, r)?;
                         }
-                        return Ok(subst_ty(&m.ret, &recv_subst));
+                        return Ok(ret_ty);
                     }
                     cur = cl.base;
                 } else { break; }
@@ -1787,6 +2069,124 @@ fn type_err(span: Span, code: ErrorCode, message: String) -> CompileError {
     }
 }
 
+/// M63b: verify each concrete type argument satisfies the bound (if any)
+/// declared on the matching generic type parameter. `tvars` and `type_args`
+/// are parallel (declaration order); bounds are looked up in
+/// `r.generic_bounds` by tvar id. A type that does not satisfy its bound
+/// yields `E2015`. Type parameters without a declared bound are unconstrained.
+fn check_bounds_satisfied(
+    tvars: &[TypeVarId],
+    type_args: &[Ty],
+    owner: &str,
+    span: Span,
+    r: &ResolvedModule,
+) -> Result<(), CompileError> {
+    for (tv, arg) in tvars.iter().zip(type_args.iter()) {
+        if let Some(bound) = r.generic_bounds.get(tv) {
+            // A concrete primitive must satisfy the bound directly. A type
+            // argument that is *itself* a bounded type variable (transitive
+            // instantiation, e.g. `quicksort[T: Comparable]` forwarding `T`
+            // into `partition[T: Comparable]`) satisfies the requirement when
+            // the caller's bound is at least as strong — modelled here by
+            // requiring the same bound. Unbounded vars fail.
+            let ok = match arg {
+                Ty::Var(arg_tv) => bound_implies(r.generic_bounds.get(arg_tv).copied(), *bound),
+                _ => bound.satisfied_by(arg),
+            };
+            if !ok {
+                return Err(type_err(
+                    span,
+                    codes::TYPE_UNSATISFIED_BOUND,
+                    format!(
+                        "type `{}` does not satisfy bound `{}` required by `{}`",
+                        arg.display(),
+                        bound.name(),
+                        owner
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// M63b: does a type parameter carrying `have` satisfy a requirement for
+/// `need`? `Comparable` implies `Equatable` and `Printable`; `Equatable`
+/// implies only `Equatable`; an unbounded parameter (`have == None`) implies
+/// nothing.
+fn bound_implies(have: Option<BoundKind>, need: BoundKind) -> bool {
+    match have {
+        None => false,
+        Some(h) if h == need => true,
+        Some(BoundKind::Comparable) => {
+            matches!(need, BoundKind::Equatable | BoundKind::Printable)
+        }
+        Some(_) => false,
+    }
+}
+
+// ── M61b: AST parameter lookup for default + keyword binding ──────────────
+//
+// The semantic `FunctionSig` / `MethodSig` carry parameter *types* but not
+// names or default expressions, so the call binder ([`argbind`]) recovers the
+// declared parameters from the original AST. These helpers find the relevant
+// `&[ast::Param]`, with `self` already stripped for methods/constructors so
+// the slice lines up 1:1 with the call's argument list.
+
+/// AST parameters of a free function by name (module-level decls only).
+fn ast_free_fn_params<'a>(r: &'a ResolvedModule, name: &str) -> Option<&'a [ast::Param]> {
+    for d in &r.module.decls {
+        if let TopDecl::Func(f) = d {
+            if f.name == name {
+                return Some(&f.params);
+            }
+        }
+    }
+    None
+}
+
+/// AST parameters (minus `self`) of a class's `__init__`, by class name.
+fn ast_ctor_params<'a>(r: &'a ResolvedModule, class_name: &str) -> Option<&'a [ast::Param]> {
+    for d in &r.module.decls {
+        if let TopDecl::Class(c) = d {
+            if c.name == class_name {
+                if let Some(init) = &c.init {
+                    return Some(strip_self(&init.params));
+                }
+                return None;
+            }
+        }
+    }
+    None
+}
+
+/// AST parameters (minus `self`) of a named method on a class, walking the
+/// inheritance chain by class name.
+fn ast_method_params<'a>(
+    r: &'a ResolvedModule,
+    class_name: &str,
+    method: &str,
+) -> Option<&'a [ast::Param]> {
+    for d in &r.module.decls {
+        if let TopDecl::Class(c) = d {
+            if c.name == class_name {
+                if let Some(m) = c.methods.iter().find(|m| m.name == method) {
+                    return Some(strip_self(&m.params));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Drop a leading implicit `self` parameter, if present.
+fn strip_self(params: &[ast::Param]) -> &[ast::Param] {
+    match params.first() {
+        Some(p) if p.name == "self" => &params[1..],
+        _ => params,
+    }
+}
+
 fn expr_span(e: &Expr) -> Span {
     match e {
         Expr::Literal { span, .. } | Expr::Ident { span, .. } | Expr::Tuple { span, .. }
@@ -1849,6 +2249,37 @@ fn prim_from_name_unchecked(name: &str) -> PrimTy {
 }
 
 /// Least-upper-bound (just enough to make tests pass).
+/// M61a: is a value of type `from` acceptable where `to` is expected?
+/// Used by the higher-order builtins (`map`/`filter`/`reduce`/`sorted_by`)
+/// to check the user callback's parameter/return types against the list
+/// element / accumulator types. Permissive on numeric widths and nullable
+/// widening (same policy `lub` encodes); the runtime is the final guard.
+fn type_assignable(from: &Ty, to: &Ty) -> bool {
+    if ty_eq(from, to) {
+        return true;
+    }
+    // `lub` returning `to` (or a supertype) means `from` widens into `to`.
+    match lub(from, to) {
+        Some(l) => ty_eq(&l, to) || is_subtype_trivial(from, to),
+        None => false,
+    }
+}
+
+/// M61a: a key for `sorted_by`/`sort_by` must be a comparable primitive —
+/// an integer/float width or `str`. (This sidesteps full comparator
+/// generics; key-based ordering is enough for v1.)
+fn is_comparable_key_ty(ty: &Ty) -> bool {
+    matches!(
+        ty,
+        Ty::Primitive(
+            PrimTy::I8 | PrimTy::I16 | PrimTy::I32 | PrimTy::I64
+                | PrimTy::U8 | PrimTy::U16 | PrimTy::U32 | PrimTy::U64
+                | PrimTy::F32 | PrimTy::F64
+                | PrimTy::Str
+        )
+    )
+}
+
 fn lub(a: &Ty, b: &Ty) -> Option<Ty> {
     if ty_eq(a, b) { return Some(a.clone()); }
     if is_subtype_trivial(a, b) { return Some(b.clone()); }

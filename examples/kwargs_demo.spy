@@ -1,0 +1,53 @@
+"""M61b demo: default argument values + keyword arguments.
+
+Exercises the four shapes the milestone adds:
+  * a free function with a trailing default, called both with and without it;
+  * a call that passes keyword arguments out of positional order;
+  * a mix of one positional argument and one keyword argument;
+  * a constructor whose trailing parameter has a default.
+
+Output is fully deterministic.
+"""
+
+final SHOUT: str = "!"
+
+# A free function with one required and one defaulted parameter.
+fn greet(name: str, greeting: str = "hi") -> str:
+    return greeting + ", " + name + SHOUT
+
+# Three parameters, the last two defaulted — lets us show keyword
+# arguments supplied out of order and a positional/keyword mix.
+fn box(width: i32, height: i32 = 1, label: str = "box") -> str:
+    return label + " " + str(width) + "x" + str(height)
+
+# A class whose constructor gives the trailing field a default.
+final class Point:
+    x: i32
+    y: i32
+
+    fn __init__(self, x: i32, y: i32 = 0) -> None:
+        self.x = x
+        self.y = y
+
+    fn show(self) -> str:
+        return "(" + str(self.x) + ", " + str(self.y) + ")"
+
+fn main() -> i32:
+    # default omitted, then overridden positionally, then overridden by keyword.
+    println(greet("alice"))
+    println(greet("bob", "hey"))
+    println(greet("cleo", greeting="yo"))
+
+    # keyword arguments out of positional order.
+    println(box(3, label="grid", height=4))
+    # one positional + one keyword, leaving `height` to default.
+    println(box(5, label="row"))
+    # all defaults but the first.
+    println(box(2))
+
+    # constructor: defaulted field omitted, then supplied by keyword.
+    p: Point = Point(7)
+    q: Point = Point(1, y=9)
+    println(p.show())
+    println(q.show())
+    return 0

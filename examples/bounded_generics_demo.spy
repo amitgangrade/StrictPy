@@ -1,0 +1,75 @@
+"""Bounded (constrained) generics — M63b.
+
+M17 shipped generic free functions and M31 generic classes, but the type
+parameter `T` was always *unbounded*: the typechecker had to defer every
+`<` / `==` on a `T` to per-instantiation lowering. M63b adds a small set of
+built-in *bounds* — `Comparable`, `Equatable`, `Printable` — declared on a
+type parameter as `[T: Comparable]`.
+
+A bound does two things:
+
+  1. Inside the generic body it *enables* the bound's operations. `a < b`
+     on a `[T: Comparable]` parameter type-checks; the same expression on an
+     unbounded `[T]` is now a compile error (E2015).
+  2. At every instantiation site the concrete type argument must *satisfy*
+     the bound. `max2[T: Comparable]` accepts i64 / f64 / str (all
+     Comparable) but a generic class instantiated over a non-Comparable type
+     would be rejected at compile time.
+
+Built-in bound satisfaction (v1): only primitive / str / char types satisfy
+a bound — there is no user-level trait/impl system yet.
+  * Comparable: i8..i64, u8..u64, f32, f64, char, str
+  * Equatable : every Comparable type plus bool
+  * Printable : every primitive plus str / char
+"""
+
+fn max2[T: Comparable](a: T, b: T) -> T:
+    if a < b:
+        return b
+    return a
+
+
+# A bounded generic container: holds two values and reports the larger.
+final class Pair2[T: Comparable]:
+    lo: T
+    hi: T
+
+    fn __init__(self, a: T, b: T) -> None:
+        if a < b:
+            self.lo = a
+            self.hi = b
+        else:
+            self.lo = b
+            self.hi = a
+
+    fn largest(self) -> T:
+        return self.hi
+
+    fn ordered(self) -> bool:
+        return self.lo <= self.hi
+
+
+fn main() -> i32:
+    # max2 over three distinct Comparable instantiations.
+    x: i64 = 7
+    y: i64 = 3
+    println(str(max2(x, y)))
+
+    f: f64 = 2.5
+    g: f64 = 9.25
+    println(str(max2(f, g)))
+
+    println(max2("apple", "banana"))
+
+    # A bounded generic class instantiated over i64 and str.
+    pi: Pair2[i64] = Pair2(x, y)
+    println(str(pi.largest()))
+    if pi.ordered():
+        println("ordered")
+    else:
+        println("unordered")
+
+    ps: Pair2[str] = Pair2("zebra", "aardvark")
+    println(ps.largest())
+
+    return 0

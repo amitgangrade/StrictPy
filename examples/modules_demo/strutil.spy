@@ -1,0 +1,14 @@
+# strutil.spy — sibling user module providing string helpers (M60).
+
+final EXCLAIM: str = "!"
+
+fn shout(s: str) -> str:
+    return s + EXCLAIM
+
+fn repeat(s: str, n: i64) -> str:
+    out: str = ""
+    i: i64 = 0
+    while i < n:
+        out = out + s
+        i = i + 1
+    return out

@@ -103,6 +103,19 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             let p = interp.alloc_string(&format!("{a}{b}"));
             Ok(p as u64)
         }
+        // Lexicographic string comparison backing the `<` / `<=` / `>` /
+        // `>=` operators on `str`. Returns i64 (-1 / 0 / 1); the IR lowering
+        // compares the result against 0 with the signed integer relop.
+        NativeFn::StrCmp => {
+            let a = arg_str(args, 0);
+            let b = arg_str(args, 1);
+            let ord: i64 = match a.cmp(&b) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            };
+            Ok(ord as u64)
+        }
         NativeFn::StrSlice => {
             let s = arg_str(args, 0);
             let start = arg_u64(args, 1) as usize;
@@ -719,6 +732,140 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             // SAFETY: dst from heap.
             unsafe { sort_list_in_place(dst, tag)? };
             Ok(dst as u64)
+        }
+
+        // ── M61a: higher-order builtins (user callbacks across NativeFn) ──
+        //
+        // Each of these receives a StrictPy closure value (a `ClosureRepr`
+        // pointer) and re-enters the interpreter via `call_callable` to
+        // invoke it per element. The intermediate result list, the source
+        // list, the closure, and (for reduce) the running accumulator are all
+        // parked in `interp.temp_roots` across each callback so a collection
+        // triggered mid-callback can't free them. The arguments are
+        // positional; `key=`/default forms are a later milestone.
+        NativeFn::Map => {
+            let closure = arg_u64(args, 0);
+            let src = arg_u64(args, 1) as *const crate::object::ListRepr;
+            let len = if src.is_null() { 0 } else { unsafe { (*src).length } };
+            let dst = interp.alloc_list(len);
+            // Park: closure, source list, dest list. (Indices into temp_roots
+            // are stable because we never truncate below `mark` here.)
+            let mark = interp.temp_roots.len();
+            interp.temp_roots.push(closure);
+            interp.temp_roots.push(src as u64);
+            interp.temp_roots.push(dst as u64);
+            let result = (|| -> Result<(), VmError> {
+                for i in 0..len {
+                    let x = unsafe {
+                        std::ptr::read_unaligned((*src).data.cast::<u64>().add(i))
+                    };
+                    let y = interp.call_callable(closure, &[x])?;
+                    // `dst` may have moved? No — lists never move (no copying
+                    // GC). Re-read the parked pointer defensively anyway.
+                    let dst_now = interp.temp_roots[mark + 2] as *mut crate::object::ListRepr;
+                    unsafe { interp.list_push(dst_now, y) };
+                }
+                Ok(())
+            })();
+            interp.temp_roots.truncate(mark);
+            result?;
+            Ok(dst as u64)
+        }
+        NativeFn::Filter => {
+            let closure = arg_u64(args, 0);
+            let src = arg_u64(args, 1) as *const crate::object::ListRepr;
+            let len = if src.is_null() { 0 } else { unsafe { (*src).length } };
+            let dst = interp.alloc_list(0);
+            let mark = interp.temp_roots.len();
+            interp.temp_roots.push(closure);
+            interp.temp_roots.push(src as u64);
+            interp.temp_roots.push(dst as u64);
+            let result = (|| -> Result<(), VmError> {
+                for i in 0..len {
+                    let x = unsafe {
+                        std::ptr::read_unaligned((*src).data.cast::<u64>().add(i))
+                    };
+                    let keep = interp.call_callable(closure, &[x])?;
+                    if keep != 0 {
+                        let dst_now = interp.temp_roots[mark + 2] as *mut crate::object::ListRepr;
+                        unsafe { interp.list_push(dst_now, x) };
+                    }
+                }
+                Ok(())
+            })();
+            interp.temp_roots.truncate(mark);
+            result?;
+            Ok(dst as u64)
+        }
+        NativeFn::Reduce => {
+            let closure = arg_u64(args, 0);
+            let src = arg_u64(args, 1) as *const crate::object::ListRepr;
+            let init = arg_u64(args, 2);
+            let len = if src.is_null() { 0 } else { unsafe { (*src).length } };
+            let mark = interp.temp_roots.len();
+            interp.temp_roots.push(closure);
+            interp.temp_roots.push(src as u64);
+            // Slot mark+2 holds the running accumulator; it may itself be a
+            // heap pointer (e.g. a str built up across the fold), so we keep
+            // it rooted and update the slot in place each iteration.
+            interp.temp_roots.push(init);
+            let result = (|| -> Result<u64, VmError> {
+                let mut acc = init;
+                for i in 0..len {
+                    let x = unsafe {
+                        std::ptr::read_unaligned((*src).data.cast::<u64>().add(i))
+                    };
+                    acc = interp.call_callable(closure, &[acc, x])?;
+                    interp.temp_roots[mark + 2] = acc;
+                }
+                Ok(acc)
+            })();
+            interp.temp_roots.truncate(mark);
+            result
+        }
+        NativeFn::SortedBy => {
+            let src = arg_u64(args, 0) as *const crate::object::ListRepr;
+            let closure = arg_u64(args, 1);
+            let key_tag = arg_u64(args, 2) as u8;
+            let len = if src.is_null() { 0 } else { unsafe { (*src).length } };
+            // Copy the source elements into a fresh list, then sort the copy.
+            let dst = interp.alloc_list(len);
+            let mark = interp.temp_roots.len();
+            interp.temp_roots.push(closure);
+            interp.temp_roots.push(src as u64);
+            interp.temp_roots.push(dst as u64);
+            let result = (|| -> Result<(), VmError> {
+                for i in 0..len {
+                    let x = unsafe {
+                        std::ptr::read_unaligned((*src).data.cast::<u64>().add(i))
+                    };
+                    let dst_now = interp.temp_roots[mark + 2] as *mut crate::object::ListRepr;
+                    unsafe { interp.list_push(dst_now, x) };
+                }
+                let dst_now = interp.temp_roots[mark + 2] as *mut crate::object::ListRepr;
+                sort_list_by_key(interp, dst_now, closure, key_tag)
+            })();
+            interp.temp_roots.truncate(mark);
+            result?;
+            Ok(dst as u64)
+        }
+        NativeFn::ListSortBy => {
+            let lst = arg_u64(args, 0) as *mut crate::object::ListRepr;
+            let closure = arg_u64(args, 1);
+            let key_tag = arg_u64(args, 2) as u8;
+            if lst.is_null() {
+                return Err(VmError::UncaughtException {
+                    type_name: "NullPointerError".into(),
+                    message: "sort_by on null list".into(),
+                });
+            }
+            let mark = interp.temp_roots.len();
+            interp.temp_roots.push(closure);
+            interp.temp_roots.push(lst as u64);
+            let result = sort_list_by_key(interp, lst, closure, key_tag);
+            interp.temp_roots.truncate(mark);
+            result?;
+            Ok(0)
         }
 
         // ── Sets ────────────────────────────────────────────────────────
@@ -9574,6 +9721,108 @@ unsafe fn sort_list_in_place(
                 ),
             });
         }
+    }
+    Ok(())
+}
+
+/// M61a: stable sort of `lst` in place by a user-supplied key function.
+///
+/// `key_fn` is a StrictPy closure value (`ClosureRepr` pointer); for each
+/// element `x` we re-enter the interpreter via `call_callable` to compute
+/// `key_fn(x)`, then sort the element slots by those keys. `key_tag` selects
+/// how the keys are compared (TypeTag::I64/F64/Ref→str), matching
+/// `sort_list_in_place`. Keys are computed up front (a "decorate" pass) so no
+/// callback runs during the comparison phase.
+///
+/// GC: the caller has already parked `lst` and `closure` in `temp_roots`.
+/// While computing keys we additionally park each computed key (which may be
+/// a heap str pointer) plus a snapshot of the element slots, since the
+/// callback can allocate and collect.
+fn sort_list_by_key(
+    interp: &mut Interpreter,
+    lst: *mut crate::object::ListRepr,
+    closure: u64,
+    key_tag: u8,
+) -> Result<(), VmError> {
+    let len = unsafe { (*lst).length };
+    if len <= 1 {
+        return Ok(());
+    }
+    // Snapshot element slots into a Rust Vec. These are roots already (they
+    // live in `lst`, which is parked), but we also need them stable while we
+    // rebuild the list, so copy them out.
+    let mut elems: Vec<u64> = Vec::with_capacity(len);
+    for i in 0..len {
+        elems.push(unsafe { std::ptr::read_unaligned((*lst).data.cast::<u64>().add(i)) });
+    }
+    // Decorate: compute keys. Park computed keys so a collection during a
+    // later callback can't free an already-computed heap key.
+    let mark = interp.temp_roots.len();
+    // Park the element snapshot too (str pointers etc. that may only be
+    // reachable through this Vec if the list is rebuilt concurrently — defensive).
+    interp.temp_roots.extend_from_slice(&elems);
+    let keys_mark = interp.temp_roots.len();
+    let result = (|| -> Result<Vec<u64>, VmError> {
+        let mut keys: Vec<u64> = Vec::with_capacity(len);
+        for &x in &elems {
+            let k = interp.call_callable(closure, &[x])?;
+            keys.push(k);
+            interp.temp_roots.push(k);
+        }
+        Ok(keys)
+    })();
+    interp.temp_roots.truncate(mark);
+    let _ = keys_mark;
+    let keys = result?;
+
+    // Decorate-sort-undecorate: build index permutation, stable-sort by key.
+    let mut idx: Vec<usize> = (0..len).collect();
+    let cmp = |a: usize, b: usize| -> std::cmp::Ordering {
+        let ka = keys[a];
+        let kb = keys[b];
+        match key_tag {
+            // TypeTag::I64
+            3 => (ka as i64).cmp(&(kb as i64)),
+            // TypeTag::F64
+            9 => {
+                let x = f64::from_bits(ka);
+                let y = f64::from_bits(kb);
+                match x.partial_cmp(&y) {
+                    Some(o) => o,
+                    None => match (x.is_nan(), y.is_nan()) {
+                        (true, true) => std::cmp::Ordering::Equal,
+                        (true, false) => std::cmp::Ordering::Greater,
+                        (false, true) => std::cmp::Ordering::Less,
+                        _ => std::cmp::Ordering::Equal,
+                    },
+                }
+            }
+            // TypeTag::Ref → str key pointers
+            11 => {
+                // SAFETY: tag==Ref means the key fn returned str pointers,
+                // which are kept reachable (parked in temp_roots during the
+                // decorate pass).
+                let sa = unsafe { read_str(ka as *const StringRepr) };
+                let sb = unsafe { read_str(kb as *const StringRepr) };
+                sa.cmp(&sb)
+            }
+            _ => std::cmp::Ordering::Equal,
+        }
+    };
+    if !matches!(key_tag, 3 | 9 | 11) {
+        return Err(VmError::UncaughtException {
+            type_name: "TypeError".into(),
+            message: format!(
+                "sort_by/sorted_by key must be i64, f64, or str in v1; got key tag {key_tag}"
+            ),
+        });
+    }
+    // Stable sort to match Python's `sorted(key=...)` semantics.
+    idx.sort_by(|&a, &b| cmp(a, b));
+    // Undecorate: write the elements back in key order.
+    let data = unsafe { (*lst).data as *mut u64 };
+    for (dst_i, &src_i) in idx.iter().enumerate() {
+        unsafe { std::ptr::write_unaligned(data.add(dst_i), elems[src_i]) };
     }
     Ok(())
 }

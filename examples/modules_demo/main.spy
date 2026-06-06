@@ -1,0 +1,41 @@
+# main.spy — M60 user-module imports demo.
+#
+# Imports two sibling modules:
+#   * `import mathutil`            — qualified access: mathutil.add(...),
+#                                    mathutil.Counter(...), mathutil.GOLDEN.
+#   * `from strutil import shout`  — named import of a single function.
+#
+# Run with:  spy examples/modules_demo/main.spy
+# Expected deterministic output:
+#   sum = 7
+#   square = 25
+#   golden = 1618
+#   counter = 13
+#   greeting = hello!
+
+import mathutil
+from strutil import shout, repeat
+
+fn main() -> i32:
+    # Qualified function call into another module.
+    s: i64 = mathutil.add(3, 4)
+    println("sum = " + str(s))
+
+    # Cross-module call chain (mathutil.square -> mathutil.mul).
+    sq: i64 = mathutil.square(5)
+    println("square = " + str(sq))
+
+    # Read a top-level constant from another module.
+    println("golden = " + str(mathutil.GOLDEN))
+
+    # Construct a cross-module class and call its methods.
+    c: mathutil.Counter = mathutil.Counter(10)
+    c.bump(3)
+    println("counter = " + str(c.get()))
+
+    # from-import: call `shout` by its bare name.
+    println("greeting = " + shout("hello"))
+
+    # from-import: `repeat` used to build a deterministic string.
+    println("ha = " + repeat("ha", 3))
+    return 0

@@ -61,13 +61,13 @@ StrictPy is **Python-syntax with mandatory static typing**. The compiler rejects
 - The `match` keyword + `case Constructor()` patterns work for sealed-class destructuring (M16).
 - Exception handling: `try` / `except <name> as e:` / `finally` (M15). The 10 built-in exception names are listed in §3.10. User-defined exception subclasses are NOT supported in v0.3.
 - Mandatory `main() -> i32` entry point in any program you intend to run.
+- Default argument values and keyword arguments (M61b): `fn f(a: i32, b: i32 = 1)`, called as `f(1)`, `f(1, 2)`, or `f(a=1, b=2)`. See §3's "Default & keyword arguments".
 
 ### What's NOT supported
 
 - `Any` type, `eval()`, `exec()`, `__dict__` access, monkey-patching, metaclasses, decorators that synthesise runtime types
-- Variadic functions (`fn f(*args)`) and keyword-only args
+- Variadic functions (`fn f(*args)`), `**kwargs`, and keyword-only args
 - Multiple inheritance
-- Default argument values (every parameter must be passed)
 - f-strings inside an f-string (nested), `f"...{expr:format_spec}"` format specifiers — basic `f"text {expr}"` works
 - `with` doesn't route IOError through an enclosing `try ... except` — wrap explicitly
 - `async`/`await` keywords (use the `asyncio` library functions instead — see §9)
@@ -262,7 +262,51 @@ let f = fn(x: i32) -> i32:
 let doubled: i32 = f(21)
 ```
 
-Note: function values are first-class but cannot cross the `NativeFn` boundary (you can't pass a user-defined function as an argument to a stdlib function that expects a callback — that's a v0.4 limit).
+Note: function values are first-class and (as of M61a) **can** cross the `NativeFn` boundary — you can pass a user-defined closure to a stdlib function that takes a callback. The prelude ships positional higher-order builtins built on this: `map`, `filter`, `reduce`, `sorted_by`, and the in-place `list.sort_by`. See §6 for signatures and examples. (Keyword/`key=`/default-argument forms of these are a later milestone; the v1 forms are positional only.)
+
+#### 3.8.1 Default & keyword arguments (M61b)
+
+Trailing parameters may declare a default value, and call sites may pass
+arguments by name. This applies to free functions, methods, and `__init__`.
+
+```python
+final SHOUT: str = "!"
+
+fn greet(name: str, greeting: str = "hi") -> str:
+    return greeting + ", " + name + SHOUT
+
+fn box(width: i32, height: i32 = 1, label: str = "box") -> str:
+    return label + " " + str(width) + "x" + str(height)
+
+final class Point:
+    x: i32
+    y: i32
+    fn __init__(self, x: i32, y: i32 = 0) -> None:    # y defaults to 0
+        self.x = x
+        self.y = y
+
+fn main() -> i32:
+    println(greet("alice"))            # "hi, alice!"  — default used
+    println(greet("bob", "hey"))       # "hey, bob!"   — positional override
+    println(greet("cleo", greeting="yo"))  # "yo, cleo!" — keyword
+
+    println(box(3, label="grid", height=4))  # "grid 3x4" — keywords out of order
+    println(box(5, label="row"))             # "row 5x1"  — positional + keyword
+    println(box(2))                          # "box 2x1"  — both defaults used
+
+    p: Point = Point(7)                # y defaults to 0  → (7, 0)
+    q: Point = Point(1, y=9)           # y supplied by keyword → (1, 9)
+    return 0
+```
+
+Binding rules: positional arguments first, then keyword arguments. Each keyword
+must name a real parameter; no parameter may be bound both positionally and by
+keyword; every non-defaulted parameter must end up bound. A required parameter
+may not follow a defaulted one in a declaration. Default expressions are
+literals or top-level `final` constants (they cannot reference other
+parameters), are evaluated at the call site when the default is used, and are
+type-checked against the parameter type. Generic functions/classes do not yet
+accept defaults or keyword arguments. See §11.5 for the error codes.
 
 ### 3.9 Class definitions
 
@@ -334,7 +378,7 @@ let p: Pair[str, i32] = Pair("count", 99i32)
 - Default values for fields are NOT supported — initialize in `__init__`.
 - Decorators on classes/methods don't exist.
 - `@property` / `@staticmethod` / `@classmethod` don't exist.
-- `class Box[T: Comparable]:` (bounded generics) — v0.4.
+- `class Box[T: Comparable]:` (bounded generics) — supported since M63b; built-in bounds are `Comparable` / `Equatable` / `Printable`, satisfied only by primitive / `str` / `char` types (see §10.3).
 - Explicit type-arg syntax `Box[i64](v)` — v0.4. Use constructor-site inference.
 
 ### 3.10 Exception handling
@@ -411,7 +455,58 @@ You can import:
 - Stdlib classes via `from json import JsonValue` etc. — also `from re import Pattern`, `from sqlite3 import Connection, Cursor`, `from hashlib import Hasher`. M36 publishes these as proper module items rather than the M34/M35 prelude flatten, so a `from <mod> import <ClassName> as <Alias>` aliases the class cleanly. The bare class names also remain reachable after `import json` / `import re` / `import sqlite3` / `import hashlib` for back-compat with the M34/M35 surface.
 - Prelude classes directly: `from threading import Thread`
 
-You CANNOT import user-defined `.spy` modules in v0.3 (deferred to v0.4).
+You can also import **user-defined sibling `.spy` modules** (M60) — see the
+"User-module imports" subsection immediately below.
+
+### User-module imports (M60)
+
+You can import other `.spy` files that sit next to the importing file. Paths
+resolve **relative to the importing file's own directory**:
+
+```python
+# project/main.spy
+import mathutil                 # -> project/mathutil.spy
+from strutil import shout       # named import from project/strutil.spy
+import pkg.geo                  # -> project/pkg/geo.spy  (dotted subpackage)
+
+fn main() -> i32:
+    println(str(mathutil.add(2, 3)))        # qualified function call
+    println(str(mathutil.GOLDEN))           # qualified top-level constant
+    c: mathutil.Counter = mathutil.Counter(10)   # qualified type + ctor
+    c.bump(5)
+    println(shout("hi"))                     # from-imported name, bare
+    println(str(pkg.geo.area(4, 5)))         # dotted access
+    return 0
+```
+
+Rules and semantics:
+
+- **Resolution.** `import foo` → `<dir>/foo.spy`; `import pkg.mod` →
+  `<dir>/pkg/mod.spy`. A directory is a *package* simply by containing `.spy`
+  files — there is no `__init__` requirement. If no matching `.spy` file
+  exists, the name falls through to the stdlib import path (so `import math`
+  etc. are unaffected).
+- **Access forms.** After `import foo` use the qualified form
+  `foo.func(...)`, `foo.Class(...)`, `foo.CONST`, and the qualified type
+  `x: foo.Class`. After `from foo import a, B [as C]` use the bare names
+  (`a()`, `B`, `C`).
+- **Exports.** v1 rule: *every* top-level definition (functions, classes,
+  protocols, `final`/`let` globals, type aliases) is importable. There is no
+  `__all__`.
+- **Real types across boundaries.** Imported functions, classes, generics,
+  and globals keep their real declared types — the type checker resolves them
+  exactly as if they were declared locally.
+- **Circular imports** are detected at compile time and raise a clear
+  `error[E4003]: circular import detected: a -> b -> a` (ImportError-style)
+  instead of hanging.
+- **Implementation note.** Imports are resolved and the whole module graph is
+  merged into one compilation unit at compile time, with each module's
+  top-level names namespaced to avoid collisions. Cross-module calls are
+  therefore ordinary intra-module calls at run time and work identically
+  under the interpreter and the JIT.
+
+A complete runnable example lives at `examples/modules_demo/` (`main.spy`
+plus sibling `mathutil.spy` / `strutil.spy`).
 
 ---
 
@@ -1981,6 +2076,52 @@ max_f64(a: f64, b: f64) -> f64
 str(42) + " items"                       # str(x) coerces any type
 ```
 
+#### Higher-order builtins (M61a — user callbacks across the NativeFn boundary)
+
+User closures are first-class and can be passed to these native builtins,
+which call back into the interpreter to invoke the closure per element. The
+callback may be a lambda that **captures** an enclosing variable, not just a
+top-level function.
+
+```python
+map(fn: T -> U,        xs: List[T])          -> List[U]   # apply fn to each
+filter(fn: T -> bool,  xs: List[T])          -> List[T]   # keep where true
+reduce(fn: (U, T) -> U, xs: List[T], init: U) -> U        # left fold
+sorted_by(xs: List[T], key_fn: T -> K)       -> List[T]   # fresh, ordered copy
+```
+
+`K` (the `sorted_by` / `sort_by` key) must be a comparable primitive:
+`i64` / `f64` / `str` (narrower integer/float widths widen to these).
+`map` / `filter` / `reduce` element/accumulator types are fully generic.
+
+```python
+fn main() -> i32:
+    nums: List[i64] = [5, 2, 8, 1, 9]
+
+    # map with a *capturing* closure:
+    factor: i64 = 10
+    scaled: List[i64] = map(fn(x: i64) -> i64: x * factor, nums)   # [50,20,80,10,90]
+
+    # filter with a capturing predicate:
+    lo: i64 = 4
+    big: List[i64] = filter(fn(x: i64) -> bool: x > lo, nums)      # [5,8,9]
+
+    # reduce to a sum and a product:
+    total: i64 = reduce(fn(acc: i64, x: i64) -> i64: acc + x, nums, 0)   # 25
+    prod:  i64 = reduce(fn(acc: i64, x: i64) -> i64: acc * x, nums, 1)   # 720
+
+    # sort a fresh copy by a string key, or in place by a numeric key:
+    words: List[str] = ["pear", "fig", "apple"]
+    by_name: List[str] = sorted_by(words, fn(w: str) -> str: w)
+    words.sort_by(fn(w: str) -> i64: i64(w.len()))                 # in place, by length
+    return 0
+```
+
+> **Positional only (for now).** These v1 forms take their arguments
+> positionally. Keyword forms (e.g. `sorted_by(xs, key=...)`) and default
+> arguments are a separate later milestone; they will layer on top of these
+> same builtins without changing the positional behaviour.
+
 ### 6.2 Prelude classes
 
 These are available without import:
@@ -2006,8 +2147,11 @@ These are available without import:
 xs.append(v: T) -> None
 xs.pop() -> T                            # raises IndexError on empty
 xs.length() -> i64                       # or len(xs)
-xs.sort() -> None                        # in-place
+xs.sort() -> None                        # in-place (element ∈ {i64,f64,str})
 xs.sorted() -> List[T]                   # returns copy
+xs.sort_by(key_fn: T -> K) -> None       # M61a: in-place, K ∈ {i64,f64,str}
+sorted_by(xs, key_fn: T -> K) -> List[T] # M61a: returns a sorted copy
+map(fn, xs) / filter(fn, xs) / reduce(fn, xs, init)   # M61a, see §6.1
 xs[i]                                    # subscript; raises IndexError if oob
 xs[i] = v                                # in-place
 for x in xs: ...
@@ -2417,16 +2561,17 @@ fn make_pair[K, V](k: K, v: V) -> Tuple[K, V]:
 
 let p: Tuple[str, i64] = make_pair("count", 99i64)
 
-# Operators on T are constrained by per-instantiation re-typecheck:
-fn max_of[T](a: T, b: T) -> T:
-    if a > b:                            # ERROR if T doesn't support `>`
+# Operators on a bare T are REJECTED — declare a bound (see §10.3):
+fn max_of[T: Comparable](a: T, b: T) -> T:
+    if a > b:                            # OK: T is Comparable
         return a
     else:
         return b
 
 let m: i64 = max_of(1i64, 2i64)           # OK
 let m2: str = max_of("a", "b")            # OK
-# max_of(SomeUserClass(...), SomeUserClass(...))   # ERROR if class has no >
+# fn bad[T](a: T, b: T) -> T:
+#     if a > b: ...                       # ERROR E2015: `>` needs `[T: Comparable]`
 ```
 
 ### 10.2 Generic classes (M31)
@@ -2456,9 +2601,59 @@ final class Pair[K, V]:
 let p: Pair[str, i32] = Pair("count", 99i32)
 ```
 
-**v0.3 limits on generic classes**:
+### 10.3 Bounded (constrained) generics (M63b)
+
+A type parameter may carry a single **bound** — a built-in protocol that the
+concrete type argument must satisfy. A bound does two things: it *enables* the
+bound's operations inside the generic body, and it is *enforced* at every
+instantiation site.
+
+```python
+fn max2[T: Comparable](a: T, b: T) -> T:
+    if a < b:                            # OK: `<` enabled by the Comparable bound
+        return b
+    return a
+
+let mi: i64 = max2(3i64, 9i64)            # OK — i64 is Comparable
+let ms: str = max2("a", "z")             # OK — str is Comparable
+
+# Bounds also apply to generic classes:
+final class Sorted[T: Comparable]:
+    lo: T
+    hi: T
+    fn __init__(self, a: T, b: T) -> None:
+        if a < b:
+            self.lo = a; self.hi = b
+        else:
+            self.lo = b; self.hi = a
+```
+
+**Syntax** — `[T: Bound]`. Exactly one bound per parameter (no `[T: A + B]`).
+
+**Built-in bounds and the types that satisfy them** (only primitive / `str` /
+`char` types satisfy a bound — there is no user trait/impl system yet, so a
+user-defined class can never satisfy a bound):
+
+| Bound        | Enables                | Satisfied by                                            |
+|--------------|------------------------|---------------------------------------------------------|
+| `Comparable` | `<`, `<=`, `>`, `>=` (and `==`/`!=`) | `i8`..`i64`, `u8`..`u64`, `f32`, `f64`, `char`, `str` |
+| `Equatable`  | `==`, `!=`             | every `Comparable` type **plus** `bool`                 |
+| `Printable` (alias `Display`) | `str(x)` / display | every primitive plus `str` / `char`         |
+
+`Comparable` implies `Equatable` (and `Printable`); an `Equatable`-only
+parameter may use `==`/`!=` but **not** ordering.
+
+**Enforcement** — using a bound-gated operator (`<`, `==`, …) on an
+*unbounded* `[T]` is a compile error (`E2015`). Instantiating a bounded
+generic with a type that does not satisfy the bound (e.g. a user class for
+`[T: Comparable]`) is also `E2015`. Enforcement happens at call-site
+inference (free functions), constructor-site inference (classes), and across
+user-module-imported generics.
+
+**v0.4 limits on generics**:
 - No explicit type-argument syntax — `Box[i64](v)` does NOT work; use constructor-site inference.
-- No bounded generics (`T: Comparable`) — operators on T are checked per instantiation.
+- A single bound per type parameter; no multi-bound `[T: A + B]`.
+- User-defined classes cannot satisfy a bound (no trait/impl system).
 - No subclassing a parameterised class.
 - No variance markers.
 - Higher-kinded types (`F[_]`) not supported.
@@ -2499,16 +2694,40 @@ if xs.length() == 0:            # for empty list
 if s == "":                     # for empty string
 ```
 
-### 11.5 No default arguments, no kwargs
+### 11.5 Default arguments and keyword arguments (M61b)
+
+Trailing parameters may declare defaults, and call sites may pass arguments by
+keyword after any positional arguments. This works for free functions,
+methods, and class `__init__` constructors.
 
 ```python
-fn greet(name: str, greeting: str) -> None:    # NO defaults
-    ...
+fn greet(name: str, greeting: str = "hi") -> str:   # `greeting` defaults
+    return greeting + ", " + name
 
-greet("alice", "hi")              # OK
-greet("alice")                    # ERROR — must pass all
-greet(name="alice")               # ERROR — no keyword args
+greet("alice")                    # OK   → "hi, alice"   (default used)
+greet("alice", "yo")              # OK   → "yo, alice"   (positional override)
+greet(name="bob")                 # OK   → "hi, bob"     (keyword)
+greet("cleo", greeting="hey")     # OK   → "hey, cleo"   (positional + keyword)
 ```
+
+Rules (errors are caught at compile time):
+
+- Positional arguments come first; keyword arguments follow. A positional
+  argument after a keyword argument is an error (`E2018`).
+- Each keyword must name a real parameter (`E2015`).
+- No parameter may be bound twice — positionally *and* by keyword (`E2016`).
+- Every parameter without a default must end up bound (`E2017`).
+- In a declaration, a required parameter may not follow a defaulted one
+  (`E2019`): `fn f(a: i32 = 1, b: i32)` is rejected.
+
+**Default expressions** are evaluated at the call site each time a default is
+used, in module scope. They may be literals or reference top-level `final`
+constants (e.g. `fn add(x: i32, y: i32 = BASE)`); they may *not* reference
+other parameters. The default is type-checked against its parameter's type at
+declaration time. Generic functions/classes (`fn f[T]`, `class Box[T]`) do not
+yet support defaults or keyword arguments — pass their arguments positionally.
+
+Still unsupported: `*args`, `**kwargs`, and keyword-only parameters (§11.6).
 
 ### 11.6 No variadic functions
 
@@ -3150,7 +3369,7 @@ backed by a single flat table `scores(game TEXT, name TEXT, score INTEGER, ts IN
 
 Two StrictPy gotchas this exercises:
 
-- **No user-module import.**  StrictPy v0.2 can only `import` stdlib modules — there is no way to `import highscores` from a sibling `.spy`.  So `highscores.spy` is a standalone reference + runnable demo, and each game **inlines** copies of the two helpers (prefixed `hs_*`).  If a future milestone adds user-module imports, the games should switch to importing the shared module.
+- **User-module imports (M60).**  StrictPy now supports importing sibling `.spy` modules (`import highscores` / `from highscores import ...`), resolved relative to the importing file's directory — see §3's "User-module imports" subsection. The games currently still **inline** copies of the two highscore helpers (prefixed `hs_*`) for historical reasons; with M60 they could instead import a shared `highscores.spy`.
 - **`i64(str)` is a char cast, not a parse.**  Casting a string with `i64(s)` converts code points; to parse a decimal string to an integer use the prelude `parse_i64(s)` (→ `I64FromStr`).  The score column comes back as `"1200"` etc., so `parse_i64` is required.
 
 Each game guards the save with a `score_saved: bool` field so the row is inserted exactly once, even though the game loop runs every frame while the overlay is shown.

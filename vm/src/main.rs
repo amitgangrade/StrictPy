@@ -169,18 +169,38 @@ fn cached_spyc_path(source: &Path) -> PathBuf {
 }
 
 fn needs_recompile(source: &Path, cached: &Path) -> bool {
-    let src_meta = match fs::metadata(source) {
-        Ok(m) => m,
-        Err(_) => return true,
-    };
     let cache_meta = match fs::metadata(cached) {
         Ok(m) => m,
         Err(_) => return true,
     };
-    match (src_meta.modified(), cache_meta.modified()) {
-        (Ok(src_mt), Ok(cache_mt)) => src_mt > cache_mt,
-        _ => true,
+    let cache_mt = match cache_meta.modified() {
+        Ok(t) => t,
+        Err(_) => return true,
+    };
+    // The source itself.
+    let src_meta = match fs::metadata(source) {
+        Ok(m) => m,
+        Err(_) => return true,
+    };
+    match src_meta.modified() {
+        Ok(src_mt) if src_mt > cache_mt => return true,
+        Err(_) => return true,
+        _ => {}
     }
+    // M60: a merged compile inlines sibling user modules, so the cache is
+    // also stale if any imported dependency is newer than it.
+    if let Ok(src_text) = fs::read_to_string(source) {
+        for dep in
+            strictpy_compiler::modules::collect_import_deps(&source.to_string_lossy(), &src_text)
+        {
+            match fs::metadata(&dep).and_then(|m| m.modified()) {
+                Ok(dep_mt) if dep_mt > cache_mt => return true,
+                Err(_) => return true,
+                _ => {}
+            }
+        }
+    }
+    false
 }
 
 enum ScriptKind {

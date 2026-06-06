@@ -109,6 +109,27 @@ pub mod codes {
     pub const TYPE_NULLABLE_USE: ErrorCode = "E2013";
     /// Cannot subclass a `final` class (spec §5.5 / §1.3).
     pub const TYPE_SUBCLASS_FINAL: ErrorCode = "E2014";
+    /// M63b: a generic type argument does not satisfy the declared bound on its
+    /// type parameter, e.g. `max2[Foo](...)` where `Foo` is not `Comparable`;
+    /// or use of a bound-gated operation (`<`, `==`, ...) on an *unbounded*
+    /// type parameter.
+    pub const TYPE_UNSATISFIED_BOUND: ErrorCode = "E2015";
+
+    // ── M61b: default + keyword argument binding ──────────────────────────
+    /// A keyword argument names a parameter the callee does not declare.
+    /// (E2015 is M63b's TYPE_UNSATISFIED_BOUND; this family continues at E2020.)
+    pub const TYPE_UNKNOWN_KEYWORD: ErrorCode = "E2020";
+    /// A parameter is bound twice — positionally and again by keyword (or by
+    /// two keyword arguments of the same name).
+    pub const TYPE_DUPLICATE_ARG: ErrorCode = "E2016";
+    /// A required (non-defaulted) parameter was left unbound after positional
+    /// and keyword arguments were applied.
+    pub const TYPE_MISSING_ARG: ErrorCode = "E2017";
+    /// A positional argument follows a keyword argument at a call site.
+    pub const TYPE_POSITIONAL_AFTER_KEYWORD: ErrorCode = "E2018";
+    /// A required parameter (no default) follows a defaulted parameter in a
+    /// declaration.
+    pub const TYPE_DEFAULT_ORDER: ErrorCode = "E2019";
 
     // ── E3xxx: semantic ──────────────────────────────────────────────────
     pub const SEM_NONEXHAUSTIVE_MATCH: ErrorCode = "E3001";
@@ -119,4 +140,6 @@ pub mod codes {
     /// `from x import y` where module `x` has no item named `y`,
     /// or `x.y` where `x` is a module but has no such attribute (M19).
     pub const LINK_NO_SUCH_MODULE_ITEM: ErrorCode = "E4002";
+    /// Circular user-module import detected (M60). ImportError-style.
+    pub const LINK_CIRCULAR_IMPORT: ErrorCode = "E4003";
 }
