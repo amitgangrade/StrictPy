@@ -14,6 +14,7 @@
 use std::fs;
 use std::path::Path;
 
+pub mod argbind;
 pub mod ast;
 pub mod bytecode;
 pub mod codegen;

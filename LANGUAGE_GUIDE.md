@@ -61,13 +61,13 @@ StrictPy is **Python-syntax with mandatory static typing**. The compiler rejects
 - The `match` keyword + `case Constructor()` patterns work for sealed-class destructuring (M16).
 - Exception handling: `try` / `except <name> as e:` / `finally` (M15). The 10 built-in exception names are listed in §3.10. User-defined exception subclasses are NOT supported in v0.3.
 - Mandatory `main() -> i32` entry point in any program you intend to run.
+- Default argument values and keyword arguments (M61b): `fn f(a: i32, b: i32 = 1)`, called as `f(1)`, `f(1, 2)`, or `f(a=1, b=2)`. See §3's "Default & keyword arguments".
 
 ### What's NOT supported
 
 - `Any` type, `eval()`, `exec()`, `__dict__` access, monkey-patching, metaclasses, decorators that synthesise runtime types
-- Variadic functions (`fn f(*args)`) and keyword-only args
+- Variadic functions (`fn f(*args)`), `**kwargs`, and keyword-only args
 - Multiple inheritance
-- Default argument values (every parameter must be passed)
 - f-strings inside an f-string (nested), `f"...{expr:format_spec}"` format specifiers — basic `f"text {expr}"` works
 - `with` doesn't route IOError through an enclosing `try ... except` — wrap explicitly
 - `async`/`await` keywords (use the `asyncio` library functions instead — see §9)
@@ -263,6 +263,50 @@ let doubled: i32 = f(21)
 ```
 
 Note: function values are first-class and (as of M61a) **can** cross the `NativeFn` boundary — you can pass a user-defined closure to a stdlib function that takes a callback. The prelude ships positional higher-order builtins built on this: `map`, `filter`, `reduce`, `sorted_by`, and the in-place `list.sort_by`. See §6 for signatures and examples. (Keyword/`key=`/default-argument forms of these are a later milestone; the v1 forms are positional only.)
+
+#### 3.8.1 Default & keyword arguments (M61b)
+
+Trailing parameters may declare a default value, and call sites may pass
+arguments by name. This applies to free functions, methods, and `__init__`.
+
+```python
+final SHOUT: str = "!"
+
+fn greet(name: str, greeting: str = "hi") -> str:
+    return greeting + ", " + name + SHOUT
+
+fn box(width: i32, height: i32 = 1, label: str = "box") -> str:
+    return label + " " + str(width) + "x" + str(height)
+
+final class Point:
+    x: i32
+    y: i32
+    fn __init__(self, x: i32, y: i32 = 0) -> None:    # y defaults to 0
+        self.x = x
+        self.y = y
+
+fn main() -> i32:
+    println(greet("alice"))            # "hi, alice!"  — default used
+    println(greet("bob", "hey"))       # "hey, bob!"   — positional override
+    println(greet("cleo", greeting="yo"))  # "yo, cleo!" — keyword
+
+    println(box(3, label="grid", height=4))  # "grid 3x4" — keywords out of order
+    println(box(5, label="row"))             # "row 5x1"  — positional + keyword
+    println(box(2))                          # "box 2x1"  — both defaults used
+
+    p: Point = Point(7)                # y defaults to 0  → (7, 0)
+    q: Point = Point(1, y=9)           # y supplied by keyword → (1, 9)
+    return 0
+```
+
+Binding rules: positional arguments first, then keyword arguments. Each keyword
+must name a real parameter; no parameter may be bound both positionally and by
+keyword; every non-defaulted parameter must end up bound. A required parameter
+may not follow a defaulted one in a declaration. Default expressions are
+literals or top-level `final` constants (they cannot reference other
+parameters), are evaluated at the call site when the default is used, and are
+type-checked against the parameter type. Generic functions/classes do not yet
+accept defaults or keyword arguments. See §11.5 for the error codes.
 
 ### 3.9 Class definitions
 
@@ -2650,16 +2694,40 @@ if xs.length() == 0:            # for empty list
 if s == "":                     # for empty string
 ```
 
-### 11.5 No default arguments, no kwargs
+### 11.5 Default arguments and keyword arguments (M61b)
+
+Trailing parameters may declare defaults, and call sites may pass arguments by
+keyword after any positional arguments. This works for free functions,
+methods, and class `__init__` constructors.
 
 ```python
-fn greet(name: str, greeting: str) -> None:    # NO defaults
-    ...
+fn greet(name: str, greeting: str = "hi") -> str:   # `greeting` defaults
+    return greeting + ", " + name
 
-greet("alice", "hi")              # OK
-greet("alice")                    # ERROR — must pass all
-greet(name="alice")               # ERROR — no keyword args
+greet("alice")                    # OK   → "hi, alice"   (default used)
+greet("alice", "yo")              # OK   → "yo, alice"   (positional override)
+greet(name="bob")                 # OK   → "hi, bob"     (keyword)
+greet("cleo", greeting="hey")     # OK   → "hey, cleo"   (positional + keyword)
 ```
+
+Rules (errors are caught at compile time):
+
+- Positional arguments come first; keyword arguments follow. A positional
+  argument after a keyword argument is an error (`E2018`).
+- Each keyword must name a real parameter (`E2015`).
+- No parameter may be bound twice — positionally *and* by keyword (`E2016`).
+- Every parameter without a default must end up bound (`E2017`).
+- In a declaration, a required parameter may not follow a defaulted one
+  (`E2019`): `fn f(a: i32 = 1, b: i32)` is rejected.
+
+**Default expressions** are evaluated at the call site each time a default is
+used, in module scope. They may be literals or reference top-level `final`
+constants (e.g. `fn add(x: i32, y: i32 = BASE)`); they may *not* reference
+other parameters. The default is type-checked against its parameter's type at
+declaration time. Generic functions/classes (`fn f[T]`, `class Box[T]`) do not
+yet support defaults or keyword arguments — pass their arguments positionally.
+
+Still unsupported: `*args`, `**kwargs`, and keyword-only parameters (§11.6).
 
 ### 11.6 No variadic functions
 

@@ -115,6 +115,22 @@ pub mod codes {
     /// type parameter.
     pub const TYPE_UNSATISFIED_BOUND: ErrorCode = "E2015";
 
+    // ── M61b: default + keyword argument binding ──────────────────────────
+    /// A keyword argument names a parameter the callee does not declare.
+    /// (E2015 is M63b's TYPE_UNSATISFIED_BOUND; this family continues at E2020.)
+    pub const TYPE_UNKNOWN_KEYWORD: ErrorCode = "E2020";
+    /// A parameter is bound twice — positionally and again by keyword (or by
+    /// two keyword arguments of the same name).
+    pub const TYPE_DUPLICATE_ARG: ErrorCode = "E2016";
+    /// A required (non-defaulted) parameter was left unbound after positional
+    /// and keyword arguments were applied.
+    pub const TYPE_MISSING_ARG: ErrorCode = "E2017";
+    /// A positional argument follows a keyword argument at a call site.
+    pub const TYPE_POSITIONAL_AFTER_KEYWORD: ErrorCode = "E2018";
+    /// A required parameter (no default) follows a defaulted parameter in a
+    /// declaration.
+    pub const TYPE_DEFAULT_ORDER: ErrorCode = "E2019";
+
     // ── E3xxx: semantic ──────────────────────────────────────────────────
     pub const SEM_NONEXHAUSTIVE_MATCH: ErrorCode = "E3001";
     pub const SEM_UNREACHABLE: ErrorCode = "E3002";
