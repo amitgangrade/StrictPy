@@ -235,6 +235,49 @@ fn classify(n: i32) -> str:
         return "zero"
 ```
 
+### 3.7.1 Comprehensions (M62a)
+
+List, dict, and set comprehensions desugar to a fresh collection plus a
+`for`-style loop that appends each (optionally filtered) element. The loop
+variable carries a **type annotation**, exactly like the `for` statement
+(`for x: T in it`), and the **iterable must be a `List[T]`** (the same
+restriction the `for` statement has today). The result type comes from the
+assignment context, and the body expression's type must match its element
+type.
+
+```python
+xs: List[i64] = [1i64, 2i64, 3i64, 4i64, 5i64, 6i64]
+
+# List comprehension — map every element.
+squares: List[i64] = [x * x for x: i64 in xs]
+
+# List comprehension WITH an `if` filter — keep only matching elements.
+even_squares: List[i64] = [x * x for x: i64 in xs if x % 2i64 == 0i64]
+
+# Dict comprehension. Dict runtime keys are strings, so the key expression
+# is usually `str(...)`.
+by_str: Dict[str, i64] = {str(n): n * n for n: i64 in xs}
+by_str_filtered: Dict[str, i64] = {str(n): n for n: i64 in xs if n > 2i64}
+
+# Set comprehension (parses + type-checks + lowers; see §11 for the set
+# runtime caveat).
+mods: Set[i64] = {x % 3i64 for x: i64 in xs}
+```
+
+Notes:
+
+* The annotation on the loop variable is **required** (the element type is
+  not inferred from the iterable — same rule as `for x: T in xs:`).
+* The `if` filter clause is optional; its condition must be `bool`.
+* An ill-typed body is a compile error: `E2041`
+  (body/key/value type doesn't match the requested element type), `E2042`
+  (filter is not `bool`), or `E2040` (the iterable is not a `List[T]`).
+* Lowering desugars to existing primitives — a fresh `List`/`Dict` (`{}` /
+  `[]`) plus an indexed loop with `.append` / `d[k] = v` — so comprehensions
+  run anywhere the equivalent hand-written loop runs.
+
+See `examples/comprehensions_demo.spy` for a runnable end-to-end example.
+
 ### 3.8 Function definitions
 
 ```python
@@ -3133,6 +3176,30 @@ fn main() -> i32:
     gfx.free_font(font)
     gfx.close_window(win)
     return 0
+```
+
+### 11.44 Comprehensions iterate `List[T]` only; set comprehensions don't run yet (M62a)
+
+List, dict, and set comprehensions are supported (syntax in §3.7.1). Two
+caveats:
+
+* **Iterable must be a `List[T]`.** `[f(x) for x: T in it]` requires `it` to
+  be a list — the same restriction the `for` statement has (iterating
+  `range(...)` or other iterables in a comprehension is not supported; build a
+  list first). A non-list iterable is rejected with `E2040`.
+* **The loop-variable annotation is required** (`for x: T in xs`) and is not
+  inferred from the element type, mirroring the `for` statement.
+* **Set comprehensions parse, type-check, and lower, but the VM has no set
+  runtime yet** — exactly like set *literals* `{1, 2, 3}`, which also lower to
+  a placeholder. A `Set[T]` comprehension builds and runs, but you can't yet
+  rely on its contents at runtime. Use a `List[T]` or `Dict[str, bool]` if you
+  need a working collection today.
+
+```python
+xs: List[i64] = [1i64, 2i64, 3i64]
+ys: List[i64] = [x + 1i64 for x: i64 in xs]              # OK
+zs: List[i64] = [x for x: i64 in range(3)]               # ERROR (E2040): range is not List[T]
+bad: List[i64] = [str(x) for x: i64 in xs]               # ERROR (E2041): body is str, not i64
 ```
 
 ---

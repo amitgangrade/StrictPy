@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use strictpy_shared::NativeFn;
 
 use crate::ast::{
-    self, BinOp as AstBinOp, Block, ExceptHandler, Expr, FuncDecl, Literal, Lvalue,
-    Span, Stmt, TopDecl, UnaryOp,
+    self, BinOp as AstBinOp, Block, ComprehensionKind, ExceptHandler, Expr, FuncDecl, Literal,
+    Lvalue, Span, Stmt, TopDecl, UnaryOp,
 };
 use crate::resolver::{SymbolId, SymbolKind};
 use crate::typecheck::{mangle_args_key, subst_ty, unify_one as unify_lower, TypedModule};
@@ -2437,7 +2437,8 @@ fn expr_span(e: &Expr) -> Span {
         | Expr::NullCoalesce { span, .. }
         | Expr::Ternary { span, .. }
         | Expr::Lambda { span, .. }
-        | Expr::Cast { span, .. } => *span,
+        | Expr::Cast { span, .. }
+        | Expr::Comprehension { span, .. } => *span,
     }
 }
 
@@ -2552,6 +2553,7 @@ fn lower_expr(fb: &mut FuncBuilder, ctx: &mut LowerCtx, e: &Expr) -> ValueId {
             let ty = ctx.expr_ty(*span);
             fb.push_value(ty, ValueKind::Const(IRConst::None))
         }
+        Expr::Comprehension { .. } => lower_comprehension(fb, ctx, e),
         Expr::Unary { op, operand, span } => {
             let v = lower_expr(fb, ctx, operand);
             let ty = ctx.expr_ty(*span);
@@ -2933,6 +2935,16 @@ fn collect_free_vars(
             collect_free_vars(body, &inner_bound, seen, captures);
         }
         Expr::Cast { expr, .. } => collect_free_vars(expr, bound, seen, captures),
+        Expr::Comprehension { var, iter, body, value, cond, .. } => {
+            // The iterable is free in the enclosing scope; the body/value/cond
+            // run with the loop variable bound.
+            collect_free_vars(iter, bound, seen, captures);
+            let mut inner_bound: std::collections::HashSet<&str> = bound.clone();
+            inner_bound.insert(var.as_str());
+            collect_free_vars(body, &inner_bound, seen, captures);
+            if let Some(v) = value { collect_free_vars(v, &inner_bound, seen, captures); }
+            if let Some(c) = cond { collect_free_vars(c, &inner_bound, seen, captures); }
+        }
     }
 }
 
@@ -3397,6 +3409,184 @@ fn lower_tuple_eq(
         ),
         _ => eq,
     }
+}
+
+/// M62a: lower a list / dict / set comprehension by desugaring to a fresh
+/// collection plus an index-counted loop over the (List) iterable that
+/// appends each (optionally filtered) element. The shape mirrors the `for`
+/// statement's List-only iteration:
+///
+///     __c = <fresh List / Dict>          # ArrayNew / DictNew
+///     __i: i64 = 0
+///     __n: i64 = ArrayLen(it)
+///     while __i < __n:
+///         x: T = it[__i]
+///         if <cond>:                      # only when an `if` filter is present
+///             append <body> (or set <body>: <value>) into __c
+///         __i = __i + 1
+///     __c
+///
+/// Set comprehensions produce the same placeholder value as set *literals*
+/// today (the VM has no set runtime yet — see `Expr::Set`), but the loop and
+/// the body still lower so the element expressions are type-checked / emitted.
+fn lower_comprehension(fb: &mut FuncBuilder, ctx: &mut LowerCtx, e: &Expr) -> ValueId {
+    let (kind, var, var_ty, iter, body, value, cond, span) = match e {
+        Expr::Comprehension { kind, var, var_ty, iter, body, value, cond, span, .. } =>
+            (*kind, var, var_ty, iter.as_ref(), body.as_ref(),
+             value.as_deref(), cond.as_deref(), *span),
+        _ => unreachable!("lower_comprehension on non-comprehension"),
+    };
+
+    let result_ty = ctx.expr_ty(span);
+
+    // Iterable element type, from the iterable's `List[T]`; fall back to the
+    // declared loop-var annotation if the args slot is somehow empty.
+    let iter_ty = ctx.expr_ty(expr_span(iter));
+    let elem_ty = match &iter_ty {
+        Ty::Generic { args, .. } if !args.is_empty() => args[0].clone(),
+        _ => ctx
+            .typed
+            .resolved
+            .ast_type_to_ty
+            .get(&(ast_type_span(var_ty).start, ast_type_span(var_ty).end))
+            .cloned()
+            .unwrap_or(Ty::Primitive(PrimTy::Unit)),
+    };
+
+    // Allocate the fresh result collection BEFORE the loop header.
+    let coll = match kind {
+        ComprehensionKind::List => fb.push_value(
+            result_ty.clone(),
+            ValueKind::Op { op: IROp::ArrayNew, args: vec![] },
+        ),
+        ComprehensionKind::Dict => fb.push_value(
+            result_ty.clone(),
+            ValueKind::Op {
+                op: IROp::NativeCall { native_id: NativeFn::DictNew as u32 },
+                args: vec![],
+            },
+        ),
+        // Sets: no runtime repr yet; mirror the set-literal placeholder. The
+        // loop body below still runs for type-checking / side effects.
+        ComprehensionKind::Set => fb.push_value(
+            result_ty.clone(),
+            ValueKind::Const(IRConst::None),
+        ),
+    };
+    // Stash the collection in a slot so the loop-body block reads a stable
+    // value across the back-edge (same phi-via-slot trick the for-loop uses).
+    let coll_slot = {
+        let n = format!("__comp_c_{}", fb.slot_ty.len());
+        let s = fb.alloc_slot(&n, result_ty.clone());
+        fb.emit_write_local(s, coll);
+        s
+    };
+
+    // Materialise the iterable once, before the loop header.
+    let arr = lower_expr(fb, ctx, iter);
+    let i64_ty = Ty::Primitive(PrimTy::I64);
+
+    // __i: i64 = 0
+    let zero = fb.push_value(i64_ty.clone(), ValueKind::Const(IRConst::I64(0)));
+    let i_slot = {
+        let n = format!("__comp_i_{}", fb.slot_ty.len());
+        let s = fb.alloc_slot(&n, i64_ty.clone());
+        fb.emit_write_local(s, zero);
+        s
+    };
+    // __n: i64 = ArrayLen(it)
+    let len_v = fb.push_value(
+        i64_ty.clone(),
+        ValueKind::Op { op: IROp::ArrayLen, args: vec![arr] },
+    );
+    let n_slot = {
+        let n = format!("__comp_n_{}", fb.slot_ty.len());
+        let s = fb.alloc_slot(&n, i64_ty.clone());
+        fb.emit_write_local(s, len_v);
+        s
+    };
+
+    // Loop variable slot.
+    let var_slot = fb.alloc_slot(var, elem_ty.clone());
+
+    let header = fb.new_block();
+    let body_b = fb.new_block();
+    let exit = fb.new_block();
+    fb.terminate(Terminator::Branch { target: header });
+
+    // header: __i < __n
+    fb.switch_to(header);
+    let i_cur = fb.emit_read_local(i_slot);
+    let n_cur = fb.emit_read_local(n_slot);
+    let test = fb.push_value(
+        Ty::Primitive(PrimTy::Bool),
+        ValueKind::Op { op: IROp::ILt, args: vec![i_cur, n_cur] },
+    );
+    fb.terminate(Terminator::CondBranch { cond: test, t: body_b, f: exit });
+
+    // body: x = it[__i]; [if cond:] append; __i += 1
+    fb.switch_to(body_b);
+    let i_now = fb.emit_read_local(i_slot);
+    let elt = fb.push_value(
+        elem_ty.clone(),
+        ValueKind::Op { op: IROp::ArrayGet, args: vec![arr, i_now] },
+    );
+    fb.emit_write_local(var_slot, elt);
+
+    // Emit the per-element append, wrapped in the optional `if` filter.
+    let emit_append = |fb: &mut FuncBuilder, ctx: &mut LowerCtx| {
+        let coll_v = fb.emit_read_local(coll_slot);
+        match kind {
+            ComprehensionKind::List | ComprehensionKind::Set => {
+                let ev = lower_expr(fb, ctx, body);
+                if matches!(kind, ComprehensionKind::List) {
+                    fb.push_value(
+                        Ty::Primitive(PrimTy::Unit),
+                        ValueKind::Op { op: IROp::ListPush, args: vec![coll_v, ev] },
+                    );
+                }
+                // Sets: element lowered for type-checking; no runtime insert.
+            }
+            ComprehensionKind::Dict => {
+                let kv = lower_expr(fb, ctx, body);
+                let vv = lower_expr(fb, ctx, value.expect("dict comprehension value"));
+                fb.push_value(
+                    Ty::Primitive(PrimTy::Unit),
+                    ValueKind::Op {
+                        op: IROp::NativeCall { native_id: NativeFn::DictSet as u32 },
+                        args: vec![coll_v, kv, vv],
+                    },
+                );
+            }
+        }
+    };
+
+    if let Some(c) = cond {
+        let cv = lower_expr(fb, ctx, c);
+        let keep = fb.new_block();
+        let skip = fb.new_block();
+        fb.terminate(Terminator::CondBranch { cond: cv, t: keep, f: skip });
+        fb.switch_to(keep);
+        emit_append(fb, ctx);
+        fb.terminate(Terminator::Branch { target: skip });
+        fb.switch_to(skip);
+    } else {
+        emit_append(fb, ctx);
+    }
+
+    // __i = __i + 1
+    let i_again = fb.emit_read_local(i_slot);
+    let one = fb.push_value(i64_ty.clone(), ValueKind::Const(IRConst::I64(1)));
+    let next_i = fb.push_value(
+        i64_ty.clone(),
+        ValueKind::Op { op: IROp::IAdd, args: vec![i_again, one] },
+    );
+    fb.emit_write_local(i_slot, next_i);
+    fb.terminate(Terminator::Branch { target: header });
+
+    // exit: read back the populated collection.
+    fb.switch_to(exit);
+    fb.emit_read_local(coll_slot)
 }
 
 fn lower_short_circuit(

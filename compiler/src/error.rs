@@ -131,6 +131,18 @@ pub mod codes {
     /// declaration.
     pub const TYPE_DEFAULT_ORDER: ErrorCode = "E2019";
 
+    // ── M62a: comprehensions ──────────────────────────────────────────────
+    /// The iterable in a comprehension (`[... for x in IT]`) is not a `List[T]`
+    /// — the only iterable shape the comprehension lowering supports today
+    /// (mirrors the `for` statement's List-only iteration). E2040.
+    pub const TYPE_COMPREHENSION_NOT_ITERABLE: ErrorCode = "E2040";
+    /// A comprehension's body / key / value expression is ill-typed for the
+    /// expected result element type, e.g. `r: List[i64] = [x for x: str in ss]`
+    /// where the body produces `str` but `List[i64]` was requested. E2041.
+    pub const TYPE_COMPREHENSION_ELEM_MISMATCH: ErrorCode = "E2041";
+    /// A comprehension's `if` filter clause is not a `bool`. E2042.
+    pub const TYPE_COMPREHENSION_FILTER_NOT_BOOL: ErrorCode = "E2042";
+
     // ── E3xxx: semantic ──────────────────────────────────────────────────
     pub const SEM_NONEXHAUSTIVE_MATCH: ErrorCode = "E3001";
     pub const SEM_UNREACHABLE: ErrorCode = "E3002";

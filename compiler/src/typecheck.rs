@@ -15,7 +15,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
-    self, Arg, BinOp, Block, ClassDecl, Expr, FuncDecl, Literal, Lvalue, Span, Stmt, TopDecl, UnaryOp,
+    self, Arg, BinOp, Block, ClassDecl, ComprehensionKind, Expr, FuncDecl, Literal, Lvalue, Span,
+    Stmt, TopDecl, UnaryOp,
 };
 use crate::error::{codes, CompileError, ErrorCode};
 use crate::resolver::{FunctionSig, ResolvedModule, SymbolId, SymbolKind};
@@ -686,6 +687,14 @@ impl TypeChecker {
                 self.expr_types.insert((span.start, span.end), ty.clone());
                 return Ok(ty);
             }
+            Expr::Comprehension { .. } => {
+                let ty = self.check_comprehension(e, Some(expected), env, ctx, r)?;
+                if !is_subtype(&ty, expected, &ctx.ty_ctx()) {
+                    return Err(type_err(expr_span(e), codes::TYPE_COMPREHENSION_ELEM_MISMATCH,
+                        format!("expected {}, got {}", expected.display(), ty.display())));
+                }
+                return Ok(ty);
+            }
             _ => {}
         }
 
@@ -995,6 +1004,121 @@ impl TypeChecker {
                 let t = r.ast_type_to_ty.get(&key).cloned().unwrap_or(Ty::Never);
                 let _ = span;
                 Ok(t)
+            }
+            Expr::Comprehension { .. } => self.check_comprehension(e, None, env, ctx, r),
+        }
+    }
+
+    /// M62a: type-check a list/set/dict comprehension. `expected` carries the
+    /// requested result type from assignment context (e.g. `List[i64]`), which
+    /// lets the body expression's literals take on the target element width.
+    fn check_comprehension(&mut self, e: &Expr, expected: Option<&Ty>,
+                           env: &Env, ctx: &Ctx, r: &ResolvedModule)
+        -> Result<Ty, CompileError>
+    {
+        let (kind, var, var_span, var_ty, iter, body, value, cond, span) = match e {
+            Expr::Comprehension { kind, var, var_span, var_ty, iter, body, value, cond, span } =>
+                (*kind, var, *var_span, var_ty, iter, body, value, cond, *span),
+            _ => unreachable!("check_comprehension on non-comprehension"),
+        };
+
+        // The iterable must be a `List[T]` — the only iteration shape the
+        // comprehension lowering supports (same restriction as `for`).
+        let iter_ty = self.check_or_synth(iter, None, env, ctx, r)?;
+        let iter_elem = match &iter_ty {
+            Ty::Generic { base: TypeCtor::List, args } if args.len() == 1 => args[0].clone(),
+            _ => {
+                return Err(type_err(expr_span(iter), codes::TYPE_COMPREHENSION_NOT_ITERABLE,
+                    format!("comprehension iterates over a List[T]; got {}", iter_ty.display())));
+            }
+        };
+
+        // Bind the loop variable to its declared type inside the body scope.
+        // The declared annotation must be compatible with the iterable's
+        // element type (same as `for x: T in xs:`).
+        let var_decl = r.ast_type_to_ty.get(&ast_type_span(var_ty)).cloned().unwrap_or(Ty::Never);
+        let var_ty_final = if matches!(var_decl, Ty::Never) { iter_elem.clone() } else { var_decl };
+        let mut env2 = env.clone();
+        if let Some(sym) = r.symbols.symbols.iter()
+            .find(|s| s.name == *var
+                  && matches!(s.kind, SymbolKind::Local)
+                  && s.def_span.start == var_span.start)
+        {
+            env2.types.insert(sym.id, var_ty_final.clone());
+        }
+
+        // Optional `if` filter must be bool. Synthesise (rather than check
+        // against bool) so a non-bool filter yields the comprehension-specific
+        // E2042 instead of the generic E2001.
+        if let Some(c) = cond {
+            let ct = self.synth_expr(c, &env2, ctx, r)?;
+            if !matches!(ct, Ty::Primitive(PrimTy::Bool)) {
+                return Err(type_err(expr_span(c), codes::TYPE_COMPREHENSION_FILTER_NOT_BOOL,
+                    format!("comprehension `if` filter must be bool, got {}", ct.display())));
+            }
+        }
+
+        let result = match kind {
+            ComprehensionKind::List | ComprehensionKind::Set => {
+                let ctor = if matches!(kind, ComprehensionKind::List) {
+                    TypeCtor::List
+                } else {
+                    TypeCtor::Set
+                };
+                let label = if matches!(kind, ComprehensionKind::List) { "List" } else { "Set" };
+                // Expected element type (if assignment context provided one).
+                let elem_expected = match expected {
+                    Some(Ty::Generic { base, args }) if *base == ctor && args.len() == 1 =>
+                        Some(args[0].clone()),
+                    _ => None,
+                };
+                let elem_ty = self.check_comprehension_elem(
+                    body, elem_expected.as_ref(), &env2, ctx, r,
+                    &format!("{label} comprehension body"))?;
+                Ty::Generic { base: ctor, args: vec![elem_expected.unwrap_or(elem_ty)] }
+            }
+            ComprehensionKind::Dict => {
+                let (kexp, vexp) = match expected {
+                    Some(Ty::Generic { base: TypeCtor::Dict, args }) if args.len() == 2 =>
+                        (Some(args[0].clone()), Some(args[1].clone())),
+                    _ => (None, None),
+                };
+                let kty = self.check_comprehension_elem(
+                    body, kexp.as_ref(), &env2, ctx, r, "dict comprehension key")?;
+                let val = value.as_ref().expect("dict comprehension has a value expr");
+                let vty = self.check_comprehension_elem(
+                    val, vexp.as_ref(), &env2, ctx, r, "dict comprehension value")?;
+                Ty::Generic {
+                    base: TypeCtor::Dict,
+                    args: vec![kexp.unwrap_or(kty), vexp.unwrap_or(vty)],
+                }
+            }
+        };
+        self.expr_types.insert((span.start, span.end), result.clone());
+        Ok(result)
+    }
+
+    /// M62a: check one comprehension sub-expression (body / dict key / dict
+    /// value) against an optional expected element type. On mismatch this
+    /// emits a comprehension-specific `E2041` (rather than the generic
+    /// `E2001`), so the diagnostic points at the right feature. When no
+    /// expected type is available the expression is synthesised.
+    fn check_comprehension_elem(&mut self, e: &Expr, expected: Option<&Ty>,
+                                env: &Env, ctx: &Ctx, r: &ResolvedModule, what: &str)
+        -> Result<Ty, CompileError>
+    {
+        match expected {
+            None => self.synth_expr(e, env, ctx, r),
+            Some(exp) => {
+                // Try the normal checked path first — this gives numeric
+                // literal widening (e.g. `[0 for ...]` targeting `List[i64]`).
+                if let Ok(t) = self.check_expr(e, exp, env, ctx, r) {
+                    return Ok(t);
+                }
+                // It didn't fit: re-synthesise to report the actual type.
+                let got = self.synth_expr(e, env, ctx, r)?;
+                Err(type_err(expr_span(e), codes::TYPE_COMPREHENSION_ELEM_MISMATCH,
+                    format!("{what} has type {}, expected {}", got.display(), exp.display())))
             }
         }
     }
@@ -2194,7 +2318,8 @@ fn expr_span(e: &Expr) -> Span {
         | Expr::Unary { span, .. } | Expr::Binary { span, .. } | Expr::Call { span, .. }
         | Expr::MethodCall { span, .. } | Expr::Attr { span, .. } | Expr::Index { span, .. }
         | Expr::NullCoalesce { span, .. } | Expr::Ternary { span, .. }
-        | Expr::Lambda { span, .. } | Expr::Cast { span, .. } => *span,
+        | Expr::Lambda { span, .. } | Expr::Cast { span, .. }
+        | Expr::Comprehension { span, .. } => *span,
     }
 }
 
