@@ -1681,7 +1681,19 @@ impl Parser {
         self.expect(&TokenKind::LBracket, "'['")?;
         let mut elems = Vec::new();
         if !matches!(self.peek_kind(), TokenKind::RBracket) {
-            elems.push(self.parse_expr()?);
+            let first = self.parse_expr()?;
+            // M62a: `[expr for x: T in it ...]` — a list comprehension.
+            if matches!(self.peek_kind(), TokenKind::KwFor) {
+                return self.parse_comprehension_tail(
+                    start,
+                    ComprehensionKind::List,
+                    first,
+                    None,
+                    &TokenKind::RBracket,
+                    "']'",
+                );
+            }
+            elems.push(first);
             while self.eat(&TokenKind::Comma) {
                 if matches!(self.peek_kind(), TokenKind::RBracket) {
                     break;
@@ -1707,8 +1719,19 @@ impl Parser {
         }
         let first = self.parse_expr()?;
         if self.eat(&TokenKind::Colon) {
-            // Dict
+            // Dict (literal or comprehension).
             let v = self.parse_expr()?;
+            // M62a: `{k: v for x: T in it ...}` — a dict comprehension.
+            if matches!(self.peek_kind(), TokenKind::KwFor) {
+                return self.parse_comprehension_tail(
+                    start,
+                    ComprehensionKind::Dict,
+                    first,
+                    Some(v),
+                    &TokenKind::RBrace,
+                    "'}'",
+                );
+            }
             let mut entries = vec![(first, v)];
             while self.eat(&TokenKind::Comma) {
                 if matches!(self.peek_kind(), TokenKind::RBrace) {
@@ -1724,6 +1747,16 @@ impl Parser {
                 entries,
                 span: merge_spans(start, self.prev_span()),
             })
+        } else if matches!(self.peek_kind(), TokenKind::KwFor) {
+            // M62a: `{expr for x: T in it ...}` — a set comprehension.
+            self.parse_comprehension_tail(
+                start,
+                ComprehensionKind::Set,
+                first,
+                None,
+                &TokenKind::RBrace,
+                "'}'",
+            )
         } else {
             let mut elems = vec![first];
             while self.eat(&TokenKind::Comma) {
@@ -1738,6 +1771,51 @@ impl Parser {
                 span: merge_spans(start, self.prev_span()),
             })
         }
+    }
+
+    /// M62a: parse the comprehension clause that follows the body expression:
+    /// `for VAR: TYPE in ITER [if COND] CLOSE`. The body (and, for dict
+    /// comprehensions, the value) have already been parsed; `close`/`close_lbl`
+    /// describe the terminating bracket (`]` for lists, `}` for dict/set).
+    fn parse_comprehension_tail(
+        &mut self,
+        start: Span,
+        kind: ComprehensionKind,
+        body: Expr,
+        value: Option<Expr>,
+        close: &TokenKind,
+        close_lbl: &'static str,
+    ) -> Result<Expr, CompileError> {
+        self.expect(&TokenKind::KwFor, "'for'")?;
+        let var_span = self.cur_span();
+        let var = self.expect_ident()?;
+        self.expect(&TokenKind::Colon, "':'")?;
+        let var_ty = self.parse_type()?;
+        self.expect(&TokenKind::KwIn, "'in'")?;
+        // The iterable is parsed WITHOUT a trailing ternary (`parse_or_expr`,
+        // not `parse_expr`): otherwise the optional comprehension `if` filter
+        // would be mis-parsed as the start of an `X if C else Y` ternary and
+        // then fail expecting `else`. A ternary iterable must be parenthesised.
+        let iter = self.parse_or_expr()?;
+        let cond = if self.eat(&TokenKind::KwIf) {
+            // The filter is the last clause before the closing bracket, so a
+            // full ternary (`a if c else b`) is unambiguous here.
+            Some(Box::new(self.parse_expr()?))
+        } else {
+            None
+        };
+        self.expect(close, close_lbl)?;
+        Ok(Expr::Comprehension {
+            kind,
+            var,
+            var_span,
+            var_ty,
+            iter: Box::new(iter),
+            body: Box::new(body),
+            value: value.map(Box::new),
+            cond,
+            span: merge_spans(start, self.prev_span()),
+        })
     }
 
     fn parse_lambda(&mut self, start: Span) -> Result<Expr, CompileError> {

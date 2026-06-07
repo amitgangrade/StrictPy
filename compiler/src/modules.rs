@@ -933,6 +933,18 @@ impl Renamer {
                 self.rewrite_expr(expr);
                 self.rewrite_type(target);
             }
+            Expr::Comprehension { var, var_ty, iter, body, value, cond, .. } => {
+                // Rewrite the iterable in the outer scope, then bind the loop
+                // variable for the body / value / filter.
+                self.rewrite_expr(iter);
+                self.push_scope();
+                self.rewrite_type(var_ty);
+                self.bind(var);
+                self.rewrite_expr(body);
+                if let Some(v) = value { self.rewrite_expr(v); }
+                if let Some(c) = cond { self.rewrite_expr(c); }
+                self.pop_scope();
+            }
         }
     }
 

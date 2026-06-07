@@ -7709,6 +7709,20 @@ impl Resolver {
                 let _ = self.lower_ast_type(target, scope)?;
                 Ok(())
             }
+            Expr::Comprehension { var, var_span, var_ty, iter, body, value, cond, .. } => {
+                // M62a: the iterable is evaluated in the *outer* scope (the
+                // loop variable is not yet in scope), exactly like the `for`
+                // statement and Python. The body / value / filter then run in
+                // a fresh inner scope that binds the loop variable.
+                self.resolve_expr(iter, scope)?;
+                let s = self.table.new_scope(Some(scope), false);
+                let t = self.lower_ast_type(var_ty, scope)?;
+                self.make_symbol(s, var, SymbolKind::Local, *var_span, Some(t));
+                if let Some(c) = cond { self.resolve_expr(c, s)?; }
+                self.resolve_expr(body, s)?;
+                if let Some(v) = value { self.resolve_expr(v, s)?; }
+                Ok(())
+            }
         }
     }
 

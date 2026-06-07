@@ -1,0 +1,52 @@
+"""comprehensions_demo.spy — M62a list / dict / set comprehensions.
+
+Exercises the three comprehension forms StrictPy desugars to a fresh
+collection + an index-counted loop over the (List) iterable:
+
+  * list comprehension WITH an `if` filter:  [x * x for x: i64 in xs if ...]
+  * dict comprehension:                      {str(n): n * n for n: i64 in xs}
+  * set comprehension:                       {x % 3i64 for x: i64 in xs}
+
+The loop variable is annotated exactly like the `for` statement
+(`for x: T in it`). Output is deterministic: the list is indexed by
+position and the dict is probed by known string keys, so neither relies
+on hash-iteration order.
+
+NOTE on sets: StrictPy's VM has no set runtime yet (set *literals* lower
+to a placeholder too — see LANGUAGE_GUIDE §11), so the set comprehension
+is constructed to show it type-checks and lowers, but the program does
+not print anything that depends on its runtime contents.
+
+Acceptance: `compiler/tests/comprehensions_demo_runs.rs` asserts exit 0
+and the `OK:` summary line; `vm/tests/m62a_comprehensions.rs` unit-tests
+each form (plus a negative ill-typed-body case).
+"""
+
+fn main() -> i32:
+    xs: List[i64] = [1i64, 2i64, 3i64, 4i64, 5i64, 6i64]
+
+    # ── List comprehension with an `if` filter ────────────────────────
+    # Squares of the even elements: [4, 16, 36].
+    even_squares: List[i64] = [x * x for x: i64 in xs if x % 2i64 == 0i64]
+    println("even_squares len=" + str(i64(len(even_squares))))
+    n: i32 = i32(i64(len(even_squares)))
+    i: i32 = 0i32
+    while i < n:
+        println("  even_squares[" + str(i) + "]=" + str(even_squares[i]))
+        i = i + 1i32
+
+    # ── Dict comprehension ────────────────────────────────────────────
+    # Map the string form of each number to its square. Dict runtime keys
+    # are strings, so the key expression is `str(num)`.
+    squares: Dict[str, i64] = {str(num): num * num for num: i64 in xs}
+    if "3" in squares:
+        println("squares has key 3")
+    if "7" not in squares:
+        println("squares lacks key 7")
+
+    # ── Set comprehension (compiles; no set runtime yet) ──────────────
+    remainders: Set[i64] = {x % 3i64 for x: i64 in xs}
+    println("built a set comprehension")
+
+    println("OK: comprehensions")
+    return 0
