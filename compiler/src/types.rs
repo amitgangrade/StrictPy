@@ -380,6 +380,30 @@ fn class_extends(c: ClassId, target: ClassId, ctx: &TypeContext) -> bool {
 ///
 /// `classes` is the resolver's `class_layouts` map (the same map exposed as
 /// `Ctx::classes` in the type-checker and `LowerCtx::class_layouts` in IR).
+/// The built-in exception class names the resolver registers in the prelude
+/// (each as an `is_open` class with `type_name`/`message` fields). Kept in
+/// sync with the `excs` list in `resolver.rs`. A user class subclassing any of
+/// these is a valid exception type.
+pub fn is_builtin_exception_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Exception"
+            | "ValueError"
+            | "IndexError"
+            | "KeyError"
+            | "TypeError"
+            | "OverflowError"
+            | "DivisionByZeroError"
+            | "ZeroDivisionError"
+            | "IOError"
+            | "NullPointerError"
+            | "AssertionError"
+            | "RuntimeError"
+            | "StopIteration"
+            | "ChannelClosedError"
+    )
+}
+
 pub fn class_is_exception(c: ClassId, classes: &HashMap<ClassId, ClassLayout>) -> bool {
     let mut cur = Some(c);
     // Bound the walk defensively in case of a malformed cycle.
@@ -389,7 +413,12 @@ pub fn class_is_exception(c: ClassId, classes: &HashMap<ClassId, ClassLayout>) -
             Some(id) => {
                 match classes.get(&id) {
                     Some(layout) => {
-                        if layout.name == "Exception" {
+                        // `Exception` is the root, but the other built-in
+                        // exceptions (ValueError, IOError, ...) are registered
+                        // as siblings with `base: None`, so a user class that
+                        // subclasses one of *them* must also count as an
+                        // exception. Match the whole built-in family by name.
+                        if is_builtin_exception_name(&layout.name) {
                             return true;
                         }
                         cur = layout.base;
