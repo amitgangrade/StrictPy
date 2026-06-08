@@ -718,6 +718,23 @@ impl TypeChecker {
             }
             return Ok(lit_ty);
         }
+        // A unary `-` / `+` applied directly to a numeric literal should coerce
+        // the literal to the expected width too, so `x: i64 = -1` and
+        // `range(a, b, -1)` behave like their positive counterparts. Without
+        // this, `-1` is `Unary(Neg, Int)` (not a bare literal), so it misses
+        // the branch above, the inner literal defaults to i32, and the negation
+        // is rejected against an i64 context. Restricted to literal operands so
+        // `-someVar` keeps its operand's real type.
+        if let Expr::Unary { op: UnaryOp::Neg | UnaryOp::Pos, operand, span } = e {
+            if matches!(
+                operand.as_ref(),
+                Expr::Literal { lit: Literal::Int { .. } | Literal::Float { .. }, .. }
+            ) {
+                let inner = self.check_expr(operand, expected, env, ctx, r)?;
+                self.expr_types.insert((span.start, span.end), inner.clone());
+                return Ok(inner);
+            }
+        }
         // For collection literals, push expected type element-wise.
         match e {
             Expr::List { elems, span } => {

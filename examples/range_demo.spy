@@ -24,9 +24,9 @@ fn main() -> i32:
         evens = evens + str(i) + " "
     println("evens = " + evens)                   # 0 2 4 6 8
 
-    # negative step
+    # negative step (a bare -1 literal coerces to i64)
     countdown: str = ""
-    for i: i64 in range(5, 0, -1i64):
+    for i: i64 in range(5, 0, -1):
         countdown = countdown + str(i)
     println("countdown = " + countdown)           # 54321
 
