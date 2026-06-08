@@ -2222,8 +2222,13 @@ The prelude is what's available without any `import` statement.
 println(s: str) -> None                  # stdout + newline
 print(s: str) -> None                    # stdout, no newline
 len(x: ...) -> i64                       # works for List/Dict/Set/str/Tuple
-range(n: i64) -> List[i64]               # [0, n)
-range_step(start: i64, stop: i64, step: i64) -> List[i64]
+range(n) / range(start, stop) / range(start, stop, step) -> Range
+    # Lazy integer sequence for `for i: i64 in range(...)`. Iterated by a
+    # counter loop (no list is materialised, so there is no size cap). 1-arg
+    # is [0, n); 3-arg supports a negative step, e.g. range(5, 0, -1i64) -> 5,4,3,2,1.
+    # NOTE: range is a `Range`, not a `List[i64]` — you cannot index it, take
+    # len() of it, or use it as a comprehension iterable; convert intent to an
+    # explicit loop if you need a materialised list.
 assert(cond: bool, msg: str) -> None     # raises AssertionError on false
 
 # Type constructors (also act as type names):

@@ -1,0 +1,39 @@
+"""`for i in range(...)` demo.
+
+range() is iterated lazily by a counter loop — no list is materialised, so
+there is no size cap. Supports range(stop), range(start, stop), and
+range(start, stop, step) including a negative step.
+"""
+
+fn main() -> i32:
+    # range(stop)
+    sum0: i64 = 0
+    for i: i64 in range(10):
+        sum0 = sum0 + i
+    println("sum 0..9 = " + str(sum0))            # 45
+
+    # range(start, stop)
+    sum1: i64 = 0
+    for i: i64 in range(5, 10):
+        sum1 = sum1 + i
+    println("sum 5..9 = " + str(sum1))            # 35
+
+    # range(start, stop, step)
+    evens: str = ""
+    for i: i64 in range(0, 10, 2):
+        evens = evens + str(i) + " "
+    println("evens = " + evens)                   # 0 2 4 6 8
+
+    # negative step
+    countdown: str = ""
+    for i: i64 in range(5, 0, -1i64):
+        countdown = countdown + str(i)
+    println("countdown = " + countdown)           # 54321
+
+    # large range — no materialisation, no 1M cap
+    big: i64 = 0
+    for i: i64 in range(2000000):
+        big = big + 1
+    println("counted = " + str(big))              # 2000000
+
+    return 0
