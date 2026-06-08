@@ -299,6 +299,32 @@ pub enum Expr {
     },
 
     Cast { expr: Box<Expr>, target: Type, span: Span },
+
+    /// M62a: a comprehension — list `[body for x: T in iter if cond]`,
+    /// set `{body for x: T in iter if cond}`, or dict
+    /// `{k: v for x: T in iter if cond}`. The loop variable carries a type
+    /// annotation just like the `for` statement. `cond` is the optional
+    /// `if` filter. For list/set comprehensions `value` is `None`; for dict
+    /// comprehensions `body` is the key expression and `value` is the value.
+    Comprehension {
+        kind: ComprehensionKind,
+        var: String,
+        /// Span of the loop-variable name token (used to key its symbol).
+        var_span: Span,
+        var_ty: Type,
+        iter: Box<Expr>,
+        body: Box<Expr>,
+        value: Option<Box<Expr>>,
+        cond: Option<Box<Expr>>,
+        span: Span,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComprehensionKind {
+    List,
+    Set,
+    Dict,
 }
 
 #[derive(Debug, Clone)]

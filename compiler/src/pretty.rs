@@ -819,6 +819,29 @@ impl PrettyPrinter {
                 self.print_expr(expr);
                 self.write(")");
             }
+            Expr::Comprehension { kind, var, var_ty, iter, body, value, cond, .. } => {
+                let (open, close) = match kind {
+                    ComprehensionKind::List => ("[", "]"),
+                    ComprehensionKind::Set | ComprehensionKind::Dict => ("{", "}"),
+                };
+                self.write(open);
+                self.print_expr(body);
+                if let Some(v) = value {
+                    self.write(": ");
+                    self.print_expr(v);
+                }
+                self.write(" for ");
+                self.write(var);
+                self.write(": ");
+                self.print_type(var_ty);
+                self.write(" in ");
+                self.print_expr(iter);
+                if let Some(c) = cond {
+                    self.write(" if ");
+                    self.print_expr(c);
+                }
+                self.write(close);
+            }
         }
     }
 
@@ -1135,6 +1158,7 @@ fn needs_atom_parens(e: &Expr) -> bool {
             | Expr::MethodCall { .. }
             | Expr::Attr { .. }
             | Expr::Index { .. }
+            | Expr::Comprehension { .. }
     )
 }
 

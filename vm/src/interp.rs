@@ -641,6 +641,20 @@ pub struct Interpreter {
     /// `Rethrow`), or when a handler matches the pending type.
     pub(crate) pending_exception: Option<(String, String)>,
 
+    /// M63a: the live heap object of the exception currently being thrown
+    /// (set by `op_throw` from the raised pointer). Carried through to the
+    /// handler bind so a caught `e` is the *original* object — preserving
+    /// user-exception subclass fields beyond `message`. `None` for natively
+    /// raised exceptions (IndexError etc.) that have no heap object, which
+    /// fall back to `materialise_exception`. Rooted by `maybe_collect`.
+    pub(crate) throw_obj: Option<u64>,
+
+    /// M63a: object companion to `pending_exception` — preserves the live
+    /// exception object while it is routed through a `finally` with no
+    /// matching arm, so `EndFinally`'s re-raise keeps the subclass fields.
+    /// Rooted by `maybe_collect`.
+    pub(crate) pending_exc_obj: Option<u64>,
+
     /// M19: command-line args forwarded to `sys.argv`. Per Python
     /// convention `argv[0]` is the program path (the `.spyc` invoked)
     /// and `argv[1..]` are the trailing args the CLI received. Set by
@@ -703,6 +717,8 @@ impl Interpreter {
             frames: Vec::with_capacity(64),
             handler_frames: Vec::new(),
             pending_exception: None,
+            throw_obj: None,
+            pending_exc_obj: None,
             argv: Vec::new(),
             sys_argv_cache: None,
             monotonic_start: std::time::Instant::now(),
@@ -882,6 +898,10 @@ impl Interpreter {
         message: &str,
         target_depth: usize,
     ) -> Result<bool, VmError> {
+        // M63a: claim the live thrown object for this propagation (cleared so
+        // a later native exception can't pick up a stale pointer). Used to
+        // bind the handler's `e` to the original object when present.
+        let thrown_obj = self.throw_obj.take();
         loop {
             // Snapshot the top handler frame's data so we can release the
             // borrow before mutating `self`.
@@ -925,11 +945,18 @@ impl Interpreter {
                 // Materialise the exception value into the bind register
                 // (if the handler asked for one).
                 if arm.bind_reg != DISCARD_REG {
-                    let exc_ptr = self.materialise_exception(type_name, message)?;
+                    // M63a: bind the original thrown object if we have it (keeps
+                    // subclass fields); otherwise reconstruct a 2-field object
+                    // for natively-raised exceptions.
+                    let exc_ptr = match thrown_obj {
+                        Some(o) => o,
+                        None => self.materialise_exception(type_name, message)?,
+                    };
                     self.write_reg(arm.bind_reg, exc_ptr);
                 }
                 // Reset pending-exception state: this exception is now handled.
                 self.pending_exception = None;
+                self.pending_exc_obj = None;
                 // Jump to the handler.
                 if let Some(f) = self.frames.last_mut() {
                     f.pc = arm.handler_pc;
@@ -943,6 +970,9 @@ impl Interpreter {
                     self.frames.pop();
                 }
                 self.pending_exception = Some((type_name.to_string(), message.to_string()));
+                // M63a: carry the live object alongside, so EndFinally's
+                // re-raise still binds the original (subclass fields intact).
+                self.pending_exc_obj = thrown_obj;
                 // Pop this handler frame (and anything pushed inside it).
                 while let Some(top) = self.handler_frames.last() {
                     if top.frame_depth >= frame_depth {
@@ -2200,6 +2230,9 @@ impl Interpreter {
                 (if tn.is_empty() { "Exception".to_string() } else { tn }, msg)
             }
         };
+        // M63a: remember the live exception object so the handler binds the
+        // original (preserving subclass fields), not a 2-field reconstruction.
+        self.throw_obj = if p.is_null() { None } else { Some(p as u64) };
         Err(VmError::UncaughtException { type_name, message })
     }
 
@@ -2263,6 +2296,9 @@ impl Interpreter {
     /// no-op. Emitted at the bottom of a `finally` block.
     fn op_end_finally(&mut self) -> Result<(), VmError> {
         if let Some((tn, msg)) = self.pending_exception.take() {
+            // M63a: restore the live object so the re-raised exception still
+            // binds the original (subclass fields intact) in an outer handler.
+            self.throw_obj = self.pending_exc_obj.take();
             return Err(VmError::UncaughtException {
                 type_name: tn,
                 message: msg,
@@ -2627,6 +2663,15 @@ impl Interpreter {
         if !self.temp_roots.is_empty() {
             roots.push(self.temp_roots.as_slice());
         }
+        // M63a: root the in-flight exception object while it unwinds (a
+        // `finally` body can run user code / allocate before the object is
+        // bound, and it may be the only reference). Null (0) slots are
+        // ignored by the conservative scan.
+        let exc_roots: [u64; 2] = [
+            self.throw_obj.unwrap_or(0),
+            self.pending_exc_obj.unwrap_or(0),
+        ];
+        roots.push(&exc_roots);
         // Also root every value living in a dict side-table — those values
         // might be StringRepr pointers or other heap objects with no other
         // root. (Channel payloads do not need rooting: every payload was
