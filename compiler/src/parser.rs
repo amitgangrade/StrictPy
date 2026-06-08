@@ -652,6 +652,17 @@ impl Parser {
                     span: merge_spans(start, self.prev_span()),
                 }
             }
+            TokenKind::KwYield => {
+                // M62b: `yield <expr>` — a value-producing generator yield.
+                // Bare `yield` (no expression) and `yield from` are not
+                // supported in v1; require an expression.
+                self.bump();
+                let value = self.parse_expr()?;
+                Stmt::Yield {
+                    value,
+                    span: merge_spans(start, self.prev_span()),
+                }
+            }
             TokenKind::KwBreak => {
                 self.bump();
                 Stmt::Break {

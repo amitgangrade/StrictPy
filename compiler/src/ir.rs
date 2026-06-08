@@ -133,6 +133,19 @@ pub enum IROp {
     ClosureNew { fn_id: FuncId, n_captures: u32 },
     ClosureCall,
 
+    // ── M62b: generators (yield) ─────────────────────────────────────────
+    /// Allocate a generator object for generator function `fn_id`. Args are
+    /// the evaluated call arguments (same shape as a `DirectCall`). Does not
+    /// run the body. Lowered to `Opcode::MakeGen`.
+    MakeGen { fn_id: FuncId },
+    /// Produce `args[0]` from the current generator frame and suspend.
+    /// Lowered to `Opcode::Yield`. Result type is Unit.
+    Yield,
+    /// Resume the generator `args[0]`; writes the yielded value into the
+    /// destination register and the exhaustion flag (1 = done, 0 = produced a
+    /// value) into local slot `done_slot`. Lowered to `Opcode::GenNext`.
+    GenNext { done_slot: u16 },
+
     // ── Safety / checks ──────────────────────────────────────────────────
     BoundsCheck,
     NullCheck,
@@ -1555,6 +1568,21 @@ fn lower_stmt(fb: &mut FuncBuilder, ctx: &mut LowerCtx, s: &Stmt) -> Option<()> 
             fb.switch_to(nb);
             Some(())
         }
+        Stmt::Yield { value, .. } => {
+            // M62b: `yield <expr>` — produce a value from the current
+            // generator frame and suspend. Lowered to a single `Yield`
+            // instruction carrying the value register. The VM saves the live
+            // frame (registers + pc) back into the owning generator object and
+            // returns control to the `GenNext` driver. On the next resume,
+            // execution continues at the instruction *after* this Yield, so
+            // (unlike Return) we keep the current block open.
+            let v = lower_expr(fb, ctx, value);
+            fb.push_value(
+                Ty::Primitive(PrimTy::Unit),
+                ValueKind::Op { op: IROp::Yield, args: vec![v] },
+            );
+            Some(())
+        }
         Stmt::If { cond, then_block, elifs, else_block, .. } => {
             lower_if_chain(fb, ctx, cond, then_block, elifs, else_block.as_ref());
             Some(())
@@ -1583,6 +1611,93 @@ fn lower_stmt(fb: &mut FuncBuilder, ctx: &mut LowerCtx, s: &Stmt) -> Option<()> 
             // want a one-liner `for x in xs:` instead of hand-rolled
             // index loops.
             let iter_ty = ctx.expr_ty(expr_span(iter));
+
+            // M62b: `for v: T in gen():` over a generator (`Iterator[T]`).
+            // Desugar into a GenNext-driven loop:
+            //
+            //     __g = <iter>            # MakeGen — allocates the generator
+            //     __done: bool = false
+            //     loop:
+            //         v = GenNext(__g)    # also writes __done
+            //         if __done: break
+            //         <body>
+            //
+            // The VM resumes the saved generator frame on each GenNext until
+            // it yields (writes the value, __done = 0) or finishes (__done = 1).
+            //
+            // Guard: only take this path when the iterable is a *direct call to
+            // a generator function* (so `iter` lowers to a real `MakeGen`).
+            // Other `Iterator[T]` shapes (e.g. `Dict.items()`) are a different
+            // runtime representation and must NOT be driven via `GenNext` — they
+            // fall through to the existing placeholder behaviour, exactly as
+            // before M62b.
+            if matches!(&iter_ty, Ty::Generic { base: TypeCtor::Iterator, .. })
+                && iter_is_generator_call(ctx, iter)
+            {
+                let args = match &iter_ty {
+                    Ty::Generic { base: TypeCtor::Iterator, args } => args.clone(),
+                    _ => Vec::new(),
+                };
+                let args = &args;
+                let elem_ty = args
+                    .first()
+                    .cloned()
+                    .or_else(|| {
+                        ctx.typed.resolved.ast_type_to_ty
+                            .get(&(ast_type_span(var_ty).start, ast_type_span(var_ty).end))
+                            .cloned()
+                    })
+                    .unwrap_or(Ty::Primitive(PrimTy::Unit));
+
+                // Materialise the generator once, before the loop.
+                let gen_v = lower_expr(fb, ctx, iter);
+                let gen_ty = find_value_ty(fb, gen_v).unwrap_or_else(|| iter_ty.clone());
+                let gen_slot = {
+                    let n = format!("__for_gen_{}", fb.slot_ty.len());
+                    let s = fb.alloc_slot(&n, gen_ty);
+                    fb.emit_write_local(s, gen_v);
+                    s
+                };
+                // Dedicated `done` slot the GenNext op writes into.
+                let bool_ty = Ty::Primitive(PrimTy::Bool);
+                let done_slot = {
+                    let n = format!("__for_done_{}", fb.slot_ty.len());
+                    fb.alloc_slot(&n, bool_ty.clone())
+                };
+                // User-visible loop variable.
+                let var_slot = fb.alloc_slot(var, elem_ty.clone());
+
+                let header = fb.new_block();
+                let body_b = fb.new_block();
+                let exit = fb.new_block();
+                fb.terminate(Terminator::Branch { target: header });
+
+                // header: v = GenNext(__g) [writes __done]; if __done -> exit
+                fb.switch_to(header);
+                let gen_cur = fb.emit_read_local(gen_slot);
+                let nxt = fb.push_value(
+                    elem_ty.clone(),
+                    ValueKind::Op {
+                        op: IROp::GenNext { done_slot },
+                        args: vec![gen_cur],
+                    },
+                );
+                fb.emit_write_local(var_slot, nxt);
+                let done_cur = fb.emit_read_local(done_slot);
+                // Branch: if done (true/non-zero) -> exit, else -> body.
+                fb.terminate(Terminator::CondBranch { cond: done_cur, t: exit, f: body_b });
+
+                // body: <body>; loop back to header.
+                fb.switch_to(body_b);
+                fb.loop_stack.push((header, exit));
+                lower_block(fb, ctx, body);
+                fb.loop_stack.pop();
+                fb.terminate(Terminator::Branch { target: header });
+
+                fb.switch_to(exit);
+                return Some(());
+            }
+
             let is_list = matches!(
                 &iter_ty,
                 Ty::Generic { base: TypeCtor::List, .. }
@@ -3629,6 +3744,40 @@ fn normalize_method_args(
     Some(out)
 }
 
+/// M62b: is `iter` a direct call to a generator function (declared
+/// `-> Iterator[T]`)? Such a call lowers to `MakeGen`, producing a generator
+/// object that the for-loop drives via `GenNext`. Used by the `for` lowering to
+/// distinguish real generators from other `Iterator[T]`-typed expressions
+/// (e.g. `Dict.items()`), which must NOT be driven via `GenNext`.
+fn iter_is_generator_call(ctx: &LowerCtx, iter: &Expr) -> bool {
+    let Expr::Call { callee, .. } = iter else {
+        return false;
+    };
+    let Expr::Ident { name, .. } = callee.as_ref() else {
+        return false;
+    };
+    let Some(sid) = ctx
+        .typed
+        .resolved
+        .symbols
+        .lookup(ctx.typed.resolved.module_scope, name)
+    else {
+        return false;
+    };
+    if !matches!(
+        ctx.typed.resolved.symbols.get(sid).kind,
+        SymbolKind::Function
+    ) {
+        return false;
+    }
+    ctx.typed
+        .resolved
+        .function_sigs
+        .get(&sid)
+        .map(|sig| matches!(&sig.ret, Ty::Generic { base: TypeCtor::Iterator, .. }))
+        .unwrap_or(false)
+}
+
 fn lower_call(
     fb: &mut FuncBuilder,
     ctx: &mut LowerCtx,
@@ -3747,6 +3896,44 @@ fn lower_call(
     let mut arg_vs: Vec<ValueId> = Vec::with_capacity(args.len());
     for a in args {
         arg_vs.push(lower_expr(fb, ctx, &a.value));
+    }
+
+    // M62b: a call to a generator function (declared `-> Iterator[T]`) does
+    // NOT run the body — it allocates a generator object. Detect this by the
+    // callee's resolved return type and emit `MakeGen` instead of the usual
+    // `DirectCall`. The argument values become the generator's initial
+    // register window (parameters), exactly like a normal call's arguments.
+    if let Expr::Ident { name, .. } = callee {
+        if let Some(sid) = ctx
+            .typed
+            .resolved
+            .symbols
+            .lookup(ctx.typed.resolved.module_scope, name)
+        {
+            if matches!(
+                ctx.typed.resolved.symbols.get(sid).kind,
+                SymbolKind::Function
+            ) {
+                let is_generator = ctx
+                    .typed
+                    .resolved
+                    .function_sigs
+                    .get(&sid)
+                    .map(|sig| matches!(&sig.ret, Ty::Generic { base: TypeCtor::Iterator, .. }))
+                    .unwrap_or(false);
+                if is_generator {
+                    if let Some(fid) = ctx.fn_id_by_name.get(name).copied() {
+                        return fb.push_value(
+                            ret_ty,
+                            ValueKind::Op {
+                                op: IROp::MakeGen { fn_id: fid },
+                                args: arg_vs,
+                            },
+                        );
+                    }
+                }
+            }
+        }
     }
 
     // Resolve callee.

@@ -7437,6 +7437,9 @@ impl Resolver {
             Stmt::Return { value, .. } => {
                 if let Some(e) = value { self.resolve_expr(e, scope)?; }
             }
+            Stmt::Yield { value, .. } => {
+                self.resolve_expr(value, scope)?;
+            }
             Stmt::If { cond, then_block, elifs, else_block, .. } => {
                 self.resolve_expr(cond, scope)?;
                 let s = self.table.new_scope(Some(scope), false);

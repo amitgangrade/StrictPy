@@ -215,6 +215,16 @@ impl TypeChecker {
             r.ast_type_to_ty.get(&key).cloned().unwrap_or_else(|| Ty::Never)
         };
         let _ = recv;
+        // M62b: a function declared `-> Iterator[T]` is a generator function
+        // and must contain at least one `yield`. Otherwise its body could
+        // never produce the iterator it promises (v1 has no other way to
+        // construct an `Iterator[T]` value).
+        if let Ty::Generic { base: TypeCtor::Iterator, .. } = &ret_ty {
+            if !block_contains_yield(&f.body) {
+                return Err(type_err(f.span, codes::SEM_YIELD_OUTSIDE_GENERATOR,
+                    format!("function `{}` is declared `-> Iterator[T]` but contains no `yield`; a generator function must `yield` at least one value", f.name)));
+            }
+        }
         self.check_block(&f.body, &ret_ty, &env, ctx, r)?;
         Ok(())
     }
@@ -312,6 +322,20 @@ impl TypeChecker {
                 }
             }
             Stmt::Return { value, span } => {
+                // M62b: inside a generator function (return type `Iterator[T]`),
+                // a bare `return` is the exhaustion signal — like Python's
+                // generators. `return <value>` is not supported (the value
+                // would be a StopIteration payload, which v1 doesn't expose).
+                if let Ty::Generic { base: TypeCtor::Iterator, .. } = ret {
+                    match value {
+                        None => {}
+                        Some(_) => {
+                            return Err(type_err(*span, codes::TYPE_MISMATCH,
+                                "return: a generator function (Iterator[T]) may only use a bare `return` to stop iteration — use `yield` to produce values".into()));
+                        }
+                    }
+                    return Ok(());
+                }
                 match value {
                     Some(v) => {
                         let got = self.check_or_synth(v, Some(ret), env, ctx, r)?;
@@ -325,6 +349,25 @@ impl TypeChecker {
                             return Err(type_err(*span, codes::TYPE_MISMATCH,
                                 format!("return: expected {}, got None", ret.display())));
                         }
+                    }
+                }
+            }
+            Stmt::Yield { value, span } => {
+                // M62b: legal only inside a generator function, i.e. one whose
+                // declared return type is `Iterator[T]`. The yielded expression
+                // must have type `T`.
+                match ret {
+                    Ty::Generic { base: TypeCtor::Iterator, args } if args.len() == 1 => {
+                        let elem = args[0].clone();
+                        let got = self.check_or_synth(value, Some(&elem), env, ctx, r)?;
+                        if !is_subtype(&got, &elem, &ctx.ty_ctx()) {
+                            return Err(type_err(*span, codes::TYPE_YIELD_MISMATCH,
+                                format!("yield: expected {}, got {}", elem.display(), got.display())));
+                        }
+                    }
+                    _ => {
+                        return Err(type_err(*span, codes::SEM_YIELD_OUTSIDE_GENERATOR,
+                            "`yield` is only allowed inside a generator function (one declared `-> Iterator[T]`)".into()));
                     }
                 }
             }
@@ -2351,6 +2394,42 @@ fn block_always_returns(b: &Block) -> bool {
         }
     }
     false
+}
+
+/// M62b: does this block (recursively, through nested control flow but NOT
+/// through nested function/lambda bodies — there are none at statement level)
+/// contain a `yield`? Used to flag a `-> Iterator[T]` function that forgot to
+/// yield.
+fn block_contains_yield(b: &Block) -> bool {
+    b.stmts.iter().any(stmt_contains_yield)
+}
+
+fn stmt_contains_yield(s: &Stmt) -> bool {
+    match s {
+        Stmt::Yield { .. } => true,
+        Stmt::If { then_block, elifs, else_block, .. } => {
+            block_contains_yield(then_block)
+                || elifs.iter().any(|(_, b)| block_contains_yield(b))
+                || else_block.as_ref().map_or(false, block_contains_yield)
+        }
+        Stmt::While { body, else_block, .. } => {
+            block_contains_yield(body)
+                || else_block.as_ref().map_or(false, block_contains_yield)
+        }
+        Stmt::For { body, else_block, .. } => {
+            block_contains_yield(body)
+                || else_block.as_ref().map_or(false, block_contains_yield)
+        }
+        Stmt::Match { arms, .. } => arms.iter().any(|a| block_contains_yield(&a.body)),
+        Stmt::Try { body, handlers, else_block, finally_block, .. } => {
+            block_contains_yield(body)
+                || handlers.iter().any(|h| block_contains_yield(&h.body))
+                || else_block.as_ref().map_or(false, block_contains_yield)
+                || finally_block.as_ref().map_or(false, block_contains_yield)
+        }
+        Stmt::With { body, .. } => block_contains_yield(body),
+        _ => false,
+    }
 }
 
 /// Narrowings to apply in `then` and `else` branches of an `if`.

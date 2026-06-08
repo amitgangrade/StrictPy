@@ -18,6 +18,20 @@ pub enum Opcode {
     ConstNone  = 0x08,
     Move       = 0x09,
 
+    // 0x0A–0x0C  M62b: generators (yield)
+    /// `MakeGen dst:r16, fn_id:u32, argc:u8, args:r16×argc` — allocate a
+    /// generator object capturing `fn_id` and the evaluated argument values.
+    /// Does NOT run the body; the generator starts suspended-at-entry. Same
+    /// operand encoding as `CallDirect`.
+    MakeGen    = 0x0A,
+    /// `Yield value:r16` — produce `value` from the current generator frame
+    /// and suspend it (saving registers + pc back into the owning generator).
+    Yield      = 0x0B,
+    /// `GenNext value:r16, gen:r16, done:r16` — resume the generator in `gen`
+    /// until its next `yield` (writing the yielded value to `value` and 0 to
+    /// `done`) or until it finishes (writing 1 to `done`).
+    GenNext    = 0x0C,
+
     // 0x10–0x1B  i32 arithmetic
     IAddI32 = 0x10, ISubI32 = 0x11, IMulI32 = 0x12, IDivI32 = 0x13,
     IRemI32 = 0x14, INegI32 = 0x15, IAndI32 = 0x16, IOrI32  = 0x17,
@@ -140,6 +154,8 @@ impl Opcode {
             0x05 => Some(Self::ConstStr),   0x06 => Some(Self::ConstTrue),
             0x07 => Some(Self::ConstFalse), 0x08 => Some(Self::ConstNone),
             0x09 => Some(Self::Move),
+            0x0A => Some(Self::MakeGen), 0x0B => Some(Self::Yield),
+            0x0C => Some(Self::GenNext),
 
             0x10 => Some(Self::IAddI32), 0x11 => Some(Self::ISubI32),
             0x12 => Some(Self::IMulI32), 0x13 => Some(Self::IDivI32),

@@ -696,6 +696,9 @@ impl Renamer {
                     self.rewrite_expr(v);
                 }
             }
+            Stmt::Yield { value, .. } => {
+                self.rewrite_expr(value);
+            }
             Stmt::If { cond, then_block, elifs, else_block, .. } => {
                 self.rewrite_expr(cond);
                 self.rewrite_block(then_block);

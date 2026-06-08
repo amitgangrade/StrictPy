@@ -264,6 +264,8 @@ pub struct TypeBundle {
     pub channel_ty: Arc<RuntimeType>,
     pub thread_ty: Arc<RuntimeType>,
     pub dict_ty: Arc<RuntimeType>,
+    /// M62b: singleton runtime type for generator objects (`Iterator[T]`).
+    pub generator_ty: Arc<RuntimeType>,
 }
 
 /// VM-global state shared between all interpreter instances running against
@@ -448,7 +450,7 @@ pub struct SharedVm {
 
 impl SharedVm {
     pub fn new(module: Module) -> Arc<Self> {
-        let (types_map, list_ty, str_ty, closure_ty, file_ty, channel_ty, thread_ty, dict_ty) =
+        let (types_map, list_ty, str_ty, closure_ty, file_ty, channel_ty, thread_ty, dict_ty, generator_ty) =
             build_type_registry(&module);
         let bundle = TypeBundle {
             types: types_map,
@@ -459,6 +461,7 @@ impl SharedVm {
             channel_ty,
             thread_ty,
             dict_ty,
+            generator_ty,
         };
         Arc::new(Self {
             module: Arc::new(module),
@@ -526,7 +529,7 @@ impl SharedVm {
     /// where Cranelift initialisation fails.
     #[cfg(feature = "jit")]
     pub fn new_with_jit(module: Module) -> Arc<Self> {
-        let (types_map, list_ty, str_ty, closure_ty, file_ty, channel_ty, thread_ty, dict_ty) =
+        let (types_map, list_ty, str_ty, closure_ty, file_ty, channel_ty, thread_ty, dict_ty, generator_ty) =
             build_type_registry(&module);
         let bundle = TypeBundle {
             types: types_map,
@@ -537,6 +540,7 @@ impl SharedVm {
             channel_ty,
             thread_ty,
             dict_ty,
+            generator_ty,
         };
         // Build the JIT, compile every supported function, and stash the
         // cache on the shared VM so `op_call_direct` can dispatch to it.
@@ -678,6 +682,20 @@ pub struct Interpreter {
     /// pushes pointers before the callback loop and pops them after (see
     /// `with_temp_roots`).
     pub(crate) temp_roots: Vec<u64>,
+
+    /// M62b: stack of generators currently being resumed. Each entry is
+    /// `(generator_ptr, frame_depth)` where `frame_depth` is the call-stack
+    /// depth at which the generator's frame sits (i.e. the index of that frame
+    /// in `self.frames`). `op_yield` consults the top entry to know which
+    /// generator object to save the suspended frame into and at what depth to
+    /// unwind. Nested generators (a generator whose body iterates another
+    /// generator) push multiple entries; the matching entry is the one whose
+    /// `frame_depth + 1 == self.frames.len()`.
+    pub(crate) gen_stack: Vec<(u64, usize)>,
+    /// M62b: set by `op_yield` to the value just yielded, then consumed by the
+    /// driving `op_gen_next` to distinguish "produced a value" (Some) from
+    /// "the generator returned / fell off the end" (None → exhausted).
+    pub(crate) last_yield: Option<u64>,
 }
 
 impl Interpreter {
@@ -708,6 +726,8 @@ impl Interpreter {
             monotonic_start: std::time::Instant::now(),
             random_lcg_state: 0,
             temp_roots: Vec::new(),
+            gen_stack: Vec::new(),
+            last_yield: None,
         }
     }
 
@@ -1108,6 +1128,11 @@ impl Interpreter {
             Opcode::ConstFalse => self.op_const_false()?,
             Opcode::ConstNone => self.op_const_none()?,
             Opcode::Move => self.op_move()?,
+
+            // M62b: generators.
+            Opcode::MakeGen => self.op_make_gen()?,
+            Opcode::Yield => return self.op_yield(),
+            Opcode::GenNext => return self.op_gen_next(),
 
             Opcode::IAddI32 => self.bin_i32(|a, b| a.wrapping_add(b))?,
             Opcode::ISubI32 => self.bin_i32(|a, b| a.wrapping_sub(b))?,
@@ -2018,6 +2043,236 @@ impl Interpreter {
         Ok(StepOutcome::Continue)
     }
 
+    // ── M62b: generators (yield) ─────────────────────────────────────────
+
+    /// `MakeGen dst:r16, fn_id:u32, argc:u8, args:r16×argc` — allocate a
+    /// generator object for `fn_id`, capturing the argument values as its
+    /// initial register window. Does NOT run the body. The generator starts in
+    /// the not-started state (`state == 0`) positioned at the function entry pc.
+    fn op_make_gen(&mut self) -> Result<(), VmError> {
+        let dst = self.read_u16()?;
+        let fn_id = self.read_u32()?;
+        let argc = self.read_u8()?;
+        let mut args: Vec<u64> = Vec::with_capacity(argc as usize);
+        for _ in 0..argc {
+            let r = self.read_u16()?;
+            args.push(self.read_reg(r));
+        }
+        // Look up the generator function's register count + entry pc.
+        let f = self
+            .shared
+            .module
+            .functions
+            .iter()
+            .find(|f| f.fn_id == fn_id)
+            .ok_or_else(|| VmError::LinkError(format!("generator fn id {fn_id} not found")))?;
+        let nregs = (f.num_registers as usize).max(args.len());
+        let entry_pc = f.code_offset as u64;
+
+        // Allocate: fixed GeneratorRepr header + `nregs` inline u64 slots.
+        let base = std::mem::size_of::<crate::object::GeneratorRepr>();
+        let size = base + nregs * 8;
+        let ty: *const RuntimeType = Arc::as_ptr(&self.shared.types.generator_ty);
+        let p = self
+            .shared
+            .heap
+            .lock()
+            .unwrap()
+            .alloc(size, ty, GcKind::Generator);
+        // SAFETY: `p` is a freshly-allocated, zero-initialised region of
+        // `size` bytes whose header we own; the inline register area starts at
+        // `p + base`.
+        unsafe {
+            let gp = p as *mut crate::object::GeneratorRepr;
+            (*gp).fn_id = fn_id;
+            (*gp).state = 0;
+            (*gp).saved_pc = entry_pc;
+            (*gp).nregs = nregs as u64;
+            let regs = (p as *mut u8).add(base) as *mut u64;
+            for (i, &a) in args.iter().enumerate() {
+                std::ptr::write_unaligned(regs.add(i), a);
+            }
+        }
+        self.write_reg(dst, p as u64);
+        Ok(())
+    }
+
+    /// `GenNext value:r16, gen:r16, done:r16` — resume the generator in `gen`
+    /// until its next `yield` or until it finishes.
+    ///
+    /// Mechanism: restore the generator's saved frame (registers + pc) into a
+    /// fresh [`Frame`], push it, record the resume on `gen_stack`, then run a
+    /// nested interpreter loop (`run_until`) until that frame unwinds. The
+    /// frame unwinds either because `op_yield` suspended it (→ `last_yield`
+    /// holds the produced value) or because it returned / fell off the end
+    /// (→ exhausted).
+    fn op_gen_next(&mut self) -> Result<StepOutcome, VmError> {
+        let value_reg = self.read_u16()?;
+        let gen_reg = self.read_u16()?;
+        let done_reg = self.read_u16()?;
+        let gp = self.read_reg(gen_reg) as *mut crate::object::GeneratorRepr;
+        if gp.is_null() {
+            return Err(VmError::UncaughtException {
+                type_name: "NullPointerError".into(),
+                message: "next() on null generator".into(),
+            });
+        }
+        let base = std::mem::size_of::<crate::object::GeneratorRepr>();
+        // Read saved state.
+        let (fn_id, state, saved_pc, nregs) = unsafe {
+            ((*gp).fn_id, (*gp).state, (*gp).saved_pc, (*gp).nregs as usize)
+        };
+        if state == 2 {
+            // Already exhausted — report done, leave value as none/0.
+            self.write_reg(done_reg, 1);
+            self.write_reg(value_reg, 0);
+            return Ok(StepOutcome::Continue);
+        }
+        // Restore the saved register file.
+        let mut registers = vec![0u64; nregs];
+        unsafe {
+            let regs = (gp as *const u8).add(base) as *const u64;
+            for (i, slot) in registers.iter_mut().enumerate() {
+                *slot = std::ptr::read_unaligned(regs.add(i));
+            }
+        }
+        // End-of-code for this function.
+        let end_pc = {
+            let f = self
+                .shared
+                .module
+                .functions
+                .iter()
+                .find(|f| f.fn_id == fn_id)
+                .ok_or_else(|| VmError::LinkError(format!("generator fn id {fn_id} not found")))?;
+            (f.code_offset + f.code_length) as usize
+        };
+        if self.frames.len() >= MAX_FRAMES {
+            return Err(VmError::Trap("stack overflow (max frame depth)".into()));
+        }
+        let frame = Frame {
+            fn_id,
+            pc: saved_pc as usize,
+            end_pc,
+            registers,
+            return_reg: DISCARD_REG,
+        };
+        let boundary_depth = self.frames.len();
+        self.frames.push(frame);
+        // Record which generator this frame belongs to so `op_yield` can save
+        // into it. `boundary_depth` is the index of the just-pushed frame.
+        self.gen_stack.push((gp as u64, boundary_depth));
+        self.last_yield = None;
+        // Drive until the generator frame unwinds (yield or return).
+        let run_result = self.run_until(boundary_depth);
+        // Pop our gen_stack entry (op_yield does NOT pop it — only this driver
+        // owns its lifetime). Defensive: only pop if it's still ours.
+        if matches!(self.gen_stack.last(), Some(&(p, d)) if p == gp as u64 && d == boundary_depth) {
+            self.gen_stack.pop();
+        }
+        if run_result.is_err() {
+            // The generator body raised an exception that propagated past the
+            // resume boundary uncaught. `run_until`/`propagate_exception` may
+            // have left the suspended generator frame (and any frames it pushed)
+            // on the stack; truncate back to the boundary so the caller's
+            // exception handling sees a consistent call stack, and drop any
+            // handler frames that belonged to the abandoned frames. Mark the
+            // generator exhausted — a generator that errored cannot resume.
+            while self.frames.len() > boundary_depth {
+                self.frames.pop();
+            }
+            while let Some(top) = self.handler_frames.last() {
+                if top.frame_depth > boundary_depth {
+                    self.handler_frames.pop();
+                } else {
+                    break;
+                }
+            }
+            unsafe {
+                (*gp).state = 2;
+            }
+        }
+        run_result?;
+        match self.last_yield.take() {
+            Some(v) => {
+                // Produced a value; the generator suspended itself (state set
+                // to 1 and frame saved by op_yield).
+                self.write_reg(value_reg, v);
+                self.write_reg(done_reg, 0);
+            }
+            None => {
+                // The frame returned / fell off the end → exhausted.
+                unsafe {
+                    (*gp).state = 2;
+                }
+                self.write_reg(value_reg, 0);
+                self.write_reg(done_reg, 1);
+            }
+        }
+        Ok(StepOutcome::Continue)
+    }
+
+    /// `Yield value:r16` — produce `value` from the current generator frame
+    /// and suspend it. Saves the live frame's registers + pc back into the
+    /// owning generator object, pops the frame, and unwinds to the driving
+    /// `op_gen_next` by returning `StepOutcome::Returned`.
+    fn op_yield(&mut self) -> Result<StepOutcome, VmError> {
+        let val_reg = self.read_u16()?;
+        let value = self.read_reg(val_reg);
+        // The frame we are in is the top of the stack; its index is
+        // frames.len() - 1. Find the matching generator entry.
+        let cur_depth = self.frames.len() - 1;
+        let gen_ptr = match self.gen_stack.last() {
+            Some(&(p, d)) if d == cur_depth => p,
+            _ => {
+                // A `yield` executed without an active generator resume. This
+                // should be unreachable (the typechecker guarantees `yield`
+                // only appears in generator functions, which are only ever
+                // entered via GenNext). Treat as a trap rather than corrupting
+                // state.
+                return Err(VmError::Trap(
+                    "`yield` executed outside an active generator resume".into(),
+                ));
+            }
+        };
+        let gp = gen_ptr as *mut crate::object::GeneratorRepr;
+        let base = std::mem::size_of::<crate::object::GeneratorRepr>();
+        // Save the current frame's registers + pc into the generator. The pc
+        // already points at the instruction *after* this Yield (operands were
+        // consumed by `read_u16`), so resume continues correctly.
+        let frame = self.frames.last().expect("active generator frame");
+        let saved_pc = frame.pc as u64;
+        let cap = unsafe { (*gp).nregs as usize };
+        // SAFETY: the inline register area holds `cap` slots; copy at most that
+        // many (the frame may have grown its register Vec, but the generator
+        // was sized from the function's declared `num_registers`, which is the
+        // upper bound the compiler guarantees, so `frame.registers.len()` ≤
+        // `cap` in practice; clamp defensively).
+        unsafe {
+            let regs = (gp as *mut u8).add(base) as *mut u64;
+            let n = frame.registers.len().min(cap);
+            for i in 0..n {
+                std::ptr::write_unaligned(regs.add(i), frame.registers[i]);
+            }
+            (*gp).saved_pc = saved_pc;
+            (*gp).state = 1;
+        }
+        // Pop the suspended frame and unwind to the GenNext driver. Mirror
+        // op_ret's handler-frame cleanup so a `yield` inside a `try` body in
+        // the generator doesn't leave a dangling handler frame.
+        self.frames.pop();
+        let new_depth = self.frames.len();
+        while let Some(top) = self.handler_frames.last() {
+            if top.frame_depth > new_depth {
+                self.handler_frames.pop();
+            } else {
+                break;
+            }
+        }
+        self.last_yield = Some(value);
+        Ok(StepOutcome::Returned(value))
+    }
+
     // ── Calls ───────────────────────────────────────────────────────────
 
     fn op_call_direct(&mut self) -> Result<StepOutcome, VmError> {
@@ -2627,6 +2882,17 @@ impl Interpreter {
         if !self.temp_roots.is_empty() {
             roots.push(self.temp_roots.as_slice());
         }
+        // M62b: root every generator currently being resumed. The generator
+        // object owns the suspended frame's saved registers (scanned via its
+        // `GcKind::Generator` body), so it must itself survive across any
+        // allocation that happens while its body runs. It's normally also held
+        // in the driver frame's registers, but rooting it here is belt-and-
+        // suspenders for deeply-nested generator resumes. Snapshot the pointers
+        // into a side vec so the borrow doesn't conflict with `&self.frames`.
+        let gen_roots: Vec<u64> = self.gen_stack.iter().map(|(p, _)| *p).collect();
+        if !gen_roots.is_empty() {
+            roots.push(gen_roots.as_slice());
+        }
         // Also root every value living in a dict side-table — those values
         // might be StringRepr pointers or other heap objects with no other
         // root. (Channel payloads do not need rooting: every payload was
@@ -2771,6 +3037,7 @@ fn build_type_registry(
     Arc<RuntimeType>,
     Arc<RuntimeType>,
     Arc<RuntimeType>,
+    Arc<RuntimeType>,
 ) {
     let mut map = HashMap::new();
     for t in &module.types {
@@ -2868,7 +3135,21 @@ fn build_type_registry(
         kind: 1,
         gc_kind: GcKind::Dict,
     });
-    (map, list_ty, str_ty, closure_ty, file_ty, channel_ty, thread_ty, dict_ty)
+    // M62b: generator object type. The recorded `size` is just the fixed
+    // header struct; each generator allocation is sized at runtime to also
+    // hold its inline saved-register window (the GC reads the true allocation
+    // size, not this field).
+    let generator_ty = Arc::new(RuntimeType {
+        type_id: u32::MAX - 8,
+        name: "generator".into(),
+        size: std::mem::size_of::<crate::object::GeneratorRepr>() as u32,
+        field_offsets: vec![],
+        field_is_ref: vec![],
+        vtable: vec![],
+        kind: 1,
+        gc_kind: GcKind::Generator,
+    });
+    (map, list_ty, str_ty, closure_ty, file_ty, channel_ty, thread_ty, dict_ty, generator_ty)
 }
 
 // Keep `NativeFn` / `loader::Module` imports live for now even if unused.
