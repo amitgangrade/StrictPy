@@ -66,9 +66,9 @@ fn negative_step_counts_down() {
     let src = "\
 fn main() -> i32:
     out: str = \"\"
-    for d: i64 in range(5, 0, -1i64):
+    for d: i64 in range(5, 0, -1):
         out = out + str(d)
-    println(out)                    # 54321
+    println(out)                    # 54321 (bare -1 coerces to i64)
     return 0
 ";
     let (code, out) = run("neg_step", src);
@@ -85,7 +85,7 @@ fn main() -> i32:
         c = c + 1
     for z2: i64 in range(5, 5):
         c = c + 1
-    for z3: i64 in range(0, 10, -1i64):
+    for z3: i64 in range(0, 10, -1):
         c = c + 1
     println(str(c))                 # 0
     return 0
