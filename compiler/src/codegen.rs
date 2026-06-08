@@ -650,6 +650,27 @@ impl<'a, S: ConstSink> Codegen<'a, S> {
             IROp::EndFinally => {
                 self.write_op(Opcode::Rethrow);
             }
+
+            // M62b: generators.
+            IROp::MakeGen { fn_id } => {
+                // Same encoding as CallDirect; the VM allocates a generator
+                // object instead of running the body. The result type is
+                // `Iterator[T]` (never Unit) so `dst` is always preserved.
+                self.emit_call(Opcode::MakeGen, dst, ty, fn_id.0, &argr);
+            }
+            IROp::Yield => {
+                // YIELD value:r16
+                self.write_op(Opcode::Yield);
+                self.write_u16(argr.first().copied().unwrap_or(0));
+            }
+            IROp::GenNext { done_slot } => {
+                // GEN_NEXT value:r16, gen:r16, done:r16
+                let done_reg = self.slot_register(*done_slot);
+                self.write_op(Opcode::GenNext);
+                self.write_u16(dst);
+                self.write_u16(argr.first().copied().unwrap_or(0));
+                self.write_u16(done_reg);
+            }
         }
     }
 

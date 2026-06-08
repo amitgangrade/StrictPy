@@ -1,0 +1,95 @@
+"""M62b demo: generators (`yield`).
+
+A function whose declared return type is `Iterator[T]` and whose body contains
+at least one `yield` is a *generator function*. Calling it does not run the
+body — it returns a generator object. Each step of a `for v: T in gen():` loop
+(the iterator protocol) resumes the body until the next `yield`, producing that
+value; when the body falls off the end (or hits a bare `return`), iteration
+stops.
+
+Generators are produce-only in v1: there is no `send()` and no `yield from`.
+They are consumed by `for` loops exactly like any other iterable.
+
+All output is deterministic so the Rust acceptance test can assert on it.
+"""
+
+
+# Count 0, 1, 2, ..., n-1. Demonstrates the simplest generator shape: a single
+# local (`i`) whose value must persist across every `yield`.
+fn count_up(n: i64) -> Iterator[i64]:
+    i: i64 = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+
+# Classic Fibonacci generator. Two locals (`a`, `b`) carry non-trivial state
+# across yields, proving the suspended frame is restored faithfully each resume.
+fn fibonacci(n: i64) -> Iterator[i64]:
+    a: i64 = 0
+    b: i64 = 1
+    count: i64 = 0
+    while count < n:
+        yield a
+        nxt: i64 = a + b
+        a = b
+        b = nxt
+        count = count + 1
+
+
+# A generator that yields nothing when its argument is non-positive. Exercises
+# the early-exhaustion path: the first `__next__` must report "done".
+fn maybe_count(n: i64) -> Iterator[i64]:
+    i: i64 = 0
+    while i < n:
+        yield i
+        i = i + 1
+
+
+# Only yield the even values in [0, n). Shows yields guarded by control flow.
+fn evens(n: i64) -> Iterator[i64]:
+    i: i64 = 0
+    while i < n:
+        if i % 2 == 0:
+            yield i
+        i = i + 1
+
+
+fn main() -> i32:
+    # ── count_up: state persists across yields ──────────────────────────
+    print("count_up:")
+    for v: i64 in count_up(5):
+        print(" " + str(v))
+    println("")
+
+    # ── fibonacci: non-trivial multi-local state ────────────────────────
+    print("fib:")
+    for f: i64 in fibonacci(10):
+        print(" " + str(f))
+    println("")
+
+    # ── empty generator: iteration stops immediately ────────────────────
+    empty_count: i64 = 0
+    for e: i64 in maybe_count(0):
+        empty_count = empty_count + 1
+    println("empty iterations=" + str(empty_count))
+
+    # ── build a list from a generator ───────────────────────────────────
+    collected: List[i64] = []
+    for x: i64 in evens(10):
+        collected.append(x)
+    print("evens:")
+    for c: i64 in collected:
+        print(" " + str(c))
+    println("")
+    println("evens count=" + str(collected.len()))
+
+    # ── a generator consumed twice produces fresh state each call ────────
+    total: i64 = 0
+    for a: i64 in count_up(4):
+        total = total + a
+    for b: i64 in count_up(4):
+        total = total + b
+    println("twice total=" + str(total))
+
+    return 0

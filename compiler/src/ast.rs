@@ -172,6 +172,11 @@ pub enum Stmt {
     Assign { target: Lvalue, value: Expr, span: Span },
     AugAssign { target: Lvalue, op: BinOp, value: Expr, span: Span },
     Return { value: Option<Expr>, span: Span },
+    /// M62b: `yield <expr>` — produce a value from a generator function and
+    /// suspend. Only legal inside a function whose declared return type is
+    /// `Iterator[T]`; the yielded expression must have type `T`. There is no
+    /// bare `yield` (every yield produces a value) and no `yield from` in v1.
+    Yield { value: Expr, span: Span },
     If {
         cond: Expr,
         then_block: Block,
