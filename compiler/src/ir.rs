@@ -1612,6 +1612,129 @@ fn lower_stmt(fb: &mut FuncBuilder, ctx: &mut LowerCtx, s: &Stmt) -> Option<()> 
             // index loops.
             let iter_ty = ctx.expr_ty(expr_span(iter));
 
+            // `for v: i64 in range(...)` — lower to a lazy integer counter loop
+            // instead of materialising the range. Previously this hit the
+            // run-once placeholder below (range's static type is `Range`, not
+            // `List`), so the body executed exactly once with a garbage loop
+            // var; the runtime range() also capped at 1M elements. The counter
+            // loop is unbounded and never allocates. Handles range(stop),
+            // range(start, stop), and range(start, stop, step) including a
+            // negative constant step.
+            if matches!(&iter_ty, Ty::Generic { base: TypeCtor::Range, .. }) {
+                if let Some(rargs) = range_call_args(iter) {
+                    let i64_ty = Ty::Primitive(PrimTy::I64);
+                    // start / stop value, and the step expression (if explicit).
+                    let (start_v, stop_v, step_expr): (ValueId, ValueId, Option<&Expr>) =
+                        match rargs.len() {
+                            1 => (
+                                fb.push_value(i64_ty.clone(), ValueKind::Const(IRConst::I64(0))),
+                                lower_expr(fb, ctx, &rargs[0].value),
+                                None,
+                            ),
+                            2 => (
+                                lower_expr(fb, ctx, &rargs[0].value),
+                                lower_expr(fb, ctx, &rargs[1].value),
+                                None,
+                            ),
+                            _ => (
+                                lower_expr(fb, ctx, &rargs[0].value),
+                                lower_expr(fb, ctx, &rargs[1].value),
+                                Some(&rargs[2].value),
+                            ),
+                        };
+                    // Step value + its compile-time sign when it's a literal.
+                    let (step_v, const_step): (ValueId, Option<i64>) = match step_expr {
+                        None => (
+                            fb.push_value(i64_ty.clone(), ValueKind::Const(IRConst::I64(1))),
+                            Some(1),
+                        ),
+                        Some(e) => (lower_expr(fb, ctx, e), const_i64(e)),
+                    };
+
+                    // Internal counter + invariant stop/step slots + user var.
+                    let cnt_slot = {
+                        let n = format!("__range_i_{}", fb.slot_ty.len());
+                        let s = fb.alloc_slot(&n, i64_ty.clone());
+                        fb.emit_write_local(s, start_v);
+                        s
+                    };
+                    let stop_slot = {
+                        let n = format!("__range_stop_{}", fb.slot_ty.len());
+                        let s = fb.alloc_slot(&n, i64_ty.clone());
+                        fb.emit_write_local(s, stop_v);
+                        s
+                    };
+                    let step_slot = {
+                        let n = format!("__range_step_{}", fb.slot_ty.len());
+                        let s = fb.alloc_slot(&n, i64_ty.clone());
+                        fb.emit_write_local(s, step_v);
+                        s
+                    };
+                    let var_slot = fb.alloc_slot(var, i64_ty.clone());
+
+                    let header = fb.new_block();
+                    let body_b = fb.new_block();
+                    let latch = fb.new_block();
+                    let exit = fb.new_block();
+                    fb.terminate(Terminator::Branch { target: header });
+
+                    // header: continue-condition.
+                    fb.switch_to(header);
+                    let i_cur = fb.emit_read_local(cnt_slot);
+                    let stop_cur = fb.emit_read_local(stop_slot);
+                    let cond = match const_step {
+                        Some(c) if c > 0 => {
+                            emit_binop(fb, AstBinOp::Lt, i_cur, stop_cur, i64_ty.clone())
+                        }
+                        Some(c) if c < 0 => {
+                            emit_binop(fb, AstBinOp::Gt, i_cur, stop_cur, i64_ty.clone())
+                        }
+                        // step == 0: zero iterations (avoids an infinite loop;
+                        // the materialising range() would raise ValueError).
+                        Some(_) => fb.push_value(
+                            Ty::Primitive(PrimTy::Bool),
+                            ValueKind::Const(IRConst::Bool(false)),
+                        ),
+                        // Non-literal step: continue while `(stop - i) * step > 0`,
+                        // which is correct for either sign (and 0 → 0 iters).
+                        None => {
+                            let step_cur = fb.emit_read_local(step_slot);
+                            let diff =
+                                emit_binop(fb, AstBinOp::Sub, stop_cur, i_cur, i64_ty.clone());
+                            let prod =
+                                emit_binop(fb, AstBinOp::Mul, diff, step_cur, i64_ty.clone());
+                            let zero = fb.push_value(
+                                i64_ty.clone(),
+                                ValueKind::Const(IRConst::I64(0)),
+                            );
+                            emit_binop(fb, AstBinOp::Gt, prod, zero, i64_ty.clone())
+                        }
+                    };
+                    fb.terminate(Terminator::CondBranch { cond, t: body_b, f: exit });
+
+                    // body: bind the user var to the counter, run body, go to latch.
+                    fb.switch_to(body_b);
+                    let i_for_var = fb.emit_read_local(cnt_slot);
+                    fb.emit_write_local(var_slot, i_for_var);
+                    // `continue` must land on the latch so the counter still steps.
+                    fb.loop_stack.push((latch, exit));
+                    lower_block(fb, ctx, body);
+                    fb.loop_stack.pop();
+                    fb.terminate(Terminator::Branch { target: latch });
+
+                    // latch: i += step; back to header.
+                    fb.switch_to(latch);
+                    let i_inc = fb.emit_read_local(cnt_slot);
+                    let step_inc = fb.emit_read_local(step_slot);
+                    let nxt = emit_binop(fb, AstBinOp::Add, i_inc, step_inc, i64_ty.clone());
+                    fb.emit_write_local(cnt_slot, nxt);
+                    fb.terminate(Terminator::Branch { target: header });
+
+                    fb.switch_to(exit);
+                    return Some(());
+                }
+            }
+
             // M62b: `for v: T in gen():` over a generator (`Iterator[T]`).
             // Desugar into a GenNext-driven loop:
             //
@@ -4001,6 +4124,30 @@ fn normalize_method_args(
 /// object that the for-loop drives via `GenNext`. Used by the `for` lowering to
 /// distinguish real generators from other `Iterator[T]`-typed expressions
 /// (e.g. `Dict.items()`), which must NOT be driven via `GenNext`.
+/// If `e` is a direct call `range(...)` with 1–3 args, return its argument
+/// list. Used by the `for` lowering to emit a lazy integer counter loop.
+fn range_call_args(e: &Expr) -> Option<&[ast::Arg]> {
+    if let Expr::Call { callee, args, .. } = e {
+        if let Expr::Ident { name, .. } = callee.as_ref() {
+            if name == "range" && !args.is_empty() && args.len() <= 3 {
+                return Some(args);
+            }
+        }
+    }
+    None
+}
+
+/// Compile-time constant `i64` value of `e` when it is an integer literal
+/// (optionally a single unary negation), else `None`. Lets the range loop pick
+/// the comparison direction (`<` vs `>`) without a runtime sign test.
+fn const_i64(e: &Expr) -> Option<i64> {
+    match e {
+        Expr::Literal { lit: Literal::Int { value, .. }, .. } => Some(*value as i64),
+        Expr::Unary { op: UnaryOp::Neg, operand, .. } => const_i64(operand).map(|v| -v),
+        _ => None,
+    }
+}
+
 fn iter_is_generator_call(ctx: &LowerCtx, iter: &Expr) -> bool {
     let Expr::Call { callee, .. } = iter else {
         return false;
