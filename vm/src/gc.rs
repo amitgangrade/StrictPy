@@ -246,7 +246,15 @@ impl Heap {
                 // no traceable refs. Side-table contents are kept alive by
                 // a separate root scan in `Interpreter::maybe_collect`.
             }
-            GcKind::Class | GcKind::Closure => {
+            GcKind::Class | GcKind::Closure | GcKind::Generator => {
+                // M62b: `Generator` is scanned exactly like `Class`/`Closure`
+                // — every 8-byte slot past the header is treated as a
+                // potential pointer. For a generator this conservatively
+                // covers the inline saved-register window, keeping any heap
+                // value held only in a suspended local alive across `yield`.
+                // The fixed numeric fields (fn_id / state / saved_pc / nregs)
+                // are scanned too, but a stray integer that aliases a live
+                // heap address is merely kept alive — never unsafe.
                 let total_size = self.size_of(obj);
                 let header_size = std::mem::size_of::<ObjectHeader>();
                 let mut off = header_size;

@@ -126,6 +126,13 @@ pub enum GcKind {
     /// `Dict[K, V]` handle wrapper. The keys/values live in the dict-handle
     /// table which the GC roots separately.
     Dict,
+    /// M62b: a generator object (`Iterator[T]` produced by a generator
+    /// function). Carries a saved call frame — the suspended function's
+    /// register file lives inline in the allocation, right after the fixed
+    /// `GeneratorRepr` fields. The GC must scan those saved registers
+    /// conservatively because they can hold the only live reference to a heap
+    /// object across a `yield`. See [`Heap::trace_object`].
+    Generator,
 }
 
 /// Heap layout for `List[T]` (spec §8.4). The element buffer is separately
@@ -206,6 +213,35 @@ pub struct DictRepr {
     /// almost exclusively; integer keys are reserved for M6.
     pub key_kind: u32,
     pub _padding: u32,
+}
+
+/// M62b: heap layout for a generator object (`Iterator[T]`).
+///
+/// A generator owns a *suspended call frame*. The fixed fields below are
+/// followed inline by `nregs` saved register slots (u64 each). The interpreter
+/// restores those slots into a fresh [`crate::interp::Frame`] on resume and
+/// re-saves them on the next `yield`.
+///
+/// GC: this object's [`crate::object::GcKind`] is `Generator`; the collector
+/// scans the inline saved-register area as a conservative pointer window so a
+/// heap value held only in a suspended local stays alive across `yield`.
+///
+/// `state`: 0 = not-started (saved registers are the initial argument window,
+/// `saved_pc` is the function entry pc), 1 = suspended at a `yield`, 2 = done
+/// (exhausted — further `GenNext` immediately reports done).
+#[repr(C)]
+pub struct GeneratorRepr {
+    pub header: ObjectHeader,
+    /// Function-table id of the generator function body.
+    pub fn_id: u32,
+    /// 0 = not started, 1 = suspended, 2 = done.
+    pub state: u32,
+    /// Saved program counter (absolute byte offset into the module code blob).
+    /// Meaningful when `state == 0` (entry pc) or `state == 1` (resume pc).
+    pub saved_pc: u64,
+    /// Number of saved register slots that follow inline.
+    pub nregs: u64,
+    // `nregs` u64 register slots follow immediately after this struct.
 }
 
 /// M35 P4-C: heap layout for a streaming `Hasher` instance.  The actual

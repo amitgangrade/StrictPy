@@ -427,6 +427,11 @@ impl PrettyPrinter {
                 }
                 self.newline();
             }
+            Stmt::Yield { value, .. } => {
+                self.write("yield ");
+                self.print_expr(value);
+                self.newline();
+            }
             Stmt::If { cond, then_block, elifs, else_block, .. } => {
                 self.write("if ");
                 self.print_expr(cond);

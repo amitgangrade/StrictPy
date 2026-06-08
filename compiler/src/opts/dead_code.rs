@@ -84,6 +84,12 @@ fn has_side_effect(k: &ValueKind) -> bool {
                 | IROp::TryEnter { .. }
                 | IROp::TryLeave
                 | IROp::EndFinally
+                // M62b: generators. `Yield` and `GenNext` mutate the
+                // suspended-frame state machine and must never be eliminated
+                // even when their result is unused; `MakeGen` allocates.
+                | IROp::MakeGen { .. }
+                | IROp::Yield
+                | IROp::GenNext { .. }
         ),
         // Constants/params/phis are side-effect-free but might still be live;
         // the `used` set already handles that. If a phi has no uses we let DCE

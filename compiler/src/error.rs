@@ -149,9 +149,21 @@ pub mod codes {
     /// A comprehension's `if` filter clause is not a `bool`. E2042.
     pub const TYPE_COMPREHENSION_FILTER_NOT_BOOL: ErrorCode = "E2042";
 
+    // ── M62b: generators (yield) ─────────────────────────────────────────
+    /// A `yield`ed expression's type does not match the generator's element
+    /// type `T` (the `T` in the function's declared `Iterator[T]` return
+    /// type). Allocated from the M62b type band (E2060+).
+    pub const TYPE_YIELD_MISMATCH: ErrorCode = "E2060";
+
     // ── E3xxx: semantic ──────────────────────────────────────────────────
     pub const SEM_NONEXHAUSTIVE_MATCH: ErrorCode = "E3001";
     pub const SEM_UNREACHABLE: ErrorCode = "E3002";
+
+    // ── M62b: generators (yield) — semantic ──────────────────────────────
+    /// `yield` used outside any function, or inside a function whose declared
+    /// return type is not `Iterator[T]`. Allocated from the M62b semantic
+    /// band (E3030+).
+    pub const SEM_YIELD_OUTSIDE_GENERATOR: ErrorCode = "E3030";
 
     // ── E4xxx: linker / module ───────────────────────────────────────────
     pub const LINK_MISSING_MODULE: ErrorCode = "E4001";

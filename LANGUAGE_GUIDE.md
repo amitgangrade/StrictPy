@@ -211,7 +211,8 @@ while i < 10:
     println(str(i))
     i = i + 1
 
-# for-in (lowered to indexed while loop)
+# for-in (lowered to an indexed while loop over List[T], or to a
+# resume-until-yield loop over a generator — see §3.8.2)
 for item in items:
     println(item)
 for i in range(10):
@@ -350,6 +351,63 @@ literals or top-level `final` constants (they cannot reference other
 parameters), are evaluated at the call site when the default is used, and are
 type-checked against the parameter type. Generic functions/classes do not yet
 accept defaults or keyword arguments. See §11.5 for the error codes.
+
+#### 3.8.2 Generators — `yield` (M62b)
+
+A function whose declared return type is `Iterator[T]` **and** whose body
+contains at least one `yield` is a *generator function*. Calling it does **not**
+run the body — it returns a generator object. Iterating that object (with a
+`for` loop, the iterator protocol) resumes the body until the next `yield`,
+producing that value; local state is preserved across every `yield`. When the
+body falls off the end (or hits a bare `return`), iteration stops.
+
+```python
+# Count 0, 1, ..., n-1. The local `i` persists across each yield.
+fn count_up(n: i64) -> Iterator[i64]:
+    i: i64 = 0
+    while i < n:
+        yield i              # produce a value, suspend here
+        i = i + 1            # resumes here on the next step
+
+# Multi-local state survives suspension/resume faithfully.
+fn fibonacci(n: i64) -> Iterator[i64]:
+    a: i64 = 0
+    b: i64 = 1
+    count: i64 = 0
+    while count < n:
+        yield a
+        nxt: i64 = a + b
+        a = b
+        b = nxt
+        count = count + 1
+
+fn main() -> i32:
+    for v: i64 in count_up(5):       # 0 1 2 3 4
+        println(str(v))
+    for f: i64 in fibonacci(10):     # 0 1 1 2 3 5 8 13 21 34
+        println(str(f))
+
+    # Generators compose with the rest of the language — build a list, etc.
+    xs: List[i64] = []
+    for x: i64 in count_up(3):
+        xs.append(x)                 # xs == [0, 1, 2]
+    return 0
+```
+
+Rules and scope (v1):
+
+- The yielded expression's type must match `T` in the declared `Iterator[T]`
+  (else `E2060`). `yield` outside a generator function — i.e. in a function not
+  declared `-> Iterator[T]` — is an error (`E3030`), as is a `-> Iterator[T]`
+  function with no `yield`.
+- Inside a generator, a bare `return` stops iteration early; `return <value>`
+  is **not** allowed (use `yield` to produce values).
+- Generators are **produce-only**: there is no `generator.send(...)` and no
+  `yield from`. Consume them with `for`.
+- A generator function is always interpreted (never JIT-compiled), since its
+  body suspends and resumes across `yield`.
+
+See `examples/generators_demo.spy` for a complete runnable program.
 
 ### 3.9 Class definitions
 
