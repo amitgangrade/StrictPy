@@ -163,6 +163,25 @@ pub enum NativeFn {
     /// local `s` is never aliased — turning the O(N^2) repeated-copy idiom into
     /// amortised O(N). Returns the (possibly reallocated) string to store back.
     StrAppendInPlace = 114,
+    // ── Native string methods (P1: text-processing perf). Receiver string is
+    //    arg 0, method args follow. Implemented in Rust so idiomatic text code
+    //    doesn't hand-roll O(n) per-char bytecode loops. ───────────────────
+    /// `s.strip()` — trim leading + trailing ASCII whitespace.
+    StrStrip      = 115,
+    /// `s.lstrip()` — trim leading whitespace.
+    StrLStrip     = 116,
+    /// `s.rstrip()` — trim trailing whitespace.
+    StrRStrip     = 117,
+    /// `s.find(needle) -> i64` — code-point index of first occurrence, or -1.
+    StrFind       = 118,
+    /// `s.replace(old, new) -> str` — replace all non-overlapping occurrences.
+    StrReplace    = 119,
+    /// `s.startswith(prefix) -> bool`.
+    StrStartsWith = 120,
+    /// `s.endswith(suffix) -> bool`.
+    StrEndsWith   = 121,
+    /// `s.contains(needle) -> bool`.
+    StrContains   = 122,
 
     // ── 130–149: `sys` module (M19) ─────────────────────────────────────
     // Foundation milestone for a real stdlib: the import-resolver and
@@ -2452,6 +2471,14 @@ impl NativeFn {
             112 => Some(Self::ListSortBy),
             113 => Some(Self::StrCmp),
             114 => Some(Self::StrAppendInPlace),
+            115 => Some(Self::StrStrip),
+            116 => Some(Self::StrLStrip),
+            117 => Some(Self::StrRStrip),
+            118 => Some(Self::StrFind),
+            119 => Some(Self::StrReplace),
+            120 => Some(Self::StrStartsWith),
+            121 => Some(Self::StrEndsWith),
+            122 => Some(Self::StrContains),
             // M19: sys module.
             130 => Some(Self::SysArgv),
             131 => Some(Self::SysExit),
@@ -3187,6 +3214,14 @@ impl NativeFn {
             "keys"        => Some(Self::DictKeys),
             "values"      => Some(Self::DictValues),
             "slice"       => Some(Self::StrSlice),
+            "strip"       => Some(Self::StrStrip),
+            "lstrip"      => Some(Self::StrLStrip),
+            "rstrip"      => Some(Self::StrRStrip),
+            "find"        => Some(Self::StrFind),
+            "replace"     => Some(Self::StrReplace),
+            "startswith"  => Some(Self::StrStartsWith),
+            "endswith"    => Some(Self::StrEndsWith),
+            "contains"    => Some(Self::StrContains),
 
             // real-world: csv_aggregate — str→number parsing.
             "parse_f64"   => Some(Self::F64FromStr),

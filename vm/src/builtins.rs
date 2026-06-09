@@ -198,6 +198,37 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             let p = interp.alloc_string(&format!("{s}{c}"));
             Ok(p as u64)
         }
+        // ── P1: native string methods (one Rust call replaces an O(n) per-char
+        //    bytecode loop). Receiver is arg 0; method args follow. ──────────
+        NativeFn::StrStrip => Ok(interp.alloc_string(arg_str(args, 0).trim()) as u64),
+        NativeFn::StrLStrip => Ok(interp.alloc_string(arg_str(args, 0).trim_start()) as u64),
+        NativeFn::StrRStrip => Ok(interp.alloc_string(arg_str(args, 0).trim_end()) as u64),
+        NativeFn::StrFind => {
+            let s = arg_str(args, 0);
+            let needle = arg_str(args, 1);
+            // Code-point index of the first occurrence (-1 if absent). `find`
+            // gives a byte offset on a char boundary; convert to code points.
+            let idx: i64 = match s.find(&needle) {
+                Some(b) => s[..b].chars().count() as i64,
+                None => -1,
+            };
+            Ok(idx as u64)
+        }
+        NativeFn::StrReplace => {
+            let s = arg_str(args, 0);
+            let old = arg_str(args, 1);
+            let new = arg_str(args, 2);
+            Ok(interp.alloc_string(&s.replace(&old, &new)) as u64)
+        }
+        NativeFn::StrStartsWith => {
+            Ok(if arg_str(args, 0).starts_with(&arg_str(args, 1)) { 1 } else { 0 })
+        }
+        NativeFn::StrEndsWith => {
+            Ok(if arg_str(args, 0).ends_with(&arg_str(args, 1)) { 1 } else { 0 })
+        }
+        NativeFn::StrContains => {
+            Ok(if arg_str(args, 0).contains(&arg_str(args, 1)) { 1 } else { 0 })
+        }
         // real-world: csv_aggregate / wordcount / markov — every text
         // stress program had to hand-roll a splitter. `s.split(sep)`
         // returns a freshly allocated `List[str]` whose elements are

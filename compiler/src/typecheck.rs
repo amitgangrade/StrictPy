@@ -2098,6 +2098,22 @@ impl TypeChecker {
                     args: vec![Ty::Primitive(PrimTy::Str)],
                 });
             }
+            // P1: native string methods (text-processing perf).
+            (Ty::Primitive(PrimTy::Str), "strip" | "lstrip" | "rstrip") => {
+                return Ok(Ty::Primitive(PrimTy::Str));
+            }
+            (Ty::Primitive(PrimTy::Str), "find") => {
+                for a in args { let _ = self.check_or_synth(&a.value, Some(&Ty::Primitive(PrimTy::Str)), env, ctx, r)?; }
+                return Ok(Ty::Primitive(PrimTy::I64));
+            }
+            (Ty::Primitive(PrimTy::Str), "replace") => {
+                for a in args { let _ = self.check_or_synth(&a.value, Some(&Ty::Primitive(PrimTy::Str)), env, ctx, r)?; }
+                return Ok(Ty::Primitive(PrimTy::Str));
+            }
+            (Ty::Primitive(PrimTy::Str), "startswith" | "endswith" | "contains") => {
+                for a in args { let _ = self.check_or_synth(&a.value, Some(&Ty::Primitive(PrimTy::Str)), env, ctx, r)?; }
+                return Ok(Ty::Primitive(PrimTy::Bool));
+            }
             // Channel methods — stdlib: producer.spy
             (Ty::Generic { base: TypeCtor::Channel, args: a }, "send") if a.len() == 1 => {
                 if args.len() == 1 {
