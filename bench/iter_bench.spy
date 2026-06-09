@@ -1,0 +1,33 @@
+import time
+
+# Pure iteration benchmark: build a List[i64] once (UNtimed), then time only
+# repeated for-in traversal that sums every element (the read prevents the loop
+# from being optimised away). Same shape as bench/iter_bench.py.
+
+fn build(n: i64) -> List[i64]:
+    xs: List[i64] = []
+    for i: i64 in range(n):
+        xs.append(i)
+    return xs
+
+fn iterate(xs: List[i64], reps: i64) -> i64:
+    total: i64 = 0
+    r: i64 = 0
+    while r < reps:
+        for x: i64 in xs:
+            total = total + x
+        r = r + 1
+    return total
+
+fn main() -> i32:
+    sizes: List[i64] = [1000000i64, 5000000i64, 10000000i64]
+    reps: i64 = 5
+    for n: i64 in sizes:
+        xs: List[i64] = build(n)                 # not timed
+        t0: f64 = time.monotonic()
+        checksum: i64 = iterate(xs, reps)
+        t1: f64 = time.monotonic()
+        total_ms: f64 = (t1 - t0) * 1000.0
+        per_pass: f64 = total_ms / f64(reps)
+        println("n=" + str(n) + " reps=" + str(reps) + " checksum=" + str(checksum) + " per_pass_ms=" + str(per_pass))
+    return 0
