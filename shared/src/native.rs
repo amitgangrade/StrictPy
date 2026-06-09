@@ -156,6 +156,13 @@ pub enum NativeFn {
     /// integer `ILt`/`ILe`/`IGt`/`IGe`, comparing the two heap-pointer u64s
     /// (same bug class as BUG-034 `str !=`).
     StrCmp     = 113,
+    /// `StrAppendInPlace(s, e) -> str` — append `e` to `s`, mutating `s`'s
+    /// buffer in place (growing with doubling) when `s` is a uniquely-owned
+    /// builder, else copying. The compiler emits this *only* for an
+    /// `s = s + e` / `s += e` accumulator where escape analysis has proven the
+    /// local `s` is never aliased — turning the O(N^2) repeated-copy idiom into
+    /// amortised O(N). Returns the (possibly reallocated) string to store back.
+    StrAppendInPlace = 114,
 
     // ── 130–149: `sys` module (M19) ─────────────────────────────────────
     // Foundation milestone for a real stdlib: the import-resolver and
@@ -2444,6 +2451,7 @@ impl NativeFn {
             111 => Some(Self::SortedBy),
             112 => Some(Self::ListSortBy),
             113 => Some(Self::StrCmp),
+            114 => Some(Self::StrAppendInPlace),
             // M19: sys module.
             130 => Some(Self::SysArgv),
             131 => Some(Self::SysExit),

@@ -1180,6 +1180,9 @@ impl Lowerer {
         recv: Option<ClassId>,
     ) -> IRFunction {
         let mut fb = FuncBuilder::new(id, &f.name);
+        // Identify uniquely-owned `str` accumulators so `s = s + e` can lower
+        // to an in-place append (amortised O(N)) instead of O(N) copies.
+        fb.inplace_str_locals = self.str_inplace_candidates(f);
         // Resolve param types — they come from f.params via the resolver, but
         // the AST `Type` is syntactic, not semantic. We look up the symbol of
         // each param name in the enclosing function scope by best-effort:
@@ -1274,6 +1277,63 @@ impl Lowerer {
         main_irfn
     }
 
+    /// Escape analysis for the in-place string-append optimisation. Returns the
+    /// `str` locals that are uniquely-owned accumulators: every occurrence is an
+    /// init, a self-append (`s = s + e` / `s += e`), or a bare `return s`.
+    /// Anything that could alias the string or let it escape removes the name,
+    /// so `StrAppendInPlace` can mutate its buffer in place soundly.
+    fn str_inplace_candidates(&self, f: &FuncDecl) -> std::collections::HashSet<String> {
+        let mut cand = std::collections::HashSet::new();
+        self.collect_selfappend_candidates(&f.body, &mut cand);
+        if cand.is_empty() {
+            return cand;
+        }
+        let mut disq = std::collections::HashSet::new();
+        disqualify_inplace_uses(&f.body, &cand, &mut disq);
+        cand.retain(|n| !disq.contains(n));
+        cand
+    }
+
+    /// Recorded type of `e` is `str` (direct lookup; the accumulator pattern is
+    /// non-generic so no substitution is needed).
+    fn expr_is_str(&self, e: &Expr) -> bool {
+        let sp = expr_span(e);
+        matches!(
+            self.typed.expr_types.get(&(sp.start, sp.end)),
+            Some(Ty::Primitive(PrimTy::Str))
+        )
+    }
+
+    fn collect_selfappend_candidates(
+        &self,
+        block: &Block,
+        out: &mut std::collections::HashSet<String>,
+    ) {
+        for s in &block.stmts {
+            match s {
+                Stmt::Assign { target: Lvalue::Ident { name, .. }, value, .. } => {
+                    if is_str_self_append(value, name) && self.expr_is_str(value) {
+                        out.insert(name.clone());
+                    }
+                }
+                Stmt::AugAssign {
+                    target: Lvalue::Ident { name, .. },
+                    op: AstBinOp::Add,
+                    value,
+                    ..
+                } => {
+                    if !expr_mentions(value, name) && self.expr_is_str(value) {
+                        out.insert(name.clone());
+                    }
+                }
+                _ => {}
+            }
+            for b in stmt_child_blocks(s) {
+                self.collect_selfappend_candidates(b, out);
+            }
+        }
+    }
+
     fn lookup_ast_ty(&self, t: &ast::Type) -> Option<Ty> {
         // The resolver maps `ast::Type` spans to semantic `Ty`. Recover via
         // the span of `t` itself.
@@ -1283,6 +1343,307 @@ impl Lowerer {
             .ast_type_to_ty
             .get(&(span.start, span.end))
             .cloned()
+    }
+}
+
+/// True if `value` is `name + <rhs>` with `<rhs>` not mentioning `name` — the
+/// in-place-appendable self-append shape.
+fn is_str_self_append(value: &Expr, name: &str) -> bool {
+    if let Expr::Binary { op: AstBinOp::Add, lhs, rhs, .. } = value {
+        if let Expr::Ident { name: l, .. } = lhs.as_ref() {
+            return l == name && !expr_mentions(rhs, name);
+        }
+    }
+    false
+}
+
+/// True if `name` appears anywhere in `e`. Exhaustive over `Expr` so adding a
+/// variant forces an update (avoids silently missing a mention, which would be
+/// unsound for the in-place-append gate).
+fn expr_mentions(e: &Expr, name: &str) -> bool {
+    match e {
+        Expr::Literal { .. } => false,
+        Expr::Ident { name: n, .. } => n == name,
+        Expr::Tuple { elems, .. } | Expr::List { elems, .. } | Expr::Set { elems, .. } => {
+            elems.iter().any(|x| expr_mentions(x, name))
+        }
+        Expr::Dict { entries, .. } => entries
+            .iter()
+            .any(|(k, v)| expr_mentions(k, name) || expr_mentions(v, name)),
+        Expr::Unary { operand, .. } => expr_mentions(operand, name),
+        Expr::Binary { lhs, rhs, .. } | Expr::NullCoalesce { lhs, rhs, .. } => {
+            expr_mentions(lhs, name) || expr_mentions(rhs, name)
+        }
+        Expr::Call { callee, args, .. } => {
+            expr_mentions(callee, name) || args.iter().any(|a| expr_mentions(&a.value, name))
+        }
+        Expr::MethodCall { receiver, args, .. } => {
+            expr_mentions(receiver, name) || args.iter().any(|a| expr_mentions(&a.value, name))
+        }
+        Expr::Attr { obj, .. } => expr_mentions(obj, name),
+        Expr::Index { obj, indices, .. } => {
+            expr_mentions(obj, name) || indices.iter().any(|x| expr_mentions(x, name))
+        }
+        Expr::Ternary { cond, then_expr, else_expr, .. } => {
+            expr_mentions(cond, name)
+                || expr_mentions(then_expr, name)
+                || expr_mentions(else_expr, name)
+        }
+        Expr::Lambda { body, .. } => expr_mentions(body, name),
+        Expr::Cast { expr, .. } => expr_mentions(expr, name),
+        Expr::Comprehension { iter, body, value, cond, .. } => {
+            expr_mentions(iter, name)
+                || expr_mentions(body, name)
+                || value.as_ref().is_some_and(|v| expr_mentions(v, name))
+                || cond.as_ref().is_some_and(|c| expr_mentions(c, name))
+        }
+    }
+}
+
+/// Blocks directly owned by a statement (for recursion in candidate scan).
+fn stmt_child_blocks(s: &Stmt) -> Vec<&Block> {
+    let mut v = Vec::new();
+    match s {
+        Stmt::If { then_block, elifs, else_block, .. } => {
+            v.push(then_block);
+            for (_, b) in elifs {
+                v.push(b);
+            }
+            if let Some(b) = else_block {
+                v.push(b);
+            }
+        }
+        Stmt::While { body, else_block, .. } | Stmt::For { body, else_block, .. } => {
+            v.push(body);
+            if let Some(b) = else_block {
+                v.push(b);
+            }
+        }
+        Stmt::Match { arms, .. } => {
+            for a in arms {
+                v.push(&a.body);
+            }
+        }
+        Stmt::Try { body, handlers, else_block, finally_block, .. } => {
+            v.push(body);
+            for h in handlers {
+                v.push(&h.body);
+            }
+            if let Some(b) = else_block {
+                v.push(b);
+            }
+            if let Some(b) = finally_block {
+                v.push(b);
+            }
+        }
+        Stmt::With { body, .. } => v.push(body),
+        _ => {}
+    }
+    v
+}
+
+fn pattern_binds(p: &ast::Pattern, name: &str) -> bool {
+    match p {
+        ast::Pattern::Identifier(n, _) => n == name,
+        ast::Pattern::Constructor { fields, .. } => fields.iter().any(|f| pattern_binds(f, name)),
+        ast::Pattern::Tuple(ps, _) => ps.iter().any(|f| pattern_binds(f, name)),
+        _ => false,
+    }
+}
+
+fn disq_expr(e: &Expr, cand: &std::collections::HashSet<String>, disq: &mut std::collections::HashSet<String>) {
+    for c in cand {
+        if !disq.contains(c) && expr_mentions(e, c) {
+            disq.insert(c.clone());
+        }
+    }
+}
+
+/// Disqualify candidates mentioned in `e`, except `keep` (the allowed lhs of a
+/// self-append).
+fn disq_expr_except(
+    e: &Expr,
+    cand: &std::collections::HashSet<String>,
+    disq: &mut std::collections::HashSet<String>,
+    keep: &str,
+) {
+    for c in cand {
+        if c != keep && !disq.contains(c) && expr_mentions(e, c) {
+            disq.insert(c.clone());
+        }
+    }
+}
+
+/// Remove from candidacy any name with a use that could alias the string or let
+/// it escape. Allowed uses: init/reassign (value not mentioning the name),
+/// self-append `s = s + e` / `s += e`, and bare `return s`. Everything else
+/// disqualifies — conservative, so in-place mutation can never corrupt an alias.
+fn disqualify_inplace_uses(
+    block: &Block,
+    cand: &std::collections::HashSet<String>,
+    disq: &mut std::collections::HashSet<String>,
+) {
+    for s in &block.stmts {
+        match s {
+            Stmt::Let { init, .. } => disq_expr(init, cand, disq),
+            Stmt::LetDestructure { names, init, .. } => {
+                disq_expr(init, cand, disq);
+                for n in names {
+                    if cand.contains(n) {
+                        disq.insert(n.clone());
+                    }
+                }
+            }
+            Stmt::Assign { target, value, .. } => match target {
+                Lvalue::Ident { name, .. } => {
+                    if cand.contains(name) && is_str_self_append(value, name) {
+                        disq_expr_except(value, cand, disq, name);
+                    } else {
+                        disq_expr(value, cand, disq);
+                    }
+                }
+                Lvalue::Attr { obj, .. } => {
+                    disq_expr(obj, cand, disq);
+                    disq_expr(value, cand, disq);
+                }
+                Lvalue::Index { obj, indices, .. } => {
+                    disq_expr(obj, cand, disq);
+                    for i in indices {
+                        disq_expr(i, cand, disq);
+                    }
+                    disq_expr(value, cand, disq);
+                }
+            },
+            Stmt::AugAssign { target, op, value, .. } => match target {
+                Lvalue::Ident { name, .. }
+                    if cand.contains(name)
+                        && *op == AstBinOp::Add
+                        && !expr_mentions(value, name) =>
+                {
+                    disq_expr_except(value, cand, disq, name);
+                }
+                Lvalue::Ident { name, .. } => {
+                    if cand.contains(name) {
+                        disq.insert(name.clone());
+                    }
+                    disq_expr(value, cand, disq);
+                }
+                Lvalue::Attr { obj, .. } => {
+                    disq_expr(obj, cand, disq);
+                    disq_expr(value, cand, disq);
+                }
+                Lvalue::Index { obj, indices, .. } => {
+                    disq_expr(obj, cand, disq);
+                    for i in indices {
+                        disq_expr(i, cand, disq);
+                    }
+                    disq_expr(value, cand, disq);
+                }
+            },
+            Stmt::Return { value: Some(e), .. } => {
+                if !matches!(e, Expr::Ident { .. }) {
+                    disq_expr(e, cand, disq);
+                }
+            }
+            Stmt::Return { value: None, .. } => {}
+            Stmt::Yield { value, .. } => disq_expr(value, cand, disq),
+            Stmt::If { cond, then_block, elifs, else_block, .. } => {
+                disq_expr(cond, cand, disq);
+                disqualify_inplace_uses(then_block, cand, disq);
+                for (ec, eb) in elifs {
+                    disq_expr(ec, cand, disq);
+                    disqualify_inplace_uses(eb, cand, disq);
+                }
+                if let Some(eb) = else_block {
+                    disqualify_inplace_uses(eb, cand, disq);
+                }
+            }
+            Stmt::While { cond, body, else_block, .. } => {
+                disq_expr(cond, cand, disq);
+                disqualify_inplace_uses(body, cand, disq);
+                if let Some(eb) = else_block {
+                    disqualify_inplace_uses(eb, cand, disq);
+                }
+            }
+            Stmt::For { var, iter, body, else_block, .. } => {
+                disq_expr(iter, cand, disq);
+                if cand.contains(var) {
+                    disq.insert(var.clone());
+                }
+                disqualify_inplace_uses(body, cand, disq);
+                if let Some(eb) = else_block {
+                    disqualify_inplace_uses(eb, cand, disq);
+                }
+            }
+            Stmt::Match { scrutinee, arms, .. } => {
+                disq_expr(scrutinee, cand, disq);
+                for a in arms {
+                    for c in cand {
+                        if pattern_binds(&a.pattern, c) {
+                            disq.insert(c.clone());
+                        }
+                    }
+                    if let Some(g) = &a.guard {
+                        disq_expr(g, cand, disq);
+                    }
+                    disqualify_inplace_uses(&a.body, cand, disq);
+                }
+            }
+            Stmt::Try { body, handlers, else_block, finally_block, .. } => {
+                disqualify_inplace_uses(body, cand, disq);
+                for h in handlers {
+                    if let Some(b) = &h.binding {
+                        if cand.contains(b) {
+                            disq.insert(b.clone());
+                        }
+                    }
+                    disqualify_inplace_uses(&h.body, cand, disq);
+                }
+                if let Some(b) = else_block {
+                    disqualify_inplace_uses(b, cand, disq);
+                }
+                if let Some(b) = finally_block {
+                    disqualify_inplace_uses(b, cand, disq);
+                }
+            }
+            Stmt::With { expr, binding, body, .. } => {
+                disq_expr(expr, cand, disq);
+                if let Some((n, _)) = binding {
+                    if cand.contains(n) {
+                        disq.insert(n.clone());
+                    }
+                }
+                disqualify_inplace_uses(body, cand, disq);
+            }
+            Stmt::Raise { exc, cause, .. } => {
+                disq_expr(exc, cand, disq);
+                if let Some(c) = cause {
+                    disq_expr(c, cand, disq);
+                }
+            }
+            Stmt::Assert { cond, msg, .. } => {
+                disq_expr(cond, cand, disq);
+                if let Some(m) = msg {
+                    disq_expr(m, cand, disq);
+                }
+            }
+            Stmt::Del { target, .. } => match target {
+                Lvalue::Ident { name, .. } => {
+                    if cand.contains(name) {
+                        disq.insert(name.clone());
+                    }
+                }
+                Lvalue::Attr { obj, .. } => disq_expr(obj, cand, disq),
+                Lvalue::Index { obj, indices, .. } => {
+                    disq_expr(obj, cand, disq);
+                    for i in indices {
+                        disq_expr(i, cand, disq);
+                    }
+                }
+            },
+            Stmt::Expr { expr, .. } => disq_expr(expr, cand, disq),
+            Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Pass { .. } => {}
+        }
     }
 }
 
@@ -1319,6 +1680,10 @@ struct FuncBuilder {
     slot_ty: Vec<Ty>,
     /// Loop stack for break/continue: (header_block, exit_block).
     loop_stack: Vec<(BlockId, BlockId)>,
+    /// Local `str` variables proven (by `str_inplace_candidates`) to be
+    /// uniquely-owned accumulators, so `s = s + e` / `s += e` can lower to an
+    /// in-place `StrAppendInPlace` instead of an O(N)-copy `StrConcat`.
+    inplace_str_locals: std::collections::HashSet<String>,
 }
 
 impl FuncBuilder {
@@ -1333,6 +1698,7 @@ impl FuncBuilder {
             slot_of: HashMap::new(),
             slot_ty: Vec::new(),
             loop_stack: Vec::new(),
+            inplace_str_locals: std::collections::HashSet::new(),
         }
     }
 
@@ -1547,11 +1913,54 @@ fn lower_stmt(fb: &mut FuncBuilder, ctx: &mut LowerCtx, s: &Stmt) -> Option<()> 
             Some(())
         }
         Stmt::Assign { target, value, .. } => {
+            // In-place string accumulator: `s = s + e` where `s` is a
+            // proven-unique local (see `str_inplace_candidates`) lowers to
+            // StrAppendInPlace(s, e) — amortised O(N) — instead of a fresh
+            // O(len) StrConcat copy each step.
+            if let Lvalue::Ident { name, .. } = target {
+                if fb.inplace_str_locals.contains(name) {
+                    if let Expr::Binary { op: AstBinOp::Add, lhs, rhs, .. } = value {
+                        if matches!(lhs.as_ref(), Expr::Ident { name: l, .. } if l == name) {
+                            let cur = lower_lvalue_load(fb, ctx, target);
+                            let ev = lower_expr(fb, ctx, rhs);
+                            let appended = fb.push_value(
+                                Ty::Primitive(PrimTy::Str),
+                                ValueKind::Op {
+                                    op: IROp::NativeCall {
+                                        native_id: NativeFn::StrAppendInPlace as u32,
+                                    },
+                                    args: vec![cur, ev],
+                                },
+                            );
+                            lower_lvalue_store(fb, ctx, target, appended);
+                            return Some(());
+                        }
+                    }
+                }
+            }
             let v = lower_expr(fb, ctx, value);
             lower_lvalue_store(fb, ctx, target, v);
             Some(())
         }
         Stmt::AugAssign { target, op, value, .. } => {
+            // `s += e` on a proven-unique str local: same in-place append.
+            if let Lvalue::Ident { name, .. } = target {
+                if *op == AstBinOp::Add && fb.inplace_str_locals.contains(name) {
+                    let cur = lower_lvalue_load(fb, ctx, target);
+                    let ev = lower_expr(fb, ctx, value);
+                    let appended = fb.push_value(
+                        Ty::Primitive(PrimTy::Str),
+                        ValueKind::Op {
+                            op: IROp::NativeCall {
+                                native_id: NativeFn::StrAppendInPlace as u32,
+                            },
+                            args: vec![cur, ev],
+                        },
+                    );
+                    lower_lvalue_store(fb, ctx, target, appended);
+                    return Some(());
+                }
+            }
             // x op= y  ⇒  x = x op y
             let cur = lower_lvalue_load(fb, ctx, target);
             let rhs = lower_expr(fb, ctx, value);

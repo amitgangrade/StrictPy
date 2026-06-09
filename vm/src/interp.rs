@@ -2619,6 +2619,8 @@ impl Interpreter {
             (*sp).byte_len = bytes.len();
             (*sp).data = data;
             (*sp).flags = if s.is_ascii() { 0b10 } else { 0 };
+            // Tight by default; the in-place-append path grows this with doubling.
+            (*sp).capacity = bytes.len();
         }
         sp
     }
