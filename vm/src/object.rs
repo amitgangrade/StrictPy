@@ -159,6 +159,13 @@ pub struct StringRepr {
     pub data: *mut u8,
     /// Bit 0 = interned, bit 1 = ascii-only, bit 2 = has-side-index.
     pub flags: u64,
+    /// Allocated capacity (in bytes) of the `data` buffer. Normally equal to
+    /// `byte_len` (strings are immutable), but the compiler-proven-unique
+    /// accumulator path (`s = s + e` lowered to `StrAppendInPlace`) over-
+    /// allocates with doubling so repeated appends are amortised O(1) instead
+    /// of allocating + copying the whole string every step. Appended at the
+    /// end of the struct so existing field offsets are unchanged.
+    pub capacity: usize,
 }
 
 /// Heap layout for closures (spec §8.6). Captures follow inline.

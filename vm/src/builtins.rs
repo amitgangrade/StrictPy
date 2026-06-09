@@ -116,6 +116,74 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             };
             Ok(ord as u64)
         }
+        // In-place append for the compiler-proven-unique `s = s + e` /
+        // `s += e` accumulator. Grows `s`'s data buffer with doubling and
+        // appends `e`'s bytes, returning the (possibly reallocated) string to
+        // store back into `s`. Turns the O(N^2) repeated-copy idiom into
+        // amortised O(N). Only emitted when escape analysis proved `s` is not
+        // aliased, so mutating its buffer in place is safe.
+        NativeFn::StrAppendInPlace => {
+            let s_ptr = arg_u64(args, 0) as *mut StringRepr;
+            let e_ptr = arg_u64(args, 1) as *const StringRepr;
+            if s_ptr.is_null() {
+                let e = arg_str(args, 1);
+                return Ok(interp.alloc_string(&e) as u64);
+            }
+            if e_ptr.is_null() {
+                return Ok(s_ptr as u64);
+            }
+            // SAFETY: both args are valid StringRepr heap pointers, rooted in
+            // registers (the trampoline published the window before this call).
+            let (s_interned, s_blen, s_cap, s_ascii) = unsafe {
+                (
+                    (*s_ptr).flags & 1 != 0,
+                    (*s_ptr).byte_len,
+                    (*s_ptr).capacity,
+                    (*s_ptr).flags & 0b10 != 0,
+                )
+            };
+            let (e_blen, e_data, e_len, e_ascii) = unsafe {
+                (
+                    (*e_ptr).byte_len,
+                    (*e_ptr).data,
+                    (*e_ptr).length,
+                    (*e_ptr).flags & 0b10 != 0,
+                )
+            };
+            if e_blen == 0 {
+                return Ok(s_ptr as u64);
+            }
+            // A shared/interned source must never be mutated (runtime interning
+            // isn't implemented today, so this is belt-and-suspenders): copy.
+            if s_interned {
+                let s_str = unsafe { read_str(s_ptr as *const StringRepr) };
+                let e_str = unsafe { read_str(e_ptr) };
+                return Ok(interp.alloc_string(&format!("{s_str}{e_str}")) as u64);
+            }
+            let need = s_blen + e_blen;
+            if need > s_cap {
+                let new_cap = need.max(s_cap.saturating_mul(2)).max(8);
+                let old_data = unsafe { (*s_ptr).data };
+                let new_data = interp
+                    .shared
+                    .heap
+                    .lock()
+                    .unwrap()
+                    .realloc_raw(old_data, s_cap, new_cap, 1, s_blen);
+                unsafe {
+                    (*s_ptr).data = new_data;
+                    (*s_ptr).capacity = new_cap;
+                }
+            }
+            unsafe {
+                let dst = (*s_ptr).data.add(s_blen);
+                std::ptr::copy_nonoverlapping(e_data, dst, e_blen);
+                (*s_ptr).byte_len = need;
+                (*s_ptr).length += e_len;
+                (*s_ptr).flags = if s_ascii && e_ascii { 0b10 } else { 0 };
+            }
+            Ok(s_ptr as u64)
+        }
         NativeFn::StrSlice => {
             let s = arg_str(args, 0);
             let start = arg_u64(args, 1) as usize;
