@@ -1,0 +1,25 @@
+import time
+
+# Idiomatic StrictPy: build the transformed array directly with a `range(n)`
+# for-loop (one list, no intermediate), then sum with a for-in loop. Mirrors
+# the idiomatic Python `xs = [i*2+1 for i in range(n)]; sum(xs)`.
+# (NOTE: comprehensions still iterate List[T], not range(), so the build is a
+# range for-loop + append rather than a comprehension over range.)
+fn run(n: i64) -> i64:
+    xs: List[i64] = []
+    for i: i64 in range(n):
+        xs.append(i * 2i64 + 1i64)
+    total: i64 = 0
+    for x: i64 in xs:
+        total = total + x
+    return total
+
+fn main() -> i32:
+    sizes: List[i64] = [1000000i64, 5000000i64, 10000000i64]
+    for n: i64 in sizes:
+        t0: f64 = time.monotonic()
+        checksum: i64 = run(n)
+        t1: f64 = time.monotonic()
+        ms: f64 = (t1 - t0) * 1000.0
+        println("n=" + str(n) + " checksum=" + str(checksum) + " ms=" + str(ms))
+    return 0

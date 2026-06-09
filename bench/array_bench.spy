@@ -1,0 +1,33 @@
+import time
+
+# Array (List[i64]) throughput benchmark: build by push, in-place transform,
+# and index-sum over large sizes. Same algorithm as bench/array_bench.py.
+fn run(n: i64) -> i64:
+    # build
+    xs: List[i64] = []
+    i: i64 = 0
+    while i < n:
+        xs.append(i)
+        i = i + 1
+    # in-place transform
+    i = 0
+    while i < n:
+        xs[i] = xs[i] * 2i64 + 1i64
+        i = i + 1
+    # index-sum
+    total: i64 = 0
+    i = 0
+    while i < n:
+        total = total + xs[i]
+        i = i + 1
+    return total
+
+fn main() -> i32:
+    sizes: List[i64] = [1000000i64, 5000000i64, 10000000i64]
+    for n: i64 in sizes:
+        t0: f64 = time.monotonic()
+        checksum: i64 = run(n)
+        t1: f64 = time.monotonic()
+        ms: f64 = (t1 - t0) * 1000.0
+        println("n=" + str(n) + " checksum=" + str(checksum) + " ms=" + str(ms))
+    return 0
