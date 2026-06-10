@@ -465,3 +465,31 @@ instantly with 0xC0000005 / SIGSEGV and no output, on every branch tested
   would need an instantiation-at-reference-site rule.
 - This is placeholder-lowering instance #4. The BUG-037 lesson stands:
   audit `ir.rs` fallthroughs that silently produce `IRConst::None`.
+
+---
+
+## Deferred: BUG-042 — subprocess.kill during wait() can never land
+
+Surfaced by the BUG-041 verification run, which was the first full-suite
+run in a long time with `target/release/spy` actually present:
+`compiler/tests/job_scheduler_runs.rs` probes **silently skip** when the
+release binary is missing (`compile_and_run` returns `None`), so
+`probe_4_kill_from_other_thread` has been green-by-skip, not green.
+
+- **Repro:** build `target/release/spy`, then
+  `cargo test --release -p strictpy-compiler --test job_scheduler_runs probe_4`.
+  Fails identically on clean `origin/main` (3825315) and on the BUG-041
+  branch: `wait()` blocks the full 60s, exit code 0,
+  `nonzero-exit=false` / `elapsed-under-5s=false`.
+- **Cause:** `NativeFn::SubprocessWait` calls `subprocess_table_take`,
+  which **removes** the `Child` from `SUBPROCESS_TABLE` before blocking
+  in `child.wait()`. The killer thread's `subprocess.kill(h)` 200ms
+  later finds no handle and raises IOError in the worker; the kill
+  never reaches the OS process. Deterministic, not a flake.
+- **Fix sketch:** keep the entry in the table during wait (store the
+  raw pid / process handle alongside, or wrap the Child in
+  `Arc<Mutex<...>>` and wait via `try_wait` polling or an OS-level
+  waitid on the pid), so `kill` can signal a process that another
+  thread is currently waiting on. Also worth making the probe tests
+  fail loudly (not skip) when the spy binary is absent, so CI actually
+  exercises them.
