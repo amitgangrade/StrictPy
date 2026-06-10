@@ -1,0 +1,31 @@
+# sys_async_tasks — spawn/await throughput for the asyncio runtime.
+# 1000 tasks, each computing (i*i) % 1000; awaited in waves of 4 so the
+# underlying workers overlap. Expected output (byte-identical to the
+# CPython twin): done=1000 / sum=461500.
+import asyncio
+from asyncio import Future
+
+final N: i64 = 1000
+
+fn task_value(i: i64) -> i64:
+    return (i * i) % 1000
+
+fn main() -> i32:
+    total: i64 = 0
+    done: i64 = 0
+    i: i64 = 0
+    while i < N:
+        a: i64 = i
+        b: i64 = i + 1
+        c: i64 = i + 2
+        d: i64 = i + 3
+        fa: Future[i64] = asyncio.spawn_i64(fn() -> i64: task_value(a))
+        fb: Future[i64] = asyncio.spawn_i64(fn() -> i64: task_value(b))
+        fc: Future[i64] = asyncio.spawn_i64(fn() -> i64: task_value(c))
+        fd: Future[i64] = asyncio.spawn_i64(fn() -> i64: task_value(d))
+        total = total + fa.await() + fb.await() + fc.await() + fd.await()
+        done = done + 4
+        i = i + 4
+    println("done=" + str(done))
+    println("sum=" + str(total))
+    return 0

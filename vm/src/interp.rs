@@ -849,6 +849,13 @@ impl Interpreter {
                 message: "call on null callable".into(),
             });
         }
+        // `none` / non-pointer bit patterns must raise, not access-violate.
+        if closure_ptr == crate::builtins::NONE_SENTINEL || closure_ptr & 0x7 != 0 {
+            return Err(VmError::UncaughtException {
+                type_name: "TypeError".into(),
+                message: "value is not a callable closure".into(),
+            });
+        }
         let (fn_id, n_cap) = unsafe { ((*cp).fn_id, (*cp).capture_n) };
         let cap_base = unsafe {
             (cp as *const u8).add(std::mem::size_of::<crate::object::ClosureRepr>()) as *const u64
@@ -2054,6 +2061,13 @@ impl Interpreter {
             return Err(VmError::UncaughtException {
                 type_name: "NullPointerError".into(),
                 message: "call on null closure".into(),
+            });
+        }
+        // `none` / non-pointer bit patterns must raise, not access-violate.
+        if cp as u64 == crate::builtins::NONE_SENTINEL || cp as u64 & 0x7 != 0 {
+            return Err(VmError::UncaughtException {
+                type_name: "TypeError".into(),
+                message: "value is not a callable closure".into(),
             });
         }
         let (fn_id, n_cap) = unsafe { ((*cp).fn_id, (*cp).capture_n) };

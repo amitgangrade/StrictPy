@@ -38,10 +38,8 @@ fn run_inline(name: &str, src: &str) -> String {
 
 #[test]
 fn spawn_i32_then_await_round_trips_return_value() {
-    // M6's threading runtime requires a closure (heap-allocated
-    // ClosureRepr with fn_id + captures); a bare function symbol can't
-    // be passed directly.  Wrap the target in a `fn() -> T:` lambda —
-    // this is the same idiom producer.spy uses for Thread.__init__.
+    // Lambda-wrapped target (the producer.spy idiom). Bare function
+    // references also work — see the dedicated bare-ref tests below.
     let src = r#"
 import asyncio
 from asyncio import Future
@@ -185,4 +183,66 @@ fn main() -> i32:
 "#;
     let out = run_inline("m32_spawn_capture", src);
     assert!(out.contains("v=123"), "stdout:\n{out}");
+}
+
+// ── Bare function references (no lambda wrapper) ─────────────────────
+//
+// LANGUAGE_GUIDE §9.43 documents `asyncio.spawn_i32(do_work)` /
+// `asyncio.run_i32(server_main)` with a *bare* module-scope function
+// name. Until the ir.rs fix that materialises such references as
+// zero-capture ClosureNew values, the name lowered to the IRConst::None
+// placeholder (= NONE_SENTINEL at runtime) and the asyncio natives
+// dereferenced it as a ClosureRepr — an instant access violation with
+// no output. These pin the fixed behaviour end-to-end.
+
+#[test]
+fn run_unit_accepts_bare_function_reference() {
+    let src = r#"
+import asyncio
+
+fn w() -> None:
+    pass
+
+fn main() -> i32:
+    asyncio.run_unit(w)
+    println("ok")
+    return 0
+"#;
+    let out = run_inline("m32_run_unit_bare_ref", src);
+    assert!(out.contains("ok"), "stdout:\n{out}");
+}
+
+#[test]
+fn spawn_i32_accepts_bare_function_reference() {
+    let src = r#"
+import asyncio
+from asyncio import Future
+
+fn t() -> i32:
+    return 7i32
+
+fn main() -> i32:
+    f: Future[i32] = asyncio.spawn_i32(t)
+    v: i32 = f.await()
+    println("v=" + str(v))
+    return 0
+"#;
+    let out = run_inline("m32_spawn_bare_ref", src);
+    assert!(out.contains("v=7"), "stdout:\n{out}");
+}
+
+#[test]
+fn map_accepts_bare_function_reference() {
+    let src = r#"
+fn double(x: i64) -> i64:
+    return x * 2
+
+fn main() -> i32:
+    xs: List[i64] = [1, 2, 3]
+    ys: List[i64] = map(double, xs)
+    println(str(ys[0]) + "," + str(ys[1]) + "," + str(ys[2]))
+    return 0
+"#;
+    let out = run_inline("m32_map_bare_ref", src);
+    assert!(out.contains("2,4,6"), "stdout:\n{out}");
 }
