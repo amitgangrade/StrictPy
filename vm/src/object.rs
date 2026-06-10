@@ -157,7 +157,11 @@ pub struct StringRepr {
     /// Pointer to the UTF-8 byte buffer (allocated via the heap as a
     /// raw byte allocation, independent of the StringRepr itself).
     pub data: *mut u8,
-    /// Bit 0 = interned, bit 1 = ascii-only, bit 2 = has-side-index.
+    /// Bit 0 = interned, bit 1 = ascii-only, bit 2 = has-side-index,
+    /// bit 3 = data is inline (UTF-8 bytes live in this same heap block, right
+    /// after the struct, not in a separate `raw_buffers` allocation). Inline is
+    /// the default from `alloc_string`; `StrAppendInPlace`'s grow path moves to
+    /// a separate buffer and clears it.
     pub flags: u64,
     /// Allocated capacity (in bytes) of the `data` buffer. Normally equal to
     /// `byte_len` (strings are immutable), but the compiler-proven-unique

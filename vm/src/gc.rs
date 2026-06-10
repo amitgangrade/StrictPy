@@ -318,10 +318,19 @@ impl Heap {
             }
             GcKind::Str => {
                 let s = obj.ptr as *mut StringRepr;
-                let data = (*s).data;
-                let byte_len = (*s).byte_len;
-                if !data.is_null() && byte_len > 0 {
-                    self.free_raw(data, byte_len, 1);
+                // Single-allocation strings keep their bytes inline in the same
+                // block (flag bit 3) — the outer sweep dealloc frees them, so we
+                // must NOT free `data` here (it isn't a separate raw buffer, and
+                // free_raw's fallback would wrongly dealloc it). Only strings
+                // whose buffer was moved to the heap by StrAppendInPlace's grow
+                // path are freed here.
+                let inline = (*s).flags & 0b1000 != 0;
+                if !inline {
+                    let data = (*s).data;
+                    let cap = (*s).capacity;
+                    if !data.is_null() && cap > 0 {
+                        self.free_raw(data, cap, 1);
+                    }
                 }
             }
             _ => {}
