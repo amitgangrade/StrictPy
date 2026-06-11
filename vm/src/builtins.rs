@@ -9075,6 +9075,15 @@ fn extract_closure_target(closure_ptr: u64) -> Result<SendableClosure, VmError> 
             message: "Thread target closure is null".into(),
         });
     }
+    // `none` (NONE_SENTINEL) and other non-pointer bit patterns must fail
+    // with a catchable exception, not an access violation. Heap objects are
+    // 8-aligned and live in user address space.
+    if closure_ptr == NONE_SENTINEL || closure_ptr & 0x7 != 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "TypeError".into(),
+            message: "target is not a callable closure".into(),
+        });
+    }
     let cp = closure_ptr as *const crate::object::ClosureRepr;
     // SAFETY: `closure_ptr` came from `ClosureNew` (or a value the user
     // passed in); we assume it points at a valid `ClosureRepr` on our

@@ -1,0 +1,11 @@
+import asyncio
+from asyncio import Future
+
+fn t() -> i32:
+    return 7i32
+
+fn main() -> i32:
+    f: Future[i32] = asyncio.spawn_i32(t)
+    v: i32 = f.await()
+    println("v=" + str(v))
+    return 0

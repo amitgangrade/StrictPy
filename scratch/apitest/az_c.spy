@@ -1,0 +1,9 @@
+import asyncio
+
+fn w() -> None:
+    pass
+
+fn main() -> i32:
+    asyncio.run_unit(w)
+    println("ok")
+    return 0

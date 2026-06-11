@@ -3181,6 +3181,26 @@ fn lower_expr(fb: &mut FuncBuilder, ctx: &mut LowerCtx, e: &Expr) -> ValueId {
                     }
                 }
             }
+            // Bare reference to a module-scope function used as a value
+            // (`asyncio.spawn_i32(do_work)`, `map(double, xs)`, or binding
+            // `f: fn() -> i32 = worker`). Materialise a zero-capture
+            // ClosureNew so every fn-typed value is uniformly a ClosureRepr
+            // heap pointer — the shape `extract_closure_target` /
+            // `ClosureCall` / `call_callable` expect. Without this the name
+            // fell through to the IRConst::None placeholder below, which
+            // codegens to ConstNone = NONE_SENTINEL (0x8000_0000_0000_0000);
+            // the asyncio/threading natives then dereferenced the sentinel
+            // as a ClosureRepr and died with an access violation.
+            if let Some(fid) = ctx.fn_id_by_name.get(name).copied() {
+                let ty = ctx.expr_ty(*span);
+                return fb.push_value(
+                    ty,
+                    ValueKind::Op {
+                        op: IROp::ClosureNew { fn_id: fid, n_captures: 0 },
+                        args: vec![],
+                    },
+                );
+            }
             // Unknown ident (likely a prelude/builtin/class) — placeholder.
             let ty = ctx.expr_ty(*span);
             fb.push_value(ty, ValueKind::Const(IRConst::None))
