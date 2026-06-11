@@ -39,6 +39,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libsdl2-dev libsdl2-image-dev
 
+      # The sdl2 crate's "image" feature links SDL2_image, which has no
+      # bundled build on Windows — fetch the official prebuilt VC
+      # development package, put its import lib on the linker search path,
+      # and its DLL on PATH so test binaries can load it at runtime.
+      - name: Install SDL2_image (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $v = "2.8.8"
+          Invoke-WebRequest "https://github.com/libsdl-org/SDL_image/releases/download/release-$v/SDL2_image-devel-$v-VC.zip" -OutFile sdl2_image.zip
+          Expand-Archive sdl2_image.zip -DestinationPath "$env:RUNNER_TEMP\sdl2_image"
+          $lib = "$env:RUNNER_TEMP\sdl2_image\SDL2_image-$v\lib\x64"
+          Add-Content $env:GITHUB_ENV "RUSTFLAGS=-L native=$lib"
+          Add-Content $env:GITHUB_PATH $lib
+
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -47,6 +62,18 @@ jobs:
 
       - name: cargo build (debug, full workspace)
         run: cargo build --workspace --verbose
+
+      # The bundled SDL2 build leaves SDL2.dll deep inside target/debug/
+      # build/sdl2-sys-*/out; test executables in target/debug/deps can't
+      # find it there. Put copies next to them.
+      - name: Stage SDL2 DLLs next to test binaries (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse target\debug\build -Filter SDL2*.dll |
+            Copy-Item -Destination target\debug\deps -Force
+          Get-ChildItem -Recurse target\debug\build -Filter SDL2*.dll |
+            Copy-Item -Destination target\debug -Force
 
       - name: cargo test (debug, full workspace)
         run: cargo test --workspace --verbose
