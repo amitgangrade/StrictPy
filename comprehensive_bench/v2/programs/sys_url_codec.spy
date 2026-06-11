@@ -1,0 +1,38 @@
+"""URL codec: quote/unquote plus urlencode/parse of query strings, N
+iterations; print accumulated lengths and counts."""
+import urllib_parse
+
+fn run() -> i32:
+    n: i64 = 30000
+    quoted_len: i64 = 0
+    unquote_ok: i64 = 0
+    encoded_len: i64 = 0
+    parsed_pairs: i64 = 0
+
+    i: i64 = 0
+    while i < n:
+        s: str = "name " + str(i) + "&value=" + str(i * 7) + "/path?q=" + str(i % 100)
+
+        q: str = urllib_parse.quote(s)
+        quoted_len = quoted_len + i64(len(q))
+        if urllib_parse.unquote(q) == s:
+            unquote_ok = unquote_ok + 1
+
+        pairs: List[Tuple[str, str]] = []
+        pairs.append(("key " + str(i % 50), s))
+        pairs.append(("page", str(i % 10)))
+        enc: str = urllib_parse.urlencode(pairs)
+        encoded_len = encoded_len + i64(len(enc))
+
+        dec: List[Tuple[str, str]] = urllib_parse.parse_query(enc)
+        parsed_pairs = parsed_pairs + len(dec)
+        i = i + 1
+
+    println("quoted_len=" + str(quoted_len))
+    println("unquote_ok=" + str(unquote_ok))
+    println("encoded_len=" + str(encoded_len))
+    println("parsed_pairs=" + str(parsed_pairs))
+    return 0
+
+fn main() -> i32:
+    return run()

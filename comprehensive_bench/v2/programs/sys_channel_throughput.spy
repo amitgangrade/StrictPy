@@ -1,0 +1,29 @@
+"""Producer/consumer: one producer thread sends 200k i32 values through a
+bounded channel, main thread consumes them all; print the sum."""
+
+fn producer(ch: Channel[i32], n: i64) -> None:
+    i: i64 = 0
+    while i < n:
+        ch.send(i32(i % 1000))
+        i = i + 1
+
+fn run() -> i32:
+    n: i64 = 200000
+    ch: Channel[i32] = Channel[i32](1024)
+
+    t: Thread = Thread(fn() -> None: producer(ch, n))
+    t.start()
+
+    total: i64 = 0
+    received: i64 = 0
+    while received < n:
+        total = total + i64(ch.recv())
+        received = received + 1
+
+    t.join()
+    println("received=" + str(received))
+    println("sum=" + str(total))
+    return 0
+
+fn main() -> i32:
+    return run()

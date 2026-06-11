@@ -1,0 +1,22 @@
+# str_json_roundtrip: parse + stringify a nested JSON payload N times using
+# the json module (json.parse / json.stringify); print total serialized length.
+
+import json
+from json import JsonValue
+
+fn run() -> i32:
+    raw: str = "{\"id\":12345,\"name\":\"benchmark\",\"active\":true,\"tags\":[\"alpha\",\"beta\",\"gamma\"],\"items\":[{\"sku\":\"a1\",\"qty\":3},{\"sku\":\"b2\",\"qty\":7},{\"sku\":\"c3\",\"qty\":11}],\"meta\":{\"version\":2,\"region\":\"us-east\",\"flags\":[1,2,3,4,5]}}"
+    n: i64 = 20000
+    total_len: i64 = 0
+    i: i64 = 0
+    while i < n:
+        parsed: JsonValue = json.parse(raw)
+        ser: str = json.stringify(parsed)
+        total_len = total_len + i64(len(ser))
+        i = i + 1
+    println("total_len=" + str(total_len))
+    println("one_len=" + str(total_len / n))
+    return 0
+
+fn main() -> i32:
+    return run()

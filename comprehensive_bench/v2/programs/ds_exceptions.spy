@@ -1,0 +1,43 @@
+# ds_exceptions: hot loop where ~1/8 iterations raise+catch ValueError and
+# ~1/13 raise a user-defined Exception subclass.
+
+final class BenchError(Exception):
+    code: i64
+    fn __init__(self, message: str, code: i64) -> None:
+        self.message = message
+        self.code = code
+
+fn risky(i: i64) -> i64:
+    if i % 8 == 0:
+        raise ValueError("bad " + str(i % 100))
+    if i % 13 == 0:
+        raise BenchError("bench", i % 7)
+    return i % 5
+
+fn run() -> i32:
+    n: i64 = 600000
+    ok: i64 = 0
+    val_errors: i64 = 0
+    bench_errors: i64 = 0
+    code_sum: i64 = 0
+    total: i64 = 0
+    i: i64 = 1
+    while i <= n:
+        try:
+            total = total + risky(i)
+            ok = ok + 1
+        except BenchError as e:
+            bench_errors = bench_errors + 1
+            code_sum = code_sum + e.code
+        except ValueError as e:
+            val_errors = val_errors + 1
+        i = i + 1
+    println("ok=" + str(ok))
+    println("val_errors=" + str(val_errors))
+    println("bench_errors=" + str(bench_errors))
+    println("code_sum=" + str(code_sum))
+    println("total=" + str(total))
+    return 0
+
+fn main() -> i32:
+    return run()

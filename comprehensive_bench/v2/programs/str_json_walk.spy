@@ -1,0 +1,72 @@
+# str_json_walk: parse a JSON document once per iteration and WALK it
+# (extract nested fields, sum array of numbers) via typed JsonValue with
+# isinstance narrowing + match on leaf values.
+
+import json
+from json import JsonValue, JObject, JInt, JList
+
+fn jget(v: JsonValue?, k: str) -> JsonValue?:
+    if v is none:
+        return none
+    if isinstance(v, JObject):
+        return v.get(k)
+    return none
+
+fn jint(v: JsonValue?) -> i64:
+    if v is none:
+        return 0
+    match v:
+        case JInt(n):
+            return n
+        case _:
+            return 0
+    return 0
+
+fn jsum(v: JsonValue?) -> i64:
+    if v is none:
+        return 0
+    total: i64 = 0
+    if isinstance(v, JList):
+        items: List[JsonValue] = v.items()
+        i: i64 = 0
+        n: i64 = i64(len(items))
+        while i < n:
+            match items[i]:
+                case JInt(x):
+                    total = total + x
+                case _:
+                    pass
+            i = i + 1
+    return total
+
+fn jlen(v: JsonValue?) -> i64:
+    if v is none:
+        return 0
+    if isinstance(v, JList):
+        return v.length()
+    return 0
+
+fn run() -> i32:
+    raw: str = "{\"user\":{\"name\":\"alice\",\"id\":42},\"scores\":[3,1,4,1,5,9,2,6],\"tags\":[\"x\",\"y\",\"z\"],\"limits\":{\"max\":100,\"min\":1}}"
+    n: i64 = 30000
+    id_sum: i64 = 0
+    score_sum: i64 = 0
+    tag_count: i64 = 0
+    limit_sum: i64 = 0
+    i: i64 = 0
+    while i < n:
+        doc: JsonValue = json.parse(raw)
+        id_sum = id_sum + jint(jget(jget(doc, "user"), "id"))
+        score_sum = score_sum + jsum(jget(doc, "scores"))
+        tag_count = tag_count + jlen(jget(doc, "tags"))
+        lim: JsonValue? = jget(doc, "limits")
+        limit_sum = limit_sum + jint(jget(lim, "max")) + jint(jget(lim, "min"))
+        i = i + 1
+    println("id_sum=" + str(id_sum))
+    println("score_sum=" + str(score_sum))
+    println("tag_count=" + str(tag_count))
+    println("limit_sum=" + str(limit_sum))
+    return 0
+
+fn main() -> i32:
+    return run()

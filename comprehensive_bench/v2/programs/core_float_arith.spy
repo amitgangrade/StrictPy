@@ -1,0 +1,28 @@
+# core_float_arith: f64 kernel — mandelbrot escape-iteration counts over a grid.
+
+fn run() -> i32:
+    w: i64 = 300
+    h: i64 = 200
+    max_iter: i64 = 80
+    total: i64 = 0
+    for py: i64 in range(h):
+        ci: f64 = -1.2 + 2.4 * f64(py) / f64(h - 1)
+        for px: i64 in range(w):
+            cr: f64 = -2.0 + 3.0 * f64(px) / f64(w - 1)
+            zr: f64 = 0.0
+            zi: f64 = 0.0
+            it: i64 = 0
+            while it < max_iter:
+                zr2: f64 = zr * zr
+                zi2: f64 = zi * zi
+                if zr2 + zi2 > 4.0:
+                    break
+                zi = 2.0 * zr * zi + ci
+                zr = zr2 - zi2 + cr
+                it = it + 1
+            total = total + it
+    println("float_arith_iters=" + str(total))
+    return 0
+
+fn main() -> i32:
+    return run()

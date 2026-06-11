@@ -1,0 +1,39 @@
+# str_split_scan: split a large synthetic log text into lines then fields,
+# accumulate field lengths; print totals.
+
+fn build_log(lines: i64) -> str:
+    s: str = ""
+    i: i64 = 0
+    while i < lines:
+        row: str = "2026-01-" + str((i % 28) + 1) + " INFO user" + str(i % 50) +
+            " action" + str(i % 7) + " value=" + str((i * 13) % 997)
+        if i == 0:
+            s = s + row
+        else:
+            s = s + "\n" + row
+        i = i + 1
+    return s
+
+fn run() -> i32:
+    text: str = build_log(4000)
+    reps: i64 = 100
+    line_count: i64 = 0
+    field_count: i64 = 0
+    char_total: i64 = 0
+    r: i64 = 0
+    while r < reps:
+        lines: List[str] = text.split("\n")
+        line_count = line_count + i64(len(lines))
+        for line: str in lines:
+            fields: List[str] = line.split(" ")
+            field_count = field_count + i64(len(fields))
+            for f: str in fields:
+                char_total = char_total + i64(len(f))
+        r = r + 1
+    println("lines=" + str(line_count))
+    println("fields=" + str(field_count))
+    println("chars=" + str(char_total))
+    return 0
+
+fn main() -> i32:
+    return run()

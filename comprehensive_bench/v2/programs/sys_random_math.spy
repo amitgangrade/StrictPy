@@ -1,0 +1,35 @@
+"""Deterministic math kernel: sqrt/sin/cos/log/exp over N values derived from
+an in-language LCG (no random module — implementations differ). Each result is
+quantized per element to i64(f(x)*1000) so float accumulation stays stable."""
+import math
+
+fn run() -> i32:
+    n: i64 = 300000
+    state: i64 = 42
+    sqrt_sum: i64 = 0
+    sin_sum: i64 = 0
+    cos_sum: i64 = 0
+    log_sum: i64 = 0
+    exp_sum: i64 = 0
+
+    i: i64 = 0
+    while i < n:
+        state = (state * 1103515245 + 12345) % 2147483648
+        x: f64 = f64(state) / 2147483648.0 * 10.0
+
+        sqrt_sum = sqrt_sum + i64(math.sqrt(x) * 1000.0)
+        sin_sum = sin_sum + i64(math.sin(x) * 1000.0)
+        cos_sum = cos_sum + i64(math.cos(x) * 1000.0)
+        log_sum = log_sum + i64(math.log(x + 1.0) * 1000.0)
+        exp_sum = exp_sum + i64(math.exp(x / 10.0) * 1000.0)
+        i = i + 1
+
+    println("sqrt_sum=" + str(sqrt_sum))
+    println("sin_sum=" + str(sin_sum))
+    println("cos_sum=" + str(cos_sum))
+    println("log_sum=" + str(log_sum))
+    println("exp_sum=" + str(exp_sum))
+    return 0
+
+fn main() -> i32:
+    return run()

@@ -1,0 +1,34 @@
+# str_join_build: build a comma-separated string of 100k ints, repeated.
+# Python uses ",".join(...); StrictPy has no str.join, so it uses its best
+# idiom: an accumulator concat loop. Print len + a slice sample.
+
+fn build(n: i64) -> str:
+    s: str = ""
+    i: i64 = 0
+    while i < n:
+        if i == 0:
+            s = s + str(i)
+        else:
+            piece: str = "," + str(i)
+            s = s + piece
+        i = i + 1
+    return s
+
+fn run() -> i32:
+    n: i64 = 100000
+    reps: i64 = 20
+    total: i64 = 0
+    sample: str = ""
+    r: i64 = 0
+    while r < reps:
+        s: str = build(n)
+        total = total + i64(len(s))
+        sample = s.slice(100, 120)
+        r = r + 1
+    println("total_len=" + str(total))
+    println("one_len=" + str(total / reps))
+    println("sample=" + sample)
+    return 0
+
+fn main() -> i32:
+    return run()

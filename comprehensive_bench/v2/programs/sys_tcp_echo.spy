@@ -1,0 +1,52 @@
+"""Loopback TCP echo: client thread does 2000 8-byte roundtrips against an
+in-process echo server; print roundtrip count (after join)."""
+import socket
+
+fn client(port: i32, n: i64) -> None:
+    handle: i64 = socket.connect_tcp("127.0.0.1", port)
+    socket.set_timeout_secs(handle, 10.0)
+    i: i64 = 0
+    while i < n:
+        sent: i32 = socket.send(handle, "echo-png")
+        reply: str = socket.recv_exact(handle, 8i32)
+        i = i + 1
+    socket.close(handle)
+
+fn run() -> i32:
+    n: i64 = 2000
+    chosen_port: i32 = 0i32
+    listener: i64 = 0
+    attempt: i32 = 0i32
+    while attempt < 16i32 and chosen_port == 0i32:
+        candidate: i32 = 51100i32 + attempt
+        try:
+            listener = socket.listen_tcp("127.0.0.1", candidate, 8i32)
+            chosen_port = candidate
+        except IOError as e:
+            chosen_port = 0i32
+        attempt = attempt + 1i32
+
+    if chosen_port == 0i32:
+        println("error=no_port")
+        return 1
+
+    t: Thread = Thread(fn() -> None: client(chosen_port, n))
+    t.start()
+
+    pair: Tuple[i64, str] = socket.accept(listener)
+    conn: i64 = pair.0
+    socket.set_timeout_secs(conn, 10.0)
+    i: i64 = 0
+    while i < n:
+        req: str = socket.recv_exact(conn, 8i32)
+        socket.send(conn, req)
+        i = i + 1
+
+    socket.close(conn)
+    socket.close_listener(listener)
+    t.join()
+    println("roundtrips=" + str(n))
+    return 0
+
+fn main() -> i32:
+    return run()
