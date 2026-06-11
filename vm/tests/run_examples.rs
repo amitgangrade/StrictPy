@@ -93,6 +93,14 @@ fn mandelbrot_renders_fractal() {
 /// hasn't fully wired lambda-capture lowering through the
 /// `Thread(fn() -> None: ...)` form, this test surfaces the resulting
 /// VmError so the failure is visible.
+///
+/// BUG-044: with the example's original `Channel[i32](16)` and both
+/// threads running concurrently, an early consumer break (see the
+/// try_recv note below) left the producer blocked forever on a full
+/// channel — `t1.join()` deadlocked and this test hung the whole suite
+/// (observed holding a CI runner for hours). The example now buffers all
+/// sends (capacity > send count) and joins the producer before starting
+/// the consumer, so the drain is deterministic: all 100 lines, every run.
 #[test]
 fn producer_runs() {
     let p = compile_to_temp("producer.spy");

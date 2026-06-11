@@ -532,3 +532,33 @@ Surfaced by an n-body benchmark where every planet mass derived from
   repro end-to-end through the VM, declaration-order independence,
   call-in-initialiser rejected, reference cycle rejected);
   `compiler/tests/conformance_negative.rs::const_init_not_compile_time_rejected`.
+
+---
+
+## Deferred: BUG-044 — `try_recv` conflates "empty" and "closed"; producer.spy could deadlock
+
+Surfaced by the BUG-043 CI work — the first runs where `cargo test
+--workspace` actually executed on a CI runner. `run_examples.rs::
+producer_runs` hung nondeterministically (locally: pass in 0.01s or hang
+forever on the same binary; on CI it held a runner in `cargo test` for
+hours).
+
+- **Cause (two layers):**
+  1. `vm/src/builtins.rs::ChannelTryRecv` returns the same `None`
+     sentinel for `TryRecvError::Empty` and `TryRecvError::Disconnected`,
+     so a consumer cannot distinguish "no data yet" from "closed". This
+     is the documented M5 limitation.
+  2. `examples/producer.spy` sent 100 items through a `Channel[i32](16)`
+     while its consumer breaks on the first `none`. When the consumer
+     won the race mid-stream, the producer blocked forever on the full
+     channel and `t1.join()` deadlocked — the program never exited.
+- **Mitigation (this branch):** the example now buffers all sends
+  (capacity 128 > 100) and joins the producer before starting the
+  consumer, so the consumer deterministically drains the full stream
+  before its first `none` — no deadlock, no early-exit flake. CI jobs
+  also carry `timeout-minutes` so any future hang fails in bounded time.
+- **Proper fix sketch:** give channels a real closed signal — either
+  `try_recv` raising/returning a distinguishable "closed" value
+  (runtime + spec §16.3 change), or a `ch.is_closed()` predicate, or a
+  blocking `recv` + `except ChannelClosedError` consumer idiom in the
+  example. Needs a spec decision, so deferred.
