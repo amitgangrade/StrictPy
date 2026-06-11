@@ -399,6 +399,24 @@ fn f() -> i32:
         spec_section: "§6.3",
         description: "use of name before its declaration",
     },
+    // ── §4.1 const_decl: module-level `final` initialisers ──────────────
+    NegativeCase {
+        name: "const_init_not_compile_time_rejected",
+        source: "\
+fn f() -> i64:
+    return 1
+
+final X: i64 = f()
+
+fn main() -> i32:
+    return 0
+",
+        expected_category: ErrorCategory::Semantic,
+        spec_section: "§4.1",
+        description: "module-level `final` initialiser must be compile-time \
+                      evaluable (a call is not); silently lowering to 0 was \
+                      the historical bug",
+    },
 ];
 
 #[test]
