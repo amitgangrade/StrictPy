@@ -341,7 +341,7 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             };
             Ok(len as u64)
         }
-        NativeFn::ListLen | NativeFn::SetLen => {
+        NativeFn::ListLen => {
             let p = arg_u64(args, 0);
             if p == 0 {
                 return Ok(0);
@@ -355,7 +355,8 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         }
         // M7: DictRepr stores a `handle` at offset 16, not a `length`, so
         // we have to look the dict up in the side table to count entries.
-        NativeFn::DictLen => {
+        // Sets are DictRepr-backed, so SetLen takes the same path.
+        NativeFn::DictLen | NativeFn::SetLen => {
             let dp = arg_u64(args, 0) as *const DictRepr;
             if dp.is_null() {
                 return Ok(0);
@@ -985,10 +986,37 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         }
 
         // ── Sets ────────────────────────────────────────────────────────
-        NativeFn::SetAdd | NativeFn::SetHas => {
-            // Set is just sugar on dict-with-unit-value; M3 codegen does
-            // not currently emit these. Deferred to M6.
-            Err(VmError::Trap(format!("native {:?}: deferred to M6", nf)))
+        // Set[T] is sugar on dict-with-unit-value: a Set value is a
+        // DictRepr whose side-table slot maps a canonical string key per
+        // element to 1. The compiler appends a TypeTag operand (I64-like /
+        // F64 / Ref-as-str, derived from the set's static element type) so
+        // the VM knows how to canonicalise the element — see
+        // `set_elem_key`. Args: [set_ptr, elem, type_tag].
+        NativeFn::SetAdd => {
+            let sp = arg_u64(args, 0) as *const DictRepr;
+            if sp.is_null() {
+                return Err(VmError::UncaughtException {
+                    type_name: "NullPointerError".into(),
+                    message: "add on null set".into(),
+                });
+            }
+            // SAFETY: sp heap pointer.
+            let handle = unsafe { (*sp).handle } as usize;
+            let key = set_elem_key(args);
+            with_dict_slot_mut(interp, handle, |slot| {
+                slot.data.insert(key, 1);
+            })?;
+            Ok(0)
+        }
+        NativeFn::SetHas => {
+            let sp = arg_u64(args, 0) as *const DictRepr;
+            if sp.is_null() {
+                return Ok(0);
+            }
+            // SAFETY: sp heap pointer.
+            let handle = unsafe { (*sp).handle } as usize;
+            let key = set_elem_key(args);
+            with_dict_slot(interp, handle, |slot| slot.data.contains_key(&key) as u64)
         }
 
         // ── Range ───────────────────────────────────────────────────────
@@ -9000,6 +9028,27 @@ fn channel_clone_receiver(
 /// closure body run under the dict-table lock; the closure must not allocate
 /// on the heap (which would re-acquire the heap lock — fine — but should not
 /// re-enter the dict table). M5/M6 dict helpers only do `HashMap` ops.
+/// Canonical dict-slot key for a set element (args = [set, elem, tag]).
+/// The TypeTag operand is emitted by the compiler from the set's static
+/// element type: int-like elements (all integer widths, bool, char) key
+/// on their signed decimal value, floats on their bit pattern (with -0.0
+/// folded onto +0.0 so `0.0 in {-0.0}` holds), and strings on their
+/// content. Sets are statically homogeneous, so the per-tag key spaces
+/// can't collide within one set.
+fn set_elem_key(args: &[u64]) -> String {
+    use strictpy_shared::TypeTag;
+    let x = arg_u64(args, 1);
+    let tag = arg_u64(args, 2) as u8;
+    if tag == TypeTag::F64 as u8 {
+        let bits = if x == (-0.0f64).to_bits() { 0 } else { x };
+        format!("f{bits:016x}")
+    } else if tag == TypeTag::Ref as u8 {
+        arg_str(args, 1)
+    } else {
+        (x as i64).to_string()
+    }
+}
+
 fn with_dict_slot<F, R>(interp: &Interpreter, handle: usize, f: F) -> Result<R, VmError>
 where
     F: FnOnce(&crate::interp::DictSlot) -> R,
