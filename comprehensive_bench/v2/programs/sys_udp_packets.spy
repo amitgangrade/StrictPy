@@ -1,0 +1,45 @@
+"""Loopback UDP: send/recv 5000 datagrams one at a time (send then recv, so
+nothing is dropped); print received count + byte total."""
+import socket
+
+fn run() -> i32:
+    n: i64 = 5000
+
+    # Bind the receiver with port retry.
+    chosen_port: i32 = 0i32
+    recv_sock: i64 = 0
+    attempt: i32 = 0i32
+    while attempt < 16i32 and chosen_port == 0i32:
+        candidate: i32 = 51300i32 + attempt
+        try:
+            recv_sock = socket.udp_bind("127.0.0.1", candidate)
+            chosen_port = candidate
+        except IOError as e:
+            chosen_port = 0i32
+        attempt = attempt + 1i32
+
+    if chosen_port == 0i32:
+        println("error=no_port")
+        return 1
+
+    send_sock: i64 = socket.udp_socket()
+
+    received: i64 = 0
+    byte_total: i64 = 0
+    i: i64 = 0
+    while i < n:
+        payload: str = "pkt-" + str(i) + "-payload"
+        sent: i32 = socket.udp_send_to(send_sock, payload, "127.0.0.1", chosen_port)
+        got: Tuple[str, str, i32] = socket.udp_recv_from(recv_sock, 256i32)
+        received = received + 1
+        byte_total = byte_total + i64(len(got.0))
+        i = i + 1
+
+    socket.udp_close(send_sock)
+    socket.udp_close(recv_sock)
+    println("received=" + str(received))
+    println("bytes=" + str(byte_total))
+    return 0
+
+fn main() -> i32:
+    return run()

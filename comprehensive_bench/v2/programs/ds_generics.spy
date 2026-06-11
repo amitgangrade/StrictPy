@@ -1,0 +1,38 @@
+# ds_generics: generic Box[T] / Pair[K, V] classes used in a hot loop.
+
+final class Box[T]:
+    value: T
+    fn __init__(self, v: T) -> None:
+        self.value = v
+    fn unwrap(self) -> T:
+        return self.value
+
+final class Pair[K, V]:
+    key: K
+    value: V
+    fn __init__(self, k: K, v: V) -> None:
+        self.key = k
+        self.value = v
+
+fn run() -> i32:
+    n: i64 = 400000
+    box_sum: i64 = 0
+    pair_sum: i64 = 0
+    key_len_sum: i64 = 0
+    i: i64 = 0
+    while i < n:
+        b: Box[i64] = Box(i % 1000)
+        box_sum = box_sum + b.unwrap()
+        p: Pair[str, i64] = Pair("p" + str(i % 50), i % 313)
+        pair_sum = pair_sum + p.value
+        key_len_sum = key_len_sum + len(p.key)
+        i = i + 1
+    sb: Box[str] = Box("checksum")
+    println("box_sum=" + str(box_sum))
+    println("pair_sum=" + str(pair_sum))
+    println("key_len_sum=" + str(key_len_sum))
+    println("str_box=" + sb.unwrap())
+    return 0
+
+fn main() -> i32:
+    return run()

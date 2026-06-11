@@ -1,0 +1,30 @@
+# ds_set_ops: set-shaped workload (dedupe + membership).
+# NOTE: StrictPy Set[T] is unusable in practice: .add()/.has()/.length() don't
+# exist in the compiler, set comprehensions don't run, and even `x in set`
+# traps at runtime with "native SetHas: deferred to M6". The only way to
+# express a set in StrictPy today is a Dict[str, i64] with throwaway values,
+# which is what this program does. The Python twin uses a real set.
+
+fn run() -> i32:
+    n: i64 = 300000
+    members: Dict[str, i64] = {}
+    i: i64 = 0
+    while i < n:
+        members[str(i * 2)] = 1
+        i = i + 1
+    hits: i64 = 0
+    misses: i64 = 0
+    i = 0
+    while i < n * 2:
+        if members.has(str(i)):
+            hits = hits + 1
+        else:
+            misses = misses + 1
+        i = i + 1
+    println("size=" + str(len(members)))
+    println("hits=" + str(hits))
+    println("misses=" + str(misses))
+    return 0
+
+fn main() -> i32:
+    return run()

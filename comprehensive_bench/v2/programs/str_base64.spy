@@ -1,0 +1,32 @@
+# str_base64: encode+decode loop over ASCII payloads (StrictPy base64 works
+# on str-as-byte-buffer); printed lengths/round-trip counts match Python.
+
+import base64
+
+fn run() -> i32:
+    reps: i64 = 20000
+    total_enc: i64 = 0
+    ok: i64 = 0
+    sample: str = ""
+    i: i64 = 0
+    while i < reps:
+        piece: str = "data:" + str(i) + ";chunk-" + str((i * 31) % 997) + ";"
+        payload: str = ""
+        k: i64 = 0
+        while k < 40:
+            payload = payload + piece
+            k = k + 1
+        enc: str = base64.encode(payload)
+        dec: str = base64.decode(enc)
+        total_enc = total_enc + i64(len(enc))
+        if dec == payload:
+            ok = ok + 1
+        sample = enc.slice(0, 24)
+        i = i + 1
+    println("total_enc=" + str(total_enc))
+    println("ok=" + str(ok))
+    println("sample=" + sample)
+    return 0
+
+fn main() -> i32:
+    return run()

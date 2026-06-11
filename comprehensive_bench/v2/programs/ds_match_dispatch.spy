@@ -1,0 +1,58 @@
+# ds_match_dispatch: sealed expression tree (Num/Add/Mul) evaluated many
+# times with match/case. All arithmetic is mod 1000003 to avoid overflow.
+
+sealed class Expr:
+    fn __init__(self) -> None:
+        pass
+
+final class Num(Expr):
+    val: i64
+    fn __init__(self, val: i64) -> None:
+        self.val = val
+
+final class Add(Expr):
+    lhs: Expr
+    rhs: Expr
+    fn __init__(self, lhs: Expr, rhs: Expr) -> None:
+        self.lhs = lhs
+        self.rhs = rhs
+
+final class Mul(Expr):
+    lhs: Expr
+    rhs: Expr
+    fn __init__(self, lhs: Expr, rhs: Expr) -> None:
+        self.lhs = lhs
+        self.rhs = rhs
+
+fn build(depth: i64, salt: i64) -> Expr:
+    if depth == 0:
+        return Num(salt % 10 + 1)
+    if salt % 2 == 0:
+        return Add(build(depth - 1, salt + 1), build(depth - 1, salt * 3 + 1))
+    return Mul(build(depth - 1, salt + 2), build(depth - 1, salt * 2 + 1))
+
+fn eval_expr(e: Expr) -> i64:
+    match e:
+        case Num(v):
+            return v
+        case Add(l, r):
+            return (eval_expr(l) + eval_expr(r)) % 1000003
+        case Mul(l, r):
+            return (eval_expr(l) * eval_expr(r)) % 1000003
+    return 0
+
+fn run() -> i32:
+    tree: Expr = build(10, 12345)
+    rounds: i64 = 150
+    acc: i64 = 0
+    r: i64 = 0
+    while r < rounds:
+        acc = (acc + eval_expr(tree)) % 1000003
+        r = r + 1
+    println("rounds=" + str(rounds))
+    println("eval=" + str(eval_expr(tree)))
+    println("acc=" + str(acc))
+    return 0
+
+fn main() -> i32:
+    return run()

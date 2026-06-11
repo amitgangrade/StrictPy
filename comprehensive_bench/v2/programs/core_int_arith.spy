@@ -1,0 +1,33 @@
+# core_int_arith: tight i64 loop mixing + - * // % and comparisons.
+# Collatz-style iteration over many seeds, accumulating a checksum.
+
+fn collatz_steps(n0: i64) -> i64:
+    n: i64 = n0
+    steps: i64 = 0
+    while n != 1:
+        if n % 2 == 0:
+            n = n // 2
+        else:
+            n = n * 3 + 1
+        steps = steps + 1
+    return steps
+
+fn run() -> i32:
+    total: i64 = 0
+    best: i64 = 0
+    best_seed: i64 = 0
+    checksum: i64 = 0
+    for seed: i64 in range(1, 20001):
+        s: i64 = collatz_steps(seed)
+        total = total + s
+        if s > best:
+            best = s
+            best_seed = seed
+        checksum = (checksum * 31 + s) % 1000000007
+    println("int_arith_total=" + str(total))
+    println("int_arith_best_seed=" + str(best_seed))
+    println("int_arith_checksum=" + str(checksum))
+    return 0
+
+fn main() -> i32:
+    return run()

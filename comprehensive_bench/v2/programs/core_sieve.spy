@@ -1,0 +1,24 @@
+# core_sieve: sieve of Eratosthenes with a List[bool]; count primes below N.
+
+fn run() -> i32:
+    n: i64 = 2000000
+    sieve: List[bool] = []
+    for k: i64 in range(n):
+        sieve.append(true)
+    sieve[0] = false
+    sieve[1] = false
+    i: i64 = 2
+    while i * i < n:
+        if sieve[i]:
+            for j: i64 in range(i * i, n, i):
+                sieve[j] = false
+        i = i + 1
+    count: i64 = 0
+    for p: i64 in range(2, n):
+        if sieve[p]:
+            count = count + 1
+    println("sieve_count=" + str(count))
+    return 0
+
+fn main() -> i32:
+    return run()

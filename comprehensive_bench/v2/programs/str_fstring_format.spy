@@ -1,0 +1,23 @@
+# str_fstring_format: render N rows like f"row {name} -> {score} pts" with
+# str() conversions; print total length.
+# NOTE: f-strings do not parse in the current spy build (E0001 at FStrStart),
+# so StrictPy renders the same row via concatenation.
+
+fn run() -> i32:
+    n: i64 = 600000
+    total_len: i64 = 0
+    last: str = ""
+    i: i64 = 0
+    while i < n:
+        name: str = "user" + str(i % 1000)
+        sc: str = str(i * 7 % 10000)
+        row: str = "row " + name + " -> " + sc + " pts"
+        total_len = total_len + i64(len(row))
+        last = row
+        i = i + 1
+    println("total_len=" + str(total_len))
+    println("last=" + last)
+    return 0
+
+fn main() -> i32:
+    return run()

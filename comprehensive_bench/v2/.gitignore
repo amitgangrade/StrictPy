@@ -1,0 +1,6 @@
+build/
+__pycache__/
+__spycache__/
+*.spyc
+*.pyc
+spy_clean_head.exe

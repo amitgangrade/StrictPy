@@ -1,0 +1,33 @@
+# core_bitops: xorshift-style PRNG + popcount via shifts/masks.
+# IMPORTANT: StrictPy BUG discovered while writing this benchmark — bitwise
+# ops on i64 (<<, >>, and & at least) are evaluated in 32-bit width:
+#   a: i64 = 2463534242;  a >> 1  ==> -915716527   (Python: 1231767121)
+#   a << 1                ==> 632101188            (Python: 4927068484)
+# A >> of a value >= 2^31 therefore sign-extends and a `while v != 0: v = v >> 1`
+# popcount loop NEVER terminates. To get identical semantics in both languages
+# this kernel keeps every bitwise operand AND result below 2^31.
+
+fn popcount31(v0: i64) -> i64:
+    v: i64 = v0
+    c: i64 = 0
+    while v != 0:
+        c = c + (v & 1)
+        v = v >> 1
+    return c
+
+fn run() -> i32:
+    x: i64 = 123456789
+    acc: i64 = 0
+    i: i64 = 0
+    while i < 400000:
+        x = x ^ ((x & 262143) << 13)
+        x = x ^ (x >> 17)
+        x = x ^ ((x & 67108863) << 5)
+        acc = (acc + popcount31(x) * 31 + (x & 255)) % 1000000007
+        i = i + 1
+    println("bitops_acc=" + str(acc))
+    println("bitops_final=" + str(x))
+    return 0
+
+fn main() -> i32:
+    return run()

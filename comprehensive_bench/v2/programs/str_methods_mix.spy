@@ -1,0 +1,45 @@
+# str_methods_mix: hot loop over a list of messy strings applying the NATIVE
+# string methods both languages share: strip, replace, contains/in,
+# startswith, endswith. (Case conversion is excluded here: StrictPy has no
+# str.lower()/upper() at all — that gap is measured in str_http_parse, which
+# needs a manual per-char ASCII helper.)
+
+fn process(msgs: List[str], reps: i64) -> Tuple[i64, i64, i64, i64]:
+    c_contains: i64 = 0
+    c_starts: i64 = 0
+    c_ends: i64 = 0
+    total_len: i64 = 0
+    r: i64 = 0
+    while r < reps:
+        for m: str in msgs:
+            t: str = m.strip()
+            rep: str = t.replace("-", "_")
+            if t.contains("Alpha"):
+                c_contains = c_contains + 1
+            if t.startswith("MSG"):
+                c_starts = c_starts + 1
+            if t.endswith("gamma"):
+                c_ends = c_ends + 1
+            total_len = total_len + i64(len(rep)) + i64(len(t))
+        r = r + 1
+    return (c_contains, c_starts, c_ends, total_len)
+
+fn run() -> i32:
+    msgs: List[str] = []
+    i: i64 = 0
+    while i < 200:
+        suffix: str = "delta"
+        if i % 3 == 0:
+            suffix = "gamma"
+        msgs.append("  MSG-" + str(i) + " Alpha beta " + suffix + "  ")
+        i = i + 1
+
+    c_contains, c_starts, c_ends, total_len = process(msgs, 4000)
+    println("contains=" + str(c_contains))
+    println("starts=" + str(c_starts))
+    println("ends=" + str(c_ends))
+    println("total_len=" + str(total_len))
+    return 0
+
+fn main() -> i32:
+    return run()

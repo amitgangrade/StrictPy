@@ -1,0 +1,29 @@
+"""Binary pack/unpack loop of mixed primitives (u32 + f64 + u64, big-endian);
+print integer checksum."""
+import struct
+
+fn run() -> i32:
+    checksum: i64 = 0
+    i: i64 = 0
+    while i < 400000:
+        a: i64 = i % 4096
+        x: f64 = f64(i) * 0.5
+        b: i64 = i * 1234567
+
+        buf: str = struct.pack_u32_be(a) +
+            struct.pack_f64_be(x) +
+            struct.pack_u64_be(b)
+
+        a2: i64 = struct.unpack_u32_be(buf, 0)
+        x2: f64 = struct.unpack_f64_be(buf, 4)
+        b2: i64 = struct.unpack_u64_be(buf, 12)
+
+        checksum = checksum + a2 + i64(x2 * 2.0) + (b2 % 1000)
+        i = i + 1
+
+    println("checksum=" + str(checksum))
+    println("iters=" + str(400000))
+    return 0
+
+fn main() -> i32:
+    return run()

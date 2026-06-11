@@ -1,0 +1,29 @@
+# ds_nullable: functions returning i64?, hot loop with is-none checks and
+# ?? coalescing.
+
+fn lookup(i: i64) -> i64?:
+    if i % 3 == 0:
+        return none
+    return i % 97
+
+fn run() -> i32:
+    n: i64 = 1000000
+    none_count: i64 = 0
+    total: i64 = 0
+    coalesced: i64 = 0
+    i: i64 = 0
+    while i < n:
+        v: i64? = lookup(i)
+        if v is none:
+            none_count = none_count + 1
+        else:
+            total = total + v
+        coalesced = coalesced + (lookup(i + 1) ?? 5)
+        i = i + 1
+    println("none_count=" + str(none_count))
+    println("total=" + str(total))
+    println("coalesced=" + str(coalesced))
+    return 0
+
+fn main() -> i32:
+    return run()

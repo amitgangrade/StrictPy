@@ -1,0 +1,45 @@
+"""Datetime epoch math: ISO roundtrips, add_days, field sums and weekday
+distribution over N LCG-derived timestamps; print numeric checksums only."""
+import datetime
+
+fn run() -> i32:
+    n: i64 = 60000
+    state: i64 = 123456789
+    roundtrip_ok: i64 = 0
+    ymd_sum: i64 = 0
+    shifted_wd_sum: i64 = 0
+    wd_counts: List[i64] = [0, 0, 0, 0, 0, 0, 0]
+
+    i: i64 = 0
+    while i < n:
+        state = (state * 1103515245 + 12345) % 2147483648
+        ts: i64 = state % 2000000000
+
+        iso: str = datetime.to_iso(ts)
+        back: i64 = datetime.from_iso(iso)
+        if back == ts:
+            roundtrip_ok = roundtrip_ok + 1
+
+        ymd_sum = ymd_sum + i64(datetime.year(ts)) + i64(datetime.month(ts)) + i64(datetime.day(ts))
+
+        wd: i64 = i64(datetime.weekday(ts))
+        wd_counts[wd] = wd_counts[wd] + 1
+
+        shifted: i64 = datetime.add_days(ts, 30)
+        shifted_wd_sum = shifted_wd_sum + i64(datetime.weekday(shifted))
+        i = i + 1
+
+    dist: str = str(wd_counts[0])
+    k: i64 = 1
+    while k < 7:
+        dist = dist + "," + str(wd_counts[k])
+        k = k + 1
+
+    println("roundtrip_ok=" + str(roundtrip_ok))
+    println("ymd_sum=" + str(ymd_sum))
+    println("wd_counts=" + dist)
+    println("shifted_wd_sum=" + str(shifted_wd_sum))
+    return 0
+
+fn main() -> i32:
+    return run()
