@@ -1,43 +1,7 @@
-"""Async tasks: spawn 1000 small futures and await them all, summing the
-results; print the sum (only after every future resolved).
-
-NOTE: asyncio.run_i32 / spawn_i32 crash with an access violation in the
-current spy.exe build (see ../notes_sys.md) — this program is written to the
-documented M32 API and compiles cleanly, but cannot run until that is fixed."""
-import asyncio
-
-fn task_value(k: i64) -> i32:
-    return i32((k * k) % 1000)
-
-fn async_main() -> i32:
-    futs: List[Future[i32]] = []
-    i: i64 = 0
-    while i < 1000:
-        k: i64 = i
-        futs.append(asyncio.spawn_i32(fn() -> i32: task_value(k)))
-        i = i + 1
-
-    total: i64 = 0
-    done: i64 = 0
-    j: i64 = 0
-    while j < 1000:
-        total = total + i64(futs[j].await())
-        done = done + 1
-        j = j + 1
-
-    println("done=" + str(done))
-    println("sum=" + str(total))
-    return 0
-
-fn run() -> i32:
-    return asyncio.run_i32(async_main)
-
-fn main() -> i32:
-    return run()
 # sys_async_tasks — spawn/await throughput for the asyncio runtime.
-# 1000 tasks, each computing (i*i) % 1000; awaited in waves of 4 so the
-# underlying workers overlap. Expected output (byte-identical to the
-# CPython twin): done=1000 / sum=461500.
+# 1000 tasks, each computing (i*i) % 1000; spawned and awaited in waves of 4
+# so the underlying workers overlap. Output (byte-identical to the CPython
+# twin): done=1000 / sum=461500.
 import asyncio
 from asyncio import Future
 
@@ -46,7 +10,7 @@ final N: i64 = 1000
 fn task_value(i: i64) -> i64:
     return (i * i) % 1000
 
-fn main() -> i32:
+fn run() -> i32:
     total: i64 = 0
     done: i64 = 0
     i: i64 = 0
@@ -65,3 +29,6 @@ fn main() -> i32:
     println("done=" + str(done))
     println("sum=" + str(total))
     return 0
+
+fn main() -> i32:
+    return run()

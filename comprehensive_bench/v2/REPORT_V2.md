@@ -8,6 +8,43 @@ Speedup = CPython time ÷ StrictPy time. **>1 means StrictPy is faster.**
 
 ---
 
+## ⏩ Post-fix update (2026-06-12 rerun, after PRs #12/#14/#15 merged to main)
+
+Five of the bugs below were fixed in cloud sessions and merged. Reran the **identical suite** on a fresh `cargo build --release`. Every program in this report's body still describes the **pre-fix** state; this section is the delta.
+
+**Bugs resolved (verified):** i64 shift/bitwise 32-bit truncation (#1), `del d[k]` no-op (#4), unusable `Set` (#3), and the **asyncio access-violation crash (#5)** — `sys_async_tasks` went from a hard crash to **passing and 2.5× faster than CPython**. (Fixing async also exposed that this benchmark's `.spy`/`.py` files had two programs concatenated by the original authoring agent — both rewritten to a single clean program; the suite is now **59/59 passing**.)
+
+**Headline movement:**
+
+| | Before fixes | After fixes |
+|---|---|---|
+| Passing / correct | 58/59 | **59/59** |
+| Wins / ties / losses | 23 / 1 / 34 | **25 / 0 / 34** |
+| Geomean speedup (all) | 0.72× | **0.88×** |
+| Core compute geomean | 4.2× | **5.1×** |
+| Strings geomean | 0.15× (6.7× slower) | **0.21× (4.8× slower)** |
+| Systems geomean | 1.20× | **1.41×** |
+
+**The native string work that shipped alongside the fixes is the big story** — absolute StrictPy times dropped across the whole strings track:
+
+| Benchmark | spy before | spy after | ratio before → after |
+|---|---:|---:|---|
+| `str_http_parse` | 25,078 ms | **1,125 ms** | 290× → **14×** slower |
+| `str_split_scan` | 2,535 ms | **1,249 ms** | 12.5× → **6.1×** |
+| `str_join_build` | 2,484 ms | **1,241 ms** | 10.2× → **5.2×** |
+| `str_csv_parse` | 1,591 ms | **1,260 ms** | 7.1× → **5.5×** |
+| `str_fstring_format` | 2,059 ms | **1,626 ms** | 10.2× → **8.1×** |
+| `ds_dict_ops` | 1,918 ms | **1,534 ms** | 6.5× → **5.5×** |
+
+**Still open / not improved:**
+- `str_slice_scan` is unchanged-to-slightly-worse (**76× slower**, spy ~14.8 s) — the per-character `s[i]` + `i32(c)` scan path got no native acceleration. This is now the single worst result and the clearest remaining string bottleneck.
+- Strings still lose the track overall (4.8× geomean); dicts, exceptions, closures, generics, and FFI-shaped stdlib (struct/file-io/sqlite) are unchanged.
+- Bug #2 (final-from-final → 0) was **not** in the merged set — still reproduces.
+
+_Caveat: the rerun ran under heavier machine load (CPython baselines ~30–40% slower in absolute ms), so cross-run **ratios** are the fair comparison and absolute StrictPy ms for the string wins are the most reliable signal. Post-fix artifacts: `results_v2_postfix.json` (final), `results_v2_prefix_baseline.json` (the original clean run)._
+
+---
+
 ## Executive summary
 
 | | Result |
