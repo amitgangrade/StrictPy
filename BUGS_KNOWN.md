@@ -493,3 +493,25 @@ release binary is missing (`compile_and_run` returns `None`), so
   thread is currently waiting on. Also worth making the probe tests
   fail loudly (not skip) when the spy binary is absent, so CI actually
   exercises them.
+
+---
+
+## Deferred: BUG-043 — producer.spy (threads + channel) hangs intermittently
+
+Found while validating the Set-runtime PR: the full-suite run stalled in
+`vm/tests/run_examples.rs::producer_runs` (31 minutes, zero CPU, thread
+asleep). **Reproduced on unmodified main** (`2788b0c`): ~1 hang in 8 direct
+runs of `target/debug/spy examples/producer.spy` (the process blocks
+forever; `timeout 60` kills it). Not caused by — and not fixed by — the
+Set work; the Set runtime only touches the dict side table.
+
+- **Repro:** `for i in $(seq 20); do timeout 60 target/debug/spy
+  examples/producer.spy >/dev/null; echo "run $i: $?"; done` — expect an
+  occasional `124`.
+- **Shape:** producer/consumer over `Channel[i64]` with two OS threads;
+  zero CPU while stuck suggests a lost-wakeup / missed-close race in the
+  channel recv path (consumer parked after the producer's last send or
+  close), not a spin.
+- **Workaround:** CI skips `producer_runs` (`-- --skip producer_runs` in
+  `.github/workflows/ci.yml`) so the suite stays deterministic; the test
+  still runs locally. Remove the skip when the race is fixed.
