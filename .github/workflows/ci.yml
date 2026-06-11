@@ -15,6 +15,12 @@ env:
   # CMake 4 honours this as an environment variable; harmless on older
   # CMake installs.
   CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+  # m33_precise_gc::recursive_allocation_does_not_leak_or_crash drives
+  # deep recursion through the interpreter. MSVC debug frames are larger
+  # than the Linux ones, so libtest's default 2 MiB worker stack
+  # overflows on Windows (STATUS_STACK_OVERFLOW) while passing on Linux.
+  # std::thread — and therefore libtest workers — honour this override.
+  RUST_MIN_STACK: "16777216"
 
 jobs:
   test:
