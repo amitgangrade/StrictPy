@@ -75,6 +75,21 @@ jobs:
       - name: cargo build (debug, full workspace)
         run: cargo build --workspace --verbose
 
+      # On a fresh build the sdl2-sys `bundled` build script copies
+      # SDL2.dll into target\debug, but when rust-cache restores the
+      # dependency artifacts the build script doesn't re-run while the
+      # staged DLL was pruned with the workspace artifacts — every test
+      # binary then dies at startup with STATUS_DLL_NOT_FOUND. Re-stage
+      # it from the cached build output.
+      - name: Stage SDL2.dll next to test binaries (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem -Path target\debug\build -Recurse -Filter SDL2.dll | Select-Object -First 1
+          if (-not $dll) { Write-Error "SDL2.dll not found under target\debug\build"; exit 1 }
+          Copy-Item $dll.FullName target\debug\ -Force
+          Copy-Item $dll.FullName target\debug\deps\ -Force
+
       # producer_runs is excluded from the parallel sweep: when the 7
       # run_examples tests execute as parallel threads in one process, the
       # threaded producer/consumer example intermittently deadlocks on a
