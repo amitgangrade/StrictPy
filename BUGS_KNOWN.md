@@ -588,3 +588,27 @@ release binary is missing (`compile_and_run` returns `None`), so
   thread is currently waiting on. Also worth making the probe tests
   fail loudly (not skip) when the spy binary is absent, so CI actually
   exercises them.
+
+---
+
+## Deferred: BUG-044 — producer.spy channel hang reproduces standalone too
+
+Same underlying flake as the producer_runs notes under BUG-043 (which
+this entry extends — it was independently found while validating the
+Set-runtime PR). One correction to those notes: the hang is NOT limited
+to the parallel test sweep. Direct standalone runs of the example
+reproduce it on unmodified main (`2788b0c`): ~1 hang in 8 runs of
+`target/debug/spy examples/producer.spy` (process blocks forever, zero
+CPU; `timeout 60` kills it), plus one 31-minute zero-CPU stall inside
+the full-suite run.
+
+- **Repro:** `for i in $(seq 20); do timeout 60 target/debug/spy
+  examples/producer.spy >/dev/null; echo "run $i: $?"; done` — expect an
+  occasional `124`.
+- **Shape:** producer/consumer over `Channel[i64]` with two OS threads;
+  zero CPU while stuck suggests a lost-wakeup / missed-close race in the
+  channel recv path (consumer parked after the producer's last send or
+  close), not a spin — consistent with the futex-wait observation in
+  the BUG-043 notes, but without the parallel-sweep / loaded-box caveat.
+- **CI handling:** see BUG-043 notes (skipped in the parallel sweep,
+  isolated+retried on Linux, skipped on Windows).

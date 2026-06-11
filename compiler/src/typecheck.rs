@@ -789,6 +789,29 @@ impl TypeChecker {
                 }
                 return Ok(ty);
             }
+            Expr::Set { elems, span } => {
+                // Mirror the List branch: push the expected element type
+                // into each element so `s: Set[i64] = {0}` checks the
+                // literal against i64 instead of synthesising Set[i32].
+                let elem_expected = match expected {
+                    Ty::Generic { base: TypeCtor::Set, args } if args.len() == 1 => Some(args[0].clone()),
+                    _ => None,
+                };
+                let mut elem_ty = elem_expected.clone();
+                for el in elems {
+                    let t = self.check_or_synth(el, elem_ty.as_ref(), env, ctx, r)?;
+                    if elem_ty.is_none() { elem_ty = Some(t); }
+                }
+                let elem = elem_ty.unwrap_or(Ty::Never);
+                check_set_elem_ty(&elem, *span)?;
+                let ty = Ty::Generic { base: TypeCtor::Set, args: vec![elem] };
+                self.expr_types.insert((span.start, span.end), ty.clone());
+                if !is_subtype(&ty, expected, &ctx.ty_ctx()) {
+                    return Err(type_err(*span, codes::TYPE_MISMATCH,
+                        format!("expected {}, got {}", expected.display(), ty.display())));
+                }
+                return Ok(ty);
+            }
             Expr::Dict { entries, span } => {
                 let (kexp, vexp) = match expected {
                     Ty::Generic { base: TypeCtor::Dict, args } if args.len() == 2 => {
@@ -889,13 +912,27 @@ impl TypeChecker {
                 }
                 Ok(Ty::Generic { base: TypeCtor::List, args: vec![elem_ty.unwrap_or(Ty::Never)] })
             }
-            Expr::Set { elems, .. } => {
+            Expr::Set { elems, span } => {
                 let mut elem_ty: Option<Ty> = None;
                 for el in elems {
-                    let t = self.synth_expr(el, env, ctx, r)?;
-                    elem_ty = Some(t);
+                    // Unsuffixed int literals default to i64 here (guide §2:
+                    // `42` defaults to i64) — without this `{0}` synthesises
+                    // Set[i32] and is rejected against every i64-flavoured
+                    // context. Suffixed literals and non-literal elements
+                    // keep their own type.
+                    let t = if is_unsuffixed_int_literal(el) {
+                        self.check_expr(el, &Ty::Primitive(PrimTy::I64), env, ctx, r)?
+                    } else {
+                        self.synth_expr(el, env, ctx, r)?
+                    };
+                    elem_ty = Some(match elem_ty {
+                        None => t,
+                        Some(prev) => lub(&prev, &t).unwrap_or(prev),
+                    });
                 }
-                Ok(Ty::Generic { base: TypeCtor::Set, args: vec![elem_ty.unwrap_or(Ty::Never)] })
+                let elem = elem_ty.unwrap_or(Ty::Never);
+                check_set_elem_ty(&elem, *span)?;
+                Ok(Ty::Generic { base: TypeCtor::Set, args: vec![elem] })
             }
             Expr::Dict { entries, .. } => {
                 let mut kty: Option<Ty> = None;
@@ -1198,7 +1235,11 @@ impl TypeChecker {
                 let elem_ty = self.check_comprehension_elem(
                     body, elem_expected.as_ref(), &env2, ctx, r,
                     &format!("{label} comprehension body"))?;
-                Ty::Generic { base: ctor, args: vec![elem_expected.unwrap_or(elem_ty)] }
+                let elem = elem_expected.unwrap_or(elem_ty);
+                if matches!(kind, ComprehensionKind::Set) {
+                    check_set_elem_ty(&elem, span)?;
+                }
+                Ty::Generic { base: ctor, args: vec![elem] }
             }
             ComprehensionKind::Dict => {
                 let (kexp, vexp) = match expected {
@@ -1311,8 +1352,22 @@ impl TypeChecker {
                 Ok(Ty::Primitive(PrimTy::Bool))
             }
             BinOp::In | BinOp::NotIn => {
+                let rt = self.synth_expr(rhs, env, ctx, r)?;
+                // Set membership checks the probe against the element type:
+                // SetHas canonicalises by the *static* element type, so a
+                // mismatched probe would silently answer false at runtime.
+                // This also coerces unsuffixed int literals (`5 in s`).
+                let rt_inner = match &rt {
+                    Ty::Nullable(inner) => (**inner).clone(),
+                    other => other.clone(),
+                };
+                if let Ty::Generic { base: TypeCtor::Set, args } = &rt_inner {
+                    if args.len() == 1 {
+                        let _ = self.check_expr(lhs, &args[0], env, ctx, r)?;
+                        return Ok(Ty::Primitive(PrimTy::Bool));
+                    }
+                }
                 let _lt = self.synth_expr(lhs, env, ctx, r)?;
-                let _rt = self.synth_expr(rhs, env, ctx, r)?;
                 Ok(Ty::Primitive(PrimTy::Bool))
             }
             // Arithmetic / bitwise / shift
@@ -2020,7 +2075,7 @@ impl TypeChecker {
                 }
                 return Ok(Ty::Primitive(PrimTy::Unit));
             }
-            (Ty::Generic { base: TypeCtor::List, args: _ }, "len") => {
+            (Ty::Generic { base: TypeCtor::List, args: _ }, "len" | "length") => {
                 return Ok(Ty::Primitive(PrimTy::I64));
             }
             (Ty::Generic { base: TypeCtor::List, args: a }, "get") if a.len() == 1 => {
@@ -2110,6 +2165,42 @@ impl TypeChecker {
                 }
                 return Ok(Ty::Primitive(PrimTy::Bool));
             }
+            (Ty::Generic { base: TypeCtor::Dict, args: _ }, "length" | "len") => {
+                if !args.is_empty() {
+                    return Err(type_err(span, codes::TYPE_ARITY,
+                        "Dict.length takes no arguments".into()));
+                }
+                return Ok(Ty::Primitive(PrimTy::I64));
+            }
+            // Set methods — guide §6.3. Set[T] is dict-backed; `add`/`has`
+            // canonicalise the element by value, so T must be a hashable
+            // primitive (enforced at set construction, re-checked here for
+            // sets that only ever arrive through annotations).
+            (Ty::Generic { base: TypeCtor::Set, args: a }, "add") if a.len() == 1 => {
+                if args.len() != 1 {
+                    return Err(type_err(span, codes::TYPE_ARITY,
+                        "Set.add takes 1 argument: (value)".into()));
+                }
+                check_set_elem_ty(&a[0], span)?;
+                let _ = self.check_expr(&args[0].value, &a[0], env, ctx, r)?;
+                return Ok(Ty::Primitive(PrimTy::Unit));
+            }
+            (Ty::Generic { base: TypeCtor::Set, args: a }, "has" | "contains") if a.len() == 1 => {
+                if args.len() != 1 {
+                    return Err(type_err(span, codes::TYPE_ARITY,
+                        "Set.has takes 1 argument: (value)".into()));
+                }
+                check_set_elem_ty(&a[0], span)?;
+                let _ = self.check_expr(&args[0].value, &a[0], env, ctx, r)?;
+                return Ok(Ty::Primitive(PrimTy::Bool));
+            }
+            (Ty::Generic { base: TypeCtor::Set, args: _ }, "length" | "len") => {
+                if !args.is_empty() {
+                    return Err(type_err(span, codes::TYPE_ARITY,
+                        "Set.length takes no arguments".into()));
+                }
+                return Ok(Ty::Primitive(PrimTy::I64));
+            }
             // `d.remove(k) -> bool` — true iff the key was present. The
             // statement form `del d[k]` lowers to the same native and
             // discards the bool; the method form exists for callers that
@@ -2132,7 +2223,7 @@ impl TypeChecker {
                 for a in args { let _ = self.check_or_synth(&a.value, Some(&Ty::Primitive(PrimTy::I64)), env, ctx, r)?; }
                 return Ok(Ty::Primitive(PrimTy::Char));
             }
-            (Ty::Primitive(PrimTy::Str), "len") => {
+            (Ty::Primitive(PrimTy::Str), "len" | "length") => {
                 return Ok(Ty::Primitive(PrimTy::I64));
             }
             // real-world: csv_aggregate / wordcount / markov all need a
@@ -2338,6 +2429,41 @@ impl TypeChecker {
 // ─────────────────────────────────────────────────────────────────────────
 //  Helpers
 // ─────────────────────────────────────────────────────────────────────────
+
+/// Set elements must canonicalise by value — the dict-backed set runtime
+/// keys on the integer value / float bit pattern / string content (see
+/// vm/src/builtins.rs::set_elem_key). Reject element types that would
+/// otherwise silently fall back to pointer-identity keying. `Never` is
+/// unreachable from source (set literals are non-empty) but tolerated.
+fn check_set_elem_ty(elem: &Ty, span: Span) -> Result<(), CompileError> {
+    let ok = match elem {
+        Ty::Primitive(p) => {
+            (p.is_numeric() && !matches!(p, PrimTy::BigInt))
+                || matches!(p, PrimTy::Bool | PrimTy::Char | PrimTy::Str)
+        }
+        Ty::Never => true,
+        _ => false,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(type_err(span, codes::TYPE_MISMATCH,
+            format!("Set elements must be int/float/bool/char/str in v0.3, got {}",
+                    elem.display())))
+    }
+}
+
+/// `42` / `-42` with no width suffix (the forms whose type is still
+/// negotiable — see the literal-coercion branch in `check_expr`).
+fn is_unsuffixed_int_literal(e: &Expr) -> bool {
+    match e {
+        Expr::Literal { lit: Literal::Int { suffix, .. }, .. } => suffix.is_none(),
+        Expr::Unary { op: UnaryOp::Neg | UnaryOp::Pos, operand, .. } => {
+            is_unsuffixed_int_literal(operand)
+        }
+        _ => false,
+    }
+}
 
 fn type_err(span: Span, code: ErrorCode, message: String) -> CompileError {
     CompileError::Type {

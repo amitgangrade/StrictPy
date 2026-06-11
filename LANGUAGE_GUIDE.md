@@ -260,8 +260,7 @@ even_squares: List[i64] = [x * x for x: i64 in xs if x % 2i64 == 0i64]
 by_str: Dict[str, i64] = {str(n): n * n for n: i64 in xs}
 by_str_filtered: Dict[str, i64] = {str(n): n for n: i64 in xs if n > 2i64}
 
-# Set comprehension (parses + type-checks + lowers; see §11 for the set
-# runtime caveat).
+# Set comprehension — duplicates collapse (this yields {0, 1, 2}).
 mods: Set[i64] = {x % 3i64 for x: i64 in xs}
 ```
 
@@ -2344,10 +2343,18 @@ len(d)
 
 # Set[T]:
 s.add(v: T) -> None
-s.has(v: T) -> bool
-s.length() -> i64
-v in s                                   # works
+s.has(v: T) -> bool                      # alias: s.contains(v)
+s.length() -> i64                        # or len(s)
+v in s / v not in s                      # works
 ```
+
+Set element types are restricted to **int (any width), float, bool, char,
+str** — the dict-backed set runtime canonicalises elements by value (integer
+value / float bit pattern / string content), so class or container elements
+are rejected at compile time (`E2001`). Unsuffixed int elements in a set
+literal default to `i64` (`{0}` is `Set[i64]`); an annotation can pin a
+different width (`s: Set[i32] = {0}`). Iterating a set (`for x in s`) is not
+supported yet.
 
 ### 6.4 String methods
 
@@ -3315,7 +3322,7 @@ fn main() -> i32:
     return 0
 ```
 
-### 11.44 Comprehensions iterate `List[T]` only; set comprehensions don't run yet (M62a)
+### 11.44 Comprehensions iterate `List[T]` only (M62a)
 
 List, dict, and set comprehensions are supported (syntax in §3.7.1). Two
 caveats:
@@ -3326,11 +3333,11 @@ caveats:
   list first). A non-list iterable is rejected with `E2040`.
 * **The loop-variable annotation is required** (`for x: T in xs`) and is not
   inferred from the element type, mirroring the `for` statement.
-* **Set comprehensions parse, type-check, and lower, but the VM has no set
-  runtime yet** — exactly like set *literals* `{1, 2, 3}`, which also lower to
-  a placeholder. A `Set[T]` comprehension builds and runs, but you can't yet
-  rely on its contents at runtime. Use a `List[T]` or `Dict[str, bool]` if you
-  need a working collection today.
+
+(Set comprehensions used to lower to a placeholder because the VM had no set
+runtime; they now build a real `Set[T]` — duplicates collapse, and `in` /
+`.has()` / `len()` all work on the result. See §6.3 for the element-type
+restriction.)
 
 ```python
 xs: List[i64] = [1i64, 2i64, 3i64]
