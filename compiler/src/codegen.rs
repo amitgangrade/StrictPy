@@ -309,12 +309,30 @@ impl<'a, S: ConstSink> Codegen<'a, S> {
                 },
                 dst, &argr,
             ),
-            IROp::IAnd => self.write_bin(Opcode::IAndI32, dst, &argr),
-            IROp::IOr  => self.write_bin(Opcode::IOrI32, dst, &argr),
-            IROp::IXor => self.write_bin(Opcode::IXorI32, dst, &argr),
-            IROp::IShl => self.write_bin(Opcode::IShlI32, dst, &argr),
-            IROp::IShr => self.write_bin(Opcode::IShrI32, dst, &argr),
-            IROp::INot => self.write_un(Opcode::INotI32, dst, &argr),
+            IROp::IAnd => self.write_bin(
+                op_for_iand(ty).or_else(|| op_for_iand(&operand_ty)).unwrap_or(Opcode::IAndI32),
+                dst, &argr,
+            ),
+            IROp::IOr => self.write_bin(
+                op_for_ior(ty).or_else(|| op_for_ior(&operand_ty)).unwrap_or(Opcode::IOrI32),
+                dst, &argr,
+            ),
+            IROp::IXor => self.write_bin(
+                op_for_ixor(ty).or_else(|| op_for_ixor(&operand_ty)).unwrap_or(Opcode::IXorI32),
+                dst, &argr,
+            ),
+            IROp::IShl => self.write_bin(
+                op_for_ishl(ty).or_else(|| op_for_ishl(&operand_ty)).unwrap_or(Opcode::IShlI32),
+                dst, &argr,
+            ),
+            IROp::IShr => self.write_bin(
+                op_for_ishr(ty).or_else(|| op_for_ishr(&operand_ty)).unwrap_or(Opcode::IShrI32),
+                dst, &argr,
+            ),
+            IROp::INot => self.write_un(
+                op_for_inot(ty).or_else(|| op_for_inot(&operand_ty)).unwrap_or(Opcode::INotI32),
+                dst, &argr,
+            ),
 
             IROp::FAdd => self.write_bin(
                 if matches!(operand_ty, Ty::Primitive(PrimTy::F32)) { Opcode::FAddF32 }
@@ -824,6 +842,75 @@ pub fn op_for_idiv(ty: &Ty) -> Option<Opcode> {
     }
 }
 
+// Bitwise / shift ops were hardwired to the I32 opcodes, so `<<`, `>>`,
+// `&`, `|`, `^`, `~` on i64/u64 operands were evaluated in 32-bit width
+// (e.g. `2463534242 >> 1` printed -915716527 instead of 1231767121).
+// Dispatch on operand width like the arithmetic ops above. Note `IAnd`/
+// `IOr` are also emitted for boolean `and`/`or` and chained-compare
+// combining; those have `Bool` operands, return `None` here, and keep
+// the I32 fallback.
+
+pub fn op_for_iand(ty: &Ty) -> Option<Opcode> {
+    match unwrap_nullable_ty(ty) {
+        Ty::Primitive(PrimTy::I32) => Some(Opcode::IAndI32),
+        Ty::Primitive(PrimTy::I64) => Some(Opcode::IAndI64),
+        Ty::Primitive(PrimTy::U32) => Some(Opcode::UAndU32),
+        Ty::Primitive(PrimTy::U64) => Some(Opcode::UAndU64),
+        _ => None,
+    }
+}
+
+pub fn op_for_ior(ty: &Ty) -> Option<Opcode> {
+    match unwrap_nullable_ty(ty) {
+        Ty::Primitive(PrimTy::I32) => Some(Opcode::IOrI32),
+        Ty::Primitive(PrimTy::I64) => Some(Opcode::IOrI64),
+        Ty::Primitive(PrimTy::U32) => Some(Opcode::UOrU32),
+        Ty::Primitive(PrimTy::U64) => Some(Opcode::UOrU64),
+        _ => None,
+    }
+}
+
+pub fn op_for_ixor(ty: &Ty) -> Option<Opcode> {
+    match unwrap_nullable_ty(ty) {
+        Ty::Primitive(PrimTy::I32) => Some(Opcode::IXorI32),
+        Ty::Primitive(PrimTy::I64) => Some(Opcode::IXorI64),
+        Ty::Primitive(PrimTy::U32) => Some(Opcode::UXorU32),
+        Ty::Primitive(PrimTy::U64) => Some(Opcode::UXorU64),
+        _ => None,
+    }
+}
+
+pub fn op_for_ishl(ty: &Ty) -> Option<Opcode> {
+    match unwrap_nullable_ty(ty) {
+        Ty::Primitive(PrimTy::I32) => Some(Opcode::IShlI32),
+        Ty::Primitive(PrimTy::I64) => Some(Opcode::IShlI64),
+        Ty::Primitive(PrimTy::U32) => Some(Opcode::UShlU32),
+        Ty::Primitive(PrimTy::U64) => Some(Opcode::UShlU64),
+        _ => None,
+    }
+}
+
+/// `>>` is arithmetic for signed operands and logical for unsigned ones.
+pub fn op_for_ishr(ty: &Ty) -> Option<Opcode> {
+    match unwrap_nullable_ty(ty) {
+        Ty::Primitive(PrimTy::I32) => Some(Opcode::IShrI32),
+        Ty::Primitive(PrimTy::I64) => Some(Opcode::IShrI64),
+        Ty::Primitive(PrimTy::U32) => Some(Opcode::UShrU32),
+        Ty::Primitive(PrimTy::U64) => Some(Opcode::UShrU64),
+        _ => None,
+    }
+}
+
+pub fn op_for_inot(ty: &Ty) -> Option<Opcode> {
+    match unwrap_nullable_ty(ty) {
+        Ty::Primitive(PrimTy::I32) => Some(Opcode::INotI32),
+        Ty::Primitive(PrimTy::I64) => Some(Opcode::INotI64),
+        Ty::Primitive(PrimTy::U32) => Some(Opcode::UNotU32),
+        Ty::Primitive(PrimTy::U64) => Some(Opcode::UNotU64),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum IntCmp { Eq, Ne, Lt, Le, Gt, Ge }
 
@@ -970,6 +1057,51 @@ mod tests {
         let emitted = emit_function(&f, &mut sink);
         // First byte must be IADD_I64 since both ops are i64.
         assert_eq!(emitted.code[0], Opcode::IAddI64 as u8);
+    }
+
+    /// Regression: bitwise/shift ops were hardwired to the I32 opcodes,
+    /// so i64/u64 operands were evaluated in 32-bit width.
+    #[test]
+    fn emits_width_correct_bitwise_opcodes() {
+        fn first_opcode(prim: PrimTy, op: IROp) -> u8 {
+            let ty = Ty::Primitive(prim);
+            let f = IRFunction {
+                id: FuncId(0),
+                name: "f".into(),
+                params: vec![ty.clone(), ty.clone()],
+                ret: ty.clone(),
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    values: vec![
+                        Value { id: 0, ty: ty.clone(), kind: ValueKind::Param { idx: 0 } },
+                        Value { id: 1, ty: ty.clone(), kind: ValueKind::Param { idx: 1 } },
+                        Value {
+                            id: 2,
+                            ty,
+                            kind: ValueKind::Op { op, args: vec![ValueId(0), ValueId(1)] },
+                        },
+                    ],
+                    terminator: Terminator::Ret { value: Some(ValueId(2)) },
+                }],
+            };
+            let mut sink = FakeSink::new();
+            emit_function(&f, &mut sink).code[0]
+        }
+
+        assert_eq!(first_opcode(PrimTy::I64, IROp::IAnd), Opcode::IAndI64 as u8);
+        assert_eq!(first_opcode(PrimTy::I64, IROp::IOr), Opcode::IOrI64 as u8);
+        assert_eq!(first_opcode(PrimTy::I64, IROp::IXor), Opcode::IXorI64 as u8);
+        assert_eq!(first_opcode(PrimTy::I64, IROp::IShl), Opcode::IShlI64 as u8);
+        assert_eq!(first_opcode(PrimTy::I64, IROp::IShr), Opcode::IShrI64 as u8);
+
+        // i32 keeps the narrow opcodes.
+        assert_eq!(first_opcode(PrimTy::I32, IROp::IAnd), Opcode::IAndI32 as u8);
+        assert_eq!(first_opcode(PrimTy::I32, IROp::IShr), Opcode::IShrI32 as u8);
+
+        // Unsigned operands pick the U variants; `>>` is logical.
+        assert_eq!(first_opcode(PrimTy::U64, IROp::IShr), Opcode::UShrU64 as u8);
+        assert_eq!(first_opcode(PrimTy::U64, IROp::IAnd), Opcode::UAndU64 as u8);
+        assert_eq!(first_opcode(PrimTy::U32, IROp::IShr), Opcode::UShrU32 as u8);
     }
 
     // ─────────────────────────────────────────────────────────────────────
