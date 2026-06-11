@@ -502,9 +502,13 @@ dispatched on operand width.
   `target/debug/spy examples/producer.spy`. It also wedged the ubuntu
   CI `cargo test` step for hours on both runs that got that far, so
   `ci.yml` now skips it in the parallel sweep and runs it isolated
-  (`--test-threads=1`, timeout + retry). Root cause untraced — the
-  cross-test trigger suggests process-global state (GC pause /
-  stackmap registry?) interacting across in-process interpreters.
+  (`--test-threads=1`, timeout + retry) on Linux. It has hung even
+  isolated on the windows runner — and GNU `timeout` under Git Bash
+  can't kill a native process tree to drive a retry — so Windows CI
+  skips it entirely; Windows coverage of producer.spy stays with local
+  runs. NOT Linux-only, NOT purely a parallel-sweep artifact. Root
+  cause untraced — suspect process-global state (GC pause / stackmap
+  registry?) or a channel race in the threaded runtime.
 - Bytecode-determinism side-finding from the audit that 115/123
   examples compile byte-identically across this change: several
   examples (`graph_lib`, `json_typed_demo`, `algorithms_lib`,
