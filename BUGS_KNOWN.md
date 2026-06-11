@@ -492,6 +492,21 @@ dispatched on operand width.
   bitwise ops on matched `I32×I32` constants, so it was never
   width-wrong — but i64 bitwise constants are simply not folded
   (missed optimization, not a correctness issue).
+- `vm/tests/run_examples.rs::producer_runs` hangs intermittently
+  (futex wait in a `strictpy-worker` thread) when the 7 example tests
+  run in parallel in one process on a loaded Linux box. Verified
+  pre-existing: `producer.spy` compiles byte-identically before/after
+  this fix, and the full `run_examples` binary from the merge-base
+  hung 4/5 runs vs 1/5 on this branch under identical load. Passes
+  reliably standalone (`--test run_examples producer_runs`) and via
+  `target/debug/spy examples/producer.spy`.
+- Bytecode-determinism side-finding from the audit that 115/123
+  examples compile byte-identically across this change: several
+  examples (`graph_lib`, `json_typed_demo`, `algorithms_lib`,
+  `test_runner`, `itertools_demo`, `job_scheduler`) compile
+  **nondeterministically run-to-run on both old and new compilers**
+  (type-table / interning order — `New { type_id }` renumbering;
+  echoes the class_id↔type_id ordering note under bug #5).
 
 ---
 
