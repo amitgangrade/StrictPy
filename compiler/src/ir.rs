@@ -2425,7 +2425,32 @@ fn lower_stmt(fb: &mut FuncBuilder, ctx: &mut LowerCtx, s: &Stmt) -> Option<()> 
             // Skip the call to assert() for now — codegen will see the discarded value.
             Some(())
         }
-        Stmt::Del { .. } => Some(()),
+        Stmt::Del { target, .. } => {
+            // Spec §7.5: `del d[k]` removes a Dict entry. The typechecker
+            // rejects every other del target (this arm used to lower the
+            // statement to nothing, so deletion silently no-opped). The
+            // native returns a bool (key was present) that the statement
+            // form discards.
+            if let Lvalue::Index { obj, indices, .. } = target {
+                let recv_ty = ctx.expr_ty(expr_span(obj));
+                if matches!(recv_ty, Ty::Generic { base: TypeCtor::Dict, .. }) {
+                    let d = lower_expr(fb, ctx, obj);
+                    let k = if let Some(i) = indices.first() {
+                        lower_expr(fb, ctx, i)
+                    } else {
+                        return Some(());
+                    };
+                    fb.push_value(
+                        Ty::Primitive(PrimTy::Bool),
+                        ValueKind::Op {
+                            op: IROp::NativeCall { native_id: NativeFn::DictRemove as u32 },
+                            args: vec![d, k],
+                        },
+                    );
+                }
+            }
+            Some(())
+        }
         Stmt::Expr { expr, .. } => {
             let _ = lower_expr(fb, ctx, expr);
             Some(())
@@ -3303,11 +3328,34 @@ fn lower_expr(fb: &mut FuncBuilder, ctx: &mut LowerCtx, e: &Expr) -> ValueId {
             dict
         }
         Expr::Set { elems, span } => {
-            for elt in elems {
-                let _ = lower_expr(fb, ctx, elt);
-            }
+            // Sets are DictRepr-backed ("dict-with-unit-value"): allocate a
+            // fresh dict slot via DictNew, then SetAdd each element. SetAdd
+            // takes a trailing TypeTag operand so the VM canonicalises the
+            // element by value (int/float/str) rather than by pointer.
             let ty = ctx.expr_ty(*span);
-            fb.push_value(ty, ValueKind::Const(IRConst::None))
+            let tag = set_elem_tag_for(&ty);
+            let set = fb.push_value(
+                ty.clone(),
+                ValueKind::Op {
+                    op: IROp::NativeCall { native_id: NativeFn::DictNew as u32 },
+                    args: vec![],
+                },
+            );
+            for elt in elems {
+                let ev = lower_expr(fb, ctx, elt);
+                let tag_v = fb.push_value(
+                    Ty::Primitive(PrimTy::I64),
+                    ValueKind::Const(IRConst::I64(tag as i64)),
+                );
+                fb.push_value(
+                    Ty::Primitive(PrimTy::Unit),
+                    ValueKind::Op {
+                        op: IROp::NativeCall { native_id: NativeFn::SetAdd as u32 },
+                        args: vec![set, ev, tag_v],
+                    },
+                );
+            }
+            set
         }
         Expr::Comprehension { .. } => lower_comprehension(fb, ctx, e),
         Expr::Unary { op, operand, span } => {
@@ -4030,11 +4078,16 @@ fn emit_binop(
                     );
                 }
                 Ty::Generic { base: TypeCtor::Set, .. } => {
+                    let tag = set_elem_tag_for(&rhs_inner);
+                    let tag_v = fb.push_value(
+                        Ty::Primitive(PrimTy::I64),
+                        ValueKind::Const(IRConst::I64(tag as i64)),
+                    );
                     return fb.push_value(
                         ty,
                         ValueKind::Op {
                             op: IROp::NativeCall { native_id: NativeFn::SetHas as u32 },
-                            args: vec![r, l],
+                            args: vec![r, l, tag_v],
                         },
                     );
                 }
@@ -4058,11 +4111,20 @@ fn emit_binop(
                 _ => None,
             };
             if let Some(native_id) = native_id {
+                let mut has_args = vec![r, l];
+                // SetHas wants the canonicalisation tag as a third operand.
+                if let Ty::Generic { base: TypeCtor::Set, .. } = &rhs_inner {
+                    let tag = set_elem_tag_for(&rhs_inner);
+                    has_args.push(fb.push_value(
+                        Ty::Primitive(PrimTy::I64),
+                        ValueKind::Const(IRConst::I64(tag as i64)),
+                    ));
+                }
                 let has = fb.push_value(
                     Ty::Primitive(PrimTy::Bool),
                     ValueKind::Op {
                         op: IROp::NativeCall { native_id },
-                        args: vec![r, l],
+                        args: has_args,
                     },
                 );
                 return fb.push_value(
@@ -4329,11 +4391,14 @@ fn lower_comprehension(fb: &mut FuncBuilder, ctx: &mut LowerCtx, e: &Expr) -> Va
                 args: vec![],
             },
         ),
-        // Sets: no runtime repr yet; mirror the set-literal placeholder. The
-        // loop body below still runs for type-checking / side effects.
+        // Sets are DictRepr-backed, same as set literals: fresh dict slot,
+        // populated via SetAdd in the loop body below.
         ComprehensionKind::Set => fb.push_value(
             result_ty.clone(),
-            ValueKind::Const(IRConst::None),
+            ValueKind::Op {
+                op: IROp::NativeCall { native_id: NativeFn::DictNew as u32 },
+                args: vec![],
+            },
         ),
     };
     // Stash the collection in a slot so the loop-body block reads a stable
@@ -4407,8 +4472,20 @@ fn lower_comprehension(fb: &mut FuncBuilder, ctx: &mut LowerCtx, e: &Expr) -> Va
                         Ty::Primitive(PrimTy::Unit),
                         ValueKind::Op { op: IROp::ListPush, args: vec![coll_v, ev] },
                     );
+                } else {
+                    let tag = set_elem_tag_for(&result_ty);
+                    let tag_v = fb.push_value(
+                        Ty::Primitive(PrimTy::I64),
+                        ValueKind::Const(IRConst::I64(tag as i64)),
+                    );
+                    fb.push_value(
+                        Ty::Primitive(PrimTy::Unit),
+                        ValueKind::Op {
+                            op: IROp::NativeCall { native_id: NativeFn::SetAdd as u32 },
+                            args: vec![coll_v, ev, tag_v],
+                        },
+                    );
                 }
-                // Sets: element lowered for type-checking; no runtime insert.
             }
             ComprehensionKind::Dict => {
                 let kv = lower_expr(fb, ctx, body);
@@ -5160,6 +5237,11 @@ fn lower_call(
                                 Ty::Generic { base: TypeCtor::Dict, .. } => {
                                     NativeFn::DictLen as u32
                                 }
+                                // Sets are DictRepr-backed too — count via
+                                // the side table, not the offset-16 read.
+                                Ty::Generic { base: TypeCtor::Set, .. } => {
+                                    NativeFn::SetLen as u32
+                                }
                                 _ => NativeFn::Len as u32,
                             };
                             return fb.push_value(
@@ -5737,6 +5819,59 @@ fn lower_method_call(
         }
     }
 
+    // Set methods: `add`/`has` need the canonicalisation TypeTag appended
+    // (same shape as the sort tag injection below); `length` maps to the
+    // side-table count.
+    if let Ty::Generic { base: TypeCtor::Set, .. } = &recv_ty {
+        let nid = match method {
+            "add" => Some(NativeFn::SetAdd),
+            "has" | "contains" => Some(NativeFn::SetHas),
+            _ => None,
+        };
+        if let Some(nid) = nid {
+            let tag = set_elem_tag_for(&recv_ty);
+            let tag_v = fb.push_value(
+                Ty::Primitive(PrimTy::I64),
+                ValueKind::Const(IRConst::I64(tag as i64)),
+            );
+            arg_vs.push(tag_v);
+            return fb.push_value(
+                ret_ty,
+                ValueKind::Op {
+                    op: IROp::NativeCall { native_id: nid as u32 },
+                    args: arg_vs,
+                },
+            );
+        }
+        if method == "length" || method == "len" {
+            return fb.push_value(
+                ret_ty,
+                ValueKind::Op {
+                    op: IROp::NativeCall { native_id: NativeFn::SetLen as u32 },
+                    args: arg_vs,
+                },
+            );
+        }
+    }
+
+    // `.length()` on the built-in containers (guide §6.3/§6.4 documents it
+    // alongside `len(x)`): dispatch on the receiver type — the name has no
+    // NativeFn::from_name entry, so without this it lands on Unknown.
+    if method == "length" {
+        let nid = match &recv_ty {
+            Ty::Generic { base: TypeCtor::List, .. } => Some(NativeFn::ListLen as u32),
+            Ty::Generic { base: TypeCtor::Dict, .. } => Some(NativeFn::DictLen as u32),
+            Ty::Primitive(PrimTy::Str) => Some(NativeFn::Len as u32),
+            _ => None,
+        };
+        if let Some(nid) = nid {
+            return fb.push_value(
+                ret_ty,
+                ValueKind::Op { op: IROp::NativeCall { native_id: nid }, args: arg_vs },
+            );
+        }
+    }
+
     // real-world: `xs.sort()` over `List[T]` needs an extra type-tag
     // operand so the VM picks the right comparator. Inject it before
     // dispatching to NativeFn::ListSort.
@@ -5832,6 +5967,30 @@ fn sort_type_tag_for(ty: &Ty) -> u8 {
     }
 }
 
+/// Map a `Set[T]` (or a bare element type) to the TypeTag operand
+/// `SetAdd`/`SetHas` expect — see vm/src/builtins.rs::set_elem_key.
+/// Integer widths, bool and char canonicalise via their value (I64),
+/// floats via their bit pattern (F64), strings via their content (Ref).
+/// The typechecker restricts set elements to these types; the I64
+/// fallback keys anything that slips through by raw bits, which never
+/// dereferences the value.
+fn set_elem_tag_for(set_ty: &Ty) -> u8 {
+    use strictpy_shared::TypeTag;
+    let elem = match set_ty {
+        Ty::Generic { args, .. } if !args.is_empty() => &args[0],
+        other => other,
+    };
+    let elem = match elem {
+        Ty::Nullable(inner) => inner.as_ref(),
+        other => other,
+    };
+    match elem {
+        Ty::Primitive(p) if p.is_float() => TypeTag::F64 as u8,
+        Ty::Primitive(PrimTy::Str) => TypeTag::Ref as u8,
+        _ => TypeTag::I64 as u8,
+    }
+}
+
 /// Pick the right `NativeFn` for `receiver.method(...)` given the static
 /// receiver type. Falls back to `NativeFn::from_name` when the method name
 /// is unambiguous across runtime classes.  (Pattern + JList + JObject
@@ -5872,6 +6031,7 @@ fn resolve_native_method(recv_ty: &Ty, method: &str) -> u32 {
             "has"    => NativeFn::DictHas    as u32,
             "keys"   => NativeFn::DictKeys   as u32,
             "values" => NativeFn::DictValues as u32,
+            "remove" => NativeFn::DictRemove as u32,
             _ => NativeFn::from_name(method)
                 .map(|n| n as u32)
                 .unwrap_or(NativeFn::Unknown as u32),

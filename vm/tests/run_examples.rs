@@ -110,6 +110,12 @@ fn producer_runs() {
     assert_eq!(code, 0, "exit code; stdout was: {out:?}");
     // Blocking recv drains everything the producer sent before
     // ChannelClosedError fires, so all 100 lines must be present.
+    // The producer sends 0..100 and closes; the consumer drains via
+    // blocking recv() and stops on ChannelClosedError. The old try_recv
+    // polling form could break early on a transient empty — and once the
+    // consumer was gone the producer blocked forever on the full bounded
+    // channel and join() deadlocked (the cause of the rare parallel-suite
+    // hang). With the race-free drain the output is exact: all 100 values.
     let count = (0..100)
         .take_while(|i| out.contains(&format!("got {i}\n")))
         .count();
@@ -117,6 +123,8 @@ fn producer_runs() {
         count, 100,
         "expected all 100 `got N` lines from the blocking-recv consumer; \
          got {count}. stdout was: {out:?}"
+        "expected the recv/ChannelClosedError drain to deliver all 100 \
+         values; got {count}. stdout was: {out:?}"
     );
 }
 
