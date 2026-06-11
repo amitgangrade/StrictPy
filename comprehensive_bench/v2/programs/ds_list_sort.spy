@@ -1,0 +1,31 @@
+# ds_list_sort: build deterministic pseudo-random lists (LCG), sort, print samples.
+
+fn run() -> i32:
+    n: i64 = 400000
+    seed: i64 = 42
+    nums: List[i64] = []
+    i: i64 = 0
+    while i < n:
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        nums.append(seed)
+        i = i + 1
+    nums.sort()
+    println("first=" + str(nums[0]))
+    println("mid=" + str(nums[n // 2]))
+    println("last=" + str(nums[n - 1]))
+
+    m: i64 = 150000
+    words: List[str] = []
+    i = 0
+    while i < m:
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        words.append("w" + str(seed % 1000000))
+        i = i + 1
+    words.sort()
+    println("wfirst=" + words[0])
+    println("wmid=" + words[m // 2])
+    println("wlast=" + words[m - 1])
+    return 0
+
+fn main() -> i32:
+    return run()

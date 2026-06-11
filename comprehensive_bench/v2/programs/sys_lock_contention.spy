@@ -1,0 +1,35 @@
+"""Lock contention: 4 threads each perform N lock-protected increments of a
+shared counter; print the final counter (after all joins)."""
+import threading
+
+fn worker(counter: List[i64], lock: i64, n: i64) -> None:
+    i: i64 = 0
+    while i < n:
+        threading.lock_acquire(lock)
+        counter[0] = counter[0] + 1
+        threading.lock_release(lock)
+        i = i + 1
+
+fn run() -> i32:
+    per_thread: i64 = 150000
+    counter: List[i64] = [0]
+    lock: i64 = threading.lock_new()
+
+    threads: List[Thread] = []
+    i: i64 = 0
+    while i < 4:
+        t: Thread = Thread(fn() -> None: worker(counter, lock, per_thread))
+        threads.append(t)
+        t.start()
+        i = i + 1
+
+    j: i64 = 0
+    while j < 4:
+        threads[j].join()
+        j = j + 1
+
+    println("counter=" + str(counter[0]))
+    return 0
+
+fn main() -> i32:
+    return run()

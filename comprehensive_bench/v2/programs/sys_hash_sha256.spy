@@ -1,0 +1,32 @@
+"""Streaming + one-shot hashing benchmark: feed many chunks through a
+streaming Hasher, then a sha256/hmac_sha256 chain; print digest of digests."""
+import hashlib
+from hashlib import Hasher
+
+fn run() -> i32:
+    # Part 1: streaming hasher fed many small chunks.
+    stream: Hasher = hashlib.new("sha256")
+    i: i64 = 0
+    while i < 80000:
+        stream.update("chunk-" + str(i) + "-abcdefghijklmnopqrstuvwxyz0123456789")
+        i = i + 1
+    stream_digest: str = stream.hexdigest()
+
+    # Part 2: one-shot sha256 chain + hmac, folded into an aggregate hasher.
+    agg: Hasher = hashlib.new("sha256")
+    d: str = "seed"
+    j: i64 = 0
+    while j < 25000:
+        d = hashlib.sha256(d + ":" + str(j))
+        hm: str = hashlib.hmac_sha256("key-" + str(j % 16), d)
+        agg.update(d)
+        agg.update(hm)
+        j = j + 1
+
+    println("stream=" + stream_digest)
+    println("chain=" + d)
+    println("final=" + agg.hexdigest())
+    return 0
+
+fn main() -> i32:
+    return run()

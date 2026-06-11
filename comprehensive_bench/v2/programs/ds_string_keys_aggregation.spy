@@ -1,0 +1,43 @@
+# ds_string_keys_aggregation: group-by aggregation. Synthetic records mapped
+# into Dict[str, i64] counters; print sorted top entries (count desc, key asc).
+
+fn pad8(n: i64) -> str:
+    s: str = str(n)
+    while len(s) < 8:
+        s = "0" + s
+    return s
+
+fn run() -> i32:
+    n: i64 = 200000
+    seed: i64 = 99
+    counts: Dict[str, i64] = {}
+    sums: Dict[str, i64] = {}
+    i: i64 = 0
+    while i < n:
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        key: str = "u" + str(seed % 1000)
+        val: i64 = seed % 100
+        if counts.has(key):
+            counts[key] = counts[key] + 1
+            sums[key] = sums[key] + val
+        else:
+            counts[key] = 1
+            sums[key] = val
+        i = i + 1
+    keys: List[str] = counts.keys()
+    ranked: List[str] = []
+    for k: str in keys:
+        ranked.append(pad8(99999999i64 - counts[k]) + k)
+    ranked.sort()
+    println("records=" + str(n))
+    println("distinct=" + str(len(counts)))
+    t: i64 = 0
+    while t < 3:
+        entry: str = ranked[t]
+        k2: str = entry.slice(8, len(entry))
+        println("top" + str(t) + "=" + k2 + ":" + str(counts[k2]) + ":" + str(sums[k2]))
+        t = t + 1
+    return 0
+
+fn main() -> i32:
+    return run()

@@ -468,6 +468,57 @@ instantly with 0xC0000005 / SIGSEGV and no output, on every branch tested
 
 ---
 
+## Fixed post-M63 (i64/u64 bitwise ops evaluated at 32-bit width)
+
+Minimal repro: `a: i64 = 2463534242` (just above 2^31), then `a >> 1`
+printed -915716527 instead of 1231767121 and `a << 1` printed 632101188
+instead of 4927068484. Consequence chains: `a & 4294967295` went
+negative, and popcount idioms `while v != 0: v = v >> 1` never
+terminated for v ≥ 2^31 (the arithmetic shift kept replicating the
+wrongly-set sign bit). `+`/`-`/`*` were unaffected because they already
+dispatched on operand width.
+
+| # | Bug | Fix location | Regression test |
+|---|-----|--------------|-----------------|
+| BUG-043 | `&`, `\|`, `^`, `<<`, `>>`, `~` on i64/u64 operands were evaluated in 32-bit width on both engines. `compiler/src/codegen.rs::emit_op` hardwired `IROp::IAnd/IOr/IXor/IShl/IShr/INot` to the `*I32` opcodes — the `*I64`/`U*64` opcodes existed in `shared/src/opcode.rs` and were implemented by the interpreter, but nothing ever emitted them. (Bytecode-level bug; the JIT faithfully lowered the W32 ops it was given.) | `compiler/src/codegen.rs`: new `op_for_iand/ior/ixor/ishl/ishr/inot` helpers dispatch on operand width like `op_for_iadd` (unsigned `>>` picks the logical-shift `UShrU32/U64`; `Bool` operands from the boolean `and`/`or` approximation keep the I32 fallback). JIT coverage: `vm/src/decompile.rs` now decodes the previously-unmapped `UAnd/UOr/UXor/UShl` (both widths) and gained an `Op::INot` (decoding `INotI32/I64`, `UNotU32/U64`) lowered via `bnot` in `vm/src/jit.rs`, so the newly-emitted opcodes stay JIT-eligible. | `vm/tests/bitwise_width.rs` — 5 tests, each run through both the Cranelift JIT (with a decode-eligibility assertion so the JIT leg can't silently fall back) and the pure interpreter, expectations verified against CPython: the repro values, negative operands, the popcount-termination loop, u64 logical shift, and i32 staying 32-bit. Plus `compiler/src/codegen.rs::tests::emits_width_correct_bitwise_opcodes` asserting opcode selection per type. |
+
+### Notes for the next round
+
+- `str()` of a u64 in the top half of the range still prints as signed
+  (`str(18446744073709551615)` → `-1`) — a separate display bug, found
+  while writing the u64 conformance tests; bitwise results in those
+  tests are kept below 2^63 to sidestep it.
+- Constant folding (`compiler/src/opts/constant_fold.rs`) only folds
+  bitwise ops on matched `I32×I32` constants, so it was never
+  width-wrong — but i64 bitwise constants are simply not folded
+  (missed optimization, not a correctness issue).
+- `vm/tests/run_examples.rs::producer_runs` hangs intermittently
+  (futex wait in a `strictpy-worker` thread) when the 7 example tests
+  run in parallel in one process on a loaded Linux box. Verified
+  pre-existing: `producer.spy` compiles byte-identically before/after
+  this fix, and the full `run_examples` binary from the merge-base
+  hung 4/5 runs vs 1/5 on this branch under identical load. Passes
+  reliably standalone (`--test run_examples producer_runs`) and via
+  `target/debug/spy examples/producer.spy`. It also wedged the ubuntu
+  CI `cargo test` step for hours on both runs that got that far, so
+  `ci.yml` now skips it in the parallel sweep and runs it isolated
+  (`--test-threads=1`, timeout + retry) on Linux. It has hung even
+  isolated on the windows runner — and GNU `timeout` under Git Bash
+  can't kill a native process tree to drive a retry — so Windows CI
+  skips it entirely; Windows coverage of producer.spy stays with local
+  runs. NOT Linux-only, NOT purely a parallel-sweep artifact. Root
+  cause untraced — suspect process-global state (GC pause / stackmap
+  registry?) or a channel race in the threaded runtime.
+- Bytecode-determinism side-finding from the audit that 115/123
+  examples compile byte-identically across this change: several
+  examples (`graph_lib`, `json_typed_demo`, `algorithms_lib`,
+  `test_runner`, `itertools_demo`, `job_scheduler`) compile
+  **nondeterministically run-to-run on both old and new compilers**
+  (type-table / interning order — `New { type_id }` renumbering;
+  echoes the class_id↔type_id ordering note under bug #5).
+
+---
+
 ## Deferred: BUG-042 — subprocess.kill during wait() can never land
 
 Surfaced by the BUG-041 verification run, which was the first full-suite
@@ -496,14 +547,16 @@ release binary is missing (`compile_and_run` returns `None`), so
 
 ---
 
-## Deferred: BUG-043 — producer.spy (threads + channel) hangs intermittently
+## Deferred: BUG-044 — producer.spy channel hang reproduces standalone too
 
-Found while validating the Set-runtime PR: the full-suite run stalled in
-`vm/tests/run_examples.rs::producer_runs` (31 minutes, zero CPU, thread
-asleep). **Reproduced on unmodified main** (`2788b0c`): ~1 hang in 8 direct
-runs of `target/debug/spy examples/producer.spy` (the process blocks
-forever; `timeout 60` kills it). Not caused by — and not fixed by — the
-Set work; the Set runtime only touches the dict side table.
+Same underlying flake as the producer_runs notes under BUG-043 (which
+this entry extends — it was independently found while validating the
+Set-runtime PR). One correction to those notes: the hang is NOT limited
+to the parallel test sweep. Direct standalone runs of the example
+reproduce it on unmodified main (`2788b0c`): ~1 hang in 8 runs of
+`target/debug/spy examples/producer.spy` (process blocks forever, zero
+CPU; `timeout 60` kills it), plus one 31-minute zero-CPU stall inside
+the full-suite run.
 
 - **Repro:** `for i in $(seq 20); do timeout 60 target/debug/spy
   examples/producer.spy >/dev/null; echo "run $i: $?"; done` — expect an
@@ -511,7 +564,7 @@ Set work; the Set runtime only touches the dict side table.
 - **Shape:** producer/consumer over `Channel[i64]` with two OS threads;
   zero CPU while stuck suggests a lost-wakeup / missed-close race in the
   channel recv path (consumer parked after the producer's last send or
-  close), not a spin.
-- **Workaround:** CI skips `producer_runs` (`-- --skip producer_runs` in
-  `.github/workflows/ci.yml`) so the suite stays deterministic; the test
-  still runs locally. Remove the skip when the race is fixed.
+  close), not a spin — consistent with the futex-wait observation in
+  the BUG-043 notes, but without the parallel-sweep / loaded-box caveat.
+- **CI handling:** see BUG-043 notes (skipped in the parallel sweep,
+  isolated+retried on Linux, skipped on Windows).

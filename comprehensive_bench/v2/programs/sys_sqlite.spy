@@ -1,0 +1,54 @@
+"""In-memory sqlite: CREATE TABLE, parameterized INSERTs, ranged SELECTs
+with WHERE, aggregate SUM; print integer results."""
+import sqlite3
+from sqlite3 import Connection, Cursor
+
+fn run() -> i32:
+    conn: Connection = sqlite3.open(":memory:")
+    conn.execute("CREATE TABLE events (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)")
+
+    n: i64 = 40000
+    i: i64 = 0
+    while i < n:
+        params: List[str] = []
+        params.append("event_" + str(i % 500))
+        params.append(str((i * 37) % 1000))
+        conn.execute_params("INSERT INTO events (name, score) VALUES (?, ?)", params)
+        i = i + 1
+
+    # Ranged SELECTs with WHERE.
+    range_rows: i64 = 0
+    range_score: i64 = 0
+    j: i64 = 0
+    while j < 400:
+        lo: i64 = (j * 61) % n + 1
+        hi: i64 = lo + 200
+        qp: List[str] = []
+        qp.append(str(lo))
+        qp.append(str(hi))
+        cur: Cursor = conn.query_params(
+            "SELECT id, score FROM events WHERE id >= ? AND id < ? ORDER BY id", qp)
+        rows: List[List[str]] = cur.fetchall()
+        k: i64 = 0
+        while k < len(rows):
+            range_rows = range_rows + 1
+            range_score = range_score + parse_i64(rows[k][1])
+            k = k + 1
+        j = j + 1
+
+    # Aggregate SUM over the whole table.
+    total: i64 = 0
+    agg: Cursor = conn.query("SELECT SUM(score) FROM events")
+    row: List[str]? = agg.fetchone()
+    if row is not none:
+        total = parse_i64(row[0])
+
+    conn.close()
+    println("inserted=" + str(n))
+    println("range_rows=" + str(range_rows))
+    println("range_score=" + str(range_score))
+    println("total_score=" + str(total))
+    return 0
+
+fn main() -> i32:
+    return run()

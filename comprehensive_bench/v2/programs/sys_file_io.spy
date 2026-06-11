@@ -1,0 +1,51 @@
+"""File I/O: write 50k lines to a temp file (relative path), read it back,
+count lines + length checksum + substring hits, then delete the file."""
+import io
+import os
+
+fn run() -> i32:
+    n: i64 = 50000
+    path: str = "bench_tmp_io.txt"
+
+    f: io.File = open(path, "w")
+    i: i64 = 0
+    while i < n:
+        f.write("line," + str(i) + "," + str((i * i) % 97) + "\n")
+        i = i + 1
+    f.close()
+
+    g: io.File = open(path, "r")
+    content: str = g.read()
+    g.close()
+
+    lines: List[str] = content.split("\n")
+    line_count: i64 = 0
+    len_sum: i64 = 0
+    field_sum: i64 = 0
+    hits42: i64 = 0
+    j: i64 = 0
+    while j < len(lines):
+        line: str = lines[j]
+        if len(line) > 0:
+            line_count = line_count + 1
+            len_sum = len_sum + i64(len(line))
+            fields: List[str] = line.split(",")
+            field_sum = field_sum + parse_i64(fields[1]) + parse_i64(fields[2])
+            if line.contains(",42"):
+                hits42 = hits42 + 1
+        j = j + 1
+
+    os.remove(path)
+    removed: i64 = 0
+    if not os.exists(path):
+        removed = 1
+
+    println("lines=" + str(line_count))
+    println("len_sum=" + str(len_sum))
+    println("field_sum=" + str(field_sum))
+    println("hits42=" + str(hits42))
+    println("removed=" + str(removed))
+    return 0
+
+fn main() -> i32:
+    return run()

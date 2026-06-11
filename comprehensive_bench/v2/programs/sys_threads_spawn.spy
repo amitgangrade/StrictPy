@@ -1,0 +1,43 @@
+"""Spawn/join 200 threads; each does a small local computation and reports
+its result over a channel. Print completion count + total (after all joins)."""
+
+fn worker(idx: i64, results: Channel[i64]) -> None:
+    acc: i64 = 0
+    j: i64 = 0
+    while j < 5000:
+        acc = acc + (idx * 31 + j) % 97
+        j = j + 1
+    results.send(acc)
+
+fn run() -> i32:
+    n: i64 = 200
+    results: Channel[i64] = Channel[i64](256)
+    threads: List[Thread] = []
+
+    i: i64 = 0
+    while i < n:
+        idx: i64 = i
+        t: Thread = Thread(fn() -> None: worker(idx, results))
+        threads.append(t)
+        t.start()
+        i = i + 1
+
+    k: i64 = 0
+    while k < n:
+        threads[k].join()
+        k = k + 1
+
+    completed: i64 = 0
+    total: i64 = 0
+    m: i64 = 0
+    while m < n:
+        total = total + results.recv()
+        completed = completed + 1
+        m = m + 1
+
+    println("completed=" + str(completed))
+    println("total=" + str(total))
+    return 0
+
+fn main() -> i32:
+    return run()

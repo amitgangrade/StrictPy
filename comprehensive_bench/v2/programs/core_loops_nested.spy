@@ -1,0 +1,16 @@
+# core_loops_nested: triple-nested for-range loops with minimal body work
+# (loop overhead microbenchmark).
+
+fn run() -> i32:
+    acc: i64 = 0
+    for i: i64 in range(150):
+        for j: i64 in range(150):
+            for k: i64 in range(200):
+                acc = acc + k
+            acc = acc + j
+        acc = acc + i
+    println("loops_nested_acc=" + str(acc))
+    return 0
+
+fn main() -> i32:
+    return run()

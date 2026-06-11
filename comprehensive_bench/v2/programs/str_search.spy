@@ -1,0 +1,32 @@
+# str_search: repeated substring search (index_of / Python str.find) over a
+# large haystack with hit and miss needles; print counts.
+
+fn run() -> i32:
+    h: str = ""
+    i: i64 = 0
+    while i < 500:
+        h = h + "block" + str(i) + " user" + str(i) + " data;"
+        i = i + 1
+
+    queries: i64 = 60000
+    hits: i64 = 0
+    misses: i64 = 0
+    idx_sum: i64 = 0
+    q: i64 = 0
+    while q < queries:
+        needle: str = "user" + str(q % 1000)
+        idx: i64 = h.find(needle)
+        if idx >= 0:
+            hits = hits + 1
+            idx_sum = idx_sum + idx
+        else:
+            misses = misses + 1
+        q = q + 1
+    println("hits=" + str(hits))
+    println("misses=" + str(misses))
+    println("idx_sum=" + str(idx_sum))
+    println("haystack_len=" + str(len(h)))
+    return 0
+
+fn main() -> i32:
+    return run()

@@ -1,0 +1,27 @@
+# str_template_render: tiny mustache-style template renderer ({{name}}
+# substitution via replace) over N renders; print total output length.
+
+fn run() -> i32:
+    template: str = "Hello {{name}}! You have {{count}} new {{thing}} in {{place}}."
+    n: i64 = 150000
+    total_len: i64 = 0
+    hits: i64 = 0
+    last: str = ""
+    i: i64 = 0
+    while i < n:
+        out: str = template.replace("{{name}}", "user" + str(i % 500))
+        out = out.replace("{{count}}", str(i % 100))
+        out = out.replace("{{thing}}", "messages")
+        out = out.replace("{{place}}", "inbox" + str(i % 10))
+        total_len = total_len + i64(len(out))
+        if out.contains("user42!"):
+            hits = hits + 1
+        last = out
+        i = i + 1
+    println("total_len=" + str(total_len))
+    println("hits=" + str(hits))
+    println("last=" + last)
+    return 0
+
+fn main() -> i32:
+    return run()
