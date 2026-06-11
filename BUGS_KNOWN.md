@@ -468,6 +468,30 @@ instantly with 0xC0000005 / SIGSEGV and no output, on every branch tested
 
 ---
 
+## Fixed: producer.spy deadlock — try_recv early exit + blocking bounded send
+
+BUG-044. `vm/tests/run_examples.rs::producer_runs` hung intermittently
+(~50% of parallel-mode runs locally; reproduced on both ubuntu and
+windows CI runners, each stalling until the job timeout). The example's
+consumer polled `try_recv()` and broke on `none` — but `none` means
+"empty" as well as "closed" (the documented M5 limitation), so under
+CPU contention the consumer could poll between sends and exit early.
+With the consumer gone, the producer filled the 16-slot bounded channel
+and blocked forever in `send()` (the receiver half lives in the shared
+channel table and is never dropped), so `t1.join()` never returned:
+three threads parked on futexes. The test tolerated the *truncated
+output* ("accept any prefix ≥ 10") but not this second-order hang.
+
+Fixed by switching the consumer to the race-free drain protocol the
+LANGUAGE_GUIDE documents: blocking `recv()` + `except
+ChannelClosedError`. `ChannelTryRecv`'s semantics are unchanged (the
+`channel_try_recv_empty_returns_none_sentinel` unit test pins them);
+the empty/closed ambiguity remains a known wart for user code — see the
+kvstore.spy header for the SHUTDOWN-sentinel alternative.
+`producer_runs` now asserts the full 100-value drain.
+
+---
+
 ## Fixed: silent no-op `del d[k]` (dict deletion unimplemented)
 
 `del d[k]` on a `Dict[str, V]` parsed and type-checked but lowered to
