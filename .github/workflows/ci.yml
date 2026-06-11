@@ -42,6 +42,25 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libsdl2-dev libsdl2-image-dev
 
+      # sdl2-sys's `bundled` feature compiles SDL2 itself from source, but
+      # the `image` feature still emits `-l SDL2_image`, expecting the
+      # library to be provided by the system — which the Windows runners
+      # don't do. Fetch the upstream prebuilt VC development package and
+      # expose its import lib to link.exe (LIB) and its DLL to the test
+      # binaries (PATH). This is the recipe the rust-sdl2 README documents
+      # for MSVC hosts.
+      - name: Install SDL2_image (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $v = "2.8.2"
+          Invoke-WebRequest -Uri "https://github.com/libsdl-org/SDL_image/releases/download/release-$v/SDL2_image-devel-$v-VC.zip" -OutFile "$env:RUNNER_TEMP\sdl2_image.zip"
+          Expand-Archive "$env:RUNNER_TEMP\sdl2_image.zip" -DestinationPath "$env:RUNNER_TEMP\sdl2_image"
+          $libdir = "$env:RUNNER_TEMP\sdl2_image\SDL2_image-$v\lib\x64"
+          if (-not (Test-Path "$libdir\SDL2_image.lib")) { throw "SDL2_image.lib not found in $libdir" }
+          Add-Content $env:GITHUB_ENV "LIB=$libdir;$env:LIB"
+          Add-Content $env:GITHUB_PATH "$libdir"
+
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
