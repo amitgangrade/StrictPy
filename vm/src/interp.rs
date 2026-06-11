@@ -849,6 +849,13 @@ impl Interpreter {
                 message: "call on null callable".into(),
             });
         }
+        // `none` / non-pointer bit patterns must raise, not access-violate.
+        if closure_ptr == crate::builtins::NONE_SENTINEL || closure_ptr & 0x7 != 0 {
+            return Err(VmError::UncaughtException {
+                type_name: "TypeError".into(),
+                message: "value is not a callable closure".into(),
+            });
+        }
         let (fn_id, n_cap) = unsafe { ((*cp).fn_id, (*cp).capture_n) };
         let cap_base = unsafe {
             (cp as *const u8).add(std::mem::size_of::<crate::object::ClosureRepr>()) as *const u64
@@ -2056,6 +2063,13 @@ impl Interpreter {
                 message: "call on null closure".into(),
             });
         }
+        // `none` / non-pointer bit patterns must raise, not access-violate.
+        if cp as u64 == crate::builtins::NONE_SENTINEL || cp as u64 & 0x7 != 0 {
+            return Err(VmError::UncaughtException {
+                type_name: "TypeError".into(),
+                message: "value is not a callable closure".into(),
+            });
+        }
         let (fn_id, n_cap) = unsafe { ((*cp).fn_id, (*cp).capture_n) };
         // Prepend captures.
         let mut full: Vec<u64> = Vec::with_capacity(n_cap as usize + args.len());
@@ -2603,24 +2617,30 @@ impl Interpreter {
     // ── Heap helpers ────────────────────────────────────────────────────
 
     pub(crate) fn alloc_string(&mut self, s: &str) -> *mut StringRepr {
-        let size = std::mem::size_of::<StringRepr>();
-        let ty: *const RuntimeType = Arc::as_ptr(&self.shared.types.str_ty);
-        let p = self.shared.heap.lock().unwrap().alloc(size, ty, GcKind::Str);
         let bytes = s.as_bytes();
-        let data = self.shared.heap.lock().unwrap().alloc_raw(bytes.len(), 1);
-        if !data.is_null() && !bytes.is_empty() {
-            unsafe {
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), data, bytes.len());
-            }
-        }
+        let blen = bytes.len();
+        let hdr_size = std::mem::size_of::<StringRepr>();
+        let ty: *const RuntimeType = Arc::as_ptr(&self.shared.types.str_ty);
+        // Single allocation: the StringRepr header + the inline UTF-8 bytes
+        // live in one heap block (mirroring ClosureRepr's inline captures).
+        // This halves per-string allocations vs the old "struct + separate
+        // data buffer" layout — the dominant cost in split-heavy text code.
+        // `flags` bit 3 ("inline") tells the GC sweep not to free `data`
+        // separately, and StrAppendInPlace to move to a heap buffer before
+        // growing (inline bytes can't grow without moving the object).
+        let total = hdr_size + blen;
+        let p = self.shared.heap.lock().unwrap().alloc(total, ty, GcKind::Str);
         let sp = p as *mut StringRepr;
         unsafe {
+            let data = (p as *mut u8).add(hdr_size);
+            if blen > 0 {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), data, blen);
+            }
             (*sp).length = s.chars().count();
-            (*sp).byte_len = bytes.len();
+            (*sp).byte_len = blen;
             (*sp).data = data;
-            (*sp).flags = if s.is_ascii() { 0b10 } else { 0 };
-            // Tight by default; the in-place-append path grows this with doubling.
-            (*sp).capacity = bytes.len();
+            (*sp).flags = (if s.is_ascii() { 0b10 } else { 0 }) | 0b1000;
+            (*sp).capacity = blen;
         }
         sp
     }

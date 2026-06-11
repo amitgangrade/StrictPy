@@ -134,12 +134,13 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             }
             // SAFETY: both args are valid StringRepr heap pointers, rooted in
             // registers (the trampoline published the window before this call).
-            let (s_interned, s_blen, s_cap, s_ascii) = unsafe {
+            let (s_interned, s_blen, s_cap, s_ascii, s_inline) = unsafe {
                 (
                     (*s_ptr).flags & 1 != 0,
                     (*s_ptr).byte_len,
                     (*s_ptr).capacity,
                     (*s_ptr).flags & 0b10 != 0,
+                    (*s_ptr).flags & 0b1000 != 0,
                 )
             };
             let (e_blen, e_data, e_len, e_ascii) = unsafe {
@@ -164,12 +165,27 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             if need > s_cap {
                 let new_cap = need.max(s_cap.saturating_mul(2)).max(8);
                 let old_data = unsafe { (*s_ptr).data };
-                let new_data = interp
-                    .shared
-                    .heap
-                    .lock()
-                    .unwrap()
-                    .realloc_raw(old_data, s_cap, new_cap, 1, s_blen);
+                let new_data = if s_inline {
+                    // Inline bytes live inside the StringRepr's GC block and
+                    // can't grow without moving the object. Move to a fresh heap
+                    // buffer (copying the existing bytes); the inline space is
+                    // reclaimed when the block is swept. Must NOT realloc/free
+                    // the inline pointer (it isn't a tracked raw buffer).
+                    let nd = interp.shared.heap.lock().unwrap().alloc_raw(new_cap, 1);
+                    unsafe {
+                        if !old_data.is_null() && s_blen > 0 {
+                            std::ptr::copy_nonoverlapping(old_data, nd, s_blen);
+                        }
+                    }
+                    nd
+                } else {
+                    interp
+                        .shared
+                        .heap
+                        .lock()
+                        .unwrap()
+                        .realloc_raw(old_data, s_cap, new_cap, 1, s_blen)
+                };
                 unsafe {
                     (*s_ptr).data = new_data;
                     (*s_ptr).capacity = new_cap;
@@ -180,6 +196,7 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
                 std::ptr::copy_nonoverlapping(e_data, dst, e_blen);
                 (*s_ptr).byte_len = need;
                 (*s_ptr).length += e_len;
+                // Now backed by a separate heap buffer: clear the inline bit.
                 (*s_ptr).flags = if s_ascii && e_ascii { 0b10 } else { 0 };
             }
             Ok(s_ptr as u64)
@@ -9056,6 +9073,15 @@ fn extract_closure_target(closure_ptr: u64) -> Result<SendableClosure, VmError> 
         return Err(VmError::UncaughtException {
             type_name: "NullPointerError".into(),
             message: "Thread target closure is null".into(),
+        });
+    }
+    // `none` (NONE_SENTINEL) and other non-pointer bit patterns must fail
+    // with a catchable exception, not an access violation. Heap objects are
+    // 8-aligned and live in user address space.
+    if closure_ptr == NONE_SENTINEL || closure_ptr & 0x7 != 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "TypeError".into(),
+            message: "target is not a callable closure".into(),
         });
     }
     let cp = closure_ptr as *const crate::object::ClosureRepr;
