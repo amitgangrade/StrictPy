@@ -9,6 +9,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # m33_precise_gc's deep-recursion test overflows the default 2 MiB
+  # libtest thread stack on Windows (MSVC debug frames are larger than
+  # Linux's); give test threads 16 MiB everywhere.
+  RUST_MIN_STACK: "16777216"
   # The bundled SDL2 source (sdl2-sys "bundled" feature) still declares an
   # old `cmake_minimum_required`; CMake 4 on current runner images refuses
   # to configure it without this opt-in.
@@ -25,6 +29,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    # Bound the job: examples/producer.spy's test can deadlock (its
+    # consumer can't distinguish an empty channel from a closed one, see
+    # vm/src/builtins.rs ChannelTryRecv), and a hung test otherwise holds
+    # the runner for the default 6 hours.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
