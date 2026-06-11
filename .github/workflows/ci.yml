@@ -9,6 +9,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # The bundled SDL2 source (sdl2-sys "bundled" feature) still declares an
+  # old `cmake_minimum_required`; CMake 4 on current runner images refuses
+  # to configure it without this opt-in.
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
 jobs:
   test:
@@ -23,6 +27,17 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
+      # The vm crate links system libraries on Linux: alsa-sys (via rodio)
+      # needs the ALSA headers, and the sdl2 crate's "image" feature links
+      # SDL2_image dynamically (the "bundled" feature only covers SDL2
+      # itself). Without these the workspace doesn't even build on a bare
+      # ubuntu runner.
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libsdl2-dev libsdl2-image-dev
 
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
