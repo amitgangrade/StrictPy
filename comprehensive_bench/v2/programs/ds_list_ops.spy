@@ -1,0 +1,24 @@
+# ds_list_ops: append N items, index-sum them, pop all.
+
+fn run() -> i32:
+    n: i64 = 1500000
+    xs: List[i64] = []
+    i: i64 = 0
+    while i < n:
+        xs.append(i * 3 % 1000)
+        i = i + 1
+    index_sum: i64 = 0
+    i = 0
+    while i < n:
+        index_sum = index_sum + xs[i]
+        i = i + 1
+    pop_sum: i64 = 0
+    while len(xs) > 0:
+        pop_sum = pop_sum + xs.pop()
+    println("n=" + str(n))
+    println("index_sum=" + str(index_sum))
+    println("pop_sum=" + str(pop_sum))
+    return 0
+
+fn main() -> i32:
+    return run()

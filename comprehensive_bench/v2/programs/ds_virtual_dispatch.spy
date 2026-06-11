@@ -1,0 +1,59 @@
+# ds_virtual_dispatch: open class Shape with overridden method, list of mixed
+# subclass instances, sum method results in a hot loop.
+
+open class Shape:
+    open fn area(self) -> i64:
+        return 0
+
+final class Square(Shape):
+    side: i64
+    fn __init__(self, side: i64) -> None:
+        self.side = side
+    fn area(self) -> i64:
+        return self.side * self.side
+
+final class Rect(Shape):
+    w: i64
+    h: i64
+    fn __init__(self, w: i64, h: i64) -> None:
+        self.w = w
+        self.h = h
+    fn area(self) -> i64:
+        return self.w * self.h
+
+final class Tri(Shape):
+    base: i64
+    height: i64
+    fn __init__(self, base: i64, height: i64) -> None:
+        self.base = base
+        self.height = height
+    fn area(self) -> i64:
+        return self.base * self.height // 2
+
+fn run() -> i32:
+    n: i64 = 90000
+    shapes: List[Shape] = []
+    i: i64 = 0
+    while i < n:
+        k: i64 = i % 3
+        if k == 0:
+            shapes.append(Square(i % 13 + 1))
+        elif k == 1:
+            shapes.append(Rect(i % 7 + 1, i % 11 + 1))
+        else:
+            shapes.append(Tri(i % 9 + 1, i % 17 + 1))
+        i = i + 1
+    passes: i64 = 10
+    total: i64 = 0
+    p: i64 = 0
+    while p < passes:
+        for s: Shape in shapes:
+            total = total + s.area()
+        p = p + 1
+    println("n=" + str(len(shapes)))
+    println("passes=" + str(passes))
+    println("total=" + str(total))
+    return 0
+
+fn main() -> i32:
+    return run()

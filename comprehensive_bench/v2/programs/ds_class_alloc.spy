@@ -1,0 +1,34 @@
+# ds_class_alloc: allocate N small 3-field objects in a loop, read fields
+# back, sum.
+
+final class Particle:
+    x: i64
+    y: i64
+    z: i64
+    fn __init__(self, x: i64, y: i64, z: i64) -> None:
+        self.x = x
+        self.y = y
+        self.z = z
+
+fn run() -> i32:
+    n: i64 = 500000
+    parts: List[Particle] = []
+    i: i64 = 0
+    while i < n:
+        parts.append(Particle(i % 101, i % 211, i % 307))
+        i = i + 1
+    sx: i64 = 0
+    sy: i64 = 0
+    sz: i64 = 0
+    for p: Particle in parts:
+        sx = sx + p.x
+        sy = sy + p.y
+        sz = sz + p.z
+    println("n=" + str(len(parts)))
+    println("sx=" + str(sx))
+    println("sy=" + str(sy))
+    println("sz=" + str(sz))
+    return 0
+
+fn main() -> i32:
+    return run()

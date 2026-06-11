@@ -1,0 +1,14 @@
+# core_recursion_fib: naive recursive fibonacci.
+
+fn fib(n: i64) -> i64:
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+fn run() -> i32:
+    result: i64 = fib(31)
+    println("fib=" + str(result))
+    return 0
+
+fn main() -> i32:
+    return run()

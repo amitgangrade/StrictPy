@@ -94,7 +94,7 @@ fn mandelbrot_renders_fractal() {
 /// `Thread(fn() -> None: ...)` form, this test surfaces the resulting
 /// VmError so the failure is visible.
 ///
-/// BUG-044: the example's consumer originally polled with `try_recv`,
+/// BUG-046: the example's consumer originally polled with `try_recv`,
 /// which returns the same `none` sentinel for both "empty" and
 /// "disconnected" (M5 limitation, see vm/src/builtins.rs::ChannelTryRecv).
 /// A consumer that won the race exited early, the producer blocked

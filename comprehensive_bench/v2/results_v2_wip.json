@@ -1,0 +1,602 @@
+{
+  "meta": {
+    "timestamp": "2026-06-11 01:46:02",
+    "python": "3.12.10",
+    "spy": "spy 0.2.0",
+    "repeats": 3,
+    "spy_startup_ms": 20.471200012252666,
+    "py_startup_ms": 50.83580000791699
+  },
+  "results": [
+    {
+      "name": "core_bitops",
+      "spy_ms": 38.570499993511476,
+      "py_ms": 736.2124000064796,
+      "spy_median_ms": 38.90990000218153,
+      "py_median_ms": 753.8293999969028,
+      "ratio": 0.05239045144196431,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "core_branchy",
+      "spy_ms": 42.559100009384565,
+      "py_ms": 237.12789999262895,
+      "spy_median_ms": 43.00019999209326,
+      "py_median_ms": 239.63080000248738,
+      "ratio": 0.179477404433251,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "core_calls",
+      "spy_ms": 66.37200000113808,
+      "py_ms": 209.90170000004582,
+      "spy_median_ms": 66.7684000072768,
+      "py_median_ms": 211.42979999422096,
+      "ratio": 0.3162051569907418,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "core_float_arith",
+      "spy_ms": 39.97709999384824,
+      "py_ms": 188.40690000797622,
+      "spy_median_ms": 40.019000007305294,
+      "py_median_ms": 191.1065000022063,
+      "ratio": 0.21218490401442733,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "core_int_arith",
+      "spy_ms": 31.58140000596177,
+      "py_ms": 175.99629999313038,
+      "spy_median_ms": 32.13530000357423,
+      "py_median_ms": 176.1026000021957,
+      "ratio": 0.1794435451608612,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "core_loops_nested",
+      "spy_ms": 27.475199996843003,
+      "py_ms": 154.63199999067,
+      "spy_median_ms": 28.889200009871274,
+      "py_median_ms": 154.67299999727402,
+      "ratio": 0.17768120439818905,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "core_matrix",
+      "spy_ms": 37.45040000649169,
+      "py_ms": 100.65120000217576,
+      "spy_median_ms": 38.08509999362286,
+      "py_median_ms": 101.79090000747237,
+      "ratio": 0.37208100852927867,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "core_nbody",
+      "spy_ms": 47.418000001925975,
+      "py_ms": 139.84960000379942,
+      "spy_median_ms": 48.31989998638164,
+      "py_median_ms": 144.54510000359733,
+      "ratio": 0.3390642518865819,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "core_quicksort",
+      "spy_ms": 35.59289999247994,
+      "py_ms": 132.51489998947363,
+      "spy_median_ms": 36.2470999971265,
+      "py_median_ms": 135.2278000122169,
+      "ratio": 0.26859545602273616,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "core_recursion_ack",
+      "spy_ms": 22.314100002404302,
+      "py_ms": 66.81000000389758,
+      "spy_median_ms": 23.56419998977799,
+      "py_median_ms": 66.89400000323076,
+      "ratio": 0.3339934141760595,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "core_recursion_fib",
+      "spy_ms": 57.44020000565797,
+      "py_ms": 211.22040000045672,
+      "spy_median_ms": 58.7422999960836,
+      "py_median_ms": 211.4960000035353,
+      "ratio": 0.2719443766110365,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "core_sieve",
+      "spy_ms": 103.72520000964869,
+      "py_ms": 196.61119999364018,
+      "spy_median_ms": 106.63710000517312,
+      "py_median_ms": 197.86650000605732,
+      "ratio": 0.5275650624837441,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "ds_class_alloc",
+      "spy_ms": 115.088000005926,
+      "py_ms": 257.67620000988245,
+      "spy_median_ms": 115.29449999216013,
+      "py_median_ms": 259.0473000018392,
+      "ratio": 0.4466380674719362,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "ds_closures_hof",
+      "spy_ms": 695.2426000061678,
+      "py_ms": 181.6720000060741,
+      "spy_median_ms": 696.1922000045888,
+      "py_median_ms": 183.2025000039721,
+      "ratio": 3.826911136459789,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "ds_comprehensions",
+      "spy_ms": 144.42159999452997,
+      "py_ms": 153.2837999984622,
+      "spy_median_ms": 144.99570000043605,
+      "py_median_ms": 155.551200004993,
+      "ratio": 0.9421843664886888,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "ds_dict_ops",
+      "spy_ms": 1913.2591000088723,
+      "py_ms": 293.5202999942703,
+      "spy_median_ms": 1932.323400003952,
+      "py_median_ms": 295.3630999982124,
+      "ratio": 6.518319516729235,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "ds_exceptions",
+      "spy_ms": 518.2652999938,
+      "py_ms": 162.5206999888178,
+      "spy_median_ms": 524.0444999944884,
+      "py_median_ms": 165.92010000022128,
+      "ratio": 3.1889187040755984,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "ds_generators",
+      "spy_ms": 619.5885999914026,
+      "py_ms": 330.6336999958148,
+      "spy_median_ms": 620.2878000040073,
+      "py_median_ms": 333.0546999932267,
+      "ratio": 1.8739426743228091,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "ds_generics",
+      "spy_ms": 484.31490000803024,
+      "py_ms": 221.50600000168197,
+      "spy_median_ms": 485.75560000608675,
+      "py_median_ms": 222.20289999677334,
+      "ratio": 2.186464023567545,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "ds_list_ops",
+      "spy_ms": 125.93199999537319,
+      "py_ms": 249.80400000640657,
+      "spy_median_ms": 129.05180000234395,
+      "py_median_ms": 250.2742000069702,
+      "ratio": 0.5041232325829189,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "ds_list_sort",
+      "spy_ms": 522.760300009395,
+      "py_ms": 270.41250000183936,
+      "spy_median_ms": 526.1671000043862,
+      "py_median_ms": 274.17330000025686,
+      "ratio": 1.933195765749879,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "ds_match_dispatch",
+      "spy_ms": 124.3084000016097,
+      "py_ms": 74.11670000874437,
+      "spy_median_ms": 129.48420000611804,
+      "py_median_ms": 75.23449999280274,
+      "ratio": 1.6771982560872738,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "ds_nullable",
+      "spy_ms": 439.0897999983281,
+      "py_ms": 213.67310000641737,
+      "spy_median_ms": 441.063899997971,
+      "py_median_ms": 216.0714000056032,
+      "ratio": 2.05496059160063,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "ds_set_ops",
+      "spy_ms": 435.8401000063168,
+      "py_ms": 95.79790000861976,
+      "spy_median_ms": 436.2264000083087,
+      "py_median_ms": 98.7885000067763,
+      "ratio": 4.549578852637693,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "ds_sort_by_key",
+      "spy_ms": 1213.8507000054233,
+      "py_ms": 360.0710999889998,
+      "spy_median_ms": 1254.9412000080338,
+      "py_median_ms": 362.0773000002373,
+      "ratio": 3.3711416996323966,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "ds_string_keys_aggregation",
+      "spy_ms": 324.7088000061922,
+      "py_ms": 132.02889999956824,
+      "spy_median_ms": 326.3864000036847,
+      "py_median_ms": 136.48560000001453,
+      "ratio": 2.4593766971265687,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "ds_tuple_ops",
+      "spy_ms": 268.20069999666885,
+      "py_ms": 214.756600005785,
+      "spy_median_ms": 268.49710001260974,
+      "py_median_ms": 215.49859999504406,
+      "ratio": 1.248858940723797,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "ds_virtual_dispatch",
+      "spy_ms": 198.83050001226366,
+      "py_ms": 140.41799999540672,
+      "spy_median_ms": 198.85139999678358,
+      "py_median_ms": 141.30020000447985,
+      "ratio": 1.4159901153610484,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "str_base64",
+      "spy_ms": 811.568700009957,
+      "py_ms": 183.6215999937849,
+      "spy_median_ms": 812.7747000107775,
+      "py_median_ms": 183.93279999145307,
+      "ratio": 4.419788848574603,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "str_concat_build",
+      "spy_ms": 646.4686999970581,
+      "py_ms": 259.63400000182446,
+      "spy_median_ms": 650.2129000000423,
+      "py_median_ms": 261.41560000542086,
+      "ratio": 2.4899231225206075,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "str_csv_parse",
+      "spy_ms": 1602.2766999958549,
+      "py_ms": 228.56469999533147,
+      "spy_median_ms": 1605.569800012745,
+      "py_median_ms": 230.80049999407493,
+      "ratio": 7.010166924413884,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "str_fstring_format",
+      "spy_ms": 2074.4290000002366,
+      "py_ms": 205.8849999884842,
+      "spy_median_ms": 2082.2776000131853,
+      "py_median_ms": 209.01059999596328,
+      "ratio": 10.075668456255997,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "str_http_parse",
+      "spy_ms": 25247.259299998404,
+      "py_ms": 87.85339999303687,
+      "spy_median_ms": 25365.81980000483,
+      "py_median_ms": 89.16570000292268,
+      "ratio": 287.37942187780396,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "str_join_build",
+      "spy_ms": 2496.8878000072436,
+      "py_ms": 247.79240001225844,
+      "spy_median_ms": 2500.311800002237,
+      "py_median_ms": 248.91660000139382,
+      "ratio": 10.076530998867282,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "str_json_roundtrip",
+      "spy_ms": 366.40330000955146,
+      "py_ms": 215.10069999203552,
+      "spy_median_ms": 368.61050000879914,
+      "py_median_ms": 215.55750000698026,
+      "ratio": 1.7034035687615996,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "str_json_walk",
+      "spy_ms": 547.6906999974744,
+      "py_ms": 146.4412000059383,
+      "spy_median_ms": 548.5152000037488,
+      "py_median_ms": 150.16999999352265,
+      "ratio": 3.7400041789828626,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "str_methods_mix",
+      "spy_ms": 1837.35559998604,
+      "py_ms": 312.29139999777544,
+      "spy_median_ms": 1854.2165999970166,
+      "py_median_ms": 314.4341000006534,
+      "ratio": 5.883465250721372,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "str_regex",
+      "spy_ms": 301.0352999990573,
+      "py_ms": 178.94250000244938,
+      "spy_median_ms": 307.85979999927804,
+      "py_median_ms": 179.72240000381134,
+      "ratio": 1.6823018567133952,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "str_search",
+      "spy_ms": 212.6066000055289,
+      "py_ms": 159.11910000431817,
+      "spy_median_ms": 212.63439999893308,
+      "py_median_ms": 160.84099998988677,
+      "ratio": 1.3361475775048952,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "str_slice_scan",
+      "spy_ms": 12636.150699996506,
+      "py_ms": 185.96319999778643,
+      "spy_median_ms": 12646.623000007821,
+      "py_median_ms": 187.88240000139922,
+      "ratio": 67.94973790592395,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "str_split_scan",
+      "spy_ms": 2594.1009000089252,
+      "py_ms": 205.1307999936398,
+      "spy_median_ms": 2603.435199998785,
+      "py_median_ms": 205.89579999796115,
+      "ratio": 12.646081914999389,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "str_template_render",
+      "spy_ms": 954.0169999963837,
+      "py_ms": 148.3985999948345,
+      "spy_median_ms": 955.2145000052406,
+      "py_median_ms": 148.64480000687763,
+      "ratio": 6.428746632580033,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "str_wordcount",
+      "spy_ms": 500.659800003632,
+      "py_ms": 153.97509999456815,
+      "spy_median_ms": 510.2301000006264,
+      "py_median_ms": 155.45330000168178,
+      "ratio": 3.251563402272796,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "sys_async_tasks",
+      "spy_ms": null,
+      "py_ms": null,
+      "spy_median_ms": null,
+      "py_median_ms": null,
+      "ratio": null,
+      "correct": null,
+      "note": "SPY RUN FAIL: rc=3221225477\nstdout:\n\nstderr:\n"
+    },
+    {
+      "name": "sys_channel_throughput",
+      "spy_ms": 86.05889999307692,
+      "py_ms": 334.90279999386985,
+      "spy_median_ms": 87.58999999554362,
+      "py_median_ms": 335.3363000060199,
+      "ratio": 0.25696679751453905,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "sys_datetime",
+      "spy_ms": 113.71669999789447,
+      "py_ms": 196.64270000066608,
+      "spy_median_ms": 114.3313000065973,
+      "py_median_ms": 197.55099999019876,
+      "ratio": 0.5782909815493241,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "sys_file_io",
+      "spy_ms": 424.935999995796,
+      "py_ms": 103.25179999927059,
+      "spy_median_ms": 425.8611999975983,
+      "py_median_ms": 103.64080000726972,
+      "ratio": 4.1155311577986815,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "sys_hash_sha256",
+      "spy_ms": 262.73570000194013,
+      "py_ms": 148.92030000919476,
+      "spy_median_ms": 263.9058000058867,
+      "py_median_ms": 150.3795999888098,
+      "ratio": 1.7642705526762845,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "sys_lock_contention",
+      "spy_ms": 215.16189999238122,
+      "py_ms": 165.16410000622272,
+      "spy_median_ms": 223.2612999941921,
+      "py_median_ms": 165.4529000079492,
+      "ratio": 1.3027159048744539,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "sys_lru_cache",
+      "spy_ms": 563.3333000005223,
+      "py_ms": 173.04759999387898,
+      "spy_median_ms": 570.2663999982178,
+      "py_median_ms": 175.5937999987509,
+      "ratio": 3.255366153708277,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "sys_pqueue",
+      "spy_ms": 108.22710000502411,
+      "py_ms": 332.1397999970941,
+      "spy_median_ms": 108.35019999649376,
+      "py_median_ms": 332.7832000068156,
+      "ratio": 0.32584803147942826,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "sys_random_math",
+      "spy_ms": 163.7477000040235,
+      "py_ms": 261.6171999979997,
+      "spy_median_ms": 164.41309999208897,
+      "py_median_ms": 262.48520000081044,
+      "ratio": 0.6259057126415064,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "sys_rate_limiter",
+      "spy_ms": 32.025699998484924,
+      "py_ms": 196.95290000527166,
+      "spy_median_ms": 32.65520000422839,
+      "py_median_ms": 197.38080000388436,
+      "ratio": 0.16260588190185432,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "sys_sqlite",
+      "spy_ms": 307.5701000052504,
+      "py_ms": 143.89269999810494,
+      "spy_median_ms": 310.4985000099987,
+      "py_median_ms": 145.23530000587925,
+      "ratio": 2.1374962038331415,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "sys_struct_pack",
+      "spy_ms": 1038.2926000020234,
+      "py_ms": 203.4230999997817,
+      "spy_median_ms": 1040.9340000041993,
+      "py_median_ms": 204.7378999995999,
+      "ratio": 5.104103712917253,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "sys_tcp_echo",
+      "spy_ms": 77.53910000610631,
+      "py_ms": 150.9675999986939,
+      "spy_median_ms": 78.0881000100635,
+      "py_median_ms": 153.9660999987973,
+      "ratio": 0.5136141795112139,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "sys_threads_spawn",
+      "spy_ms": 30.467699994915165,
+      "py_ms": 149.3004999938421,
+      "spy_median_ms": 31.17509999719914,
+      "py_median_ms": 152.08260000508744,
+      "ratio": 0.20406964475116832,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "sys_udp_packets",
+      "spy_ms": 65.73200000275392,
+      "py_ms": 102.43689999333583,
+      "spy_median_ms": 66.2980999913998,
+      "py_median_ms": 103.45729999244213,
+      "ratio": 0.6416828311578172,
+      "correct": true,
+      "note": ""
+    },
+    {
+      "name": "sys_url_codec",
+      "spy_ms": 327.02500000596046,
+      "py_ms": 515.4368999938015,
+      "spy_median_ms": 327.74229999631643,
+      "py_median_ms": 525.5947999976343,
+      "ratio": 0.6344617546976035,
+      "correct": true,
+      "note": ""
+    }
+  ]
+}

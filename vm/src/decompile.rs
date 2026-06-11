@@ -60,6 +60,7 @@ pub enum Op {
     // Integer binops — width tagged by NumWidth.
     IBin { op: IntBinOp, w: NumWidth, dst: u16, a: u16, b: u16 },
     INeg { w: NumWidth, dst: u16, a: u16 },
+    INot { w: NumWidth, dst: u16, a: u16 },
     IDivChk { w: NumWidth, dst: u16, a: u16, b: u16 },
     IRemChk { w: NumWidth, dst: u16, a: u16, b: u16 },
 
@@ -233,6 +234,7 @@ pub fn decode_function(
             Opcode::IShlI32 => decode_ibin(IntBinOp::Shl, NumWidth::W32, bytes, &mut pc, end)?,
             Opcode::IShrI32 => decode_ibin(IntBinOp::ShrSigned, NumWidth::W32, bytes, &mut pc, end)?,
             Opcode::INegI32 => decode_ineg(NumWidth::W32, bytes, &mut pc, end)?,
+            Opcode::INotI32 => decode_inot(NumWidth::W32, bytes, &mut pc, end)?,
             Opcode::IDivI32 => decode_idiv(NumWidth::W32, bytes, &mut pc, end)?,
             Opcode::IRemI32 => decode_irem(NumWidth::W32, bytes, &mut pc, end)?,
 
@@ -245,6 +247,7 @@ pub fn decode_function(
             Opcode::IShlI64 => decode_ibin(IntBinOp::Shl, NumWidth::W64, bytes, &mut pc, end)?,
             Opcode::IShrI64 => decode_ibin(IntBinOp::ShrSigned, NumWidth::W64, bytes, &mut pc, end)?,
             Opcode::INegI64 => decode_ineg(NumWidth::W64, bytes, &mut pc, end)?,
+            Opcode::INotI64 => decode_inot(NumWidth::W64, bytes, &mut pc, end)?,
             Opcode::IDivI64 => decode_idiv(NumWidth::W64, bytes, &mut pc, end)?,
             Opcode::IRemI64 => decode_irem(NumWidth::W64, bytes, &mut pc, end)?,
 
@@ -252,11 +255,21 @@ pub fn decode_function(
             Opcode::UAddU32 => decode_ibin(IntBinOp::Add, NumWidth::W32, bytes, &mut pc, end)?,
             Opcode::USubU32 => decode_ibin(IntBinOp::Sub, NumWidth::W32, bytes, &mut pc, end)?,
             Opcode::UMulU32 => decode_ibin(IntBinOp::Mul, NumWidth::W32, bytes, &mut pc, end)?,
+            Opcode::UAndU32 => decode_ibin(IntBinOp::And, NumWidth::W32, bytes, &mut pc, end)?,
+            Opcode::UOrU32  => decode_ibin(IntBinOp::Or,  NumWidth::W32, bytes, &mut pc, end)?,
+            Opcode::UXorU32 => decode_ibin(IntBinOp::Xor, NumWidth::W32, bytes, &mut pc, end)?,
+            Opcode::UShlU32 => decode_ibin(IntBinOp::Shl, NumWidth::W32, bytes, &mut pc, end)?,
             Opcode::UShrU32 => decode_ibin(IntBinOp::ShrUnsigned, NumWidth::W32, bytes, &mut pc, end)?,
+            Opcode::UNotU32 => decode_inot(NumWidth::W32, bytes, &mut pc, end)?,
             Opcode::UAddU64 => decode_ibin(IntBinOp::Add, NumWidth::W64, bytes, &mut pc, end)?,
             Opcode::USubU64 => decode_ibin(IntBinOp::Sub, NumWidth::W64, bytes, &mut pc, end)?,
             Opcode::UMulU64 => decode_ibin(IntBinOp::Mul, NumWidth::W64, bytes, &mut pc, end)?,
+            Opcode::UAndU64 => decode_ibin(IntBinOp::And, NumWidth::W64, bytes, &mut pc, end)?,
+            Opcode::UOrU64  => decode_ibin(IntBinOp::Or,  NumWidth::W64, bytes, &mut pc, end)?,
+            Opcode::UXorU64 => decode_ibin(IntBinOp::Xor, NumWidth::W64, bytes, &mut pc, end)?,
+            Opcode::UShlU64 => decode_ibin(IntBinOp::Shl, NumWidth::W64, bytes, &mut pc, end)?,
             Opcode::UShrU64 => decode_ibin(IntBinOp::ShrUnsigned, NumWidth::W64, bytes, &mut pc, end)?,
+            Opcode::UNotU64 => decode_inot(NumWidth::W64, bytes, &mut pc, end)?,
 
             // ─── Float binops ──────────────────────────────────────────
             Opcode::FAddF32 => decode_fbin(FloatBinOp::Add, FloatWidth::F32, bytes, &mut pc, end)?,
@@ -551,6 +564,17 @@ fn decode_ineg(
     let dst = read_u16(bytes, pc, end)?;
     let a = read_u16(bytes, pc, end)?;
     Ok(Op::INeg { w, dst, a })
+}
+
+fn decode_inot(
+    w: NumWidth,
+    bytes: &[u8],
+    pc: &mut usize,
+    end: usize,
+) -> Result<Op, DecodeError> {
+    let dst = read_u16(bytes, pc, end)?;
+    let a = read_u16(bytes, pc, end)?;
+    Ok(Op::INot { w, dst, a })
 }
 
 fn decode_idiv(

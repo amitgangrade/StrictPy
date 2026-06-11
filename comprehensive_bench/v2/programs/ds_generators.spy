@@ -1,0 +1,23 @@
+# ds_generators: generator function yielding N values consumed by a for loop.
+
+fn lcg_stream(n: i64) -> Iterator[i64]:
+    seed: i64 = 7
+    i: i64 = 0
+    while i < n:
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        yield seed % 1000
+        i = i + 1
+
+fn run() -> i32:
+    n: i64 = 1500000
+    total: i64 = 0
+    cnt: i64 = 0
+    for v: i64 in lcg_stream(n):
+        total = total + v
+        cnt = cnt + 1
+    println("count=" + str(cnt))
+    println("total=" + str(total))
+    return 0
+
+fn main() -> i32:
+    return run()

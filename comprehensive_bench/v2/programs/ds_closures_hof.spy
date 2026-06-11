@@ -1,0 +1,27 @@
+# ds_closures_hof: map/filter/reduce with capturing lambdas over a large list.
+
+fn imax(a: i64, b: i64) -> i64:
+    if a > b:
+        return a
+    return b
+
+fn run() -> i32:
+    n: i64 = 1000000
+    base: List[i64] = []
+    i: i64 = 0
+    while i < n:
+        base.append(i % 1000)
+        i = i + 1
+    factor: i64 = 7
+    scaled: List[i64] = map(fn(x: i64) -> i64: x * factor + 1, base)
+    threshold: i64 = 3500
+    kept: List[i64] = filter(fn(x: i64) -> bool: x > threshold, scaled)
+    total: i64 = reduce(fn(acc: i64, x: i64) -> i64: acc + x, kept, 0)
+    mx: i64 = reduce(fn(acc: i64, x: i64) -> i64: imax(acc, x), kept, 0)
+    println("kept_len=" + str(len(kept)))
+    println("total=" + str(total))
+    println("max=" + str(mx))
+    return 0
+
+fn main() -> i32:
+    return run()

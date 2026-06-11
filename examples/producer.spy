@@ -17,7 +17,7 @@ fn producer(ch: Channel[i32]) -> None:
     ch.close()
 
 # The consumer deliberately does NOT poll with `try_recv`: it returns the
-# same `none` for "empty" and "closed" (BUGS_KNOWN.md BUG-044), so a
+# same `none` for "empty" and "closed" (BUGS_KNOWN.md BUG-046), so a
 # polling consumer can exit early and leave the producer blocked forever
 # on a full channel — `t1.join()` in main would then deadlock. Blocking
 # `recv()` raises ChannelClosedError exactly when the stream is finished.
