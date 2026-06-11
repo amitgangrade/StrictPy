@@ -499,7 +499,12 @@ dispatched on operand width.
   this fix, and the full `run_examples` binary from the merge-base
   hung 4/5 runs vs 1/5 on this branch under identical load. Passes
   reliably standalone (`--test run_examples producer_runs`) and via
-  `target/debug/spy examples/producer.spy`.
+  `target/debug/spy examples/producer.spy`. It also wedged the ubuntu
+  CI `cargo test` step for hours on both runs that got that far, so
+  `ci.yml` now skips it in the parallel sweep and runs it isolated
+  (`--test-threads=1`, timeout + retry). Root cause untraced — the
+  cross-test trigger suggests process-global state (GC pause /
+  stackmap registry?) interacting across in-process interpreters.
 - Bytecode-determinism side-finding from the audit that 115/123
   examples compile byte-identically across this change: several
   examples (`graph_lib`, `json_typed_demo`, `algorithms_lib`,

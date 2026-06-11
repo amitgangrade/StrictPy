@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+# A wedged test (see the producer_runs step below) can otherwise hold a
+# runner for the full 6-hour default; superseded runs on the same branch
+# are just wasted minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -35,6 +42,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -67,8 +75,24 @@ jobs:
       - name: cargo build (debug, full workspace)
         run: cargo build --workspace --verbose
 
+      # producer_runs is excluded from the parallel sweep: when the 7
+      # run_examples tests execute as parallel threads in one process, the
+      # threaded producer/consumer example intermittently deadlocks on a
+      # futex (wedged both ubuntu CI runs for hours; reproduced at the
+      # merge-base, so it predates current work — see the BUG-043 notes in
+      # BUGS_KNOWN.md). It passes reliably single-threaded, so it runs
+      # isolated below.
       - name: cargo test (debug, full workspace)
-        run: cargo test --workspace --verbose
+        run: cargo test --workspace --verbose -- --skip producer_runs
+
+      - name: cargo test (producer_runs, isolated — known parallel-sweep flake)
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            timeout 300 cargo test -p strictpy-vm --test run_examples producer_runs -- --test-threads=1 && exit 0
+            echo "producer_runs attempt $attempt failed or timed out; retrying"
+          done
+          exit 1
 
       # Verify the interpreter-only build path still compiles. M8's JIT lives
       # behind `feature = "jit"` (default on); --no-default-features should
