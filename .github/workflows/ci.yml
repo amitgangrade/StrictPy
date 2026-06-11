@@ -18,6 +18,11 @@ env:
   # key off these (see vm/src/builtins.rs).
   SDL_VIDEODRIVER: dummy
   SDL_AUDIODRIVER: dummy
+  # m33_precise_gc::recursive_allocation_does_not_leak_or_crash recurses
+  # 5000 frames through the VM; MSVC debug frames overflow libtest's
+  # default 2 MiB worker-thread stack (STATUS_STACK_OVERFLOW on the
+  # windows runner). 16 MiB gives all test threads comfortable headroom.
+  RUST_MIN_STACK: "16777216"
 
 jobs:
   test:
