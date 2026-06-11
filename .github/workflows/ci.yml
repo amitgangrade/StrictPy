@@ -14,6 +14,11 @@ env:
   # removed that compat and refuses to configure. This is CMake's own
   # documented escape hatch for exactly this case.
   CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+  # The VM interprets guest calls recursively on the Rust stack; deep-
+  # recursion tests (m33_precise_gc 5000-frame build) overflow libtest's
+  # default 2 MiB thread stack under MSVC debug codegen (fatter frames
+  # than Linux). libtest honors RUST_MIN_STACK for its per-test threads.
+  RUST_MIN_STACK: "16777216"
 
 jobs:
   test:
