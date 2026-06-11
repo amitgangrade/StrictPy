@@ -43,6 +43,23 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libsdl2-dev libsdl2-image-dev
 
+      # sdl2-sys's "bundled" feature vendors SDL2 itself, but the "image"
+      # feature still links the system SDL2_image — which the Windows
+      # runners don't ship (the build dies at the final spy.exe link with
+      # LNK1181: cannot open 'SDL2_image.lib'). Drop in the official
+      # prebuilt VC development package: .lib onto the linker search path
+      # (LIB), .dll onto PATH for the test binaries.
+      - name: Install SDL2_image (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $v = "2.8.8"
+          curl.exe -sSL -o sdl2_image.zip "https://github.com/libsdl-org/SDL_image/releases/download/release-$v/SDL2_image-devel-$v-VC.zip"
+          tar -xf sdl2_image.zip
+          $libdir = "$PWD\SDL2_image-$v\lib\x64"
+          "LIB=$env:LIB;$libdir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $libdir | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
