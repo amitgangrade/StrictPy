@@ -1,0 +1,23 @@
+# ds_sort_by_key: sort N strings by (length, value) using sorted_by with a
+# composite string key: 2-digit length prefix + "|" + the string itself.
+
+fn run() -> i32:
+    n: i64 = 250000
+    seed: i64 = 7
+    words: List[str] = []
+    i: i64 = 0
+    while i < n:
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        words.append("w" + str(seed % 1000000))
+        i = i + 1
+    out: List[str] = sorted_by(words, fn(s: str) -> str: str(10i64 + len(s)) + "|" + s)
+    println("first0=" + out[0])
+    println("first1=" + out[1])
+    println("first2=" + out[2])
+    println("last2=" + out[n - 3])
+    println("last1=" + out[n - 2])
+    println("last0=" + out[n - 1])
+    return 0
+
+fn main() -> i32:
+    return run()

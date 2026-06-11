@@ -1,0 +1,31 @@
+# ds_comprehensions: list + dict comprehensions with filters over a large list.
+
+fn run() -> i32:
+    n: i64 = 500000
+    base: List[i64] = []
+    i: i64 = 0
+    while i < n:
+        base.append(i * 7 % 9973)
+        i = i + 1
+    squares: List[i64] = [x * x % 100000 for x: i64 in base]
+    evens: List[i64] = [x for x: i64 in base if x % 2 == 0]
+    d: Dict[str, i64] = {("k" + str(x % 100)): x for x: i64 in base if x % 17 == 0}
+    sq_sum: i64 = 0
+    for v: i64 in squares:
+        sq_sum = sq_sum + v
+    ev_sum: i64 = 0
+    for v: i64 in evens:
+        ev_sum = ev_sum + v
+    dkeys: List[str] = d.keys()
+    dkeys.sort()
+    d_sum: i64 = 0
+    for k: str in dkeys:
+        d_sum = d_sum + d[k]
+    println("sq_len=" + str(len(squares)) + " sq_sum=" + str(sq_sum))
+    println("ev_len=" + str(len(evens)) + " ev_sum=" + str(ev_sum))
+    println("d_len=" + str(len(d)) + " d_sum=" + str(d_sum))
+    println("d_first=" + dkeys[0] + " d_last=" + dkeys[len(dkeys) - 1])
+    return 0
+
+fn main() -> i32:
+    return run()

@@ -1,0 +1,44 @@
+# ds_dict_ops: insert N str-keyed entries, lookup all, membership hit/miss,
+# overwrite half, iterate keys in sorted order; print checksums.
+
+fn run() -> i32:
+    n: i64 = 250000
+    d: Dict[str, i64] = {}
+    i: i64 = 0
+    while i < n:
+        d["k" + str(i)] = i * 7 % 10000
+        i = i + 1
+    lookup_sum: i64 = 0
+    i = 0
+    while i < n:
+        lookup_sum = lookup_sum + d["k" + str(i)]
+        i = i + 1
+    hits: i64 = 0
+    misses: i64 = 0
+    i = 0
+    while i < n:
+        if d.has("k" + str(i)):
+            hits = hits + 1
+        if ("x" + str(i)) not in d:
+            misses = misses + 1
+        i = i + 1
+    i = 0
+    while i < n:
+        if i % 2 == 0:
+            d["k" + str(i)] = 1
+        i = i + 1
+    keys: List[str] = d.keys()
+    keys.sort()
+    val_sum: i64 = 0
+    for k: str in keys:
+        val_sum = val_sum + d[k]
+    println("len=" + str(len(d)))
+    println("lookup_sum=" + str(lookup_sum))
+    println("hits=" + str(hits))
+    println("misses=" + str(misses))
+    println("first_key=" + keys[0])
+    println("val_sum=" + str(val_sum))
+    return 0
+
+fn main() -> i32:
+    return run()

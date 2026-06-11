@@ -1,0 +1,154 @@
+diff --git a/vm/src/builtins.rs b/vm/src/builtins.rs
+index d4433bd..4ab24f8 100644
+--- a/vm/src/builtins.rs
++++ b/vm/src/builtins.rs
+@@ -134,12 +134,13 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
+             }
+             // SAFETY: both args are valid StringRepr heap pointers, rooted in
+             // registers (the trampoline published the window before this call).
+-            let (s_interned, s_blen, s_cap, s_ascii) = unsafe {
++            let (s_interned, s_blen, s_cap, s_ascii, s_inline) = unsafe {
+                 (
+                     (*s_ptr).flags & 1 != 0,
+                     (*s_ptr).byte_len,
+                     (*s_ptr).capacity,
+                     (*s_ptr).flags & 0b10 != 0,
++                    (*s_ptr).flags & 0b1000 != 0,
+                 )
+             };
+             let (e_blen, e_data, e_len, e_ascii) = unsafe {
+@@ -164,12 +165,27 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
+             if need > s_cap {
+                 let new_cap = need.max(s_cap.saturating_mul(2)).max(8);
+                 let old_data = unsafe { (*s_ptr).data };
+-                let new_data = interp
+-                    .shared
+-                    .heap
+-                    .lock()
+-                    .unwrap()
+-                    .realloc_raw(old_data, s_cap, new_cap, 1, s_blen);
++                let new_data = if s_inline {
++                    // Inline bytes live inside the StringRepr's GC block and
++                    // can't grow without moving the object. Move to a fresh heap
++                    // buffer (copying the existing bytes); the inline space is
++                    // reclaimed when the block is swept. Must NOT realloc/free
++                    // the inline pointer (it isn't a tracked raw buffer).
++                    let nd = interp.shared.heap.lock().unwrap().alloc_raw(new_cap, 1);
++                    unsafe {
++                        if !old_data.is_null() && s_blen > 0 {
++                            std::ptr::copy_nonoverlapping(old_data, nd, s_blen);
++                        }
++                    }
++                    nd
++                } else {
++                    interp
++                        .shared
++                        .heap
++                        .lock()
++                        .unwrap()
++                        .realloc_raw(old_data, s_cap, new_cap, 1, s_blen)
++                };
+                 unsafe {
+                     (*s_ptr).data = new_data;
+                     (*s_ptr).capacity = new_cap;
+@@ -180,6 +196,7 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
+                 std::ptr::copy_nonoverlapping(e_data, dst, e_blen);
+                 (*s_ptr).byte_len = need;
+                 (*s_ptr).length += e_len;
++                // Now backed by a separate heap buffer: clear the inline bit.
+                 (*s_ptr).flags = if s_ascii && e_ascii { 0b10 } else { 0 };
+             }
+             Ok(s_ptr as u64)
+diff --git a/vm/src/gc.rs b/vm/src/gc.rs
+index dd47579..2bf95f7 100644
+--- a/vm/src/gc.rs
++++ b/vm/src/gc.rs
+@@ -318,10 +318,19 @@ impl Heap {
+             }
+             GcKind::Str => {
+                 let s = obj.ptr as *mut StringRepr;
+-                let data = (*s).data;
+-                let byte_len = (*s).byte_len;
+-                if !data.is_null() && byte_len > 0 {
+-                    self.free_raw(data, byte_len, 1);
++                // Single-allocation strings keep their bytes inline in the same
++                // block (flag bit 3) — the outer sweep dealloc frees them, so we
++                // must NOT free `data` here (it isn't a separate raw buffer, and
++                // free_raw's fallback would wrongly dealloc it). Only strings
++                // whose buffer was moved to the heap by StrAppendInPlace's grow
++                // path are freed here.
++                let inline = (*s).flags & 0b1000 != 0;
++                if !inline {
++                    let data = (*s).data;
++                    let cap = (*s).capacity;
++                    if !data.is_null() && cap > 0 {
++                        self.free_raw(data, cap, 1);
++                    }
+                 }
+             }
+             _ => {}
+diff --git a/vm/src/interp.rs b/vm/src/interp.rs
+index d9d677c..f18cdea 100644
+--- a/vm/src/interp.rs
++++ b/vm/src/interp.rs
+@@ -2603,24 +2603,30 @@ impl Interpreter {
+     // ── Heap helpers ────────────────────────────────────────────────────
+ 
+     pub(crate) fn alloc_string(&mut self, s: &str) -> *mut StringRepr {
+-        let size = std::mem::size_of::<StringRepr>();
+-        let ty: *const RuntimeType = Arc::as_ptr(&self.shared.types.str_ty);
+-        let p = self.shared.heap.lock().unwrap().alloc(size, ty, GcKind::Str);
+         let bytes = s.as_bytes();
+-        let data = self.shared.heap.lock().unwrap().alloc_raw(bytes.len(), 1);
+-        if !data.is_null() && !bytes.is_empty() {
+-            unsafe {
+-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), data, bytes.len());
+-            }
+-        }
++        let blen = bytes.len();
++        let hdr_size = std::mem::size_of::<StringRepr>();
++        let ty: *const RuntimeType = Arc::as_ptr(&self.shared.types.str_ty);
++        // Single allocation: the StringRepr header + the inline UTF-8 bytes
++        // live in one heap block (mirroring ClosureRepr's inline captures).
++        // This halves per-string allocations vs the old "struct + separate
++        // data buffer" layout — the dominant cost in split-heavy text code.
++        // `flags` bit 3 ("inline") tells the GC sweep not to free `data`
++        // separately, and StrAppendInPlace to move to a heap buffer before
++        // growing (inline bytes can't grow without moving the object).
++        let total = hdr_size + blen;
++        let p = self.shared.heap.lock().unwrap().alloc(total, ty, GcKind::Str);
+         let sp = p as *mut StringRepr;
+         unsafe {
++            let data = (p as *mut u8).add(hdr_size);
++            if blen > 0 {
++                std::ptr::copy_nonoverlapping(bytes.as_ptr(), data, blen);
++            }
+             (*sp).length = s.chars().count();
+-            (*sp).byte_len = bytes.len();
++            (*sp).byte_len = blen;
+             (*sp).data = data;
+-            (*sp).flags = if s.is_ascii() { 0b10 } else { 0 };
+-            // Tight by default; the in-place-append path grows this with doubling.
+-            (*sp).capacity = bytes.len();
++            (*sp).flags = (if s.is_ascii() { 0b10 } else { 0 }) | 0b1000;
++            (*sp).capacity = blen;
+         }
+         sp
+     }
+diff --git a/vm/src/object.rs b/vm/src/object.rs
+index 63c9012..8944a3b 100644
+--- a/vm/src/object.rs
++++ b/vm/src/object.rs
+@@ -157,7 +157,11 @@ pub struct StringRepr {
+     /// Pointer to the UTF-8 byte buffer (allocated via the heap as a
+     /// raw byte allocation, independent of the StringRepr itself).
+     pub data: *mut u8,
+-    /// Bit 0 = interned, bit 1 = ascii-only, bit 2 = has-side-index.
++    /// Bit 0 = interned, bit 1 = ascii-only, bit 2 = has-side-index,
++    /// bit 3 = data is inline (UTF-8 bytes live in this same heap block, right
++    /// after the struct, not in a separate `raw_buffers` allocation). Inline is
++    /// the default from `alloc_string`; `StrAppendInPlace`'s grow path moves to
++    /// a separate buffer and clears it.
+     pub flags: u64,
+     /// Allocated capacity (in bytes) of the `data` buffer. Normally equal to
+     /// `byte_len` (strings are immutable), but the compiler-proven-unique

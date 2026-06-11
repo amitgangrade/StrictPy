@@ -1,0 +1,36 @@
+"""Async tasks: spawn 1000 small futures and await them all, summing the
+results; print the sum (only after every future resolved).
+
+NOTE: asyncio.run_i32 / spawn_i32 crash with an access violation in the
+current spy.exe build (see ../notes_sys.md) — this program is written to the
+documented M32 API and compiles cleanly, but cannot run until that is fixed."""
+import asyncio
+
+fn task_value(k: i64) -> i32:
+    return i32((k * k) % 1000)
+
+fn async_main() -> i32:
+    futs: List[Future[i32]] = []
+    i: i64 = 0
+    while i < 1000:
+        k: i64 = i
+        futs.append(asyncio.spawn_i32(fn() -> i32: task_value(k)))
+        i = i + 1
+
+    total: i64 = 0
+    done: i64 = 0
+    j: i64 = 0
+    while j < 1000:
+        total = total + i64(futs[j].await())
+        done = done + 1
+        j = j + 1
+
+    println("done=" + str(done))
+    println("sum=" + str(total))
+    return 0
+
+fn run() -> i32:
+    return asyncio.run_i32(async_main)
+
+fn main() -> i32:
+    return run()

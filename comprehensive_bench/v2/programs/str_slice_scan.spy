@@ -1,0 +1,62 @@
+# str_slice_scan: char-by-char scanning + slicing windows of a large string;
+# print checksum of char codes and window stats. Hot loops are isolated in
+# kernel functions (StrictPy JIT / concat optimizations are per-function).
+
+fn build_text(n: i64) -> str:
+    s: str = ""
+    i: i64 = 0
+    while i < n:
+        piece: str = "seg" + str(i) + ":payload-" + str((i * 7) % 100) + ";"
+        s = s + piece
+        i = i + 1
+    return s
+
+fn char_scan(s: str, reps: i64) -> i64:
+    n: i64 = i64(len(s))
+    checksum: i64 = 0
+    r: i64 = 0
+    while r < reps:
+        j: i64 = 0
+        while j < n:
+            c: char = s[j]
+            checksum = checksum + i64(i32(c))
+            j = j + 1
+        r = r + 1
+    return checksum
+
+fn window_scan(s: str, reps: i64) -> Tuple[i64, i64, i64]:
+    n: i64 = i64(len(s))
+    windows: i64 = 0
+    wlen_sum: i64 = 0
+    whits: i64 = 0
+    r: i64 = 0
+    while r < reps:
+        k: i64 = 0
+        while k < n:
+            end: i64 = k + 16
+            if end > n:
+                end = n
+            w: str = s.slice(k, end)
+            windows = windows + 1
+            wlen_sum = wlen_sum + i64(len(w))
+            if w.contains("pay"):
+                whits = whits + 1
+            k = k + 997
+        r = r + 1
+    return (windows, wlen_sum, whits)
+
+fn run() -> i32:
+    s: str = build_text(4000)
+    n: i64 = i64(len(s))
+    reps: i64 = 40
+    checksum: i64 = char_scan(s, reps)
+    windows, wlen_sum, whits = window_scan(s, reps)
+    println("checksum=" + str(checksum))
+    println("windows=" + str(windows))
+    println("wlen_sum=" + str(wlen_sum))
+    println("whits=" + str(whits))
+    println("n=" + str(n))
+    return 0
+
+fn main() -> i32:
+    return run()

@@ -1,0 +1,25 @@
+# str_concat_build: build a large string by repeated `s = s + piece`.
+# NOTE: the accumulator loop must live in its own function where the only
+# other use of `s` is `return s` — otherwise StrictPy's proven-unique
+# in-place concat optimization does not fire and the loop is O(n^2).
+# (Also: `s = s + "ab" + str(i)` 2-step form is quadratic in BOTH languages.)
+
+fn build(n: i64) -> str:
+    s: str = ""
+    i: i64 = 0
+    while i < n:
+        piece: str = "ab" + str(i % 10)
+        s = s + piece
+        i = i + 1
+    return s
+
+fn run() -> i32:
+    n: i64 = 800000
+    s: str = build(n)
+    println("len=" + str(len(s)))
+    println("head=" + s.slice(0, 12))
+    println("tail=" + s.slice(i64(len(s)) - 12, i64(len(s))))
+    return 0
+
+fn main() -> i32:
+    return run()

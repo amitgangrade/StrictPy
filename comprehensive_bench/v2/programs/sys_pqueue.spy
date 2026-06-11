@@ -1,0 +1,30 @@
+"""Priority queue: push N tasks with synthetic priorities, pop all in
+priority order; print integer priority/item sums."""
+import queue
+
+fn run() -> i32:
+    n: i64 = 200000
+    pq: i64 = queue.pq_new_i64()
+
+    i: i64 = 0
+    while i < n:
+        prio: f64 = f64((i * 37) % 1000)
+        queue.pq_push_i64(pq, prio, i)
+        i = i + 1
+
+    prio_sum: i64 = 0
+    item_sum: i64 = 0
+    popped: i64 = 0
+    while not queue.pq_is_empty(pq):
+        top: Tuple[f64, i64] = queue.pq_pop_min_i64(pq)
+        prio_sum = prio_sum + i64(top.0)
+        item_sum = item_sum + top.1
+        popped = popped + 1
+
+    println("popped=" + str(popped))
+    println("prio_sum=" + str(prio_sum))
+    println("item_sum=" + str(item_sum))
+    return 0
+
+fn main() -> i32:
+    return run()

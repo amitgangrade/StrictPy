@@ -1,0 +1,33 @@
+# str_regex: compiled regex — find_all of a word+digits pattern plus a
+# replace_all over synthetic text, N iterations; print match counts and
+# replaced length. (Pattern subset valid in both Rust regex and Python re.)
+
+import re
+from re import Pattern
+
+fn run() -> i32:
+    text: str = ""
+    i: i64 = 0
+    while i < 1500:
+        text = text + "alpha" + str(i % 100) + " beta gamma" + str(i % 10) + " "
+        i = i + 1
+
+    p1: Pattern = re.compile("[a-z]+[0-9]+")
+    p2: Pattern = re.compile("[0-9]+")
+    reps: i64 = 100
+    match_count: i64 = 0
+    replaced_len: i64 = 0
+    r: i64 = 0
+    while r < reps:
+        found: List[str] = p1.find_all(text)
+        match_count = match_count + i64(len(found))
+        repl: str = p2.replace_all(text, "#")
+        replaced_len = replaced_len + i64(len(repl))
+        r = r + 1
+    println("match_count=" + str(match_count))
+    println("replaced_len=" + str(replaced_len))
+    println("text_len=" + str(len(text)))
+    return 0
+
+fn main() -> i32:
+    return run()

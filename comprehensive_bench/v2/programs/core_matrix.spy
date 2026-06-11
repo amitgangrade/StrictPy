@@ -1,0 +1,40 @@
+# core_matrix: NxN f64 matrix multiply (lists of lists), integer-valued contents.
+# Checksum stays integral so output is an exact i64 in both languages.
+
+fn build(n: i64, fa: i64, fb: i64) -> List[List[f64]]:
+    m: List[List[f64]] = []
+    for i: i64 in range(n):
+        row: List[f64] = []
+        for j: i64 in range(n):
+            row.append(f64((i * fa + j * fb) % 10))
+        m.append(row)
+    return m
+
+fn run() -> i32:
+    n: i64 = 100
+    a: List[List[f64]] = build(n, 7, 3)
+    b: List[List[f64]] = build(n, 5, 11)
+    c: List[List[f64]] = []
+    for i: i64 in range(n):
+        row: List[f64] = []
+        for j: i64 in range(n):
+            row.append(0.0)
+        c.append(row)
+    for i2: i64 in range(n):
+        ai: List[f64] = a[i2]
+        ci: List[f64] = c[i2]
+        for k: i64 in range(n):
+            aik: f64 = ai[k]
+            bk: List[f64] = b[k]
+            for j2: i64 in range(n):
+                ci[j2] = ci[j2] + aik * bk[j2]
+    total: f64 = 0.0
+    for i3: i64 in range(n):
+        ci3: List[f64] = c[i3]
+        for j3: i64 in range(n):
+            total = total + ci3[j3]
+    println("matrix_checksum=" + str(i64(total)))
+    return 0
+
+fn main() -> i32:
+    return run()

@@ -1,0 +1,50 @@
+# str_csv_parse: parse a synthetic in-memory CSV string (~50k rows x 6 cols,
+# no quoting) via split; aggregate a numeric column; print sums.
+
+fn build_csv(n: i64) -> str:
+    s: str = ""
+    i: i64 = 0
+    while i < n:
+        flag: str = "N"
+        if i % 2 == 0:
+            flag = "Y"
+        row: str = str(i) + ",item" + str(i % 100) + "," + str(i % 7) + "," +
+            str((i * 13) % 1000) + "," + flag + ",note" + str(i % 5)
+        if i == 0:
+            s = s + row
+        else:
+            piece: str = "\n" + row
+            s = s + piece
+        i = i + 1
+    return s
+
+fn aggregate(text: str, reps: i64) -> Tuple[i64, i64, i64, i64]:
+    price_sum: i64 = 0
+    qty_sum: i64 = 0
+    y_count: i64 = 0
+    rows: i64 = 0
+    r: i64 = 0
+    while r < reps:
+        lines: List[str] = text.split("\n")
+        for line: str in lines:
+            fields: List[str] = line.split(",")
+            rows = rows + 1
+            qty_sum = qty_sum + parse_i64(fields[2])
+            price_sum = price_sum + parse_i64(fields[3])
+            if fields[4] == "Y":
+                y_count = y_count + 1
+        r = r + 1
+    return (rows, qty_sum, price_sum, y_count)
+
+fn run() -> i32:
+    nrows: i64 = 50000
+    text: str = build_csv(nrows)
+    rows, qty_sum, price_sum, y_count = aggregate(text, 8)
+    println("rows=" + str(rows))
+    println("qty_sum=" + str(qty_sum))
+    println("price_sum=" + str(price_sum))
+    println("y_count=" + str(y_count))
+    return 0
+
+fn main() -> i32:
+    return run()
