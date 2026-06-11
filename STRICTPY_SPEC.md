@@ -5129,12 +5129,18 @@ fn producer(ch: Channel[i32]) -> None:
         i = i + 1
     ch.close()
 
+# Blocking `recv()` + ChannelClosedError is the reliable drain idiom:
+# `try_recv` returns the same `none` for "empty" and "closed", so a
+# polling consumer can exit early and leave the producer blocked forever
+# on a full channel (BUGS_KNOWN.md BUG-044).
 fn consumer(ch: Channel[i32]) -> None:
-    while true:
-        v: i32? = ch.try_recv()
-        if v is none:
-            break
-        println("got " + str(v))
+    running: bool = true
+    while running:
+        try:
+            v: i32 = ch.recv()
+            println("got " + str(v))
+        except ChannelClosedError:
+            running = false
 
 fn main() -> i32:
     ch: Channel[i32] = Channel[i32](16)

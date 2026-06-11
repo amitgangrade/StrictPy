@@ -94,31 +94,29 @@ fn mandelbrot_renders_fractal() {
 /// `Thread(fn() -> None: ...)` form, this test surfaces the resulting
 /// VmError so the failure is visible.
 ///
-/// BUG-044: with the example's original `Channel[i32](16)` and both
-/// threads running concurrently, an early consumer break (see the
-/// try_recv note below) left the producer blocked forever on a full
-/// channel — `t1.join()` deadlocked and this test hung the whole suite
-/// (observed holding a CI runner for hours). The example now buffers all
-/// sends (capacity > send count) and joins the producer before starting
-/// the consumer, so the drain is deterministic: all 100 lines, every run.
+/// BUG-044: the example's consumer originally polled with `try_recv`,
+/// which returns the same `none` sentinel for both "empty" and
+/// "disconnected" (M5 limitation, see vm/src/builtins.rs::ChannelTryRecv).
+/// A consumer that won the race exited early, the producer blocked
+/// forever on the full 16-slot channel, and `t1.join()` deadlocked —
+/// this test hung the whole suite (observed holding a CI runner for
+/// hours). The consumer now uses blocking `recv()` + `except
+/// ChannelClosedError`, so the drain is deterministic: all 100 lines,
+/// every run, with both threads genuinely concurrent.
 #[test]
 fn producer_runs() {
     let p = compile_to_temp("producer.spy");
     let (code, out) = run_file_capture(&p).expect("producer.spy must run cleanly");
     assert_eq!(code, 0, "exit code; stdout was: {out:?}");
-    // The producer sends 0..100; the consumer drains via `try_recv` and
-    // breaks on the first `none`. Because try_recv currently returns the
-    // same `none` sentinel for both "empty" and "disconnected" (M5
-    // limitation, see vm/src/builtins.rs::ChannelTryRecv), the consumer
-    // may break early if it polls between sends. Accept any prefix that
-    // covers at least the first ten values, per the M7 task spec.
+    // Blocking recv drains everything the producer sent before
+    // ChannelClosedError fires, so all 100 lines must be present.
     let count = (0..100)
         .take_while(|i| out.contains(&format!("got {i}\n")))
         .count();
-    assert!(
-        count >= 10,
-        "expected at least 10 consecutive `got N` lines (try_recv race \
-         is acceptable for v0.1); got {count}. stdout was: {out:?}"
+    assert_eq!(
+        count, 100,
+        "expected all 100 `got N` lines from the blocking-recv consumer; \
+         got {count}. stdout was: {out:?}"
     );
 }
 

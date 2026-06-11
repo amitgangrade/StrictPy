@@ -552,11 +552,13 @@ hours).
      while its consumer breaks on the first `none`. When the consumer
      won the race mid-stream, the producer blocked forever on the full
      channel and `t1.join()` deadlocked — the program never exited.
-- **Mitigation (this branch):** the example now buffers all sends
-  (capacity 128 > 100) and joins the producer before starting the
-  consumer, so the consumer deterministically drains the full stream
-  before its first `none` — no deadlock, no early-exit flake. CI jobs
-  also carry `timeout-minutes` so any future hang fails in bounded time.
+- **Mitigation (this branch):** the example's consumer now uses blocking
+  `recv()` + `except ChannelClosedError` (the kvstore.spy idiom), which
+  is deterministic: it drains all 100 items and exits exactly when the
+  channel is closed and empty, with both threads genuinely concurrent
+  on the original 16-slot channel. `run_examples::producer_runs` now
+  asserts all 100 lines. CI jobs also carry `timeout-minutes` so any
+  future hang fails in bounded time.
 - **Proper fix sketch:** give channels a real closed signal — either
   `try_recv` raising/returning a distinguishable "closed" value
   (runtime + spec §16.3 change), or a `ch.is_closed()` predicate, or a
