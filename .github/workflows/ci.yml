@@ -9,6 +9,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # CMake 4 (now on the GitHub runners) removed compatibility with
+  # cmake_minimum_required < 3.5, but sdl2-sys's bundled SDL2 sources
+  # still declare an older minimum, so the configure step aborts.
+  # CMake 4 honours this as an environment variable; harmless on older
+  # CMake installs.
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
 jobs:
   test:
@@ -21,8 +27,20 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    # The full workspace build + test is normally well under an hour; the
+    # cap turns a hung test binary into a visible failure instead of a
+    # six-hour stall.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+
+      # The M52–M58 gfx milestones made strictpy-vm depend on rodio
+      # (ALSA backend on Linux) and bundled SDL2 with the `image`
+      # feature, which links the system SDL2_image. Neither library's
+      # dev package ships on ubuntu-latest.
+      - name: Install Linux system deps (ALSA + SDL2_image)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libsdl2-dev libsdl2-image-dev
 
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
