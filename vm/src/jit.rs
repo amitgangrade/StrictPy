@@ -988,6 +988,14 @@ impl<'a> Translator<'a> {
                 let r = self.builder.ins().ineg(av);
                 self.write_reg(*dst, r);
             }
+            Op::INot { w, dst, a } => {
+                let av = match w {
+                    NumWidth::W64 => self.read_reg(*a),
+                    NumWidth::W32 => self.read_i32(*a),
+                };
+                let r = self.builder.ins().bnot(av);
+                self.write_reg(*dst, r);
+            }
             Op::IDivChk { w, dst, a, b } => {
                 let (av, bv) = match w {
                     NumWidth::W64 => (self.read_reg(*a), self.read_reg(*b)),
