@@ -2332,8 +2332,10 @@ len(xs)                                  # same as xs.length()
 # Dict[str, V]:
 d[k]                                     # raises KeyError if absent
 d[k] = v
+del d[k]                                 # remove entry; quiet no-op if absent
 d.get(k: str) -> V?                      # none if absent
 d.has(k: str) -> bool                    # PREFER over `k in d` (BUG-039 fix uses this path)
+d.remove(k: str) -> bool                 # true iff the key was present
 d.keys() -> List[str]
 d.values() -> List[V]
 d.length() -> i64

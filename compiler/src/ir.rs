@@ -2396,7 +2396,32 @@ fn lower_stmt(fb: &mut FuncBuilder, ctx: &mut LowerCtx, s: &Stmt) -> Option<()> 
             // Skip the call to assert() for now — codegen will see the discarded value.
             Some(())
         }
-        Stmt::Del { .. } => Some(()),
+        Stmt::Del { target, .. } => {
+            // Spec §7.5: `del d[k]` removes a Dict entry. The typechecker
+            // rejects every other del target (this arm used to lower the
+            // statement to nothing, so deletion silently no-opped). The
+            // native returns a bool (key was present) that the statement
+            // form discards.
+            if let Lvalue::Index { obj, indices, .. } = target {
+                let recv_ty = ctx.expr_ty(expr_span(obj));
+                if matches!(recv_ty, Ty::Generic { base: TypeCtor::Dict, .. }) {
+                    let d = lower_expr(fb, ctx, obj);
+                    let k = if let Some(i) = indices.first() {
+                        lower_expr(fb, ctx, i)
+                    } else {
+                        return Some(());
+                    };
+                    fb.push_value(
+                        Ty::Primitive(PrimTy::Bool),
+                        ValueKind::Op {
+                            op: IROp::NativeCall { native_id: NativeFn::DictRemove as u32 },
+                            args: vec![d, k],
+                        },
+                    );
+                }
+            }
+            Some(())
+        }
         Stmt::Expr { expr, .. } => {
             let _ = lower_expr(fb, ctx, expr);
             Some(())
@@ -5872,6 +5897,7 @@ fn resolve_native_method(recv_ty: &Ty, method: &str) -> u32 {
             "has"    => NativeFn::DictHas    as u32,
             "keys"   => NativeFn::DictKeys   as u32,
             "values" => NativeFn::DictValues as u32,
+            "remove" => NativeFn::DictRemove as u32,
             _ => NativeFn::from_name(method)
                 .map(|n| n as u32)
                 .unwrap_or(NativeFn::Unknown as u32),

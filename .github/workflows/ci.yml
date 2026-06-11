@@ -90,28 +90,14 @@ jobs:
           Copy-Item $dll.FullName target\debug\ -Force
           Copy-Item $dll.FullName target\debug\deps\ -Force
 
-      # producer_runs is excluded from the sweep: the threaded
-      # producer/consumer example intermittently deadlocks on a futex
-      # (wedged the ubuntu CI test step for hours; reproduced at the
-      # merge-base, so it predates current work — see the BUG-043 notes
-      # in BUGS_KNOWN.md). On Linux it passes reliably when run isolated
-      # with retries (step below). On Windows it has hung even isolated,
-      # and GNU `timeout` under Git Bash cannot kill a native process
-      # tree to drive a retry, so Windows runs without it — coverage for
-      # producer.spy on Windows stays with local development runs until
-      # the underlying deadlock is root-caused.
+      # producer_runs is back in the sweep on both platforms: the
+      # deadlock it used to hit (consumer's try_recv poll exiting on a
+      # transient empty, then the producer blocking forever on the full
+      # bounded channel) is root-caused and fixed — see BUG-045 in
+      # BUGS_KNOWN.md and examples/producer.spy's recv +
+      # ChannelClosedError drain.
       - name: cargo test (debug, full workspace)
-        run: cargo test --workspace --verbose -- --skip producer_runs
-
-      - name: cargo test (producer_runs, isolated — known deadlock flake)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          for attempt in 1 2 3; do
-            timeout 300 cargo test -p strictpy-vm --test run_examples producer_runs -- --test-threads=1 && exit 0
-            echo "producer_runs attempt $attempt failed or timed out; retrying"
-          done
-          exit 1
+        run: cargo test --workspace --verbose
 
       # Verify the interpreter-only build path still compiles. M8's JIT lives
       # behind `feature = "jit"` (default on); --no-default-features should

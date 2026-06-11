@@ -742,6 +742,22 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             let key = arg_str(args, 1);
             with_dict_slot(interp, handle, |slot| slot.data.contains_key(&key) as u64)
         }
+        NativeFn::DictRemove => {
+            let dp = arg_u64(args, 0) as *const DictRepr;
+            if dp.is_null() {
+                return Err(VmError::UncaughtException {
+                    type_name: "NullPointerError".into(),
+                    message: "remove on null dict".into(),
+                });
+            }
+            // SAFETY: dp heap pointer.
+            let handle = unsafe { (*dp).handle } as usize;
+            let key = arg_str(args, 1);
+            // Returns whether the key was present, so `del d[k]` on an
+            // absent key is a quiet no-op (StrictPy has no KeyError-on-del;
+            // callers that care use the `d.remove(k) -> bool` form).
+            with_dict_slot_mut(interp, handle, |slot| slot.data.remove(&key).is_some() as u64)
+        }
         NativeFn::DictKeys => {
             let dp = arg_u64(args, 0) as *const DictRepr;
             if dp.is_null() {
@@ -25752,6 +25768,47 @@ mod tests {
         let k = alloc_s(&mut i, "missing");
         let got = dispatch(&mut i, NativeFn::DictGet as u32, &[dp, k]).unwrap();
         assert_eq!(got, NONE_SENTINEL);
+    }
+
+    #[test]
+    fn dict_remove_deletes_key_and_reports_presence() {
+        let mut i = empty_interp();
+        let dp = alloc_dict_for_test(&mut i);
+        let k = alloc_s(&mut i, "session");
+        dispatch(&mut i, NativeFn::DictSet as u32, &[dp, k, 7]).unwrap();
+        let k2 = alloc_s(&mut i, "session");
+        let removed = dispatch(&mut i, NativeFn::DictRemove as u32, &[dp, k2]).unwrap();
+        assert_eq!(removed, 1, "removing a present key must return true");
+        let k3 = alloc_s(&mut i, "session");
+        assert_eq!(dispatch(&mut i, NativeFn::DictHas as u32, &[dp, k3]).unwrap(), 0);
+        let k4 = alloc_s(&mut i, "session");
+        assert_eq!(
+            dispatch(&mut i, NativeFn::DictGet as u32, &[dp, k4]).unwrap(),
+            NONE_SENTINEL,
+        );
+        assert_eq!(dispatch(&mut i, NativeFn::DictLen as u32, &[dp]).unwrap(), 0);
+    }
+
+    #[test]
+    fn dict_remove_absent_key_returns_false_without_trapping() {
+        let mut i = empty_interp();
+        let dp = alloc_dict_for_test(&mut i);
+        let k = alloc_s(&mut i, "never-inserted");
+        let removed = dispatch(&mut i, NativeFn::DictRemove as u32, &[dp, k]).unwrap();
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn dict_remove_on_null_dict_traps() {
+        let mut i = empty_interp();
+        let k = alloc_s(&mut i, "x");
+        let err = dispatch(&mut i, NativeFn::DictRemove as u32, &[0, k]).unwrap_err();
+        match err {
+            VmError::UncaughtException { type_name, .. } => {
+                assert_eq!(type_name, "NullPointerError");
+            }
+            other => panic!("expected NullPointerError, got {other:?}"),
+        }
     }
 
     #[test]
