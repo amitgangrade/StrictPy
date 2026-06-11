@@ -1,7 +1,15 @@
 """Producer/consumer over a Channel[i32]. The producer sends 0..100 then
-closes; the consumer drains via `try_recv` until it sees `none`.
+closes; the consumer drains via blocking `recv()` and stops on the
+`ChannelClosedError` raised once the channel is closed and empty.
 Demonstrates §16.1 (Thread) and §16.3 (Channel) and lambda capture per
-the §21.4 style — `Thread(fn() -> None: producer(ch))`."""
+the §21.4 style — `Thread(fn() -> None: producer(ch))`.
+
+The consumer used to poll `try_recv()` and break on `none`, but `none`
+means "empty" as well as "closed" (M5 limitation), so a consumer that
+polled between sends exited early — and once it was gone the producer
+blocked forever on the full bounded channel and `t1.join()` deadlocked
+(observed as a rare hang when the test suite runs in parallel). The
+recv + except form is the race-free drain protocol."""
 
 # NOTE: §16 declares `Thread` and `Channel` as runtime classes but does
 # not pin down their import path. Following the example in §21.4, we
@@ -16,11 +24,13 @@ fn producer(ch: Channel[i32]) -> None:
     ch.close()
 
 fn consumer(ch: Channel[i32]) -> None:
-    while true:
-        v: i32? = ch.try_recv()
-        if v is none:
-            break
-        println("got " + str(v))
+    running: bool = true
+    while running:
+        try:
+            v: i32 = ch.recv()
+            println("got " + str(v))
+        except ChannelClosedError:
+            running = false
 
 fn main() -> i32:
     ch: Channel[i32] = Channel[i32](16)

@@ -98,19 +98,19 @@ fn producer_runs() {
     let p = compile_to_temp("producer.spy");
     let (code, out) = run_file_capture(&p).expect("producer.spy must run cleanly");
     assert_eq!(code, 0, "exit code; stdout was: {out:?}");
-    // The producer sends 0..100; the consumer drains via `try_recv` and
-    // breaks on the first `none`. Because try_recv currently returns the
-    // same `none` sentinel for both "empty" and "disconnected" (M5
-    // limitation, see vm/src/builtins.rs::ChannelTryRecv), the consumer
-    // may break early if it polls between sends. Accept any prefix that
-    // covers at least the first ten values, per the M7 task spec.
+    // The producer sends 0..100 and closes; the consumer drains via
+    // blocking recv() and stops on ChannelClosedError. The old try_recv
+    // polling form could break early on a transient empty — and once the
+    // consumer was gone the producer blocked forever on the full bounded
+    // channel and join() deadlocked (the cause of the rare parallel-suite
+    // hang). With the race-free drain the output is exact: all 100 values.
     let count = (0..100)
         .take_while(|i| out.contains(&format!("got {i}\n")))
         .count();
-    assert!(
-        count >= 10,
-        "expected at least 10 consecutive `got N` lines (try_recv race \
-         is acceptable for v0.1); got {count}. stdout was: {out:?}"
+    assert_eq!(
+        count, 100,
+        "expected the recv/ChannelClosedError drain to deliver all 100 \
+         values; got {count}. stdout was: {out:?}"
     );
 }
 

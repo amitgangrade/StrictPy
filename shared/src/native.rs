@@ -2381,6 +2381,14 @@ pub enum NativeFn {
     GfxSetFullscreen    = 1190,
     GfxSetVsync         = 1191,
 
+    // ── 1200+: container ops added after the 90–119 block filled up ─────
+    /// `del d[k]` / `d.remove(k) -> bool` — remove a key from a Dict.
+    /// Args: `[dict_ptr, key_str_ptr]`. Returns 1 if the key was present
+    /// (and is now gone), 0 if it was absent. Spec §7.5 lists `del_stmt`;
+    /// before this id existed the IR lowered `del` to nothing, so the
+    /// statement silently no-opped (see vm/tests/dict_remove.rs).
+    DictRemove = 1200,
+
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
     /// encounters. The VM treats this as a runtime error.
@@ -3155,6 +3163,8 @@ impl NativeFn {
             // ── M58 (GFX polish) ─────────────────────────────────────
             1190 => Some(Self::GfxSetFullscreen),
             1191 => Some(Self::GfxSetVsync),
+            // ── container ops past the 90–119 block ──────────────────
+            1200 => Some(Self::DictRemove),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }
@@ -3250,6 +3260,12 @@ impl NativeFn {
             // dispatcher. The receiver is implicit (the list pointer),
             // so the IR appends it as the first argument before the call.
             "pop"         => Some(Self::ListPop),
+            // `d.remove(k) -> bool` — dispatched via the Dict branch of
+            // `resolve_native_method`; registered here too so the name
+            // table stays complete. (`os.remove` is unaffected: stdlib
+            // module items carry their native_id directly and never go
+            // through `from_name`.)
+            "remove"      => Some(Self::DictRemove),
 
             // M32: Future[T] method dispatch (special-cased to
             // `AsyncioFutureAwait` / `AsyncioFutureIsReady` in the IR via

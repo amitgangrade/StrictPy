@@ -506,9 +506,11 @@ dispatched on operand width.
   isolated on the windows runner — and GNU `timeout` under Git Bash
   can't kill a native process tree to drive a retry — so Windows CI
   skips it entirely; Windows coverage of producer.spy stays with local
-  runs. NOT Linux-only, NOT purely a parallel-sweep artifact. Root
-  cause untraced — suspect process-global state (GC pause / stackmap
-  registry?) or a channel race in the threaded runtime.
+  runs. NOT Linux-only, NOT purely a parallel-sweep artifact.
+  **Root-caused and fixed since — see the BUG-045 entry below** (the
+  consumer's try_recv polling could exit on a transient empty, after
+  which the producer blocked forever on the full bounded channel); the
+  ci.yml skip/isolated-retry scaffolding has been removed again.
 - Bytecode-determinism side-finding from the audit that 115/123
   examples compile byte-identically across this change: several
   examples (`graph_lib`, `json_typed_demo`, `algorithms_lib`,
@@ -516,6 +518,48 @@ dispatched on operand width.
   **nondeterministically run-to-run on both old and new compilers**
   (type-table / interning order — `New { type_id }` renumbering;
   echoes the class_id↔type_id ordering note under bug #5).
+
+---
+
+## Fixed: producer.spy deadlock — try_recv early exit + blocking bounded send
+
+BUG-045. `vm/tests/run_examples.rs::producer_runs` hung intermittently
+(~50% of parallel-mode runs locally; reproduced on both ubuntu and
+windows CI runners, each stalling until the job timeout). The example's
+consumer polled `try_recv()` and broke on `none` — but `none` means
+"empty" as well as "closed" (the documented M5 limitation), so under
+CPU contention the consumer could poll between sends and exit early.
+With the consumer gone, the producer filled the 16-slot bounded channel
+and blocked forever in `send()` (the receiver half lives in the shared
+channel table and is never dropped), so `t1.join()` never returned:
+three threads parked on futexes. The test tolerated the *truncated
+output* ("accept any prefix ≥ 10") but not this second-order hang.
+
+Fixed by switching the consumer to the race-free drain protocol the
+LANGUAGE_GUIDE documents: blocking `recv()` + `except
+ChannelClosedError`. `ChannelTryRecv`'s semantics are unchanged (the
+`channel_try_recv_empty_returns_none_sentinel` unit test pins them);
+the empty/closed ambiguity remains a known wart for user code — see the
+kvstore.spy header for the SHUTDOWN-sentinel alternative.
+`producer_runs` now asserts the full 100-value drain.
+
+---
+
+## Fixed: silent no-op `del d[k]` (dict deletion unimplemented)
+
+`del d[k]` on a `Dict[str, V]` parsed and type-checked but lowered to
+**nothing** — `compiler/src/ir.rs` had `Stmt::Del { .. } => Some(())`, so
+after `del d[k]` both `len(d)` and `d.get(k)` were unchanged. There was
+also no `d.remove()` / `d.pop()` alternative, so the language had no way
+to remove a dict key at all (the LRU-cache benchmark had to fake eviction
+with two-generation segmented maps). Fifth instance of the
+"placeholder IR lowering" pattern (after BUG-008/034/037/041), and the
+worst form of it: a statement the spec grammar includes (§7.5 `del_stmt`)
+that compiled to a no-op with no diagnostic.
+
+| # | Bug | Fix location | Regression test |
+|---|-----|--------------|-----------------|
+| BUG-044 | `del d[k]` silently lowered to nothing; no dict-key removal existed anywhere in the language. | New `NativeFn::DictRemove = 1200` (`shared/src/native.rs`) implemented in `vm/src/builtins.rs` (removes the key from the side-table slot, returns 1/0 for present/absent — `len` reads the same side table so it stays consistent). `compiler/src/ir.rs` lowers `Stmt::Del` on a Dict-index target to it and dispatches the new `d.remove(k) -> bool` method via `resolve_native_method`; `compiler/src/typecheck.rs` checks the key against `K`, adds the `remove` synth entry, and **rejects every other `del` target** (plain names, list indices, attributes) with a type error instead of compiling a no-op. | `vm/tests/dict_remove.rs` (del removes entry / absent-key no-op / `remove` presence bool / re-insert after del / non-dict `del` targets are compile errors); unit: `vm/src/builtins.rs::tests::dict_remove_*` |
 
 ---
 

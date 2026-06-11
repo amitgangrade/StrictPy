@@ -629,7 +629,40 @@ impl TypeChecker {
             Stmt::Expr { expr, .. } => {
                 let _ = self.check_or_synth(expr, None, env, ctx, r)?;
             }
-            Stmt::Del { .. } | Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Pass { .. } => {}
+            Stmt::Del { target, span } => {
+                // Spec §7.5 `del_stmt`. v1 implements deletion for Dict
+                // entries only (`del d[k]` lowers to NativeFn::DictRemove).
+                // Any other target has no runtime deletion path, and the IR
+                // used to lower the whole statement to nothing — a silent
+                // no-op `del` is worse than a missing feature, so reject
+                // everything we can't actually delete.
+                match target {
+                    Lvalue::Index { obj, indices, .. } => {
+                        let obj_ty = self.synth_expr(obj, env, ctx, r)?;
+                        match &obj_ty {
+                            Ty::Generic { base: TypeCtor::Dict, args: a } if a.len() == 2 => {
+                                if indices.len() != 1 {
+                                    return Err(type_err(*span, codes::TYPE_ARITY,
+                                        "del on a Dict takes exactly one key: `del d[k]`".into()));
+                                }
+                                let _ = self.check_expr(&indices[0], &a[0], env, ctx, r)?;
+                            }
+                            other => {
+                                return Err(type_err(*span, codes::TYPE_MISMATCH,
+                                    format!("del is only supported on Dict entries \
+                                             (`del d[k]`); cannot delete from {}",
+                                            other.display())));
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(type_err(*span, codes::TYPE_MISMATCH,
+                            "del is only supported on Dict entries (`del d[k]`); \
+                             deleting names or attributes is not part of v1".into()));
+                    }
+                }
+            }
+            Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Pass { .. } => {}
         }
         Ok(())
     }
@@ -2075,6 +2108,19 @@ impl TypeChecker {
                 if !args.is_empty() {
                     let _ = self.check_expr(&args[0].value, &a[0], env, ctx, r)?;
                 }
+                return Ok(Ty::Primitive(PrimTy::Bool));
+            }
+            // `d.remove(k) -> bool` — true iff the key was present. The
+            // statement form `del d[k]` lowers to the same native and
+            // discards the bool; the method form exists for callers that
+            // need to observe whether anything was evicted (LRU caches,
+            // session stores).
+            (Ty::Generic { base: TypeCtor::Dict, args: a }, "remove") if a.len() == 2 => {
+                if args.len() != 1 {
+                    return Err(type_err(span, codes::TYPE_ARITY,
+                        "Dict.remove takes 1 argument: (key)".into()));
+                }
+                let _ = self.check_expr(&args[0].value, &a[0], env, ctx, r)?;
                 return Ok(Ty::Primitive(PrimTy::Bool));
             }
             // str methods — stdlib: wordcount.spy
