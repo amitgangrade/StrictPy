@@ -19,6 +19,7 @@ use crate::ast::{
     Stmt, TopDecl, UnaryOp,
 };
 use crate::error::{codes, CompileError, ErrorCode};
+use crate::ir::{eval_const_expr, IRConst};
 use crate::resolver::{FunctionSig, ResolvedModule, SymbolId, SymbolKind};
 use crate::types::{
     is_subtype, is_subtype_trivial, ty_eq, BoundKind, ClassId, ClassLayout, PrimTy, ProtoId,
@@ -128,6 +129,60 @@ impl TypeChecker {
                 }
                 TopDecl::Protocol(_) | TopDecl::TypeAlias(_) => {}
             }
+        }
+
+        // Module-level `final` initialisers must be compile-time evaluable:
+        // IR lowering folds each const to a literal and substitutes it at
+        // every reference site, so an unfoldable initialiser used to lower
+        // to `None` — numeric 0 — silently (`final S: f64 = 4.0 * PI * PI`
+        // read back as 0.0). Mirror the lowerer's fixed-point fold here
+        // (initialisers may reference other consts in any declaration
+        // order) and reject whatever is left over as E3003.
+        let mut module_consts: HashMap<String, (IRConst, Ty)> = HashMap::new();
+        let mut pending: Vec<_> = resolved
+            .module
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                TopDecl::Const(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        loop {
+            let before = pending.len();
+            let mut still_pending = Vec::new();
+            for c in pending {
+                let ty = ctx
+                    .base_types
+                    .get(&resolved.symbols.lookup(resolved.module_scope, &c.name).unwrap())
+                    .cloned()
+                    .unwrap_or(Ty::Never);
+                match eval_const_expr(&c.value, &ty, &module_consts) {
+                    Some(v) => {
+                        module_consts.insert(c.name.clone(), (v, ty));
+                    }
+                    None => still_pending.push(c),
+                }
+            }
+            pending = still_pending;
+            if pending.len() == before {
+                break;
+            }
+        }
+        if let Some(c) = pending.first() {
+            return Err(CompileError::Semantic {
+                file: String::new(),
+                line: c.span.line,
+                col: c.span.col,
+                code: codes::SEM_CONST_INIT_NOT_CONST,
+                message: format!(
+                    "initialiser of `final {}` cannot be evaluated at compile time; \
+                     module-level `final` initialisers must be built from literals, \
+                     other `final` consts, unary `+`/`-`/`not`, and binary \
+                     arithmetic/bitwise operators, without reference cycles",
+                    c.name
+                ),
+            });
         }
 
         Ok(TypedModule {

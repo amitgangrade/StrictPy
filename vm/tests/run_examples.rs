@@ -93,11 +93,23 @@ fn mandelbrot_renders_fractal() {
 /// hasn't fully wired lambda-capture lowering through the
 /// `Thread(fn() -> None: ...)` form, this test surfaces the resulting
 /// VmError so the failure is visible.
+///
+/// BUG-046: the example's consumer originally polled with `try_recv`,
+/// which returns the same `none` sentinel for both "empty" and
+/// "disconnected" (M5 limitation, see vm/src/builtins.rs::ChannelTryRecv).
+/// A consumer that won the race exited early, the producer blocked
+/// forever on the full 16-slot channel, and `t1.join()` deadlocked —
+/// this test hung the whole suite (observed holding a CI runner for
+/// hours). The consumer now uses blocking `recv()` + `except
+/// ChannelClosedError`, so the drain is deterministic: all 100 lines,
+/// every run, with both threads genuinely concurrent.
 #[test]
 fn producer_runs() {
     let p = compile_to_temp("producer.spy");
     let (code, out) = run_file_capture(&p).expect("producer.spy must run cleanly");
     assert_eq!(code, 0, "exit code; stdout was: {out:?}");
+    // Blocking recv drains everything the producer sent before
+    // ChannelClosedError fires, so all 100 lines must be present.
     // The producer sends 0..100 and closes; the consumer drains via
     // blocking recv() and stops on ChannelClosedError. The old try_recv
     // polling form could break early on a transient empty — and once the
@@ -109,6 +121,8 @@ fn producer_runs() {
         .count();
     assert_eq!(
         count, 100,
+        "expected all 100 `got N` lines from the blocking-recv consumer; \
+         got {count}. stdout was: {out:?}"
         "expected the recv/ChannelClosedError drain to deliver all 100 \
          values; got {count}. stdout was: {out:?}"
     );

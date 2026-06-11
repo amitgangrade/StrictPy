@@ -467,20 +467,49 @@ impl Lowerer {
                         self.fn_id_by_name.insert(name, fid);
                     }
                 }
-                TopDecl::Const(c) => {
-                    // Fold each `final` const to its literal value so all
-                    // references substitute the constant directly. v0.1
-                    // requires const initialisers to be literal-typed
-                    // (per the grammar) so this is sound for non-pathological
-                    // inputs; non-literal initialisers fall back to None.
-                    let ty = self
-                        .lookup_ast_ty(&c.ty)
-                        .unwrap_or(Ty::Primitive(PrimTy::Unit));
-                    if let Some(irc) = literal_to_irconst(&c.value, &ty) {
-                        self.module_consts.insert(c.name.clone(), (irc, ty));
-                    }
+                TopDecl::Const(_) => {
+                    // Folded in Pass 1.5 below — a const initialiser may
+                    // reference other consts in any declaration order, so
+                    // a single in-order sweep is not enough.
                 }
                 _ => {}
+            }
+        }
+
+        // Pass 1.5: fold every top-level `final` const to a literal IR
+        // value so reference sites can substitute the constant directly.
+        // Initialisers may reference other consts (`final B: f64 = A * 2.0`)
+        // — including consts the module merger placed *after* the use —
+        // so iterate to a fixed point rather than relying on declaration
+        // order. Anything still unfolded after the fixed point was already
+        // rejected by the typechecker (E3003), so no reference site can
+        // observe a missing `module_consts` entry. (Historically only bare
+        // literals were folded and `final SOLAR_MASS: f64 = 4.0 * PI * PI`
+        // silently lowered to `None`/0.0 at every use.)
+        let mut pending: Vec<_> = decls
+            .iter()
+            .filter_map(|d| match d {
+                TopDecl::Const(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        loop {
+            let before = pending.len();
+            let mut still_pending = Vec::new();
+            for c in pending {
+                let ty = self
+                    .lookup_ast_ty(&c.ty)
+                    .unwrap_or(Ty::Primitive(PrimTy::Unit));
+                match eval_const_expr(&c.value, &ty, &self.module_consts) {
+                    Some(irc) => {
+                        self.module_consts.insert(c.name.clone(), (irc, ty));
+                    }
+                    None => still_pending.push(c),
+                }
+            }
+            pending = still_pending;
+            if pending.len() == before {
+                break;
             }
         }
 
@@ -3723,10 +3752,115 @@ fn collect_free_vars(
     }
 }
 
-/// Fold a top-level `final` const initialiser to an [`IRConst`] when it's
-/// a literal (the only kind currently allowed at module scope). Returns
-/// `None` for non-literal initialisers; callers leave such consts
-/// unfolded and references resolve to `None` at runtime.
+/// Evaluate a top-level `final` const initialiser at compile time.
+///
+/// Supports literals, references to already-evaluated consts (`consts`),
+/// unary `+`/`-`/`not`, binary arithmetic/bitwise/shift operators over
+/// same-typed numeric constants, and `str + str` concatenation. Semantics
+/// mirror the VM exactly: integer ops wrap, `/` and `//` on integers both
+/// truncate (`IDiv`), `//` on floats is plain division (it lowers to
+/// `FDiv`), and a zero integer divisor refuses to fold (it must raise
+/// `ZeroDivisionError` at runtime, not bake a value in).
+///
+/// Returns `None` when the expression is not const-evaluable; the
+/// typechecker turns that into `E3003` after its fixed-point pass, so the
+/// IR lowerer's reference sites never see a missing const.
+pub(crate) fn eval_const_expr(
+    e: &Expr,
+    ty: &Ty,
+    consts: &HashMap<String, (IRConst, Ty)>,
+) -> Option<IRConst> {
+    match e {
+        Expr::Literal { .. } => literal_to_irconst(e, ty),
+        Expr::Ident { name, .. } => consts.get(name).map(|(c, _)| c.clone()),
+        Expr::Unary { op: UnaryOp::Neg, operand, .. } => {
+            match eval_const_expr(operand, ty, consts)? {
+                IRConst::I32(v) => Some(IRConst::I32(v.wrapping_neg())),
+                IRConst::I64(v) => Some(IRConst::I64(v.wrapping_neg())),
+                IRConst::F32(v) => Some(IRConst::F32(-v)),
+                IRConst::F64(v) => Some(IRConst::F64(-v)),
+                _ => None,
+            }
+        }
+        Expr::Unary { op: UnaryOp::Pos, operand, .. } => {
+            eval_const_expr(operand, ty, consts)
+        }
+        Expr::Unary { op: UnaryOp::Not, operand, .. } => {
+            match eval_const_expr(operand, ty, consts)? {
+                IRConst::Bool(b) => Some(IRConst::Bool(!b)),
+                _ => None,
+            }
+        }
+        Expr::Binary { op, lhs, rhs, .. } => {
+            let l = eval_const_expr(lhs, ty, consts)?;
+            let r = eval_const_expr(rhs, ty, consts)?;
+            fold_const_binop(*op, l, r)
+        }
+        _ => None,
+    }
+}
+
+/// Binary-operator folding for [`eval_const_expr`]. Only same-variant
+/// operand pairs fold; mixed-type arithmetic is a type error upstream.
+/// `Pow` never folds — runtime lowers it to a placeholder (`IMul`), so
+/// there is no correct value to bake in.
+fn fold_const_binop(op: AstBinOp, l: IRConst, r: IRConst) -> Option<IRConst> {
+    use AstBinOp::*;
+    macro_rules! fold_int {
+        ($ctor:ident, $a:expr, $b:expr) => {
+            match op {
+                Add => IRConst::$ctor($a.wrapping_add($b)),
+                Sub => IRConst::$ctor($a.wrapping_sub($b)),
+                Mul => IRConst::$ctor($a.wrapping_mul($b)),
+                // `/` and `//` both lower to truncating IDiv; division by
+                // zero must raise at runtime, so leave it unfolded.
+                Div | FloorDiv => {
+                    if $b == 0 { return None; }
+                    IRConst::$ctor($a.wrapping_div($b))
+                }
+                Rem => {
+                    if $b == 0 { return None; }
+                    IRConst::$ctor($a.wrapping_rem($b))
+                }
+                BitAnd => IRConst::$ctor($a & $b),
+                BitOr => IRConst::$ctor($a | $b),
+                BitXor => IRConst::$ctor($a ^ $b),
+                Shl => IRConst::$ctor($a.wrapping_shl($b as u32)),
+                Shr => IRConst::$ctor($a.wrapping_shr($b as u32)),
+                _ => return None,
+            }
+        };
+    }
+    macro_rules! fold_float {
+        ($ctor:ident, $a:expr, $b:expr) => {
+            match op {
+                Add => IRConst::$ctor($a + $b),
+                Sub => IRConst::$ctor($a - $b),
+                Mul => IRConst::$ctor($a * $b),
+                // Float `//` lowers to plain FDiv (no floor) — mirror it.
+                Div | FloorDiv => IRConst::$ctor($a / $b),
+                _ => return None,
+            }
+        };
+    }
+    Some(match (l, r) {
+        (IRConst::I32(a), IRConst::I32(b)) => fold_int!(I32, a, b),
+        (IRConst::I64(a), IRConst::I64(b)) => fold_int!(I64, a, b),
+        (IRConst::U32(a), IRConst::U32(b)) => fold_int!(U32, a, b),
+        (IRConst::U64(a), IRConst::U64(b)) => fold_int!(U64, a, b),
+        (IRConst::F32(a), IRConst::F32(b)) => fold_float!(F32, a, b),
+        (IRConst::F64(a), IRConst::F64(b)) => fold_float!(F64, a, b),
+        (IRConst::Str(a), IRConst::Str(b)) => match op {
+            Add => IRConst::Str(format!("{a}{b}")),
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
+/// Fold a `final` const initialiser leaf to an [`IRConst`] when it's a
+/// literal. Compound initialisers are handled by [`eval_const_expr`],
+/// which recurses down to this for the literal leaves.
 fn literal_to_irconst(e: &Expr, ty: &Ty) -> Option<IRConst> {
     match e {
         Expr::Literal { lit, .. } => Some(match lit {
@@ -6401,6 +6535,63 @@ mod tests {
         let resolved = resolver::Resolver::new().resolve(module).unwrap();
         let typed = typecheck::TypeChecker::new().check(resolved).unwrap();
         lower(typed)
+    }
+
+    /// Regression: a top-level `final` whose initialiser references another
+    /// `final` (`SOLAR_MASS = 4.0 * PI * PI`) used to fall out of
+    /// `module_consts` — only bare literals were folded — so every reference
+    /// site silently lowered to `Const(None)`, i.e. 0.0. Discovered via an
+    /// n-body benchmark where all planet masses became 0.
+    #[test]
+    fn module_const_referencing_const_folds_to_value() {
+        let src = "\
+final PI: f64 = 3.141592653589793
+final SOLAR_MASS: f64 = 4.0 * PI * PI
+
+fn main() -> i32:
+    x: f64 = SOLAR_MASS
+    return 0
+";
+        let ir = lower_src(src);
+        let main = ir.functions.iter().find(|f| f.name == "main").unwrap();
+        let expected = 4.0 * 3.141592653589793_f64 * 3.141592653589793_f64;
+        let folded = main.blocks.iter().flat_map(|b| &b.values).any(|v| {
+            matches!(
+                &v.kind,
+                ValueKind::Const(IRConst::F64(x)) if (x - expected).abs() < 1e-9
+            )
+        });
+        assert!(
+            folded,
+            "SOLAR_MASS reference did not fold to {expected}:\n{}",
+            dump_function(main)
+        );
+    }
+
+    /// Const-to-const folding must not depend on declaration order — the
+    /// module merger appends imported modules' decls after the root's, so
+    /// a use can precede its definition in the merged decl list.
+    #[test]
+    fn module_const_forward_reference_folds() {
+        let src = "\
+final AREA: i64 = WIDTH * HEIGHT
+final WIDTH: i64 = 60
+final HEIGHT: i64 = 30
+
+fn main() -> i32:
+    n: i64 = AREA
+    return 0
+";
+        let ir = lower_src(src);
+        let main = ir.functions.iter().find(|f| f.name == "main").unwrap();
+        let folded = main.blocks.iter().flat_map(|b| &b.values).any(|v| {
+            matches!(&v.kind, ValueKind::Const(IRConst::I64(1800)))
+        });
+        assert!(
+            folded,
+            "AREA reference did not fold to 1800:\n{}",
+            dump_function(main)
+        );
     }
 
     /// Regression: M3.5's local-slot lowering double-installed the implicit

@@ -591,6 +591,76 @@ release binary is missing (`compile_and_run` returns `None`), so
 
 ---
 
+## Fixed: BUG-045 — module `final` consts referencing other consts silently became 0
+
+Placeholder-lowering instance #5 (the BUG-041 notes called for exactly
+this audit: "ir.rs fallthroughs that silently produce `IRConst::None`").
+Surfaced by an n-body benchmark where every planet mass derived from
+`SOLAR_MASS` evaluated to 0.
+
+- **Repro:** `final PI: f64 = 3.141592653589793` followed by
+  `final SOLAR_MASS: f64 = 4.0 * PI * PI` — `SOLAR_MASS` read back as
+  `0.0` at every reference site; the program compiled and ran without
+  any diagnostic.
+- **Cause:** IR lowering folded module consts to literals via
+  `literal_to_irconst`, which only handled bare literals (plus one level
+  of unary minus). Any other initialiser was silently *not* inserted
+  into `module_consts`, and `lower_expr`'s `Expr::Ident` /
+  `lower_lvalue_load` fallthrough substituted `IRConst::None`
+  (numeric 0) at each use.
+- **Fix:** (1) `compiler/src/ir.rs::eval_const_expr` — compile-time
+  const evaluator covering literals, references to other consts, unary
+  `+`/`-`/`not`, binary arithmetic/bitwise/shift over same-typed numeric
+  constants, and `str + str`; semantics mirror the VM (integer ops wrap,
+  `/` and `//` on ints truncate, float `//` is plain `FDiv`, zero
+  divisors refuse to fold so they still raise at runtime). Pass 1.5 of
+  the lowerer evaluates all consts to a **fixed point**, so declaration
+  order — including merger-reordered cross-module decls — doesn't
+  matter. (2) `compiler/src/typecheck.rs::check` — runs the same
+  fixed-point evaluation and rejects any const that remains unevaluable
+  (calls, cycles, unsupported operators) with the new `E3003`
+  (`SEM_CONST_INIT_NOT_CONST`, `CompileError::Semantic`) instead of
+  letting it reach the silent-0 path.
+- **Tests:** `compiler/src/ir.rs::tests::module_const_referencing_const_folds_to_value`,
+  `::module_const_forward_reference_folds`;
+  `compiler/tests/module_const_init_runs.rs` (4 tests: the SOLAR_MASS
+  repro end-to-end through the VM, declaration-order independence,
+  call-in-initialiser rejected, reference cycle rejected);
+  `compiler/tests/conformance_negative.rs::const_init_not_compile_time_rejected`.
+
+---
+
+## Deferred: BUG-046 — `try_recv` conflates "empty" and "closed"; producer.spy could deadlock
+
+Surfaced by the BUG-045 CI work — the first runs where `cargo test
+--workspace` actually executed on a CI runner, and independently by
+the BUG-043 verification runs (see the "root cause untraced" note
+above — this entry is that root cause). `run_examples.rs::
+producer_runs` hung nondeterministically (locally: pass in 0.01s or hang
+forever on the same binary; on CI it held a runner in `cargo test` for
+hours).
+
+- **Cause (two layers):**
+  1. `vm/src/builtins.rs::ChannelTryRecv` returns the same `None`
+     sentinel for `TryRecvError::Empty` and `TryRecvError::Disconnected`,
+     so a consumer cannot distinguish "no data yet" from "closed". This
+     is the documented M5 limitation.
+  2. `examples/producer.spy` sent 100 items through a `Channel[i32](16)`
+     while its consumer breaks on the first `none`. When the consumer
+     won the race mid-stream, the producer blocked forever on the full
+     channel and `t1.join()` deadlocked — the program never exited.
+- **Mitigation (this branch):** the example's consumer now uses blocking
+  `recv()` + `except ChannelClosedError` (the kvstore.spy idiom), which
+  is deterministic: it drains all 100 items and exits exactly when the
+  channel is closed and empty, with both threads genuinely concurrent
+  on the original 16-slot channel. `run_examples::producer_runs` now
+  asserts all 100 lines. CI jobs also carry `timeout-minutes` so any
+  future hang fails in bounded time.
+- **Proper fix sketch:** give channels a real closed signal — either
+  `try_recv` raising/returning a distinguishable "closed" value
+  (runtime + spec §16.3 change), or a `ch.is_closed()` predicate, or a
+  blocking `recv` + `except ChannelClosedError` consumer idiom in the
+  example. Needs a spec decision, so deferred.
 ## Deferred: BUG-044 — producer.spy channel hang reproduces standalone too
 
 Same underlying flake as the producer_runs notes under BUG-043 (which

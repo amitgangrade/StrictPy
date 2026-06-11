@@ -158,6 +158,14 @@ pub mod codes {
     // ── E3xxx: semantic ──────────────────────────────────────────────────
     pub const SEM_NONEXHAUSTIVE_MATCH: ErrorCode = "E3001";
     pub const SEM_UNREACHABLE: ErrorCode = "E3002";
+    /// A module-level `final` initialiser is not compile-time evaluable
+    /// (it must be built from literals, other `final` consts, unary
+    /// `+`/`-`/`not`, and binary arithmetic/bitwise operators, with no
+    /// reference cycles). IR lowering substitutes each const's folded
+    /// value at every reference site; before this check an unfoldable
+    /// initialiser silently lowered to `None` — numeric 0 — at each use
+    /// (e.g. `final SOLAR_MASS: f64 = 4.0 * PI * PI` read back as 0.0).
+    pub const SEM_CONST_INIT_NOT_CONST: ErrorCode = "E3003";
 
     // ── M62b: generators (yield) — semantic ──────────────────────────────
     /// `yield` used outside any function, or inside a function whose declared

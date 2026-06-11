@@ -1,4 +1,8 @@
 """Producer/consumer over a Channel[i32]. The producer sends 0..100 then
+closes; the consumer drains with blocking `recv()` until the channel is
+closed and empty (`ChannelClosedError`). Demonstrates §16.1 (Thread),
+§16.3 (Channel), §7.5 (try/except), and lambda capture per the §21.4
+style — `Thread(fn() -> None: producer(ch))`."""
 closes; the consumer drains via blocking `recv()` and stops on the
 `ChannelClosedError` raised once the channel is closed and empty.
 Demonstrates §16.1 (Thread) and §16.3 (Channel) and lambda capture per
@@ -23,6 +27,11 @@ fn producer(ch: Channel[i32]) -> None:
         i = i + 1
     ch.close()
 
+# The consumer deliberately does NOT poll with `try_recv`: it returns the
+# same `none` for "empty" and "closed" (BUGS_KNOWN.md BUG-046), so a
+# polling consumer can exit early and leave the producer blocked forever
+# on a full channel — `t1.join()` in main would then deadlock. Blocking
+# `recv()` raises ChannelClosedError exactly when the stream is finished.
 fn consumer(ch: Channel[i32]) -> None:
     running: bool = true
     while running:
