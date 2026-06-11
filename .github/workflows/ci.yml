@@ -9,6 +9,15 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # sdl2-sys's vendored SDL2 source declares cmake_minimum_required < 3.5,
+  # which CMake 4.x (current GitHub runners) refuses to configure without
+  # this opt-in.
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+  # Run gfx/audio against SDL's headless backends — runners have no
+  # display or audio device. The runtime and the m52+ gfx tests already
+  # key off these (see vm/src/builtins.rs).
+  SDL_VIDEODRIVER: dummy
+  SDL_AUDIODRIVER: dummy
 
 jobs:
   test:
@@ -23,6 +32,26 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
+      # rodio → cpal → alsa-sys needs the ALSA headers; the sdl2 crate's
+      # `image` feature links the system SDL2_image (only SDL2 itself is
+      # covered by the `bundled` feature).
+      - name: Install Linux system libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libsdl2-dev libsdl2-image-dev
+
+      # Same SDL2_image story on Windows: fetch the official MSVC devel
+      # package, put its import lib on the linker search path (the MSVC
+      # linker reads `LIB`) and its DLL on PATH for the test binaries.
+      - name: Install SDL2_image (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://github.com/libsdl-org/SDL_image/releases/download/release-2.8.2/SDL2_image-devel-2.8.2-VC.zip -OutFile SDL2_image.zip
+          Expand-Archive SDL2_image.zip -DestinationPath C:\SDL2_image
+          $lib = "C:\SDL2_image\SDL2_image-2.8.2\lib\x64"
+          "LIB=$env:LIB;$lib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $lib | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
