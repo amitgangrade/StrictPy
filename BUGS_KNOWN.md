@@ -468,6 +468,24 @@ instantly with 0xC0000005 / SIGSEGV and no output, on every branch tested
 
 ---
 
+## Fixed: silent no-op `del d[k]` (dict deletion unimplemented)
+
+`del d[k]` on a `Dict[str, V]` parsed and type-checked but lowered to
+**nothing** — `compiler/src/ir.rs` had `Stmt::Del { .. } => Some(())`, so
+after `del d[k]` both `len(d)` and `d.get(k)` were unchanged. There was
+also no `d.remove()` / `d.pop()` alternative, so the language had no way
+to remove a dict key at all (the LRU-cache benchmark had to fake eviction
+with two-generation segmented maps). Fifth instance of the
+"placeholder IR lowering" pattern (after BUG-008/034/037/041), and the
+worst form of it: a statement the spec grammar includes (§7.5 `del_stmt`)
+that compiled to a no-op with no diagnostic.
+
+| # | Bug | Fix location | Regression test |
+|---|-----|--------------|-----------------|
+| BUG-043 | `del d[k]` silently lowered to nothing; no dict-key removal existed anywhere in the language. | New `NativeFn::DictRemove = 1200` (`shared/src/native.rs`) implemented in `vm/src/builtins.rs` (removes the key from the side-table slot, returns 1/0 for present/absent — `len` reads the same side table so it stays consistent). `compiler/src/ir.rs` lowers `Stmt::Del` on a Dict-index target to it and dispatches the new `d.remove(k) -> bool` method via `resolve_native_method`; `compiler/src/typecheck.rs` checks the key against `K`, adds the `remove` synth entry, and **rejects every other `del` target** (plain names, list indices, attributes) with a type error instead of compiling a no-op. | `vm/tests/dict_remove.rs` (del removes entry / absent-key no-op / `remove` presence bool / re-insert after del / non-dict `del` targets are compile errors); unit: `vm/src/builtins.rs::tests::dict_remove_*` |
+
+---
+
 ## Deferred: BUG-042 — subprocess.kill during wait() can never land
 
 Surfaced by the BUG-041 verification run, which was the first full-suite

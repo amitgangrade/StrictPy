@@ -73,10 +73,9 @@ fn replay_wal(state: Dict[str, str], wal_text: str) -> None:
                 if op == "SET" and len(fields) >= 3:
                     state[fields[1]] = fields[2]
                 elif op == "DEL" and len(fields) >= 2:
-                    # Spec §7.5 has `del d[k]` but to keep this example
-                    # focused we emulate delete by setting to a sentinel
-                    # string. A real impl would use the `del` statement.
-                    state[fields[1]] = "<deleted>"
+                    # Spec §7.5 `del_stmt`: removing an absent key is a
+                    # quiet no-op, so replay doesn't need a presence check.
+                    del state[fields[1]]
         i = i + 1
 
 # ── Worker loop ─────────────────────────────────────────────────────────
@@ -131,21 +130,14 @@ fn worker_loop(cmds: Channel[str], resp: Channel[str], wal_path: str) -> None:
         elif op == "DEL":
             if len(fields) >= 2:
                 k3: str = fields[1]
-                # Bug #3 found: the typechecker rejects `dict.has(k)` with
-                # E2004 "no method `has` on type Dict[str, str]", even
-                # though shared/src/native.rs::DictHas exists and
-                # NativeFn::from_name maps "has" → DictHas. The method is
-                # plumbed end-to-end in the runtime but unknown to the
-                # frontend's synth_method_call dispatch in
-                # compiler/src/typecheck.rs. Workaround: use get() with
-                # an `is none` check.
-                existing: str? = state.get(k3)
-                if existing is none:
-                    resp.send("<missing>")
-                else:
-                    state[k3] = "<deleted>"
+                # `state.remove(k) -> bool` reports whether the key was
+                # present, so the <missing> reply and the WAL append share
+                # a single lookup.
+                if state.remove(k3):
                     wal.write("DEL\t" + k3 + "\n")
                     resp.send("OK")
+                else:
+                    resp.send("<missing>")
             else:
                 resp.send("ERR")
         else:
