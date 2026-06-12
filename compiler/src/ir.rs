@@ -1375,15 +1375,48 @@ impl Lowerer {
     }
 }
 
-/// True if `value` is `name + <rhs>` with `<rhs>` not mentioning `name` — the
-/// in-place-appendable self-append shape.
+/// True if `value` is a left-nested `name + e1 + e2 + ... + eK` Add chain
+/// (K >= 1) rooted at `name`, with no `ei` mentioning `name` — the in-place-
+/// appendable self-append shape. Strings round 2 widened this from the single
+/// `name + e` form so chained appends (`s = s + a + b`) keep the amortised
+/// O(N) path instead of silently reverting to O(n^2) StrConcat copies
+/// (REPORT_V2 "Performance cliffs").
 fn is_str_self_append(value: &Expr, name: &str) -> bool {
-    if let Expr::Binary { op: AstBinOp::Add, lhs, rhs, .. } = value {
-        if let Expr::Ident { name: l, .. } = lhs.as_ref() {
-            return l == name && !expr_mentions(rhs, name);
+    str_self_append_operands(value, name).is_some()
+}
+
+/// If `value` is a left-nested `name + e1 + ... + eK` Add chain rooted at
+/// `name` (each `ei` not mentioning `name`), return the appended operands in
+/// source (append) order. `None` for any other shape — including a bare
+/// `name` with no append, and a chain whose root is not exactly `name`.
+///
+/// The soundness contract matches the single-operand form exactly: every
+/// returned operand is treated like the old `rhs` (it may not mention
+/// `name`), and `disqualify_inplace_uses` walks the whole chain expression
+/// via this same predicate, so other candidates appearing in any operand are
+/// still disqualified.
+fn str_self_append_operands<'a>(value: &'a Expr, name: &str) -> Option<Vec<&'a Expr>> {
+    let mut rev_ops: Vec<&'a Expr> = Vec::new();
+    let mut cur = value;
+    loop {
+        match cur {
+            Expr::Binary { op: AstBinOp::Add, lhs, rhs, .. } => {
+                if expr_mentions(rhs, name) {
+                    return None;
+                }
+                rev_ops.push(rhs.as_ref());
+                cur = lhs.as_ref();
+            }
+            Expr::Ident { name: l, .. } if l == name => {
+                if rev_ops.is_empty() {
+                    return None; // bare `s = s` is not an append
+                }
+                rev_ops.reverse();
+                return Some(rev_ops);
+            }
+            _ => return None,
         }
     }
-    false
 }
 
 /// True if `name` appears anywhere in `e`. Exhaustive over `Expr` so adding a
@@ -1942,28 +1975,38 @@ fn lower_stmt(fb: &mut FuncBuilder, ctx: &mut LowerCtx, s: &Stmt) -> Option<()> 
             Some(())
         }
         Stmt::Assign { target, value, .. } => {
-            // In-place string accumulator: `s = s + e` where `s` is a
-            // proven-unique local (see `str_inplace_candidates`) lowers to
-            // StrAppendInPlace(s, e) — amortised O(N) — instead of a fresh
-            // O(len) StrConcat copy each step.
+            // In-place string accumulator: `s = s + e1 + ... + eK` (a
+            // left-nested Add chain rooted at `s`) where `s` is a
+            // proven-unique local (see `str_inplace_candidates`) lowers to a
+            // sequence of StrAppendInPlace(s, ei) calls — amortised O(N) —
+            // instead of fresh O(len) StrConcat copies each step. Strings
+            // round 2 widened this from the single `s = s + e` form.
             if let Lvalue::Ident { name, .. } = target {
                 if fb.inplace_str_locals.contains(name) {
-                    if let Expr::Binary { op: AstBinOp::Add, lhs, rhs, .. } = value {
-                        if matches!(lhs.as_ref(), Expr::Ident { name: l, .. } if l == name) {
-                            let cur = lower_lvalue_load(fb, ctx, target);
-                            let ev = lower_expr(fb, ctx, rhs);
-                            let appended = fb.push_value(
+                    if let Some(ops) = str_self_append_operands(value, name) {
+                        let cur = lower_lvalue_load(fb, ctx, target);
+                        // Evaluate every appended operand BEFORE the first
+                        // in-place append (operands keep source order). If an
+                        // operand raises, `s`'s buffer is still untouched —
+                        // identical observable semantics to the StrConcat
+                        // fallback. The appends themselves cannot raise a
+                        // catchable exception.
+                        let evs: Vec<ValueId> =
+                            ops.iter().map(|e| lower_expr(fb, ctx, e)).collect();
+                        let mut acc = cur;
+                        for ev in evs {
+                            acc = fb.push_value(
                                 Ty::Primitive(PrimTy::Str),
                                 ValueKind::Op {
                                     op: IROp::NativeCall {
                                         native_id: NativeFn::StrAppendInPlace as u32,
                                     },
-                                    args: vec![cur, ev],
+                                    args: vec![acc, ev],
                                 },
                             );
-                            lower_lvalue_store(fb, ctx, target, appended);
-                            return Some(());
                         }
+                        lower_lvalue_store(fb, ctx, target, acc);
+                        return Some(());
                     }
                 }
             }
@@ -6032,6 +6075,24 @@ fn resolve_native_method(recv_ty: &Ty, method: &str) -> u32 {
             "keys"   => NativeFn::DictKeys   as u32,
             "values" => NativeFn::DictValues as u32,
             "remove" => NativeFn::DictRemove as u32,
+            _ => NativeFn::from_name(method)
+                .map(|n| n as u32)
+                .unwrap_or(NativeFn::Unknown as u32),
+        };
+    }
+    // Strings round 2: str-receiver overrides, intercepted BEFORE the
+    // bare from_name fallback. `join` would otherwise resolve to
+    // ThreadJoin (from_name's first match); `char_at` historically had no
+    // from_name entry at all, so `s.char_at(i)` compiled to
+    // NativeFn::Unknown and trapped at runtime with "unknown native id"
+    // (REPORT_V2 bug #7).
+    if let Ty::Primitive(PrimTy::Str) = recv_ty {
+        return match method {
+            "join"    => NativeFn::StrJoin   as u32,
+            "lower"   => NativeFn::StrLower  as u32,
+            "upper"   => NativeFn::StrUpper  as u32,
+            "repeat"  => NativeFn::StrRepeat as u32,
+            "char_at" => NativeFn::StrCharAt as u32,
             _ => NativeFn::from_name(method)
                 .map(|n| n as u32)
                 .unwrap_or(NativeFn::Unknown as u32),
