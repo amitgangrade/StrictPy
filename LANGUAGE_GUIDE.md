@@ -2360,23 +2360,41 @@ supported yet.
 
 ```python
 s.length()                               # or len(s)
-s.upper() -> str
-s.lower() -> str
+s.upper() -> str                         # native; ASCII fast path, Unicode-aware
+s.lower() -> str                         # ('ß'.upper() == "SS", like Python)
 s.strip() -> str
 s.lstrip() -> str
 s.rstrip() -> str
-s.split(sep: str) -> List[str]
-s.starts_with(prefix: str) -> bool
-s.ends_with(suffix: str) -> bool
+s.split(sep: str) -> List[str]           # sep must be non-empty (ValueError)
+sep.join(xs: List[str]) -> str           # ",".join(cells) — receiver is the separator
+s.startswith(prefix: str) -> bool
+s.endswith(suffix: str) -> bool
 s.contains(needle: str) -> bool
 s.replace(old: str, new: str) -> str
-s.char_at(i: i64) -> char
-s.slice(start: i64, end: i64) -> str     # [start, end)
-s.index_of(needle: str) -> i64           # -1 if not found
-s.repeat(n: i64) -> str
+s.char_at(i: i64) -> char                # same as s[i]; raises IndexError oob
+s.slice(start: i64, end: i64) -> str     # [start, end), clamped to len
+s.find(needle: str) -> i64               # code-point index, -1 if not found
+s.repeat(n: i64) -> str                  # n <= 0 yields ""
 str(x)                                   # generic — works on any type
 char(i: i32) -> char                     # Unicode codepoint
 ```
+
+Notes:
+
+- The method names are exactly as above: `startswith`/`endswith` (not
+  `starts_with`/`ends_with`) and `find` (not `index_of`).
+- `s.char_at(i)` works as of strings round 2 (it previously typechecked but
+  trapped at runtime with "unknown native id" — REPORT_V2 bug #7).
+- `join`, `lower`, `upper`, `repeat`, `strip`-family, `find`, `replace`,
+  `split` and the predicates are native Rust calls — prefer them over
+  hand-rolled per-char loops.
+- Performance: on ASCII strings, `s[i]` / `s.char_at(i)` are O(1) and
+  `s.slice(a, b)` is O(b−a). Non-ASCII strings fall back to a code-point
+  walk (O(position)). String accumulators of the shape `s = s + a` /
+  `s = s + a + b` / `s += a` on a local that is never aliased are appended
+  in place (amortised O(total)); aliasing the local (e.g. `t = s`, passing
+  `s` to a call, storing it in a container) safely falls back to copying
+  concatenation.
 
 ### 6.5 Channel methods
 

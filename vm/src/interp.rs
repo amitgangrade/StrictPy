@@ -2010,6 +2010,22 @@ impl Interpreter {
         let i = self.read_u16()?;
         let p = self.read_reg(s) as *const StringRepr;
         let idx = self.read_reg(i) as usize;
+        // ASCII fast path (flags bit 1): 1 byte == 1 code point, so the
+        // lookup is an O(1) byte load instead of an O(idx) chars() walk.
+        if !p.is_null() {
+            // SAFETY: p is a heap StringRepr pointer held in a register.
+            let (flags, blen, data) = unsafe { ((*p).flags, (*p).byte_len, (*p).data) };
+            if flags & 0b10 != 0 {
+                let b = if idx < blen && !data.is_null() {
+                    // SAFETY: idx < byte_len.
+                    unsafe { *data.add(idx) }
+                } else {
+                    0 // matches the chars().nth(idx).unwrap_or('\0') fallback
+                };
+                self.write_reg(dst, b as u64);
+                return Ok(());
+            }
+        }
         let s = unsafe { read_str(p) };
         let ch = s.chars().nth(idx).unwrap_or('\0');
         self.write_reg(dst, ch as u32 as u64);

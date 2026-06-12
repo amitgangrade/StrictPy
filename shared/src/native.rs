@@ -182,6 +182,21 @@ pub enum NativeFn {
     StrEndsWith   = 121,
     /// `s.contains(needle) -> bool`.
     StrContains   = 122,
+    // ── Strings round 2 (ids 123–129 reserved for this track). ─────────
+    /// `sep.join(xs: List[str]) -> str` — receiver (arg 0) is the
+    /// separator, arg 1 is the list. NOTE: dispatched receiver-type-aware
+    /// in the IR (`resolve_native_method`'s str arm) because
+    /// `from_name("join")` maps to `ThreadJoin`; there is deliberately no
+    /// `from_name` entry for this variant.
+    StrJoin       = 123,
+    /// `s.lower() -> str` — Unicode-aware lowercasing (ASCII fast path in
+    /// the VM when the receiver's ascii flag is set).
+    StrLower      = 124,
+    /// `s.upper() -> str` — Unicode-aware uppercasing (ASCII fast path).
+    StrUpper      = 125,
+    /// `s.repeat(n: i64) -> str` — receiver repeated `n` times; `n <= 0`
+    /// yields the empty string.
+    StrRepeat     = 126,
 
     // ── 130–149: `sys` module (M19) ─────────────────────────────────────
     // Foundation milestone for a real stdlib: the import-resolver and
@@ -2487,6 +2502,11 @@ impl NativeFn {
             120 => Some(Self::StrStartsWith),
             121 => Some(Self::StrEndsWith),
             122 => Some(Self::StrContains),
+            // Strings round 2.
+            123 => Some(Self::StrJoin),
+            124 => Some(Self::StrLower),
+            125 => Some(Self::StrUpper),
+            126 => Some(Self::StrRepeat),
             // M19: sys module.
             130 => Some(Self::SysArgv),
             131 => Some(Self::SysExit),
@@ -3232,6 +3252,17 @@ impl NativeFn {
             "startswith"  => Some(Self::StrStartsWith),
             "endswith"    => Some(Self::StrEndsWith),
             "contains"    => Some(Self::StrContains),
+            // Strings round 2 — collision-free names only. `join` is
+            // intentionally ABSENT here (it would collide with ThreadJoin
+            // above); str `join` dispatches receiver-type-aware via the IR's
+            // `resolve_native_method` str arm.
+            "lower"       => Some(Self::StrLower),
+            "upper"       => Some(Self::StrUpper),
+            "repeat"      => Some(Self::StrRepeat),
+            // REPORT_V2 bug #7: `s.char_at(i)` typechecked but had no
+            // from_name entry, so the IR emitted NativeFn::Unknown and the
+            // VM trapped with "unknown native id" at runtime.
+            "char_at"     => Some(Self::StrCharAt),
 
             // real-world: csv_aggregate — str→number parsing.
             "parse_f64"   => Some(Self::F64FromStr),

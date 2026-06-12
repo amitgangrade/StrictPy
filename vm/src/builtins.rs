@@ -202,9 +202,39 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             Ok(s_ptr as u64)
         }
         NativeFn::StrSlice => {
-            let s = arg_str(args, 0);
+            let sp = arg_u64(args, 0) as *const StringRepr;
             let start = arg_u64(args, 1) as usize;
             let end = arg_u64(args, 2) as usize;
+            // ASCII fast path: flags bit 1 means 1 byte == 1 code point, so
+            // the slice is a direct O(slice_len) byte copy instead of an
+            // O(end) chars() walk (which made scanning loops quadratic).
+            if !sp.is_null() {
+                // SAFETY: sp is a heap pointer to StringRepr, rooted in the
+                // caller's register window.
+                let (flags, blen, data) =
+                    unsafe { ((*sp).flags, (*sp).byte_len, (*sp).data) };
+                if flags & 0b10 != 0 {
+                    let end_c = end.min(blen);
+                    let start_c = start.min(end_c);
+                    if start_c == end_c || data.is_null() {
+                        return Ok(interp.alloc_string("") as u64);
+                    }
+                    // SAFETY: start_c..end_c is in bounds of the byte_len-long
+                    // buffer; ascii bytes are valid UTF-8. The GC is
+                    // non-moving and the source is rooted, so `data` stays
+                    // valid across the alloc_string copy (same invariant
+                    // StrAppendInPlace relies on).
+                    let sub = unsafe {
+                        std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                            data.add(start_c),
+                            end_c - start_c,
+                        ))
+                    };
+                    return Ok(interp.alloc_string(sub) as u64);
+                }
+            }
+            // Non-ASCII fallback: code-point walk.
+            let s = arg_str(args, 0);
             let sliced: String = s.chars().skip(start).take(end.saturating_sub(start)).collect();
             let p = interp.alloc_string(&sliced);
             Ok(p as u64)
@@ -245,6 +275,52 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         }
         NativeFn::StrContains => {
             Ok(if arg_str(args, 0).contains(&arg_str(args, 1)) { 1 } else { 0 })
+        }
+        // ── Strings round 2 (ids 123–126). ─────────────────────────────────
+        // `sep.join(xs)` — receiver (arg 0) is the separator, arg 1 the
+        // List[str]. One native call + one allocation instead of an O(n²)
+        // per-piece concat loop.
+        NativeFn::StrJoin => {
+            let sep = arg_str(args, 0);
+            let parts = read_list_str(args, 1);
+            Ok(interp.alloc_string(&parts.join(&sep)) as u64)
+        }
+        // `s.lower()` / `s.upper()` — ASCII fast path via the receiver's
+        // ascii flag (bit 1); Unicode-aware fallback otherwise (Rust's
+        // to_lowercase/to_uppercase, matching Python semantics incl.
+        // one-to-many mappings like 'ß' → "SS").
+        NativeFn::StrLower => {
+            let sp = arg_u64(args, 0) as *const StringRepr;
+            // SAFETY: sp is a heap StringRepr pointer or null.
+            let ascii = !sp.is_null() && unsafe { (*sp).flags } & 0b10 != 0;
+            let mut s = arg_str(args, 0);
+            if ascii {
+                s.make_ascii_lowercase();
+                Ok(interp.alloc_string(&s) as u64)
+            } else {
+                Ok(interp.alloc_string(&s.to_lowercase()) as u64)
+            }
+        }
+        NativeFn::StrUpper => {
+            let sp = arg_u64(args, 0) as *const StringRepr;
+            // SAFETY: sp is a heap StringRepr pointer or null.
+            let ascii = !sp.is_null() && unsafe { (*sp).flags } & 0b10 != 0;
+            let mut s = arg_str(args, 0);
+            if ascii {
+                s.make_ascii_uppercase();
+                Ok(interp.alloc_string(&s) as u64)
+            } else {
+                Ok(interp.alloc_string(&s.to_uppercase()) as u64)
+            }
+        }
+        // `s.repeat(n)` — n <= 0 yields "".
+        NativeFn::StrRepeat => {
+            let s = arg_str(args, 0);
+            let n = arg_i64(args, 1);
+            if n <= 0 || s.is_empty() {
+                return Ok(interp.alloc_string("") as u64);
+            }
+            Ok(interp.alloc_string(&s.repeat(n as usize)) as u64)
         }
         // real-world: csv_aggregate / wordcount / markov — every text
         // stress program had to hand-roll a splitter. `s.split(sep)`
@@ -813,6 +889,24 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
                     message: "char-at on null string".into(),
                 });
             }
+            // ASCII fast path: flags bit 1 means 1 byte == 1 code point, so
+            // `s[i]` is a direct O(1) byte load instead of an O(i) chars()
+            // walk (which made per-char scanning loops quadratic).
+            // SAFETY: sp is a heap pointer to StringRepr, rooted in the
+            // caller's register window.
+            let (flags, blen, data) = unsafe { ((*sp).flags, (*sp).byte_len, (*sp).data) };
+            if flags & 0b10 != 0 {
+                if idx >= blen || data.is_null() {
+                    return Err(VmError::UncaughtException {
+                        type_name: "IndexError".into(),
+                        message: format!("string index {idx} out of range"),
+                    });
+                }
+                // SAFETY: idx < byte_len, buffer is byte_len bytes long.
+                let b = unsafe { *data.add(idx) };
+                return Ok(b as u64);
+            }
+            // Non-ASCII fallback: code-point walk.
             // SAFETY: sp is a heap pointer to StringRepr.
             let s = unsafe { read_str(sp) };
             let ch = s.chars().nth(idx).ok_or_else(|| VmError::UncaughtException {
