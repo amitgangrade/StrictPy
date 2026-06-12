@@ -120,6 +120,15 @@ rodio = { version = "0.19", default-features = false, features = ["wav", "vorbis
 # fontdue parses TTF/OTF and rasterises glyphs to alpha bitmaps that we
 # composite into SDL2 textures manually.
 fontdue = "0.7"
+# Dict speedup: the VM's string-keyed dict (see `strdict`) stores entries in
+# a `hashbrown::HashTable` keyed by an explicitly supplied 64-bit hash, so the
+# Dict* natives can reuse a hash cached in the key string's object header
+# instead of rehashing the bytes on every operation.  `rustc-hash` (FxHash)
+# replaces the default SipHash — see strdict.rs for the DoS-hardening
+# tradeoff discussion.  Both crates are tiny, pure Rust, and already in the
+# dependency graph transitively (via cranelift).
+hashbrown = "0.15"
+rustc-hash = "2"
 
 # M27 P3c-A: `libc` for `shutil.disk_usage` on Unix (statvfs syscall).
 # Windows uses GetDiskFreeSpaceExW from kernel32 declared inline — no

@@ -290,23 +290,92 @@ impl TypeRegistry {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-//  Mark-bit helpers (live in the gc_meta header field)
+//  gc_meta bit helpers (mark bit + string hash cache)
+//
+//  Layout of the 64-bit `gc_meta` header word:
+//
+//  ```text
+//  bit  0       GC mark bit (mark-sweep)
+//  bit  1       STR_HASH_CACHED — bits 32..64 hold a valid hash (str only)
+//  bits 2..32   reserved (age / lock bits, future)
+//  bits 32..64  cached 32-bit Fx hash of the string's UTF-8 bytes
+//  ```
+//
+//  All accesses go through relaxed atomics: the GC marks objects on one
+//  thread (under the heap lock) while another thread's dict operation may
+//  lazily publish a hash into the same word — atomics make the two
+//  read-modify-writes race-free.  The hash bits are write-once-idempotent
+//  (the hash is a pure function of the bytes, so racing writers store the
+//  same value) and only `StrAppendInPlace` — which requires a
+//  compiler-proven-unique string — ever clears them.
 // ─────────────────────────────────────────────────────────────────────────
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 pub const GC_MARK_BIT: u64 = 1 << 0;
+/// Set when bits 32..64 of `gc_meta` hold a valid cached string hash.
+/// A separate flag (rather than "0 means uncached") so the string whose
+/// hash happens to be 0 doesn't get rehashed on every dict operation.
+pub const STR_HASH_CACHED_BIT: u64 = 1 << 1;
+/// Bit offset of the cached 32-bit string hash inside `gc_meta`.
+pub const STR_HASH_SHIFT: u32 = 32;
+
+#[inline]
+unsafe fn gc_meta_atomic<'a>(obj: *const ObjectHeader) -> &'a AtomicU64 {
+    // SAFETY (of the cast): `gc_meta` is a u64 at a fixed offset in a
+    // `#[repr(C)]` struct; AtomicU64 has the same size and alignment.
+    &*(std::ptr::addr_of!((*obj).gc_meta) as *const AtomicU64)
+}
 
 /// # Safety
 /// `obj` must point at a valid [`ObjectHeader`].
 pub unsafe fn is_marked(obj: *const ObjectHeader) -> bool {
-    (*obj).gc_meta & GC_MARK_BIT != 0
+    gc_meta_atomic(obj).load(Ordering::Relaxed) & GC_MARK_BIT != 0
 }
 
 /// # Safety
 /// `obj` must point at a valid mutable [`ObjectHeader`].
 pub unsafe fn set_marked(obj: *mut ObjectHeader, val: bool) {
     if val {
-        (*obj).gc_meta |= GC_MARK_BIT;
+        gc_meta_atomic(obj).fetch_or(GC_MARK_BIT, Ordering::Relaxed);
     } else {
-        (*obj).gc_meta &= !GC_MARK_BIT;
+        gc_meta_atomic(obj).fetch_and(!GC_MARK_BIT, Ordering::Relaxed);
     }
+}
+
+/// Read the cached 32-bit string hash, if one has been published.
+///
+/// # Safety
+/// `obj` must point at a valid [`ObjectHeader`] (of a `StringRepr`).
+pub unsafe fn cached_str_hash(obj: *const ObjectHeader) -> Option<u32> {
+    let meta = gc_meta_atomic(obj).load(Ordering::Relaxed);
+    if meta & STR_HASH_CACHED_BIT != 0 {
+        Some((meta >> STR_HASH_SHIFT) as u32)
+    } else {
+        None
+    }
+}
+
+/// Publish a freshly computed 32-bit string hash into the header.
+/// `fetch_or` is sufficient: the hash bits are zero until first publish,
+/// and every publisher computes the same value from the same bytes — so
+/// concurrent publishes are idempotent and the GC mark bit is preserved.
+///
+/// # Safety
+/// `obj` must point at a valid mutable [`ObjectHeader`] (of a `StringRepr`)
+/// whose hash-cache bits are clear or already equal to `h32`.
+pub unsafe fn publish_str_hash(obj: *mut ObjectHeader, h32: u32) {
+    let bits = STR_HASH_CACHED_BIT | ((h32 as u64) << STR_HASH_SHIFT);
+    gc_meta_atomic(obj).fetch_or(bits, Ordering::Relaxed);
+}
+
+/// Invalidate the cached string hash. MUST be called by anything that
+/// mutates a string's bytes in place (today: `StrAppendInPlace` only).
+/// Clears only the hash bits; the GC mark bit is untouched.
+///
+/// # Safety
+/// `obj` must point at a valid mutable [`ObjectHeader`].
+pub unsafe fn invalidate_str_hash(obj: *mut ObjectHeader) {
+    let mask = !(STR_HASH_CACHED_BIT | (0xFFFF_FFFFu64 << STR_HASH_SHIFT));
+    gc_meta_atomic(obj).fetch_and(mask, Ordering::Relaxed);
 }
