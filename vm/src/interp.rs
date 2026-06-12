@@ -112,8 +112,12 @@ pub struct ThreadSlot {
 /// One slot in the VM's dict table. M5 supports string-keyed dicts; the
 /// keys are owned `String`s (cheap to clone from the heap-side `StringRepr`)
 /// so the dict survives even if the source string objects move.
+///
+/// Storage is [`crate::strdict::StrDict`] — a hashbrown `HashTable` keyed by
+/// an explicit FxHash so the Dict* natives can reuse the hash cached in the
+/// key string's header instead of rehashing on every operation.
 pub struct DictSlot {
-    pub data: HashMap<String, u64>,
+    pub data: crate::strdict::StrDict,
 }
 
 /// M23 P3a-C: one slot in the VM's lock table.
@@ -2869,7 +2873,7 @@ impl Interpreter {
             let mut dicts = self.shared.dicts.lock().unwrap();
             let h = dicts.len() as u64;
             dicts.push(Some(DictSlot {
-                data: HashMap::new(),
+                data: crate::strdict::StrDict::new(),
             }));
             h
         };

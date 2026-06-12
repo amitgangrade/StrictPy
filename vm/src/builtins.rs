@@ -198,6 +198,10 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
                 (*s_ptr).length += e_len;
                 // Now backed by a separate heap buffer: clear the inline bit.
                 (*s_ptr).flags = if s_ascii && e_ascii { 0b10 } else { 0 };
+                // The bytes just changed in place — any dict hash cached in
+                // the header (gc_meta bits) is now stale and MUST be dropped,
+                // or a later dict op on this string would use the old hash.
+                crate::object::invalidate_str_hash(s_ptr as *mut crate::object::ObjectHeader);
             }
             Ok(s_ptr as u64)
         }
@@ -783,12 +787,16 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             }
             // SAFETY: dp heap pointer.
             let handle = unsafe { (*dp).handle } as usize;
-            let key = arg_str(args, 1);
+            // Perf: hash from the key string's header cache (computed at
+            // most once per string object) + a borrowed byte view — no
+            // String allocation, no rehash. SAFETY: the key is rooted in
+            // the caller's registers and nothing below allocates.
+            let (h, kb) = unsafe { crate::strdict::str_key_hash_bytes(arg_u64(args, 1) as *const StringRepr) };
             // get() returns Optional[V] per the wordcount example
             // (`prev: i32? = counts.get(w)`). Use NONE_SENTINEL when absent.
             // When present, the payload is the raw stored u64.
             with_dict_slot(interp, handle, |slot| {
-                slot.data.get(&key).copied().unwrap_or(NONE_SENTINEL)
+                slot.data.get_hashed(h, kb).unwrap_or(NONE_SENTINEL)
             })
         }
         NativeFn::DictSet => {
@@ -801,10 +809,12 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             }
             // SAFETY: dp heap pointer.
             let handle = unsafe { (*dp).handle } as usize;
-            let key = arg_str(args, 1);
+            // SAFETY: key rooted in caller registers; no allocation below.
+            let (h, kb) = unsafe { crate::strdict::str_key_hash_bytes(arg_u64(args, 1) as *const StringRepr) };
             let val = arg_u64(args, 2);
             with_dict_slot_mut(interp, handle, |slot| {
-                slot.data.insert(key, val);
+                // Owned key String is allocated only when the key is new.
+                slot.data.insert_hashed(h, kb, val);
             })?;
             Ok(0)
         }
@@ -815,8 +825,9 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             }
             // SAFETY: dp heap pointer.
             let handle = unsafe { (*dp).handle } as usize;
-            let key = arg_str(args, 1);
-            with_dict_slot(interp, handle, |slot| slot.data.contains_key(&key) as u64)
+            // SAFETY: key rooted in caller registers; no allocation below.
+            let (h, kb) = unsafe { crate::strdict::str_key_hash_bytes(arg_u64(args, 1) as *const StringRepr) };
+            with_dict_slot(interp, handle, |slot| slot.data.contains_hashed(h, kb) as u64)
         }
         NativeFn::DictRemove => {
             let dp = arg_u64(args, 0) as *const DictRepr;
@@ -828,11 +839,14 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             }
             // SAFETY: dp heap pointer.
             let handle = unsafe { (*dp).handle } as usize;
-            let key = arg_str(args, 1);
+            // SAFETY: key rooted in caller registers; no allocation below.
+            let (h, kb) = unsafe { crate::strdict::str_key_hash_bytes(arg_u64(args, 1) as *const StringRepr) };
             // Returns whether the key was present, so `del d[k]` on an
             // absent key is a quiet no-op (StrictPy has no KeyError-on-del;
             // callers that care use the `d.remove(k) -> bool` form).
-            with_dict_slot_mut(interp, handle, |slot| slot.data.remove(&key).is_some() as u64)
+            with_dict_slot_mut(interp, handle, |slot| {
+                slot.data.remove_hashed(h, kb).is_some() as u64
+            })
         }
         NativeFn::DictKeys => {
             let dp = arg_u64(args, 0) as *const DictRepr;
