@@ -189,6 +189,23 @@ pub enum HasherState {
     Md5(md5::Md5),
 }
 
+/// Batch binary serialization state for the `struct` module's
+/// writer/reader surface (`struct.writer()` / `struct.reader(buf)`).
+/// Stored in `SharedVm.struct_bufs` keyed by an opaque i64 handle
+/// returned to user code — the streaming-Hasher idiom, minus the heap
+/// object: handles are plain i64s and lifetimes are explicit
+/// (`finish` / `reader_done` remove the slot), so the GC never sees
+/// these buffers at all.
+///
+/// `Writer` accumulates raw bytes; every `w_*` call appends to the Vec
+/// with no StrictPy-heap allocation.  `Reader` holds the decoded bytes
+/// of a packed str plus the current read offset, advanced by each
+/// `r_*` call.
+pub enum StructBufSlot {
+    Writer(Vec<u8>),
+    Reader(Vec<u8>, usize),
+}
+
 /// Wrapper providing `Ord` for `f64`. NaN sorts as the greatest value so
 /// the binary-heap invariant holds; programs shouldn't insert NaN
 /// priorities but if they do, NaN bubbles down to the bottom (max-priority
@@ -308,6 +325,13 @@ pub struct SharedVm {
     /// hasher attached" (mirrors the io.File / Channel convention).
     pub hashers: std::sync::Mutex<HashMap<i64, HasherSlot>>,
     pub next_hasher_id: std::sync::atomic::AtomicI64,
+    /// Batch struct writer/reader buffers, keyed by monotonic i64 handle
+    /// starting at 1 (slot 0 unused — same convention as `hashers`).
+    /// Unlike hashers there is no heap-side repr: handles are plain
+    /// i64s, freed explicitly by `struct.finish` / `struct.reader_done`,
+    /// so no GC root scan is needed.
+    pub struct_bufs: std::sync::Mutex<HashMap<i64, StructBufSlot>>,
+    pub next_struct_buf_id: std::sync::atomic::AtomicI64,
     /// M23 P3a-D: open SQLite connections, indexed by i64 handle.  Slot 0
     /// is reserved as "no connection".
     pub sqlite_connections: Arc<Mutex<Vec<Option<rusqlite::Connection>>>>,
@@ -480,6 +504,9 @@ impl SharedVm {
             // monotonic i64 starting at 1.
             hashers: std::sync::Mutex::new(HashMap::new()),
             next_hasher_id: std::sync::atomic::AtomicI64::new(1),
+            // struct batch writer/reader slot table — same idiom.
+            struct_bufs: std::sync::Mutex::new(HashMap::new()),
+            next_struct_buf_id: std::sync::atomic::AtomicI64::new(1),
             sqlite_connections: Arc::new(Mutex::new(vec![None])),
             // M35 P4-B: Cursor slot table — empty map, next handle = 1.
             sqlite_cursors: std::sync::Mutex::new(HashMap::new()),
@@ -561,6 +588,9 @@ impl SharedVm {
             // M35 P4-C: streaming hashers (JIT path mirror).
             hashers: std::sync::Mutex::new(HashMap::new()),
             next_hasher_id: std::sync::atomic::AtomicI64::new(1),
+            // struct batch writer/reader slot table (JIT path mirror).
+            struct_bufs: std::sync::Mutex::new(HashMap::new()),
+            next_struct_buf_id: std::sync::atomic::AtomicI64::new(1),
             sqlite_connections: Arc::new(Mutex::new(vec![None])),
             // M35 P4-B: Cursor slot table — empty map, next handle = 1.
             sqlite_cursors: std::sync::Mutex::new(HashMap::new()),

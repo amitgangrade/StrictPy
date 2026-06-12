@@ -1118,20 +1118,53 @@ statistics.max_i64(xs: List[i64]) -> i64
 
 ### struct (M22 P2D)
 
-Binary packing — like Python's `struct`. Format codes: `i32` `i64` `u32` `u64` `f32` `f64` `b` (i8) `B` (u8) `?` (bool).
+Binary packing — like Python's `struct`, as flat per-width functions. Widths: `u32` (4 bytes, value carried in `i64`), `u64` (8 bytes, value carried in `i64` — all-ones reads back as `-1`), `f64` (8 bytes, IEEE 754). Each has a `_be` (big-endian) and `_le` (little-endian) variant.
 
 ```python
 import struct
-struct.pack_i32(n: i32) -> str         # 4 bytes
-struct.pack_i64(n: i64) -> str
-struct.pack_f32(x: f32) -> str
-struct.pack_f64(x: f64) -> str
-struct.unpack_i32(data: str, offset: i64) -> i32
-struct.unpack_i64(data: str, offset: i64) -> i64
-struct.unpack_f64(data: str, offset: i64) -> f64
+struct.pack_u32_be(v: i64) -> str      # 4 bytes; also pack_u32_le
+struct.pack_u64_be(v: i64) -> str      # 8 bytes; also pack_u64_le
+struct.pack_f64_be(x: f64) -> str      # 8 bytes; also pack_f64_le
+struct.unpack_u32_be(data: str, offset: i32) -> i64   # also _le
+struct.unpack_u64_be(data: str, offset: i32) -> i64   # also _le
+struct.unpack_f64_be(data: str, offset: i32) -> f64   # also _le
 ```
 
-`str` is the byte-buffer (§3.3).
+`str` is the byte-buffer (§3.3): one codepoint 0–255 per byte, so `len(buf) == byte_count`. Out-of-bounds offsets and codepoints > 255 raise `ValueError`.
+
+**Batch writer/reader.** Each `pack_*` call allocates a str and multi-field records pay a concat allocation per `+` — at volume that dominates. The handle-based writer/reader amortizes it: all `w_*` appends go into one native buffer (no per-field allocation), `finish` does a single str allocation for the whole record, and reads are sequential (internal offset, no per-call offsets).
+
+```python
+import struct
+struct.writer() -> i64                    # new write handle
+struct.w_u32_be(w: i64, v: i64) -> None   # append 4 bytes; also w_u32_le
+struct.w_u64_be(w: i64, v: i64) -> None   # append 8 bytes; also w_u64_le
+struct.w_f64_be(w: i64, x: f64) -> None   # append 8 bytes; also w_f64_le
+struct.finish(w: i64) -> str              # whole record, one allocation; frees w
+
+struct.reader(buf: str) -> i64            # new read handle at offset 0
+struct.r_u32_be(r: i64) -> i64            # read 4 bytes + advance; also r_u32_le
+struct.r_u64_be(r: i64) -> i64            # read 8 bytes + advance; also r_u64_le
+struct.r_f64_be(r: i64) -> f64            # read 8 bytes + advance; also r_f64_le
+struct.reader_done(r: i64) -> None        # frees r
+```
+
+```python
+w: i64 = struct.writer()
+struct.w_u32_be(w, ident)
+struct.w_f64_be(w, score)
+struct.w_u64_be(w, stamp)
+rec: str = struct.finish(w)               # byte-identical to
+                                          # pack_u32_be(ident) + pack_f64_be(score) + pack_u64_be(stamp)
+
+r: i64 = struct.reader(rec)               # also accepts pack_*-built buffers
+ident2: i64 = struct.r_u32_be(r)
+score2: f64 = struct.r_f64_be(r)
+stamp2: i64 = struct.r_u64_be(r)
+struct.reader_done(r)
+```
+
+Reading past the end of the buffer raises `ValueError` ("struct reader overrun"). Handles are consumed by `finish` / `reader_done`; any later use of a consumed (or wrong-kind) handle raises `ValueError`. See `examples/struct_builder_demo.spy`.
 
 ### urllib_parse (M22 P2D)
 

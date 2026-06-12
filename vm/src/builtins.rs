@@ -2287,6 +2287,187 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             Ok(v.to_bits())
         }
 
+        // ── `struct` batch writer/reader ───────────────────────────────
+        // Handle-based fast path over the pack_*/unpack_* surface.  A
+        // writer accumulates raw bytes in one Rust-side Vec<u8> (slot in
+        // `SharedVm.struct_bufs`); the w_* arms below append with zero
+        // StrictPy-heap allocations, and `finish` converts the whole
+        // record via `bytes_to_packed_str` in a single str allocation —
+        // byte-identical to concatenating the equivalent pack_* results.
+        // The reader decodes a packed str once and serves sequential
+        // reads that advance an internal offset.  All failures raise
+        // ValueError, matching the pack/unpack arms above.
+        NativeFn::StructWriterNew => {
+            use crate::interp::StructBufSlot;
+            let h = interp
+                .shared
+                .next_struct_buf_id
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            interp
+                .shared
+                .struct_bufs
+                .lock()
+                .unwrap()
+                .insert(h, StructBufSlot::Writer(Vec::with_capacity(32)));
+            Ok(h as u64)
+        }
+        NativeFn::StructWU32Be => {
+            let w = arg_i64(args, 0);
+            let v = arg_i64(args, 1);
+            struct_writer_append(interp, w, &(v as u32).to_be_bytes(), "w_u32_be")?;
+            Ok(0)
+        }
+        NativeFn::StructWU32Le => {
+            let w = arg_i64(args, 0);
+            let v = arg_i64(args, 1);
+            struct_writer_append(interp, w, &(v as u32).to_le_bytes(), "w_u32_le")?;
+            Ok(0)
+        }
+        NativeFn::StructWU64Be => {
+            let w = arg_i64(args, 0);
+            let v = arg_i64(args, 1);
+            struct_writer_append(interp, w, &(v as u64).to_be_bytes(), "w_u64_be")?;
+            Ok(0)
+        }
+        NativeFn::StructWU64Le => {
+            let w = arg_i64(args, 0);
+            let v = arg_i64(args, 1);
+            struct_writer_append(interp, w, &(v as u64).to_le_bytes(), "w_u64_le")?;
+            Ok(0)
+        }
+        NativeFn::StructWF64Be => {
+            let w = arg_i64(args, 0);
+            let v = arg_f64(args, 1);
+            struct_writer_append(interp, w, &v.to_bits().to_be_bytes(), "w_f64_be")?;
+            Ok(0)
+        }
+        NativeFn::StructWF64Le => {
+            let w = arg_i64(args, 0);
+            let v = arg_f64(args, 1);
+            struct_writer_append(interp, w, &v.to_bits().to_le_bytes(), "w_f64_le")?;
+            Ok(0)
+        }
+        NativeFn::StructWriterFinish => {
+            use crate::interp::StructBufSlot;
+            let w = arg_i64(args, 0);
+            // Remove the slot *before* alloc_string — the handle is
+            // consumed even though the str allocation can't fail.  A
+            // reader slot under the same handle is put back untouched.
+            let bytes = {
+                let mut tbl = interp.shared.struct_bufs.lock().unwrap();
+                match tbl.remove(&w) {
+                    Some(StructBufSlot::Writer(buf)) => buf,
+                    Some(slot @ StructBufSlot::Reader(..)) => {
+                        tbl.insert(w, slot);
+                        return Err(VmError::UncaughtException {
+                            type_name: "ValueError".into(),
+                            message: format!(
+                                "struct.finish: handle {w} is a reader, not a writer"
+                            ),
+                        });
+                    }
+                    None => {
+                        return Err(VmError::UncaughtException {
+                            type_name: "ValueError".into(),
+                            message: format!(
+                                "struct.finish: stale or already-finished writer handle {w}"
+                            ),
+                        });
+                    }
+                }
+            };
+            let p = interp.alloc_string(&bytes_to_packed_str(&bytes));
+            Ok(p as u64)
+        }
+        NativeFn::StructReaderNew => {
+            use crate::interp::StructBufSlot;
+            let s = arg_str(args, 0);
+            // Decode the packed str to raw bytes once, up front — same
+            // codepoint-0..=255 convention `packed_str_to_bytes` enforces
+            // per unpack_* call.
+            let mut bytes: Vec<u8> = Vec::with_capacity(s.len());
+            for c in s.chars() {
+                let cp = c as u32;
+                if cp > 255 {
+                    return Err(VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "struct.reader: codepoint U+{cp:04X} is not a packed byte (must be 0..255)"
+                        ),
+                    });
+                }
+                bytes.push(cp as u8);
+            }
+            let h = interp
+                .shared
+                .next_struct_buf_id
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            interp
+                .shared
+                .struct_bufs
+                .lock()
+                .unwrap()
+                .insert(h, StructBufSlot::Reader(bytes, 0));
+            Ok(h as u64)
+        }
+        NativeFn::StructRU32Be => {
+            let r = arg_i64(args, 0);
+            let b = struct_reader_read(interp, r, 4, "r_u32_be")?;
+            let v = u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as i64;
+            Ok(v as u64)
+        }
+        NativeFn::StructRU32Le => {
+            let r = arg_i64(args, 0);
+            let b = struct_reader_read(interp, r, 4, "r_u32_le")?;
+            let v = u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as i64;
+            Ok(v as u64)
+        }
+        NativeFn::StructRU64Be => {
+            let r = arg_i64(args, 0);
+            let b = struct_reader_read(interp, r, 8, "r_u64_be")?;
+            Ok(u64::from_be_bytes(b))
+        }
+        NativeFn::StructRU64Le => {
+            let r = arg_i64(args, 0);
+            let b = struct_reader_read(interp, r, 8, "r_u64_le")?;
+            Ok(u64::from_le_bytes(b))
+        }
+        NativeFn::StructRF64Be => {
+            let r = arg_i64(args, 0);
+            let b = struct_reader_read(interp, r, 8, "r_f64_be")?;
+            let v = f64::from_bits(u64::from_be_bytes(b));
+            Ok(v.to_bits())
+        }
+        NativeFn::StructRF64Le => {
+            let r = arg_i64(args, 0);
+            let b = struct_reader_read(interp, r, 8, "r_f64_le")?;
+            let v = f64::from_bits(u64::from_le_bytes(b));
+            Ok(v.to_bits())
+        }
+        NativeFn::StructReaderDone => {
+            use crate::interp::StructBufSlot;
+            let r = arg_i64(args, 0);
+            let mut tbl = interp.shared.struct_bufs.lock().unwrap();
+            match tbl.remove(&r) {
+                Some(StructBufSlot::Reader(..)) => Ok(0),
+                Some(slot @ StructBufSlot::Writer(_)) => {
+                    tbl.insert(r, slot);
+                    Err(VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "struct.reader_done: handle {r} is a writer, not a reader"
+                        ),
+                    })
+                }
+                None => Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "struct.reader_done: stale or already-freed reader handle {r}"
+                    ),
+                }),
+            }
+        }
+
         // ── M22 P2D: `urllib_parse` module ─────────────────────────────
         // Hand-rolled URL helpers — no `url` crate dependency.  See
         // §9.16 for the unreserved-character set (`A-Z a-z 0-9 - _ . ~`).
@@ -8610,6 +8791,88 @@ fn packed_str_to_bytes(s: &str, offset: usize, n: usize, who: &str) -> Result<Ve
         out.push(cp as u8);
     }
     Ok(out)
+}
+
+/// Shared body of the six `struct.w_*` natives: look up `handle` in
+/// `SharedVm.struct_bufs`, require a Writer slot, and append `bytes` to
+/// its growing Vec.  No StrictPy-heap allocation — the buffer lives
+/// entirely Rust-side until `struct.finish` converts it.
+///
+/// All failures are ValueError (matching the pack_*/unpack_* arms):
+/// stale/finished handle, or a reader handle passed to a writer fn.
+fn struct_writer_append(
+    interp: &Interpreter,
+    handle: i64,
+    bytes: &[u8],
+    who: &str,
+) -> Result<(), VmError> {
+    use crate::interp::StructBufSlot;
+    let mut tbl = interp.shared.struct_bufs.lock().unwrap();
+    match tbl.get_mut(&handle) {
+        Some(StructBufSlot::Writer(buf)) => {
+            buf.extend_from_slice(bytes);
+            Ok(())
+        }
+        Some(StructBufSlot::Reader(..)) => Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("struct.{who}: handle {handle} is a reader, not a writer"),
+        }),
+        None => Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "struct.{who}: stale or already-finished writer handle {handle}"
+            ),
+        }),
+    }
+}
+
+/// Shared body of the six `struct.r_*` natives: look up `handle`,
+/// require a Reader slot, copy `n` bytes (n ≤ 8) from the current
+/// offset into a fixed array, and advance the offset.  Callers decode
+/// the first `n` bytes in the byte order their NativeFn arm specifies.
+///
+/// All failures are ValueError: overrun (message starts with
+/// "struct reader overrun"), stale/freed handle, or a writer handle
+/// passed to a reader fn.
+fn struct_reader_read(
+    interp: &Interpreter,
+    handle: i64,
+    n: usize,
+    who: &str,
+) -> Result<[u8; 8], VmError> {
+    use crate::interp::StructBufSlot;
+    let mut tbl = interp.shared.struct_bufs.lock().unwrap();
+    match tbl.get_mut(&handle) {
+        Some(StructBufSlot::Reader(buf, off)) => {
+            let end = match off.checked_add(n) {
+                Some(e) if e <= buf.len() => e,
+                _ => {
+                    return Err(VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "struct reader overrun: {who}: need {n} bytes at offset {}, buffer has {} bytes",
+                            *off,
+                            buf.len()
+                        ),
+                    });
+                }
+            };
+            let mut out = [0u8; 8];
+            out[..n].copy_from_slice(&buf[*off..end]);
+            *off = end;
+            Ok(out)
+        }
+        Some(StructBufSlot::Writer(_)) => Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("struct.{who}: handle {handle} is a writer, not a reader"),
+        }),
+        None => Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "struct.{who}: stale or already-freed reader handle {handle}"
+            ),
+        }),
+    }
 }
 
 /// Percent-encode `s`.  Unreserved chars (`A-Z a-z 0-9 - _ . ~`) pass
