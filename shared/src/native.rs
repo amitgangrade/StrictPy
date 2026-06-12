@@ -550,6 +550,34 @@ pub enum NativeFn {
     /// `urllib_parse.parse_query(qs: str) -> List[Tuple[str, str]]`.
     UrlParseQuery = 347,
 
+    // ── 348–349 + 356–369: `struct` batch writer/reader ─────────────────
+    // Handle-based binary serialization fixing the per-field cost of the
+    // pack_*/unpack_* surface: each `pack_*` call allocates a heap str and
+    // multi-field records pay a concat allocation per `+`.  The writer
+    // accumulates raw bytes in one Rust-side `Vec<u8>` (no StrictPy-heap
+    // allocation per field) and `finish` converts the whole record to a
+    // packed str in a single allocation.  The reader is the mirror image:
+    // it decodes the packed str to bytes once and serves sequential reads
+    // that advance an internal offset (no explicit per-call offsets).
+    //
+    // Handles are opaque i64s into `SharedVm.struct_bufs` (the M35
+    // streaming-Hasher slot-table idiom — monotonic id, slot 0 unused).
+    // `finish` / `reader_done` consume the handle; further use raises
+    // ValueError.  Byte<->str convention matches pack_*/unpack_* exactly:
+    // one codepoint 0..=255 per byte (see `bytes_to_packed_str`).
+    //
+    // Discriminant layout note: this feature needs 16 ids but only 14
+    // slots (356–369) remain after the subprocess block (350–355), so the
+    // two lifecycle ids live at 348–349 — still inside the struct
+    // module's original 330–349 reservation.
+    //
+    /// `struct.writer() -> i64` — new write handle backed by a growing
+    /// byte buffer.
+    StructWriterNew    = 348,
+    /// `struct.finish(w: i64) -> str` — one str allocation for the whole
+    /// accumulated record; consumes (frees) the handle.
+    StructWriterFinish = 349,
+
     // ── 350–369: `subprocess` module (M23 P3a-A) ────────────────────────
     // Cross-platform process spawn + wait + IO capture, backed by
     // Rust's `std::process::Command`.  Running processes are tracked
@@ -598,6 +626,43 @@ pub enum NativeFn {
     /// succeeds if the child has already exited.  Raises `IOError` on
     /// invalid handle.
     SubprocessKill          = 355,
+
+    // ── 356–369: `struct` batch writer/reader (continued) ───────────────
+    // See the block comment above `StructWriterNew` (348).  Byte-order
+    // semantics of each w_*/r_* pair match the corresponding
+    // StructPack*/StructUnpack* arm exactly (u32-in-i64 truncation, f64
+    // IEEE 754 bit patterns).
+    //
+    /// `struct.w_u32_be(w: i64, v: i64) -> None` — append 4 bytes, big-endian.
+    StructWU32Be     = 356,
+    /// `struct.w_u32_le(w: i64, v: i64) -> None` — append 4 bytes, little-endian.
+    StructWU32Le     = 357,
+    /// `struct.w_u64_be(w: i64, v: i64) -> None` — append 8 bytes, big-endian.
+    StructWU64Be     = 358,
+    /// `struct.w_u64_le(w: i64, v: i64) -> None` — append 8 bytes, little-endian.
+    StructWU64Le     = 359,
+    /// `struct.w_f64_be(w: i64, v: f64) -> None` — append 8 bytes, IEEE 754 big-endian.
+    StructWF64Be     = 360,
+    /// `struct.w_f64_le(w: i64, v: f64) -> None` — append 8 bytes, IEEE 754 little-endian.
+    StructWF64Le     = 361,
+    /// `struct.reader(buf: str) -> i64` — new read handle over the packed
+    /// buffer's bytes, starting at offset 0.  Raises ValueError if `buf`
+    /// contains a codepoint > 255 (not a packed buffer).
+    StructReaderNew  = 362,
+    /// `struct.r_u32_be(r: i64) -> i64` — read 4 bytes big-endian, advance.
+    StructRU32Be     = 363,
+    /// `struct.r_u32_le(r: i64) -> i64` — read 4 bytes little-endian, advance.
+    StructRU32Le     = 364,
+    /// `struct.r_u64_be(r: i64) -> i64` — read 8 bytes big-endian, advance.
+    StructRU64Be     = 365,
+    /// `struct.r_u64_le(r: i64) -> i64` — read 8 bytes little-endian, advance.
+    StructRU64Le     = 366,
+    /// `struct.r_f64_be(r: i64) -> f64` — read 8 bytes IEEE 754 big-endian, advance.
+    StructRF64Be     = 367,
+    /// `struct.r_f64_le(r: i64) -> f64` — read 8 bytes IEEE 754 little-endian, advance.
+    StructRF64Le     = 368,
+    /// `struct.reader_done(r: i64) -> None` — free the read handle.
+    StructReaderDone = 369,
 
     // ── 370–389: `pathlib` module (M23 P3a-A) ───────────────────────────
     // Object-oriented path API as a *flat function* surface — the Pythonic
@@ -2667,6 +2732,10 @@ impl NativeFn {
             339 => Some(Self::StructUnpackU64Le),
             340 => Some(Self::StructUnpackF64Be),
             341 => Some(Self::StructUnpackF64Le),
+            // struct batch writer/reader — lifecycle ids (348-349); the
+            // field-level w_*/r_* ids live at 356-369 below.
+            348 => Some(Self::StructWriterNew),
+            349 => Some(Self::StructWriterFinish),
             // M22 P2D: urllib_parse module (342-347, 6 ids).
             342 => Some(Self::UrlQuote),
             343 => Some(Self::UrlQuotePlus),
@@ -2682,6 +2751,21 @@ impl NativeFn {
             353 => Some(Self::SubprocessWait),
             354 => Some(Self::SubprocessTryWait),
             355 => Some(Self::SubprocessKill),
+            // struct batch writer/reader (356-369, 14 ids; +348-349 above).
+            356 => Some(Self::StructWU32Be),
+            357 => Some(Self::StructWU32Le),
+            358 => Some(Self::StructWU64Be),
+            359 => Some(Self::StructWU64Le),
+            360 => Some(Self::StructWF64Be),
+            361 => Some(Self::StructWF64Le),
+            362 => Some(Self::StructReaderNew),
+            363 => Some(Self::StructRU32Be),
+            364 => Some(Self::StructRU32Le),
+            365 => Some(Self::StructRU64Be),
+            366 => Some(Self::StructRU64Le),
+            367 => Some(Self::StructRF64Be),
+            368 => Some(Self::StructRF64Le),
+            369 => Some(Self::StructReaderDone),
             // M23 P3a-A: pathlib module (370-383, 14 ids; 384-389 reserved).
             370 => Some(Self::PathlibJoin),
             371 => Some(Self::PathlibWithSuffix),
