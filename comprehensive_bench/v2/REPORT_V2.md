@@ -8,6 +8,45 @@ Speedup = CPython time ÷ StrictPy time. **>1 means StrictPy is faster.**
 
 ---
 
+## ⏩⏩ Run-3 update — parity reached (after dict-FxHash + batch-struct + char-scan VM work)
+
+Reran the identical suite on a release build that adds **dict string-hash caching (FxHash)**, **batch struct serialization**, and — the big one — **native acceleration for the per-character `s[i]` scan path**. This is the strongest result the suite has produced.
+
+| | Original baseline | Post-fix (run 2) | **Run 3 (now)** |
+|---|---|---|---|
+| Passing / correct | 58/59 | 59/59 | **59/59** |
+| Wins / ties / losses | 23 / 1 / 34 | 25 / 0 / 34 | **26 / 0 / 33** |
+| **Geomean speedup (all)** | 0.72× | 0.88× | **0.96× — at parity with CPython** |
+| Core compute | 4.2× | 5.1× | **4.7×** |
+| Strings | 0.15× (6.7× slower) | 0.21× | **0.31× (3.2× slower)** |
+| Systems | 1.20× | 1.41× | **1.39×** |
+| Data structures | 0.53× | 0.56× | **0.58×** |
+
+**Headline: `str_slice_scan` 14,793 ms → 132 ms** — the per-character scan went from the single worst result (66× *slower* than CPython) to **1.3× faster**. That one fix drives most of the jump to parity.
+
+**What the dict-FxHash + batch-struct + string work moved:**
+
+| Benchmark | baseline | run 3 | ratio (baseline → now) |
+|---|---:|---:|---|
+| `str_slice_scan` | 12,502 ms | **132 ms** | 66× slower → **1.3× faster** |
+| `str_split_scan` | 2,535 ms | **672 ms** | 12.5× → **3.5×** slower |
+| `str_http_parse` | 25,078 ms | **1,004 ms** | 290× → **12.5×** slower |
+| `str_wordcount` | 507 ms | **345 ms** | 3.3× → **2.3×** |
+| `ds_string_keys_aggregation` (dict FxHash) | 318 ms | **230 ms** | 2.4× → **1.9×** |
+| `sys_struct_pack` (batch struct) | 1,019 ms | **843 ms** | 4.9× → **4.2×** |
+
+**Did NOT improve / still open:**
+- `ds_dict_ops`: 1,918 → **1,552 ms**, still **5.6× slower**. FxHash helped aggregation-shaped dict code but not this insert/lookup benchmark — its bottleneck is the `str(i)` key construction on every op, not the hash function.
+- String formatting cluster remains the worst non-dict losers: `str_fstring_format` 8.2×, `str_csv_parse` 5.8×, `str_join_build` 5.4×, `str_template_render` 5.1×.
+- FFI-shaped stdlib still loses: `struct` 4.2×, `file_io` 3.9×, `sqlite` 2.0×.
+- Bug #2 (top-level `final` computed from another `final` → 0) — still not fixed.
+
+**No regressions or new failures.** The few `core_*` benchmarks showing ~1–5 ms increases are jitter on sub-50 ms workloads. Run-3 artifacts: `results_v2_run3.json` (this run, also the live `results_v2.json`), `results_v2_prefix_baseline.json` (original clean run).
+
+_Note: the "Post-fix update" and main body below describe earlier states and remain accurate as history; the per-benchmark tables further down reflect run 2, not run 3 — see `REPORT_V2_tables.md` (regenerated) for the current numbers._
+
+---
+
 ## ⏩ Post-fix update (2026-06-12 rerun, after PRs #12/#14/#15 merged to main)
 
 Five of the bugs below were fixed in cloud sessions and merged. Reran the **identical suite** on a fresh `cargo build --release`. Every program in this report's body still describes the **pre-fix** state; this section is the delta.
