@@ -2306,6 +2306,38 @@ impl TypeChecker {
                 for a in args { let _ = self.check_or_synth(&a.value, Some(&Ty::Primitive(PrimTy::Str)), env, ctx, r)?; }
                 return Ok(Ty::Primitive(PrimTy::Bool));
             }
+            // Strings round 2: native join/lower/upper/repeat.
+            // `sep.join(xs: List[str]) -> str` — the receiver is the
+            // separator. NOTE: must be intercepted here (and in the IR's
+            // str-receiver dispatch) because the name `join` otherwise
+            // resolves to Thread.join via NativeFn::from_name.
+            (Ty::Primitive(PrimTy::Str), "join") => {
+                if args.len() != 1 {
+                    return Err(type_err(span, codes::TYPE_ARITY,
+                        "str.join takes 1 argument: (xs: List[str])".into()));
+                }
+                let want = Ty::Generic {
+                    base: TypeCtor::List,
+                    args: vec![Ty::Primitive(PrimTy::Str)],
+                };
+                let _ = self.check_or_synth(&args[0].value, Some(&want), env, ctx, r)?;
+                return Ok(Ty::Primitive(PrimTy::Str));
+            }
+            (Ty::Primitive(PrimTy::Str), "lower" | "upper") => {
+                if !args.is_empty() {
+                    return Err(type_err(span, codes::TYPE_ARITY,
+                        format!("str.{method}() takes no arguments")));
+                }
+                return Ok(Ty::Primitive(PrimTy::Str));
+            }
+            (Ty::Primitive(PrimTy::Str), "repeat") => {
+                if args.len() != 1 {
+                    return Err(type_err(span, codes::TYPE_ARITY,
+                        "str.repeat takes 1 argument: (n: i64)".into()));
+                }
+                let _ = self.check_or_synth(&args[0].value, Some(&Ty::Primitive(PrimTy::I64)), env, ctx, r)?;
+                return Ok(Ty::Primitive(PrimTy::Str));
+            }
             // Channel methods — stdlib: producer.spy
             (Ty::Generic { base: TypeCtor::Channel, args: a }, "send") if a.len() == 1 => {
                 if args.len() == 1 {

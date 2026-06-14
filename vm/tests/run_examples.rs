@@ -123,8 +123,6 @@ fn producer_runs() {
         count, 100,
         "expected all 100 `got N` lines from the blocking-recv consumer; \
          got {count}. stdout was: {out:?}"
-        "expected the recv/ChannelClosedError drain to deliver all 100 \
-         values; got {count}. stdout was: {out:?}"
     );
 }
 

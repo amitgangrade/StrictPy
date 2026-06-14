@@ -1,0 +1,86 @@
+# Strings round 2 demo — exercises the native string toolkit added for the
+# v2 benchmark follow-up:
+#   * sep.join(xs: List[str])           (one native call, no O(n²) concat)
+#   * s.lower() / s.upper()             (ASCII fast path, Unicode fallback)
+#   * s.repeat(n)                       (n <= 0 → "")
+#   * s.char_at(i)                      (REPORT_V2 bug #7: used to trap)
+#   * O(1) ASCII s[i] / O(len) slice    (was O(position) per call)
+#   * chained in-place append           (s = s + a + b stays amortised O(N))
+#
+# Prints `PASS test=N` / `FAIL test=N` per check and a final `OK: n/16`.
+
+fn check(id: i64, ok: bool) -> i64:
+    if ok:
+        println("PASS test=" + str(id))
+        return 1i64
+    println("FAIL test=" + str(id))
+    return 0i64
+
+# Pure accumulator (init + chained self-append + bare return) so the
+# compiler's widened escape analysis keeps the amortised-O(N) in-place path.
+fn build_chain(n: i64) -> str:
+    s: str = ""
+    i: i64 = 0
+    while i < n:
+        s = s + "<" + str(i) + ">"
+        i = i + 1
+    return s
+
+# Per-char scan via s[i] — O(1) per access on ASCII strings.
+fn scan_sum(s: str) -> i64:
+    total: i64 = 0
+    i: i64 = 0
+    n: i64 = i64(len(s))
+    while i < n:
+        c: char = s[i]
+        total = total + i64(i32(c))
+        i = i + 1
+    return total
+
+fn main() -> i32:
+    passed: i64 = 0
+
+    # join
+    parts: List[str] = ["alpha", "beta", "gamma"]
+    passed = passed + check(1i64, ",".join(parts) == "alpha,beta,gamma")
+    empty: List[str] = []
+    passed = passed + check(2i64, "-".join(empty) == "")
+    passed = passed + check(3i64, "".join(parts) == "alphabetagamma")
+
+    # lower / upper (ASCII + Unicode)
+    passed = passed + check(4i64, "HeLLo WoRLD".lower() == "hello world")
+    passed = passed + check(5i64, "HeLLo WoRLD".upper() == "HELLO WORLD")
+    passed = passed + check(6i64, "HÉLLO".lower() == "héllo")
+
+    # repeat
+    passed = passed + check(7i64, "ab".repeat(3i64) == "ababab")
+    passed = passed + check(8i64, "x".repeat(0i64) == "")
+
+    # char_at (bug #7) — ASCII and non-ASCII receivers
+    passed = passed + check(9i64, "abcdef".char_at(2i64) == 'c')
+    passed = passed + check(10i64, "héllo".char_at(1i64) == 'é')
+
+    # slice — ASCII fast path and non-ASCII fallback
+    passed = passed + check(11i64, "hello world".slice(6i64, 11i64) == "world")
+    passed = passed + check(12i64, "héllo".slice(1i64, 3i64) == "él")
+
+    # chained in-place append
+    small: str = build_chain(3i64)
+    passed = passed + check(13i64, small == "<0><1><2>")
+    big: str = build_chain(500i64)
+    passed = passed + check(14i64, i64(len(big)) == 2390i64)
+
+    # alias safety: `t = s` disqualifies the in-place path; t keeps its value
+    s: str = ""
+    s = s + "x" + "y" + "z"
+    t: str = s
+    s = s + "A" + "B"
+    passed = passed + check(15i64, t == "xyz" and s == "xyzAB")
+
+    # O(1) ASCII per-char scan
+    passed = passed + check(16i64, scan_sum("abc") == 294i64)
+
+    println("OK: " + str(passed) + "/16")
+    if passed == 16i64:
+        return 0
+    return 1

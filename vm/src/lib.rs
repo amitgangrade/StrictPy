@@ -37,6 +37,7 @@ pub mod loader;
 pub mod object;
 #[cfg(feature = "jit")]
 pub mod stackmap_registry;
+pub mod strdict;
 
 use std::path::Path;
 

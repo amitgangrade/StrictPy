@@ -198,13 +198,47 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
                 (*s_ptr).length += e_len;
                 // Now backed by a separate heap buffer: clear the inline bit.
                 (*s_ptr).flags = if s_ascii && e_ascii { 0b10 } else { 0 };
+                // The bytes just changed in place — any dict hash cached in
+                // the header (gc_meta bits) is now stale and MUST be dropped,
+                // or a later dict op on this string would use the old hash.
+                crate::object::invalidate_str_hash(s_ptr as *mut crate::object::ObjectHeader);
             }
             Ok(s_ptr as u64)
         }
         NativeFn::StrSlice => {
-            let s = arg_str(args, 0);
+            let sp = arg_u64(args, 0) as *const StringRepr;
             let start = arg_u64(args, 1) as usize;
             let end = arg_u64(args, 2) as usize;
+            // ASCII fast path: flags bit 1 means 1 byte == 1 code point, so
+            // the slice is a direct O(slice_len) byte copy instead of an
+            // O(end) chars() walk (which made scanning loops quadratic).
+            if !sp.is_null() {
+                // SAFETY: sp is a heap pointer to StringRepr, rooted in the
+                // caller's register window.
+                let (flags, blen, data) =
+                    unsafe { ((*sp).flags, (*sp).byte_len, (*sp).data) };
+                if flags & 0b10 != 0 {
+                    let end_c = end.min(blen);
+                    let start_c = start.min(end_c);
+                    if start_c == end_c || data.is_null() {
+                        return Ok(interp.alloc_string("") as u64);
+                    }
+                    // SAFETY: start_c..end_c is in bounds of the byte_len-long
+                    // buffer; ascii bytes are valid UTF-8. The GC is
+                    // non-moving and the source is rooted, so `data` stays
+                    // valid across the alloc_string copy (same invariant
+                    // StrAppendInPlace relies on).
+                    let sub = unsafe {
+                        std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                            data.add(start_c),
+                            end_c - start_c,
+                        ))
+                    };
+                    return Ok(interp.alloc_string(sub) as u64);
+                }
+            }
+            // Non-ASCII fallback: code-point walk.
+            let s = arg_str(args, 0);
             let sliced: String = s.chars().skip(start).take(end.saturating_sub(start)).collect();
             let p = interp.alloc_string(&sliced);
             Ok(p as u64)
@@ -245,6 +279,52 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         }
         NativeFn::StrContains => {
             Ok(if arg_str(args, 0).contains(&arg_str(args, 1)) { 1 } else { 0 })
+        }
+        // ── Strings round 2 (ids 123–126). ─────────────────────────────────
+        // `sep.join(xs)` — receiver (arg 0) is the separator, arg 1 the
+        // List[str]. One native call + one allocation instead of an O(n²)
+        // per-piece concat loop.
+        NativeFn::StrJoin => {
+            let sep = arg_str(args, 0);
+            let parts = read_list_str(args, 1);
+            Ok(interp.alloc_string(&parts.join(&sep)) as u64)
+        }
+        // `s.lower()` / `s.upper()` — ASCII fast path via the receiver's
+        // ascii flag (bit 1); Unicode-aware fallback otherwise (Rust's
+        // to_lowercase/to_uppercase, matching Python semantics incl.
+        // one-to-many mappings like 'ß' → "SS").
+        NativeFn::StrLower => {
+            let sp = arg_u64(args, 0) as *const StringRepr;
+            // SAFETY: sp is a heap StringRepr pointer or null.
+            let ascii = !sp.is_null() && unsafe { (*sp).flags } & 0b10 != 0;
+            let mut s = arg_str(args, 0);
+            if ascii {
+                s.make_ascii_lowercase();
+                Ok(interp.alloc_string(&s) as u64)
+            } else {
+                Ok(interp.alloc_string(&s.to_lowercase()) as u64)
+            }
+        }
+        NativeFn::StrUpper => {
+            let sp = arg_u64(args, 0) as *const StringRepr;
+            // SAFETY: sp is a heap StringRepr pointer or null.
+            let ascii = !sp.is_null() && unsafe { (*sp).flags } & 0b10 != 0;
+            let mut s = arg_str(args, 0);
+            if ascii {
+                s.make_ascii_uppercase();
+                Ok(interp.alloc_string(&s) as u64)
+            } else {
+                Ok(interp.alloc_string(&s.to_uppercase()) as u64)
+            }
+        }
+        // `s.repeat(n)` — n <= 0 yields "".
+        NativeFn::StrRepeat => {
+            let s = arg_str(args, 0);
+            let n = arg_i64(args, 1);
+            if n <= 0 || s.is_empty() {
+                return Ok(interp.alloc_string("") as u64);
+            }
+            Ok(interp.alloc_string(&s.repeat(n as usize)) as u64)
         }
         // real-world: csv_aggregate / wordcount / markov — every text
         // stress program had to hand-roll a splitter. `s.split(sep)`
@@ -707,12 +787,16 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             }
             // SAFETY: dp heap pointer.
             let handle = unsafe { (*dp).handle } as usize;
-            let key = arg_str(args, 1);
+            // Perf: hash from the key string's header cache (computed at
+            // most once per string object) + a borrowed byte view — no
+            // String allocation, no rehash. SAFETY: the key is rooted in
+            // the caller's registers and nothing below allocates.
+            let (h, kb) = unsafe { crate::strdict::str_key_hash_bytes(arg_u64(args, 1) as *const StringRepr) };
             // get() returns Optional[V] per the wordcount example
             // (`prev: i32? = counts.get(w)`). Use NONE_SENTINEL when absent.
             // When present, the payload is the raw stored u64.
             with_dict_slot(interp, handle, |slot| {
-                slot.data.get(&key).copied().unwrap_or(NONE_SENTINEL)
+                slot.data.get_hashed(h, kb).unwrap_or(NONE_SENTINEL)
             })
         }
         NativeFn::DictSet => {
@@ -725,10 +809,12 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             }
             // SAFETY: dp heap pointer.
             let handle = unsafe { (*dp).handle } as usize;
-            let key = arg_str(args, 1);
+            // SAFETY: key rooted in caller registers; no allocation below.
+            let (h, kb) = unsafe { crate::strdict::str_key_hash_bytes(arg_u64(args, 1) as *const StringRepr) };
             let val = arg_u64(args, 2);
             with_dict_slot_mut(interp, handle, |slot| {
-                slot.data.insert(key, val);
+                // Owned key String is allocated only when the key is new.
+                slot.data.insert_hashed(h, kb, val);
             })?;
             Ok(0)
         }
@@ -739,8 +825,9 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             }
             // SAFETY: dp heap pointer.
             let handle = unsafe { (*dp).handle } as usize;
-            let key = arg_str(args, 1);
-            with_dict_slot(interp, handle, |slot| slot.data.contains_key(&key) as u64)
+            // SAFETY: key rooted in caller registers; no allocation below.
+            let (h, kb) = unsafe { crate::strdict::str_key_hash_bytes(arg_u64(args, 1) as *const StringRepr) };
+            with_dict_slot(interp, handle, |slot| slot.data.contains_hashed(h, kb) as u64)
         }
         NativeFn::DictRemove => {
             let dp = arg_u64(args, 0) as *const DictRepr;
@@ -752,11 +839,14 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             }
             // SAFETY: dp heap pointer.
             let handle = unsafe { (*dp).handle } as usize;
-            let key = arg_str(args, 1);
+            // SAFETY: key rooted in caller registers; no allocation below.
+            let (h, kb) = unsafe { crate::strdict::str_key_hash_bytes(arg_u64(args, 1) as *const StringRepr) };
             // Returns whether the key was present, so `del d[k]` on an
             // absent key is a quiet no-op (StrictPy has no KeyError-on-del;
             // callers that care use the `d.remove(k) -> bool` form).
-            with_dict_slot_mut(interp, handle, |slot| slot.data.remove(&key).is_some() as u64)
+            with_dict_slot_mut(interp, handle, |slot| {
+                slot.data.remove_hashed(h, kb).is_some() as u64
+            })
         }
         NativeFn::DictKeys => {
             let dp = arg_u64(args, 0) as *const DictRepr;
@@ -813,6 +903,24 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
                     message: "char-at on null string".into(),
                 });
             }
+            // ASCII fast path: flags bit 1 means 1 byte == 1 code point, so
+            // `s[i]` is a direct O(1) byte load instead of an O(i) chars()
+            // walk (which made per-char scanning loops quadratic).
+            // SAFETY: sp is a heap pointer to StringRepr, rooted in the
+            // caller's register window.
+            let (flags, blen, data) = unsafe { ((*sp).flags, (*sp).byte_len, (*sp).data) };
+            if flags & 0b10 != 0 {
+                if idx >= blen || data.is_null() {
+                    return Err(VmError::UncaughtException {
+                        type_name: "IndexError".into(),
+                        message: format!("string index {idx} out of range"),
+                    });
+                }
+                // SAFETY: idx < byte_len, buffer is byte_len bytes long.
+                let b = unsafe { *data.add(idx) };
+                return Ok(b as u64);
+            }
+            // Non-ASCII fallback: code-point walk.
             // SAFETY: sp is a heap pointer to StringRepr.
             let s = unsafe { read_str(sp) };
             let ch = s.chars().nth(idx).ok_or_else(|| VmError::UncaughtException {
@@ -2285,6 +2393,187 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             arr.copy_from_slice(&buf[..8]);
             let v = f64::from_bits(u64::from_le_bytes(arr));
             Ok(v.to_bits())
+        }
+
+        // ── `struct` batch writer/reader ───────────────────────────────
+        // Handle-based fast path over the pack_*/unpack_* surface.  A
+        // writer accumulates raw bytes in one Rust-side Vec<u8> (slot in
+        // `SharedVm.struct_bufs`); the w_* arms below append with zero
+        // StrictPy-heap allocations, and `finish` converts the whole
+        // record via `bytes_to_packed_str` in a single str allocation —
+        // byte-identical to concatenating the equivalent pack_* results.
+        // The reader decodes a packed str once and serves sequential
+        // reads that advance an internal offset.  All failures raise
+        // ValueError, matching the pack/unpack arms above.
+        NativeFn::StructWriterNew => {
+            use crate::interp::StructBufSlot;
+            let h = interp
+                .shared
+                .next_struct_buf_id
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            interp
+                .shared
+                .struct_bufs
+                .lock()
+                .unwrap()
+                .insert(h, StructBufSlot::Writer(Vec::with_capacity(32)));
+            Ok(h as u64)
+        }
+        NativeFn::StructWU32Be => {
+            let w = arg_i64(args, 0);
+            let v = arg_i64(args, 1);
+            struct_writer_append(interp, w, &(v as u32).to_be_bytes(), "w_u32_be")?;
+            Ok(0)
+        }
+        NativeFn::StructWU32Le => {
+            let w = arg_i64(args, 0);
+            let v = arg_i64(args, 1);
+            struct_writer_append(interp, w, &(v as u32).to_le_bytes(), "w_u32_le")?;
+            Ok(0)
+        }
+        NativeFn::StructWU64Be => {
+            let w = arg_i64(args, 0);
+            let v = arg_i64(args, 1);
+            struct_writer_append(interp, w, &(v as u64).to_be_bytes(), "w_u64_be")?;
+            Ok(0)
+        }
+        NativeFn::StructWU64Le => {
+            let w = arg_i64(args, 0);
+            let v = arg_i64(args, 1);
+            struct_writer_append(interp, w, &(v as u64).to_le_bytes(), "w_u64_le")?;
+            Ok(0)
+        }
+        NativeFn::StructWF64Be => {
+            let w = arg_i64(args, 0);
+            let v = arg_f64(args, 1);
+            struct_writer_append(interp, w, &v.to_bits().to_be_bytes(), "w_f64_be")?;
+            Ok(0)
+        }
+        NativeFn::StructWF64Le => {
+            let w = arg_i64(args, 0);
+            let v = arg_f64(args, 1);
+            struct_writer_append(interp, w, &v.to_bits().to_le_bytes(), "w_f64_le")?;
+            Ok(0)
+        }
+        NativeFn::StructWriterFinish => {
+            use crate::interp::StructBufSlot;
+            let w = arg_i64(args, 0);
+            // Remove the slot *before* alloc_string — the handle is
+            // consumed even though the str allocation can't fail.  A
+            // reader slot under the same handle is put back untouched.
+            let bytes = {
+                let mut tbl = interp.shared.struct_bufs.lock().unwrap();
+                match tbl.remove(&w) {
+                    Some(StructBufSlot::Writer(buf)) => buf,
+                    Some(slot @ StructBufSlot::Reader(..)) => {
+                        tbl.insert(w, slot);
+                        return Err(VmError::UncaughtException {
+                            type_name: "ValueError".into(),
+                            message: format!(
+                                "struct.finish: handle {w} is a reader, not a writer"
+                            ),
+                        });
+                    }
+                    None => {
+                        return Err(VmError::UncaughtException {
+                            type_name: "ValueError".into(),
+                            message: format!(
+                                "struct.finish: stale or already-finished writer handle {w}"
+                            ),
+                        });
+                    }
+                }
+            };
+            let p = interp.alloc_string(&bytes_to_packed_str(&bytes));
+            Ok(p as u64)
+        }
+        NativeFn::StructReaderNew => {
+            use crate::interp::StructBufSlot;
+            let s = arg_str(args, 0);
+            // Decode the packed str to raw bytes once, up front — same
+            // codepoint-0..=255 convention `packed_str_to_bytes` enforces
+            // per unpack_* call.
+            let mut bytes: Vec<u8> = Vec::with_capacity(s.len());
+            for c in s.chars() {
+                let cp = c as u32;
+                if cp > 255 {
+                    return Err(VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "struct.reader: codepoint U+{cp:04X} is not a packed byte (must be 0..255)"
+                        ),
+                    });
+                }
+                bytes.push(cp as u8);
+            }
+            let h = interp
+                .shared
+                .next_struct_buf_id
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            interp
+                .shared
+                .struct_bufs
+                .lock()
+                .unwrap()
+                .insert(h, StructBufSlot::Reader(bytes, 0));
+            Ok(h as u64)
+        }
+        NativeFn::StructRU32Be => {
+            let r = arg_i64(args, 0);
+            let b = struct_reader_read(interp, r, 4, "r_u32_be")?;
+            let v = u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as i64;
+            Ok(v as u64)
+        }
+        NativeFn::StructRU32Le => {
+            let r = arg_i64(args, 0);
+            let b = struct_reader_read(interp, r, 4, "r_u32_le")?;
+            let v = u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as i64;
+            Ok(v as u64)
+        }
+        NativeFn::StructRU64Be => {
+            let r = arg_i64(args, 0);
+            let b = struct_reader_read(interp, r, 8, "r_u64_be")?;
+            Ok(u64::from_be_bytes(b))
+        }
+        NativeFn::StructRU64Le => {
+            let r = arg_i64(args, 0);
+            let b = struct_reader_read(interp, r, 8, "r_u64_le")?;
+            Ok(u64::from_le_bytes(b))
+        }
+        NativeFn::StructRF64Be => {
+            let r = arg_i64(args, 0);
+            let b = struct_reader_read(interp, r, 8, "r_f64_be")?;
+            let v = f64::from_bits(u64::from_be_bytes(b));
+            Ok(v.to_bits())
+        }
+        NativeFn::StructRF64Le => {
+            let r = arg_i64(args, 0);
+            let b = struct_reader_read(interp, r, 8, "r_f64_le")?;
+            let v = f64::from_bits(u64::from_le_bytes(b));
+            Ok(v.to_bits())
+        }
+        NativeFn::StructReaderDone => {
+            use crate::interp::StructBufSlot;
+            let r = arg_i64(args, 0);
+            let mut tbl = interp.shared.struct_bufs.lock().unwrap();
+            match tbl.remove(&r) {
+                Some(StructBufSlot::Reader(..)) => Ok(0),
+                Some(slot @ StructBufSlot::Writer(_)) => {
+                    tbl.insert(r, slot);
+                    Err(VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "struct.reader_done: handle {r} is a writer, not a reader"
+                        ),
+                    })
+                }
+                None => Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "struct.reader_done: stale or already-freed reader handle {r}"
+                    ),
+                }),
+            }
         }
 
         // ── M22 P2D: `urllib_parse` module ─────────────────────────────
@@ -8610,6 +8899,88 @@ fn packed_str_to_bytes(s: &str, offset: usize, n: usize, who: &str) -> Result<Ve
         out.push(cp as u8);
     }
     Ok(out)
+}
+
+/// Shared body of the six `struct.w_*` natives: look up `handle` in
+/// `SharedVm.struct_bufs`, require a Writer slot, and append `bytes` to
+/// its growing Vec.  No StrictPy-heap allocation — the buffer lives
+/// entirely Rust-side until `struct.finish` converts it.
+///
+/// All failures are ValueError (matching the pack_*/unpack_* arms):
+/// stale/finished handle, or a reader handle passed to a writer fn.
+fn struct_writer_append(
+    interp: &Interpreter,
+    handle: i64,
+    bytes: &[u8],
+    who: &str,
+) -> Result<(), VmError> {
+    use crate::interp::StructBufSlot;
+    let mut tbl = interp.shared.struct_bufs.lock().unwrap();
+    match tbl.get_mut(&handle) {
+        Some(StructBufSlot::Writer(buf)) => {
+            buf.extend_from_slice(bytes);
+            Ok(())
+        }
+        Some(StructBufSlot::Reader(..)) => Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("struct.{who}: handle {handle} is a reader, not a writer"),
+        }),
+        None => Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "struct.{who}: stale or already-finished writer handle {handle}"
+            ),
+        }),
+    }
+}
+
+/// Shared body of the six `struct.r_*` natives: look up `handle`,
+/// require a Reader slot, copy `n` bytes (n ≤ 8) from the current
+/// offset into a fixed array, and advance the offset.  Callers decode
+/// the first `n` bytes in the byte order their NativeFn arm specifies.
+///
+/// All failures are ValueError: overrun (message starts with
+/// "struct reader overrun"), stale/freed handle, or a writer handle
+/// passed to a reader fn.
+fn struct_reader_read(
+    interp: &Interpreter,
+    handle: i64,
+    n: usize,
+    who: &str,
+) -> Result<[u8; 8], VmError> {
+    use crate::interp::StructBufSlot;
+    let mut tbl = interp.shared.struct_bufs.lock().unwrap();
+    match tbl.get_mut(&handle) {
+        Some(StructBufSlot::Reader(buf, off)) => {
+            let end = match off.checked_add(n) {
+                Some(e) if e <= buf.len() => e,
+                _ => {
+                    return Err(VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "struct reader overrun: {who}: need {n} bytes at offset {}, buffer has {} bytes",
+                            *off,
+                            buf.len()
+                        ),
+                    });
+                }
+            };
+            let mut out = [0u8; 8];
+            out[..n].copy_from_slice(&buf[*off..end]);
+            *off = end;
+            Ok(out)
+        }
+        Some(StructBufSlot::Writer(_)) => Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("struct.{who}: handle {handle} is a writer, not a reader"),
+        }),
+        None => Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "struct.{who}: stale or already-freed reader handle {handle}"
+            ),
+        }),
+    }
 }
 
 /// Percent-encode `s`.  Unreserved chars (`A-Z a-z 0-9 - _ . ~`) pass

@@ -2,11 +2,7 @@
 closes; the consumer drains with blocking `recv()` until the channel is
 closed and empty (`ChannelClosedError`). Demonstrates §16.1 (Thread),
 §16.3 (Channel), §7.5 (try/except), and lambda capture per the §21.4
-style — `Thread(fn() -> None: producer(ch))`."""
-closes; the consumer drains via blocking `recv()` and stops on the
-`ChannelClosedError` raised once the channel is closed and empty.
-Demonstrates §16.1 (Thread) and §16.3 (Channel) and lambda capture per
-the §21.4 style — `Thread(fn() -> None: producer(ch))`.
+style — `Thread(fn() -> None: producer(ch))`.
 
 The consumer used to poll `try_recv()` and break on `none`, but `none`
 means "empty" as well as "closed" (M5 limitation), so a consumer that

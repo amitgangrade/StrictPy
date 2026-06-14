@@ -1,0 +1,104 @@
+"""struct_builder_demo — batch writer/reader for the stdlib `struct` module.
+
+The pack_*/unpack_* surface allocates one heap str per field and pays a
+concat allocation per `+`, so multi-field records are slow at volume.
+The writer/reader API fixes that with opaque i64 handles:
+
+  w = struct.writer()          one growing Rust-side byte buffer
+  struct.w_u32_be(w, v)        append bytes — no per-field allocation
+  buf = struct.finish(w)       ONE str allocation for the whole record
+                               (frees the handle)
+
+  r = struct.reader(buf)       decode the packed str to bytes once
+  struct.r_u32_be(r)           sequential reads — internal offset,
+                               no explicit per-call offsets
+  struct.reader_done(r)        frees the handle
+
+The byte<->str convention is unchanged (one codepoint 0-255 per byte),
+so writer output is byte-identical to the equivalent pack_* concat and
+the reader accepts buffers built either way.  Overrun and stale-handle
+misuse raise ValueError.
+"""
+
+import struct
+
+fn main() -> i32:
+    # 1. Build a 3-field record (u32 + f64 + u64) with the writer.
+    ident: i64 = 0x01020304
+    score: f64 = 3.141592653589793
+    stamp: i64 = 9223372036854775807
+
+    w: i64 = struct.writer()
+    struct.w_u32_be(w, ident)
+    struct.w_f64_be(w, score)
+    struct.w_u64_be(w, stamp)
+    record: str = struct.finish(w)
+    println("record len: " + str(len(record)))
+
+    # 2. Byte-identical to the old per-field API.
+    old: str = struct.pack_u32_be(ident) + struct.pack_f64_be(score) + struct.pack_u64_be(stamp)
+    if record == old:
+        println("matches pack_* concat: ok")
+    else:
+        println("matches pack_* concat: FAIL")
+
+    # 3. Sequential reads recover every field — no offsets to thread.
+    r: i64 = struct.reader(record)
+    got_id: i64 = struct.r_u32_be(r)
+    got_score: f64 = struct.r_f64_be(r)
+    got_stamp: i64 = struct.r_u64_be(r)
+    struct.reader_done(r)
+    println("id: " + str(got_id))
+    if got_score == score:
+        println("score round-trip: ok")
+    else:
+        println("score round-trip: FAIL")
+    println("stamp: " + str(got_stamp))
+
+    # 4. Little-endian mirrors work the same way.
+    w2: i64 = struct.writer()
+    struct.w_u32_le(w2, ident)
+    struct.w_u64_le(w2, stamp)
+    struct.w_f64_le(w2, score)
+    r2: i64 = struct.reader(struct.finish(w2))
+    println("le u32: " + str(struct.r_u32_le(r2)))
+    println("le u64: " + str(struct.r_u64_le(r2)))
+    le_f: f64 = struct.r_f64_le(r2)
+    if le_f == score:
+        println("le f64: ok")
+    struct.reader_done(r2)
+
+    # 5. Handles are independent — interleave two writers.
+    wa: i64 = struct.writer()
+    wb: i64 = struct.writer()
+    struct.w_u32_be(wa, 1)
+    struct.w_u32_be(wb, 2)
+    struct.w_u32_be(wa, 3)
+    struct.w_u32_be(wb, 4)
+    ra: i64 = struct.reader(struct.finish(wa))
+    rb: i64 = struct.reader(struct.finish(wb))
+    println("a: " + str(struct.r_u32_be(ra)) + "," + str(struct.r_u32_be(ra)))
+    println("b: " + str(struct.r_u32_be(rb)) + "," + str(struct.r_u32_be(rb)))
+    struct.reader_done(ra)
+    struct.reader_done(rb)
+
+    # 6. Reading past the end raises ValueError.
+    short: i64 = struct.reader(struct.pack_u32_be(7))
+    first: i64 = struct.r_u32_be(short)
+    println("first: " + str(first))
+    try:
+        over: i64 = struct.r_u32_be(short)
+        println("UNREACHED: " + str(over))
+    except ValueError as e:
+        println("caught overrun")
+    struct.reader_done(short)
+
+    # 7. A finished writer handle is dead — reuse raises ValueError.
+    try:
+        struct.w_u32_be(w, 99)
+        println("UNREACHED stale write")
+    except ValueError as e:
+        println("caught stale writer")
+
+    println("done")
+    return 0

@@ -1596,6 +1596,27 @@ impl Resolver {
         const STRUCT_UNPACK_U64_LE: u32 = 339;
         const STRUCT_UNPACK_F64_BE: u32 = 340;
         const STRUCT_UNPACK_F64_LE: u32 = 341;
+        // Batch writer/reader (handle-based fast path; see
+        // shared::NativeFn::StructWriterNew for the discriminant-layout
+        // note — lifecycle ids sit at 348-349 inside the struct module's
+        // original 330-349 block, the field-level w_*/r_* ids at 356-369
+        // after the subprocess block).
+        const STRUCT_WRITER: u32        = 348;
+        const STRUCT_FINISH: u32        = 349;
+        const STRUCT_W_U32_BE: u32      = 356;
+        const STRUCT_W_U32_LE: u32      = 357;
+        const STRUCT_W_U64_BE: u32      = 358;
+        const STRUCT_W_U64_LE: u32      = 359;
+        const STRUCT_W_F64_BE: u32      = 360;
+        const STRUCT_W_F64_LE: u32      = 361;
+        const STRUCT_READER: u32        = 362;
+        const STRUCT_R_U32_BE: u32      = 363;
+        const STRUCT_R_U32_LE: u32      = 364;
+        const STRUCT_R_U64_BE: u32      = 365;
+        const STRUCT_R_U64_LE: u32      = 366;
+        const STRUCT_R_F64_BE: u32      = 367;
+        const STRUCT_R_F64_LE: u32      = 368;
+        const STRUCT_READER_DONE: u32   = 369;
 
         let struct_mod = StdlibModule {
             name: "struct".into(),
@@ -1671,6 +1692,109 @@ impl Resolver {
                     kind: StdlibItemKind::Function,
                     ty: fn_ty(vec![str_ty.clone(), i32_ty.clone()], f64_ty.clone()),
                     native_id: STRUCT_UNPACK_F64_LE,
+                },
+                // ── Batch writer/reader ────────────────────────────────
+                // writer() -> handle; w_*(handle, v) append bytes with no
+                // per-field str allocation; finish(handle) -> str does one
+                // allocation for the whole record and frees the handle.
+                // reader(buf) -> handle; r_*(handle) read sequentially
+                // (internal offset, no per-call offsets); reader_done
+                // frees.  ValueError on overrun / stale handle.
+                StdlibItem {
+                    name: "writer".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], i64_ty.clone()),
+                    native_id: STRUCT_WRITER,
+                },
+                StdlibItem {
+                    name: "w_u32_be".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i64_ty.clone()], unit_ty.clone()),
+                    native_id: STRUCT_W_U32_BE,
+                },
+                StdlibItem {
+                    name: "w_u32_le".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i64_ty.clone()], unit_ty.clone()),
+                    native_id: STRUCT_W_U32_LE,
+                },
+                StdlibItem {
+                    name: "w_u64_be".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i64_ty.clone()], unit_ty.clone()),
+                    native_id: STRUCT_W_U64_BE,
+                },
+                StdlibItem {
+                    name: "w_u64_le".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i64_ty.clone()], unit_ty.clone()),
+                    native_id: STRUCT_W_U64_LE,
+                },
+                StdlibItem {
+                    name: "w_f64_be".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), f64_ty.clone()], unit_ty.clone()),
+                    native_id: STRUCT_W_F64_BE,
+                },
+                StdlibItem {
+                    name: "w_f64_le".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), f64_ty.clone()], unit_ty.clone()),
+                    native_id: STRUCT_W_F64_LE,
+                },
+                StdlibItem {
+                    name: "finish".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], str_ty.clone()),
+                    native_id: STRUCT_FINISH,
+                },
+                StdlibItem {
+                    name: "reader".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], i64_ty.clone()),
+                    native_id: STRUCT_READER,
+                },
+                StdlibItem {
+                    name: "r_u32_be".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i64_ty.clone()),
+                    native_id: STRUCT_R_U32_BE,
+                },
+                StdlibItem {
+                    name: "r_u32_le".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i64_ty.clone()),
+                    native_id: STRUCT_R_U32_LE,
+                },
+                StdlibItem {
+                    name: "r_u64_be".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i64_ty.clone()),
+                    native_id: STRUCT_R_U64_BE,
+                },
+                StdlibItem {
+                    name: "r_u64_le".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i64_ty.clone()),
+                    native_id: STRUCT_R_U64_LE,
+                },
+                StdlibItem {
+                    name: "r_f64_be".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], f64_ty.clone()),
+                    native_id: STRUCT_R_F64_BE,
+                },
+                StdlibItem {
+                    name: "r_f64_le".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], f64_ty.clone()),
+                    native_id: STRUCT_R_F64_LE,
+                },
+                StdlibItem {
+                    name: "reader_done".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], unit_ty.clone()),
+                    native_id: STRUCT_READER_DONE,
                 },
             ],
         };
