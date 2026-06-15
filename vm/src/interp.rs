@@ -120,6 +120,93 @@ pub struct DictSlot {
     pub data: crate::strdict::StrDict,
 }
 
+/// Side-table of dict (and set) backing stores, indexed by the `handle` field
+/// stored on each `DictRepr` heap object. Sets are sugar over dicts and share
+/// this table, so de-locking it speeds up both.
+///
+/// ## Why this isn't just `Mutex<Vec<…>>`
+///
+/// Every `d[k]`, `d[k] = v`, `k in d`, `s.add(x)`, … used to take a global
+/// mutex over the *entire* table — even in single-threaded programs, which is
+/// the overwhelming common case. `ds_dict_ops` paid that uncontended
+/// lock/unlock (two atomic RMWs) 750k times.
+///
+/// `DictTable` keeps a `mt` flag that starts `false`. While it's `false` the
+/// program is provably single-threaded — no worker interpreter has been
+/// spawned yet — so `with`/`with_mut` dereference the `UnsafeCell` with no
+/// lock at all (just one relaxed atomic *load*, which is a plain `mov` on
+/// x86). The first time a worker thread that shares this VM is spawned,
+/// [`DictTable::mark_multithreaded`] flips `mt` permanently and every
+/// subsequent access serializes on `lock`, restoring the original coarse
+/// global-mutex semantics for the (rare) cross-thread case.
+pub struct DictTable {
+    /// Set once, before the first worker thread is spawned. Monotonic: once
+    /// true it stays true (a relaxed load on the hot path is enough — the
+    /// thread spawn that sets it is itself a happens-before edge to the new
+    /// thread, and a thread always observes its own prior store).
+    mt: std::sync::atomic::AtomicBool,
+    /// Only ever locked when `mt` is true.
+    lock: Mutex<()>,
+    slots: std::cell::UnsafeCell<Vec<Option<DictSlot>>>,
+}
+
+// SAFETY: the `UnsafeCell` is accessed only (a) from a single thread while
+// `mt` is false — no other reference can exist because no other thread that
+// observes this VM exists yet — or (b) under `lock` while `mt` is true.
+// `mark_multithreaded` flips `mt` before any worker is spawned, so a worker
+// never observes `mt == false`.
+unsafe impl Send for DictTable {}
+unsafe impl Sync for DictTable {}
+
+impl DictTable {
+    pub fn new() -> Self {
+        Self {
+            mt: std::sync::atomic::AtomicBool::new(false),
+            lock: Mutex::new(()),
+            // Index 0 is reserved: a `handle` of 0 means "invalid dict",
+            // matching the previous `Mutex::new(vec![None])` table.
+            slots: std::cell::UnsafeCell::new(vec![None]),
+        }
+    }
+
+    /// Permanently switch to locked access. Called once, before the first
+    /// worker thread that shares this VM is spawned.
+    #[inline]
+    pub fn mark_multithreaded(&self) {
+        self.mt.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Run `f` against the slot vector with shared access. Lock-free unless a
+    /// worker thread has been spawned.
+    #[inline]
+    pub fn with<R>(&self, f: impl FnOnce(&[Option<DictSlot>]) -> R) -> R {
+        let _guard = self
+            .mt
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .then(|| self.lock.lock().unwrap());
+        // SAFETY: single-threaded (no other accessor exists) or guarded by
+        // `lock` — see the type-level note.
+        f(unsafe { &*self.slots.get() })
+    }
+
+    /// Run `f` against the slot vector with exclusive access.
+    #[inline]
+    pub fn with_mut<R>(&self, f: impl FnOnce(&mut Vec<Option<DictSlot>>) -> R) -> R {
+        let _guard = self
+            .mt
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .then(|| self.lock.lock().unwrap());
+        // SAFETY: see `with`.
+        f(unsafe { &mut *self.slots.get() })
+    }
+}
+
+impl Default for DictTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// M23 P3a-C: one slot in the VM's lock table.
 ///
 /// The owner thread id lives inside its own `Mutex` — the same mutex
@@ -308,7 +395,9 @@ pub struct SharedVm {
     pub files: Arc<Mutex<Vec<Option<FileSlot>>>>,
     pub channels: Arc<Mutex<Vec<Option<ChannelSlot>>>>,
     pub threads: Arc<Mutex<Vec<Option<ThreadSlot>>>>,
-    pub dicts: Arc<Mutex<Vec<Option<DictSlot>>>>,
+    /// Dict (and set) backing stores. Lock-free in single-threaded programs;
+    /// see [`DictTable`].
+    pub dicts: Arc<DictTable>,
     /// M23 P3a-C: `threading.Lock` slots. Index 0 is reserved (handle 0
     /// would collide with "no lock"). Outer mutex guards the table; the
     /// inner state is per-slot.
@@ -500,7 +589,7 @@ impl SharedVm {
             files: Arc::new(Mutex::new(vec![None])),
             channels: Arc::new(Mutex::new(vec![None])),
             threads: Arc::new(Mutex::new(vec![None])),
-            dicts: Arc::new(Mutex::new(vec![None])),
+            dicts: Arc::new(DictTable::new()),
             locks: Arc::new(Mutex::new(vec![None])),
             semaphores: Arc::new(Mutex::new(vec![None])),
             priority_queues: Arc::new(Mutex::new(vec![None])),
@@ -585,7 +674,7 @@ impl SharedVm {
             files: Arc::new(Mutex::new(vec![None])),
             channels: Arc::new(Mutex::new(vec![None])),
             threads: Arc::new(Mutex::new(vec![None])),
-            dicts: Arc::new(Mutex::new(vec![None])),
+            dicts: Arc::new(DictTable::new()),
             locks: Arc::new(Mutex::new(vec![None])),
             semaphores: Arc::new(Mutex::new(vec![None])),
             priority_queues: Arc::new(Mutex::new(vec![None])),
@@ -2899,14 +2988,13 @@ impl Interpreter {
 
     /// Allocate a `DictRepr` backed by an empty side-table HashMap.
     pub(crate) fn alloc_dict(&mut self, key_kind: u32) -> *mut DictRepr {
-        let handle = {
-            let mut dicts = self.shared.dicts.lock().unwrap();
+        let handle = self.shared.dicts.with_mut(|dicts| {
             let h = dicts.len() as u64;
             dicts.push(Some(DictSlot {
                 data: crate::strdict::StrDict::new(),
             }));
             h
-        };
+        });
         let size = std::mem::size_of::<DictRepr>();
         let ty: *const RuntimeType = Arc::as_ptr(&self.shared.types.dict_ty);
         let p = self.shared.heap.lock().unwrap().alloc(size, ty, GcKind::Dict);
@@ -3030,15 +3118,17 @@ impl Interpreter {
         // interpreter). For producer.spy this is fine because the
         // workers' working sets are tiny i32s and channel-pointer
         // captures which are also held in main's registers.
-        let dict_roots: Vec<Vec<u64>> = self
-            .shared
-            .dicts
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|s| s.as_ref())
-            .map(|slot| slot.data.values().copied().collect())
-            .collect();
+        // In a multi-threaded program `with` takes the dict lock here; since
+        // we already hold the heap lock this matches the existing lock order
+        // (heap → dict), and worker dict ops only ever take the dict lock, so
+        // there's no cycle. Single-threaded programs take no lock.
+        let dict_roots: Vec<Vec<u64>> = self.shared.dicts.with(|dicts| {
+            dicts
+                .iter()
+                .filter_map(|s| s.as_ref())
+                .map(|slot| slot.data.values().copied().collect())
+                .collect()
+        });
         for v in &dict_roots {
             roots.push(v.as_slice());
         }

@@ -9440,36 +9440,40 @@ fn with_dict_slot<F, R>(interp: &Interpreter, handle: usize, f: F) -> Result<R, 
 where
     F: FnOnce(&crate::interp::DictSlot) -> R,
 {
-    let dicts = interp.shared.dicts.lock().unwrap();
-    if handle == 0 || handle >= dicts.len() {
-        return Err(VmError::UncaughtException {
+    // Lock-free in single-threaded programs — see `crate::interp::DictTable`.
+    interp.shared.dicts.with(|dicts| {
+        if handle == 0 || handle >= dicts.len() {
+            return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: "dict handle is invalid".into(),
+            });
+        }
+        let slot = dicts[handle].as_ref().ok_or_else(|| VmError::UncaughtException {
             type_name: "ValueError".into(),
-            message: "dict handle is invalid".into(),
-        });
-    }
-    let slot = dicts[handle].as_ref().ok_or_else(|| VmError::UncaughtException {
-        type_name: "ValueError".into(),
-        message: "dict handle has been released".into(),
-    })?;
-    Ok(f(slot))
+            message: "dict handle has been released".into(),
+        })?;
+        Ok(f(slot))
+    })
 }
 
 fn with_dict_slot_mut<F, R>(interp: &Interpreter, handle: usize, f: F) -> Result<R, VmError>
 where
     F: FnOnce(&mut crate::interp::DictSlot) -> R,
 {
-    let mut dicts = interp.shared.dicts.lock().unwrap();
-    if handle == 0 || handle >= dicts.len() {
-        return Err(VmError::UncaughtException {
+    // Lock-free in single-threaded programs — see `crate::interp::DictTable`.
+    interp.shared.dicts.with_mut(|dicts| {
+        if handle == 0 || handle >= dicts.len() {
+            return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: "dict handle is invalid".into(),
+            });
+        }
+        let slot = dicts[handle].as_mut().ok_or_else(|| VmError::UncaughtException {
             type_name: "ValueError".into(),
-            message: "dict handle is invalid".into(),
-        });
-    }
-    let slot = dicts[handle].as_mut().ok_or_else(|| VmError::UncaughtException {
-        type_name: "ValueError".into(),
-        message: "dict handle has been released".into(),
-    })?;
-    Ok(f(slot))
+            message: "dict handle has been released".into(),
+        })?;
+        Ok(f(slot))
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -9576,6 +9580,10 @@ fn start_thread(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> 
     };
     let target = extract_closure_target(closure_ptr)?;
 
+    // From now on a second thread may touch the shared dict/set table, so it
+    // must serialize. Set before the spawn so the happens-before edge carries
+    // the flag to the worker. See `crate::interp::DictTable`.
+    interp.shared.dicts.mark_multithreaded();
     let shared = std::sync::Arc::clone(&interp.shared);
     let jh = std::thread::Builder::new()
         .name(format!("strictpy-worker-{handle}"))
@@ -10978,6 +10986,9 @@ fn m32_spawn_future_thread(
     kind: crate::FutureValueKind,
 ) -> Result<(), VmError> {
     let m32_async_target = extract_closure_target(closure_ptr)?;
+    // A worker interpreter will run user code that may touch the shared
+    // dict/set table; switch it to locked access. See `crate::interp::DictTable`.
+    interp.shared.dicts.mark_multithreaded();
     let m32_async_shared = std::sync::Arc::clone(&interp.shared);
     std::thread::Builder::new()
         .name("strictpy-asyncio".into())
@@ -11168,6 +11179,8 @@ fn m32_socket_async_accept(
         m32_async_listener.clone()
     };
     let (m32_async_handle, m32_async_future_slot) = m32_alloc_future_slot(interp);
+    // Worker interpreter shares the dict/set table — switch to locked access.
+    interp.shared.dicts.mark_multithreaded();
     let m32_async_shared = std::sync::Arc::clone(&interp.shared);
     std::thread::Builder::new()
         .name("strictpy-asyncio-accept".into())
@@ -11232,6 +11245,8 @@ fn m32_socket_async_recv(
     let m32_async_stream_arc =
         arc_tcp_stream(interp, m32_async_handle, "socket.async_recv")?;
     let (m32_async_future_handle, m32_async_future_slot) = m32_alloc_future_slot(interp);
+    // Worker interpreter shares the dict/set table — switch to locked access.
+    interp.shared.dicts.mark_multithreaded();
     let m32_async_shared = std::sync::Arc::clone(&interp.shared);
     let m32_async_max_usize = m32_async_max as usize;
     std::thread::Builder::new()
@@ -26220,11 +26235,10 @@ mod tests {
         let dp = alloc_dict_for_test(&mut i);
         let dr = dp as *const DictRepr;
         let h = unsafe { (*dr).handle };
-        let len = i.shared.dicts.lock().unwrap()[h as usize]
-            .as_ref()
-            .unwrap()
-            .data
-            .len();
+        let len = i
+            .shared
+            .dicts
+            .with(|dicts| dicts[h as usize].as_ref().unwrap().data.len());
         assert_eq!(len, 0);
     }
 
