@@ -40,6 +40,17 @@ use clap::Parser;
 
 use strictpy_vm::{run_bytes_with_args, run_file_with_args, VmError};
 
+// The `spy` runtime is allocation-heavy: every `str(int)`, string concat,
+// list/dict entry, and closure is a separate small heap object, and JIT'd
+// programs allocate without ever triggering the (interpreter-driven) GC, so
+// freelist quality dominates. The platform default allocator (notably the
+// Windows process heap) is slow under that churn; mimalloc is markedly
+// faster for many small short-lived allocations and works on MSVC (unlike
+// jemalloc). Scoped to the `spy` binary only — the library and its test
+// harness keep the system allocator.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "spy",

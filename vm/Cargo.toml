@@ -24,6 +24,10 @@ jit = ["dep:cranelift", "dep:cranelift-jit", "dep:cranelift-module", "dep:cranel
 
 [dependencies]
 strictpy-shared.workspace = true
+# Faster allocator for the `spy` binary's small-object churn (str/list/dict
+# allocations; JIT'd code never GCs). mimalloc works on MSVC where jemalloc
+# does not. Only wired in by main.rs's #[global_allocator].
+mimalloc = "0.1"
 # M25: the `spy` binary now also compiles `.spy` sources (with
 # __spycache__ caching) and inline `-c "code"` snippets, so the
 # compiler crate is a regular dependency rather than just a
