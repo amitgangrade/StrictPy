@@ -44,15 +44,17 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
 
         // ── str(x) conversions ──────────────────────────────────────────
         NativeFn::StrFromI32 => {
-            let v = arg_i64(args, 0) as i32;
-            let s = format!("{v}");
-            let p = interp.alloc_string(&s);
+            let v = arg_i64(args, 0) as i32 as i64;
+            let mut buf = [0u8; I64_DEC_MAX];
+            // SAFETY: `i64_to_ascii` writes only ASCII digits/sign.
+            let p = unsafe { interp.alloc_string_ascii(i64_to_ascii(v, &mut buf)) };
             Ok(p as u64)
         }
         NativeFn::StrFromI64 => {
             let v = arg_i64(args, 0);
-            let s = format!("{v}");
-            let p = interp.alloc_string(&s);
+            let mut buf = [0u8; I64_DEC_MAX];
+            // SAFETY: `i64_to_ascii` writes only ASCII digits/sign.
+            let p = unsafe { interp.alloc_string_ascii(i64_to_ascii(v, &mut buf)) };
             Ok(p as u64)
         }
         NativeFn::StrFromF64 => {
@@ -63,8 +65,9 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         }
         NativeFn::StrFromBool => {
             let v = arg_u64(args, 0) != 0;
-            let s = if v { "true" } else { "false" }.to_string();
-            let p = interp.alloc_string(&s);
+            let s: &[u8] = if v { b"true" } else { b"false" };
+            // SAFETY: literal ASCII.
+            let p = unsafe { interp.alloc_string_ascii(s) };
             Ok(p as u64)
         }
         NativeFn::StrFromChar => {
@@ -98,9 +101,13 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
 
         // ── str manipulation ────────────────────────────────────────────
         NativeFn::StrConcat => {
-            let a = arg_str(args, 0);
-            let b = arg_str(args, 1);
-            let p = interp.alloc_string(&format!("{a}{b}"));
+            // Direct two-buffer concat: one allocation, no intermediate
+            // Rust strings (the old `format!(read_str, read_str)` path made
+            // four allocations per `a + b`). See `alloc_str_concat2`.
+            let a = arg_u64(args, 0) as *const StringRepr;
+            let b = arg_u64(args, 1) as *const StringRepr;
+            // SAFETY: both args are register-rooted string pointers or null.
+            let p = unsafe { interp.alloc_str_concat2(a, b) };
             Ok(p as u64)
         }
         // Lexicographic string comparison backing the `<` / `<=` / `>` /
@@ -9440,36 +9447,40 @@ fn with_dict_slot<F, R>(interp: &Interpreter, handle: usize, f: F) -> Result<R, 
 where
     F: FnOnce(&crate::interp::DictSlot) -> R,
 {
-    let dicts = interp.shared.dicts.lock().unwrap();
-    if handle == 0 || handle >= dicts.len() {
-        return Err(VmError::UncaughtException {
+    // Lock-free in single-threaded programs — see `crate::interp::DictTable`.
+    interp.shared.dicts.with(|dicts| {
+        if handle == 0 || handle >= dicts.len() {
+            return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: "dict handle is invalid".into(),
+            });
+        }
+        let slot = dicts[handle].as_ref().ok_or_else(|| VmError::UncaughtException {
             type_name: "ValueError".into(),
-            message: "dict handle is invalid".into(),
-        });
-    }
-    let slot = dicts[handle].as_ref().ok_or_else(|| VmError::UncaughtException {
-        type_name: "ValueError".into(),
-        message: "dict handle has been released".into(),
-    })?;
-    Ok(f(slot))
+            message: "dict handle has been released".into(),
+        })?;
+        Ok(f(slot))
+    })
 }
 
 fn with_dict_slot_mut<F, R>(interp: &Interpreter, handle: usize, f: F) -> Result<R, VmError>
 where
     F: FnOnce(&mut crate::interp::DictSlot) -> R,
 {
-    let mut dicts = interp.shared.dicts.lock().unwrap();
-    if handle == 0 || handle >= dicts.len() {
-        return Err(VmError::UncaughtException {
+    // Lock-free in single-threaded programs — see `crate::interp::DictTable`.
+    interp.shared.dicts.with_mut(|dicts| {
+        if handle == 0 || handle >= dicts.len() {
+            return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: "dict handle is invalid".into(),
+            });
+        }
+        let slot = dicts[handle].as_mut().ok_or_else(|| VmError::UncaughtException {
             type_name: "ValueError".into(),
-            message: "dict handle is invalid".into(),
-        });
-    }
-    let slot = dicts[handle].as_mut().ok_or_else(|| VmError::UncaughtException {
-        type_name: "ValueError".into(),
-        message: "dict handle has been released".into(),
-    })?;
-    Ok(f(slot))
+            message: "dict handle has been released".into(),
+        })?;
+        Ok(f(slot))
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -9576,6 +9587,10 @@ fn start_thread(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> 
     };
     let target = extract_closure_target(closure_ptr)?;
 
+    // From now on a second thread may touch the shared dict/set table, so it
+    // must serialize. Set before the spawn so the happens-before edge carries
+    // the flag to the worker. See `crate::interp::DictTable`.
+    interp.shared.dicts.mark_multithreaded();
     let shared = std::sync::Arc::clone(&interp.shared);
     let jh = std::thread::Builder::new()
         .name(format!("strictpy-worker-{handle}"))
@@ -9932,6 +9947,34 @@ fn arg_str(args: &[u64], i: usize) -> String {
     // SAFETY: any pointer here came from our heap (or null). `read_str`
     // tolerates both.
     unsafe { read_str(p) }
+}
+
+/// Max bytes needed to format any `i64` in decimal: 19 digits for the
+/// magnitude plus a possible `-` (`i64::MIN` = "-9223372036854775808").
+const I64_DEC_MAX: usize = 20;
+
+/// Format `v` in decimal into `buf`, returning the written ASCII slice.
+/// No heap allocation — the digit/sign bytes are emitted from the
+/// least-significant end of the buffer. Replaces `format!("{v}")` +
+/// `alloc_string` (two allocations + two O(n) scans) on the hot `str(int)`
+/// path.
+fn i64_to_ascii(v: i64, buf: &mut [u8; I64_DEC_MAX]) -> &[u8] {
+    let mut i = I64_DEC_MAX;
+    // `unsigned_abs` is correct for `i64::MIN` (whose negation overflows).
+    let mut u = v.unsigned_abs();
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (u % 10) as u8;
+        u /= 10;
+        if u == 0 {
+            break;
+        }
+    }
+    if v < 0 {
+        i -= 1;
+        buf[i] = b'-';
+    }
+    &buf[i..]
 }
 
 /// M23 P3a-A: read a `List[str]` argument into a `Vec<String>`.  Each
@@ -10978,6 +11021,9 @@ fn m32_spawn_future_thread(
     kind: crate::FutureValueKind,
 ) -> Result<(), VmError> {
     let m32_async_target = extract_closure_target(closure_ptr)?;
+    // A worker interpreter will run user code that may touch the shared
+    // dict/set table; switch it to locked access. See `crate::interp::DictTable`.
+    interp.shared.dicts.mark_multithreaded();
     let m32_async_shared = std::sync::Arc::clone(&interp.shared);
     std::thread::Builder::new()
         .name("strictpy-asyncio".into())
@@ -11168,6 +11214,8 @@ fn m32_socket_async_accept(
         m32_async_listener.clone()
     };
     let (m32_async_handle, m32_async_future_slot) = m32_alloc_future_slot(interp);
+    // Worker interpreter shares the dict/set table — switch to locked access.
+    interp.shared.dicts.mark_multithreaded();
     let m32_async_shared = std::sync::Arc::clone(&interp.shared);
     std::thread::Builder::new()
         .name("strictpy-asyncio-accept".into())
@@ -11232,6 +11280,8 @@ fn m32_socket_async_recv(
     let m32_async_stream_arc =
         arc_tcp_stream(interp, m32_async_handle, "socket.async_recv")?;
     let (m32_async_future_handle, m32_async_future_slot) = m32_alloc_future_slot(interp);
+    // Worker interpreter shares the dict/set table — switch to locked access.
+    interp.shared.dicts.mark_multithreaded();
     let m32_async_shared = std::sync::Arc::clone(&interp.shared);
     let m32_async_max_usize = m32_async_max as usize;
     std::thread::Builder::new()
@@ -26220,11 +26270,10 @@ mod tests {
         let dp = alloc_dict_for_test(&mut i);
         let dr = dp as *const DictRepr;
         let h = unsafe { (*dr).handle };
-        let len = i.shared.dicts.lock().unwrap()[h as usize]
-            .as_ref()
-            .unwrap()
-            .data
-            .len();
+        let len = i
+            .shared
+            .dicts
+            .with(|dicts| dicts[h as usize].as_ref().unwrap().data.len());
         assert_eq!(len, 0);
     }
 
