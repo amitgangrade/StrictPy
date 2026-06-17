@@ -1439,6 +1439,10 @@ fn float_cc(op: FloatCmp) -> FloatCC {
 pub unsafe extern "C" fn strictpy_alloc_str_const(vm: *mut VmCtx, str_idx: u32) -> u64 {
     // SAFETY: caller contract.
     let interp = unsafe { &mut *(vm as *mut crate::interp::Interpreter) };
+    // GC safepoint before minting a fresh heap string. A JIT'd loop that
+    // materialises a `ConstStr` each iteration would otherwise leak every
+    // copy; the caller's roots are published in the shadow window.
+    interp.jit_safepoint();
     let s = match interp.shared.module.constants.get(str_idx as usize) {
         Some(crate::loader::Constant::String(sidx)) => interp
             .shared
@@ -1478,6 +1482,13 @@ pub unsafe extern "C" fn strictpy_native_trampoline(
     // we're inside this call because we're being driven from within its
     // own dispatch loop.
     let interp = unsafe { &mut *(vm as *mut crate::interp::Interpreter) };
+    // GC safepoint before re-entering the interpreter's builtins, which run
+    // arbitrary allocating code (`str(...)`, string ops, dict ops, …). This
+    // is the path the reported `str()`-in-a-JIT-loop repro takes: the
+    // temporaries are minted inside `dispatch`, so without a collect here a
+    // fully-JIT'd loop grows the heap without bound. The caller's register
+    // window is published in the shadow stack, so collecting is safe.
+    interp.jit_safepoint();
     let slice: &[u64] = if args.is_null() || n_args == 0 {
         &[]
     } else {
