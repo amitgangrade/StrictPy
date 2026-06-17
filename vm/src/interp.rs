@@ -392,6 +392,13 @@ pub struct SharedVm {
     pub module: Arc<Module>,
     pub types: Arc<TypeBundle>,
     pub heap: Arc<Mutex<Heap>>,
+    /// Lock-free mirror of the heap's "a collection is due" flag (a clone of
+    /// `Heap::gc_due`). The JIT allocation helpers probe this with a single
+    /// relaxed load to decide whether to take a GC safepoint, so the common
+    /// no-collection path avoids a heap-mutex round-trip on every allocation.
+    /// The authoritative decision still happens under the lock in
+    /// [`Interpreter::maybe_collect`].
+    pub gc_due: Arc<std::sync::atomic::AtomicBool>,
     pub files: Arc<Mutex<Vec<Option<FileSlot>>>>,
     pub channels: Arc<Mutex<Vec<Option<ChannelSlot>>>>,
     pub threads: Arc<Mutex<Vec<Option<ThreadSlot>>>>,
@@ -580,10 +587,13 @@ impl SharedVm {
             dict_ty,
             generator_ty,
         };
+        let heap = Heap::new();
+        let gc_due = heap.gc_due_handle();
         Arc::new(Self {
             module: Arc::new(module),
             types: Arc::new(bundle),
-            heap: Arc::new(Mutex::new(Heap::new())),
+            heap: Arc::new(Mutex::new(heap)),
+            gc_due,
             // Slot 0 is reserved so any field that reads "handle == 0" can
             // be treated as "no resource attached".
             files: Arc::new(Mutex::new(vec![None])),
@@ -667,10 +677,13 @@ impl SharedVm {
         let mut jit = crate::jit::Jit::new(crate::jit::native_trampoline);
         let (_compiled, _total) = jit.compile_module(&module);
         let jit_cell = Arc::new(crate::jit::JitCell::new(jit));
+        let heap = Heap::new();
+        let gc_due = heap.gc_due_handle();
         Arc::new(Self {
             module: Arc::new(module),
             types: Arc::new(bundle),
-            heap: Arc::new(Mutex::new(Heap::new())),
+            heap: Arc::new(Mutex::new(heap)),
+            gc_due,
             files: Arc::new(Mutex::new(vec![None])),
             channels: Arc::new(Mutex::new(vec![None])),
             threads: Arc::new(Mutex::new(vec![None])),
@@ -3136,6 +3149,34 @@ impl Interpreter {
             // either be a non-matching pointer or segfault before us.
             // Compare with our singleton str_ty pointer.
             std::ptr::read_unaligned(hdr as *const usize) == our_str_ty as usize
+        }
+    }
+
+    /// GC safepoint taken by the JIT runtime allocation helpers, *before*
+    /// they allocate. At every call site the JIT has already published the
+    /// calling frame's register window via `rt_shadow_push` (the
+    /// `m33_safepoint_enter` bracket around each heap-allocating helper
+    /// call), so the conservative root scan in [`Self::maybe_collect`] is
+    /// precise enough to collect safely mid-JIT.
+    ///
+    /// Without this, a fully-JIT'd allocation loop never reaches a
+    /// collection point — the interpreter dispatch loop (the only other
+    /// `maybe_collect` caller, via `Opcode::GcSafepoint`) isn't running —
+    /// so the heap grows without bound. We gate on the lock-free `gc_due`
+    /// hint so the steady-state (nothing to collect) cost is a single
+    /// relaxed load rather than a heap-mutex acquisition per allocation;
+    /// `maybe_collect` re-checks `should_collect()` under the lock, so a
+    /// stale-true `gc_due` simply costs one no-op lock and a stale-false one
+    /// is corrected by the next allocation that crosses the threshold.
+    ///
+    /// Re-entrancy: collection only ever happens here, at a helper's entry,
+    /// where no dict-table borrow is held (dict ops never run JIT'd code
+    /// while holding a `with_dict_slot_mut` borrow) — so `maybe_collect`'s
+    /// shared dict-value scan can't alias a live exclusive borrow.
+    #[cfg(feature = "jit")]
+    pub(crate) fn jit_safepoint(&mut self) {
+        if self.shared.gc_due.load(std::sync::atomic::Ordering::Relaxed) {
+            self.maybe_collect();
         }
     }
 

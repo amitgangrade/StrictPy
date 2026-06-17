@@ -50,6 +50,10 @@ pub unsafe extern "C" fn rt_list_push(
 ) {
     // SAFETY: caller contract above.
     let interp = unsafe { &mut *(vm as *mut Interpreter) };
+    // GC safepoint: `list` and `value` are live in the caller's published
+    // shadow window, so a collection here is safe. Collect before growing
+    // the backing buffer so a long append loop stays heap-bounded.
+    interp.jit_safepoint();
     if list.is_null() {
         // Match the interpreter's behaviour: a null-list push is an
         // error, but JIT'd code can't propagate exceptions yet, so
@@ -76,6 +80,9 @@ pub unsafe extern "C" fn rt_list_new(
 ) -> *mut ListRepr {
     // SAFETY: caller contract above.
     let interp = unsafe { &mut *(vm as *mut Interpreter) };
+    // GC safepoint before allocating the fresh list (caller's roots are
+    // published in the shadow window).
+    interp.jit_safepoint();
     interp.alloc_list(capacity as usize)
 }
 
@@ -93,6 +100,9 @@ pub unsafe extern "C" fn rt_array_new(
 ) -> *mut ListRepr {
     // SAFETY: caller contract above.
     let interp = unsafe { &mut *(vm as *mut Interpreter) };
+    // GC safepoint before allocating (caller's roots are in the shadow
+    // window).
+    interp.jit_safepoint();
     let len = length as usize;
     let p = interp.alloc_list(len);
     // SAFETY: `p` was just allocated as a valid ListRepr.
@@ -117,6 +127,11 @@ pub unsafe extern "C" fn rt_array_new(
 pub unsafe extern "C" fn rt_alloc(vm: *mut VmCtx, type_or_class_id: u32) -> *mut u8 {
     // SAFETY: caller contract above.
     let interp = unsafe { &mut *(vm as *mut Interpreter) };
+    // GC safepoint: `rt_alloc` is the prototypical "may collect" call — the
+    // tight recursive/loop allocators (M26 btree(10k) shape) hammer it. The
+    // caller's register window is already published in the shadow stack, so
+    // collecting here keeps a fully-JIT'd allocation loop heap-bounded.
+    interp.jit_safepoint();
     let ty: Arc<RuntimeType> = match interp.shared.types.types.get(&type_or_class_id) {
         Some(t) => t.clone(),
         None => {
@@ -162,6 +177,10 @@ pub unsafe extern "C" fn rt_virtual_call(
 ) -> u64 {
     // SAFETY: caller contract above.
     let interp = unsafe { &mut *(vm as *mut Interpreter) };
+    // GC safepoint before dispatching into the (possibly allocation-heavy)
+    // callee. Args, including the receiver, are published in the caller's
+    // shadow window.
+    interp.jit_safepoint();
     let slice: &[u64] = if args.is_null() || n_args == 0 {
         &[]
     } else {

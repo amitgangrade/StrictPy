@@ -27,10 +27,29 @@
 
 use std::alloc::{alloc as sys_alloc, dealloc, Layout};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::object::{
     is_marked, set_marked, GcKind, ListRepr, ObjectHeader, RuntimeType, StringRepr,
 };
+
+thread_local! {
+    /// Count of mark-sweep collections that have run on the current thread.
+    /// Diagnostic/test hook: lets the GC tests assert that a collection
+    /// actually *fired* during a workload (the heap-bounded property),
+    /// rather than only that the program produced the right answer. A
+    /// thread-local (not a global) keeps parallel `cargo test` threads from
+    /// racing on the counter — a single-threaded program's collections all
+    /// run on the thread that drives `run_main`.
+    static GC_COLLECTIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Number of collections that have run on the calling thread since process
+/// start. See [`GC_COLLECTIONS`].
+pub fn collections_this_thread() -> u64 {
+    GC_COLLECTIONS.with(|c| c.get())
+}
 
 /// Live-allocation bookkeeping entry.
 #[derive(Debug)]
@@ -53,6 +72,15 @@ pub struct Heap {
     gc_threshold: usize,
     /// Total live bytes (approximate; recomputed each sweep).
     live_bytes: usize,
+    /// Lock-free "a collection is due" flag, shared (via `Arc`) with
+    /// `SharedVm.gc_due`. Set whenever an allocation pushes `bytes_since_gc`
+    /// past `gc_threshold`; cleared by [`Heap::collect`]. The JIT allocation
+    /// helpers probe the `SharedVm` clone with a single relaxed load to
+    /// decide whether to take a GC safepoint, so the common (no-collection)
+    /// path never pays an extra heap-mutex round-trip. It is only a hint:
+    /// `Interpreter::maybe_collect` re-checks [`Heap::should_collect`] under
+    /// the lock before actually collecting, so a stale value is harmless.
+    gc_due: Arc<AtomicBool>,
 }
 
 // SAFETY: `Heap` stores raw `*mut u8` pointers obtained from the system
@@ -73,7 +101,15 @@ impl Heap {
             bytes_since_gc: 0,
             gc_threshold: 4 * 1024 * 1024,
             live_bytes: 0,
+            gc_due: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Clone of the lock-free "collection due" flag, for `SharedVm` to stash
+    /// alongside the `Arc<Mutex<Heap>>` so allocation helpers can probe it
+    /// without taking the heap lock. See the field docs on `gc_due`.
+    pub fn gc_due_handle(&self) -> Arc<AtomicBool> {
+        self.gc_due.clone()
     }
 
     /// Allocate `size` bytes, install `vtable` into the header, and return
@@ -107,6 +143,7 @@ impl Heap {
         });
         self.bytes_since_gc += size;
         self.live_bytes += size;
+        self.signal_if_due();
         ptr
     }
 
@@ -126,7 +163,18 @@ impl Heap {
         unsafe { std::ptr::write_bytes(ptr, 0, size) };
         self.raw_buffers.push((ptr, layout));
         self.bytes_since_gc += size;
+        self.signal_if_due();
         ptr
+    }
+
+    /// Flip the lock-free `gc_due` flag on once this allocation crossed the
+    /// threshold. Cheap (a relaxed store under the heap lock we already
+    /// hold); the JIT helpers act on it at their next safepoint.
+    #[inline]
+    fn signal_if_due(&self) {
+        if self.bytes_since_gc >= self.gc_threshold {
+            self.gc_due.store(true, Ordering::Relaxed);
+        }
     }
 
     /// Replace one raw buffer with a fresh one of the new size, copying
@@ -212,10 +260,15 @@ impl Heap {
         self.objects = survived;
         self.live_bytes = self.live_bytes.saturating_sub(freed_bytes);
         self.bytes_since_gc = 0;
+        // Threshold reset below, so we're no longer "due" — clear the
+        // lock-free hint that the JIT safepoints poll.
+        self.gc_due.store(false, Ordering::Relaxed);
 
         // Adaptive: schedule next GC after live_bytes doubles.
         let target = (self.live_bytes.saturating_mul(2)).max(1024 * 1024);
         self.gc_threshold = target;
+
+        GC_COLLECTIONS.with(|c| c.set(c.get().wrapping_add(1)));
     }
 
     /// Trace the reachable graph from one already-marked object.

@@ -199,3 +199,67 @@ fn shadow_helpers_balance() {
     }
     assert_eq!(depth(), 0);
 }
+
+// ── (5) GC actually fires during a fully-JIT'd allocation loop ──────────
+
+/// The headline property this change adds: a fully-JIT'd loop that
+/// allocates far more than the GC threshold but retains almost nothing must
+/// actually *collect* mid-flight, keeping the heap bounded.
+///
+/// Before the JIT allocation helpers took a safepoint, `maybe_collect` was
+/// unreachable from JIT'd code — the interpreter dispatch loop (its only
+/// other caller, via `Opcode::GcSafepoint`) isn't running while a JIT'd
+/// function executes — so this loop ran to completion with **zero**
+/// collections and the heap grew without bound. Now each heap-allocating
+/// runtime helper polls the lock-free `gc_due` flag and runs a collection
+/// (with precise roots from the published shadow window) when one is due.
+///
+/// We assert the per-thread collection counter advanced across the run (the
+/// interpreter + JIT'd code execute synchronously on the test thread) AND
+/// that the program still produced the right answer — a torn or prematurely
+/// freed live pointer would crash or corrupt the result.
+#[cfg(feature = "jit")]
+#[test]
+fn gc_fires_during_jit_allocation_loop() {
+    use strictpy_vm::gc::collections_this_thread;
+
+    // ~1M allocations of a 24-byte object ≈ 24 MB churned, far past the
+    // 4 MB initial GC threshold — but the live set is a single object at a
+    // time (each `Box` is dead the moment the next iteration overwrites
+    // `b`). A correct collector keeps the heap at a few MB; a missing one
+    // grows it to the full 24 MB.
+    let src = "\
+final class Box:
+    v: i64
+    fn __init__(self, v: i64) -> None:
+        self.v = v
+
+fn churn(n: i64) -> i64:
+    last: i64 = 0i64
+    i: i64 = 0i64
+    while i < n:
+        b: Box = Box(i)
+        last = b.v
+        i = i + 1i64
+    return last
+
+fn main() -> i32:
+    r: i64 = churn(1000000i64)
+    println(str(r))
+    return 0
+";
+    let p = compile_snippet("gc_jit_loop", src);
+
+    let before = collections_this_thread();
+    let (code, out) = run_file_capture(&p).expect("run");
+    let after = collections_this_thread();
+
+    assert_eq!(code, 0, "exit code");
+    assert_eq!(out.trim(), "999999", "final value survived the churn");
+    assert!(
+        after > before,
+        "expected ≥1 collection during the JIT'd allocation loop, \
+         but the counter did not advance (before={before}, after={after}). \
+         GC is not firing from JIT'd code.",
+    );
+}
