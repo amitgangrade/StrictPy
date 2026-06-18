@@ -120,6 +120,16 @@ pub enum Op {
     /// object's vtable pointer. Args follow the receiver in `args`.
     VirtualCall { dst: u16, recv: u16, vtable_slot: u16, args: Vec<u16> },
 
+    // ── Closures (M14) ─────────────────────────────────────────────────
+    /// `dst = alloc_closure(fn_id, captures...)` — heap-allocate a
+    /// `ClosureRepr` (header + fn_id + capture_n + inline captures) and
+    /// store each capture register inline. Goes through `rt_closure_new`.
+    ClosureNew { dst: u16, fn_id: u32, captures: Vec<u16> },
+    /// `dst = recv(captures..., args...)` — read the `ClosureRepr` in
+    /// `recv`, prepend its inline captures to `args`, and dispatch to its
+    /// `fn_id`. Goes through `rt_closure_call`.
+    ClosureCall { dst: u16, recv: u16, args: Vec<u16> },
+
     // NullCheck — used both as null guard and as the placeholder for
     // BoundsCheck the compiler emits. Safe to lower as a "trap if zero".
     NullCheck { src: u16 },
@@ -485,6 +495,30 @@ pub fn decode_function(
                     args.push(read_u16(bytes, &mut pc, end)?);
                 }
                 Op::VirtualCall { dst, recv, vtable_slot, args }
+            }
+
+            // ─── Closures ──────────────────────────────────────────────
+            Opcode::ClosureNew => {
+                // CLOSURE_NEW dst:r16, fn_id:u32, n_cap:u8, caps:r16×n_cap
+                let dst = read_u16(bytes, &mut pc, end)?;
+                let fn_id = read_u32(bytes, &mut pc, end)?;
+                let n_cap = read_u8(bytes, &mut pc, end)? as usize;
+                let mut captures = Vec::with_capacity(n_cap);
+                for _ in 0..n_cap {
+                    captures.push(read_u16(bytes, &mut pc, end)?);
+                }
+                Op::ClosureNew { dst, fn_id, captures }
+            }
+            Opcode::ClosureCall => {
+                // CLOSURE_CALL dst:r16, recv:r16, argc:u8, args:r16×argc
+                let dst = read_u16(bytes, &mut pc, end)?;
+                let recv = read_u16(bytes, &mut pc, end)?;
+                let argc = read_u8(bytes, &mut pc, end)? as usize;
+                let mut args = Vec::with_capacity(argc);
+                for _ in 0..argc {
+                    args.push(read_u16(bytes, &mut pc, end)?);
+                }
+                Op::ClosureCall { dst, recv, args }
             }
 
             // ─── Misc ──────────────────────────────────────────────────

@@ -5,6 +5,7 @@
 //! 1. Constant folding & propagation                 — `opts::constant_fold`
 //! 2. Dead code elimination                          — `opts::dead_code`
 //! 3. Trivial copy propagation                       — `opts::copy_prop`
+//! 4. Tuple scalar replacement (P1)                  — `opts::tuple_scalar`
 //!
 //! Deferred to M6: inlining, devirtualization, escape analysis, CSE, LICM,
 //! bounds-check elimination, null-check elimination, register allocation,
@@ -20,6 +21,7 @@ pub fn run(mut ir: IRModule) -> IRModule {
     loop {
         let mut changed = false;
         changed |= opts::constant_fold::run(&mut ir);
+        changed |= opts::tuple_scalar::run(&mut ir);
         changed |= opts::copy_prop::run(&mut ir);
         changed |= opts::dead_code::run(&mut ir);
         if !changed {

@@ -211,3 +211,72 @@ pub unsafe extern "C" fn rt_virtual_call(
     // JIT'd entry and short-circuits to native code when present.
     interp.invoke(fn_id, slice).unwrap_or(0)
 }
+
+/// Allocate a `ClosureRepr` for `fn_id` whose inline captures are the
+/// `n_cap` raw 8-byte slots at `caps`. Mirrors the interpreter's
+/// `op_closure_new` / `Interpreter::alloc_closure`. The GC sees the capture
+/// pointers because `alloc_closure` writes them into the heap block (which
+/// the collector scans via the closure's `GcKind::Closure` tag), and the
+/// caller's register window — including the still-live capture registers —
+/// is published in the shadow stack before this call.
+///
+/// # Safety
+/// * `vm` is a valid `*mut Interpreter` for the duration of the call.
+/// * `caps` points to at least `n_cap` raw 8-byte slots (or is null when
+///   `n_cap == 0`).
+#[no_mangle]
+pub unsafe extern "C" fn rt_closure_new(
+    vm: *mut VmCtx,
+    fn_id: u32,
+    caps: *const u64,
+    n_cap: u32,
+) -> *mut u8 {
+    // SAFETY: caller contract above.
+    let interp = unsafe { &mut *(vm as *mut Interpreter) };
+    // GC safepoint before minting the closure; the caller's captures are
+    // published in the shadow window.
+    interp.jit_safepoint();
+    let slice: &[u64] = if caps.is_null() || n_cap == 0 {
+        &[]
+    } else {
+        // SAFETY: caller promised the slot count.
+        unsafe { std::slice::from_raw_parts(caps, n_cap as usize) }
+    };
+    interp.alloc_closure(fn_id, slice) as *mut u8
+}
+
+/// Invoke the closure in `closure_ptr` with the `n_args` raw 8-byte
+/// arguments at `args`. Mirrors `Opcode::ClosureCall`: the closure's inline
+/// captures are read out and prepended to the args, then the body is
+/// dispatched through `Interpreter::call_callable` (which takes the JIT fast
+/// path when the body is itself JIT'd). Returns the body's raw 64-bit
+/// result; a null/non-callable receiver yields 0 (JIT'd code has no error
+/// channel, matching the other `rt_*` trap-to-zero conventions).
+///
+/// # Safety
+/// * `vm` is a valid `*mut Interpreter` for the duration of the call.
+/// * `args` points to at least `n_args` raw 8-byte slots (or is null when
+///   `n_args == 0`).
+#[no_mangle]
+pub unsafe extern "C" fn rt_closure_call(
+    vm: *mut VmCtx,
+    closure_ptr: u64,
+    args: *const u64,
+    n_args: u32,
+) -> u64 {
+    // SAFETY: caller contract above.
+    let interp = unsafe { &mut *(vm as *mut Interpreter) };
+    // GC safepoint before dispatching into the (possibly allocation-heavy)
+    // closure body. The closure pointer and args are published in the
+    // caller's shadow window.
+    interp.jit_safepoint();
+    let slice: &[u64] = if args.is_null() || n_args == 0 {
+        &[]
+    } else {
+        // SAFETY: caller asserts the slot count.
+        unsafe { std::slice::from_raw_parts(args, n_args as usize) }
+    };
+    // `call_callable` validates the pointer (null / NONE / misaligned all
+    // raise) and reads the inline captures itself.
+    interp.call_callable(closure_ptr, slice).unwrap_or(0)
+}

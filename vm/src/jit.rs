@@ -105,6 +105,9 @@ pub struct Jit {
     rt_array_new_id: Option<FuncId>,
     rt_alloc_id: Option<FuncId>,
     rt_virtual_call_id: Option<FuncId>,
+    /// M14 closure helpers (allocate a `ClosureRepr` / dispatch a closure).
+    rt_closure_new_id: Option<FuncId>,
+    rt_closure_call_id: Option<FuncId>,
     /// M33 shadow-stack helpers. Called immediately around every
     /// heap-allocating runtime helper so the GC can see the JIT'd frame's
     /// register-resident pointers without walking machine stacks.
@@ -153,6 +156,15 @@ impl Jit {
             "rt_virtual_call",
             crate::jit_runtime::rt_virtual_call as *const u8,
         );
+        // M14: closure construction + dispatch helpers.
+        builder.symbol(
+            "rt_closure_new",
+            crate::jit_runtime::rt_closure_new as *const u8,
+        );
+        builder.symbol(
+            "rt_closure_call",
+            crate::jit_runtime::rt_closure_call as *const u8,
+        );
         // M33: per-thread shadow-stack publishers. Called around every
         // heap-allocating helper so the GC has a precise-enough root set
         // even while the JIT'd code is mid-execution.
@@ -176,6 +188,8 @@ impl Jit {
             rt_array_new_id: None,
             rt_alloc_id: None,
             rt_virtual_call_id: None,
+            rt_closure_new_id: None,
+            rt_closure_call_id: None,
             m33_safepoint_push_id: None,
             m33_safepoint_pop_id: None,
         }
@@ -243,6 +257,8 @@ impl Jit {
         let rt_array_new_sig = make_rt_array_new_sig();
         let rt_alloc_sig = make_rt_alloc_sig();
         let rt_virtual_call_sig = make_rt_virtual_call_sig();
+        let rt_closure_new_sig = make_rt_closure_new_sig();
+        let rt_closure_call_sig = make_rt_closure_call_sig();
         let m33_safepoint_push_sig = make_m33_safepoint_push_sig();
         let m33_safepoint_pop_sig = make_m33_safepoint_pop_sig();
 
@@ -314,6 +330,26 @@ impl Jit {
         };
         self.rt_virtual_call_id = Some(rt_vc_id);
 
+        let rt_cn_id = match m.declare_function(
+            "rt_closure_new",
+            Linkage::Import,
+            &rt_closure_new_sig,
+        ) {
+            Ok(id) => id,
+            Err(_) => return (0, module.functions.len()),
+        };
+        self.rt_closure_new_id = Some(rt_cn_id);
+
+        let rt_cc_id = match m.declare_function(
+            "rt_closure_call",
+            Linkage::Import,
+            &rt_closure_call_sig,
+        ) {
+            Ok(id) => id,
+            Err(_) => return (0, module.functions.len()),
+        };
+        self.rt_closure_call_id = Some(rt_cc_id);
+
         let m33_safepoint_push_id = match m.declare_function(
             "rt_shadow_push",
             Linkage::Import,
@@ -375,6 +411,8 @@ impl Jit {
             let rt_array_new_ref = m.declare_func_in_func(rt_an_id, &mut ctx.func);
             let rt_alloc_ref = m.declare_func_in_func(rt_alloc_id, &mut ctx.func);
             let rt_virtual_call_ref = m.declare_func_in_func(rt_vc_id, &mut ctx.func);
+            let rt_closure_new_ref = m.declare_func_in_func(rt_cn_id, &mut ctx.func);
+            let rt_closure_call_ref = m.declare_func_in_func(rt_cc_id, &mut ctx.func);
             let m33_safepoint_push_ref =
                 m.declare_func_in_func(m33_safepoint_push_id, &mut ctx.func);
             let m33_safepoint_pop_ref =
@@ -386,6 +424,8 @@ impl Jit {
                 rt_array_new: rt_array_new_ref,
                 rt_alloc: rt_alloc_ref,
                 rt_virtual_call: rt_virtual_call_ref,
+                rt_closure_new: rt_closure_new_ref,
+                rt_closure_call: rt_closure_call_ref,
                 m33_safepoint_push: m33_safepoint_push_ref,
                 m33_safepoint_pop: m33_safepoint_pop_ref,
             };
@@ -575,6 +615,8 @@ struct RuntimeHelpers {
     rt_array_new: FuncRef,
     rt_alloc: FuncRef,
     rt_virtual_call: FuncRef,
+    rt_closure_new: FuncRef,
+    rt_closure_call: FuncRef,
     /// M33 shadow-stack publishers, called around every allocation
     /// helper so the GC sees this frame's register-resident pointers.
     m33_safepoint_push: FuncRef,
@@ -586,6 +628,28 @@ fn make_rt_virtual_call_sig() -> Signature {
     let mut sig = Signature::new(host_call_conv());
     sig.params.push(AbiParam::new(types::I64)); // vm
     sig.params.push(AbiParam::new(types::I32)); // vtable_slot
+    sig.params.push(AbiParam::new(types::I64)); // args ptr
+    sig.params.push(AbiParam::new(types::I32)); // n_args
+    sig.returns.push(AbiParam::new(types::I64));
+    sig
+}
+
+/// `rt_closure_new(vm, fn_id, caps_ptr, n_cap) -> *mut u8`.
+fn make_rt_closure_new_sig() -> Signature {
+    let mut sig = Signature::new(host_call_conv());
+    sig.params.push(AbiParam::new(types::I64)); // vm
+    sig.params.push(AbiParam::new(types::I32)); // fn_id
+    sig.params.push(AbiParam::new(types::I64)); // caps ptr
+    sig.params.push(AbiParam::new(types::I32)); // n_cap
+    sig.returns.push(AbiParam::new(types::I64));
+    sig
+}
+
+/// `rt_closure_call(vm, closure_ptr, args_ptr, n_args) -> u64`.
+fn make_rt_closure_call_sig() -> Signature {
+    let mut sig = Signature::new(host_call_conv());
+    sig.params.push(AbiParam::new(types::I64)); // vm
+    sig.params.push(AbiParam::new(types::I64)); // closure ptr
     sig.params.push(AbiParam::new(types::I64)); // args ptr
     sig.params.push(AbiParam::new(types::I32)); // n_args
     sig.returns.push(AbiParam::new(types::I64));
@@ -713,6 +777,8 @@ fn translate_function(
         rt_array_new_ref: helpers.rt_array_new,
         rt_alloc_ref: helpers.rt_alloc,
         rt_virtual_call_ref: helpers.rt_virtual_call,
+        rt_closure_new_ref: helpers.rt_closure_new,
+        rt_closure_call_ref: helpers.rt_closure_call,
         m33_shadow_slot,
         m33_safepoint_push_ref: helpers.m33_safepoint_push,
         m33_safepoint_pop_ref: helpers.m33_safepoint_pop,
@@ -787,6 +853,8 @@ struct Translator<'a> {
     rt_array_new_ref: FuncRef,
     rt_alloc_ref: FuncRef,
     rt_virtual_call_ref: FuncRef,
+    rt_closure_new_ref: FuncRef,
+    rt_closure_call_ref: FuncRef,
     /// M33: per-function shadow stack slot. Holds `nregs * 8` bytes — one
     /// u64 per StrictPy register. Spilled into right before every
     /// heap-allocating runtime helper call and published via
@@ -1314,6 +1382,56 @@ impl<'a> Translator<'a> {
                 let call = self.builder.ins().call(
                     self.rt_virtual_call_ref,
                     &[self.vm_ptr, slot, buf, n_args],
+                );
+                self.m33_safepoint_leave();
+                let result = self.builder.inst_results(call)[0];
+                self.write_reg(*dst, result);
+            }
+
+            Op::ClosureNew { dst, fn_id, captures } => {
+                // Marshal the capture registers into a stack buffer and hand
+                // them to `rt_closure_new`, which allocates a `ClosureRepr`
+                // with the captures stored inline. The captures are pointers
+                // into the GC heap; publishing the register window before the
+                // call keeps them rooted if the allocation collects.
+                let n = captures.len();
+                let buf = self.alloca_u64_buf(n);
+                for (i, r) in captures.iter().enumerate() {
+                    let v = self.read_reg(*r);
+                    self.builder
+                        .ins()
+                        .store(MemFlags::trusted(), v, buf, (i * 8) as i32);
+                }
+                let fid = self.builder.ins().iconst(types::I32, *fn_id as i64);
+                let n_cap = self.builder.ins().iconst(types::I32, n as i64);
+                self.m33_safepoint_enter();
+                let call = self.builder.ins().call(
+                    self.rt_closure_new_ref,
+                    &[self.vm_ptr, fid, buf, n_cap],
+                );
+                self.m33_safepoint_leave();
+                let result = self.builder.inst_results(call)[0];
+                self.write_reg(*dst, result);
+            }
+            Op::ClosureCall { dst, recv, args } => {
+                // The closure pointer is `recv`; the explicit call arguments
+                // follow (the inline captures are prepended on the Rust side
+                // by `call_callable`, mirroring `Opcode::ClosureCall`). Only
+                // the explicit args go in the marshalled buffer.
+                let n = args.len();
+                let buf = self.alloca_u64_buf(n);
+                for (i, r) in args.iter().enumerate() {
+                    let v = self.read_reg(*r);
+                    self.builder
+                        .ins()
+                        .store(MemFlags::trusted(), v, buf, (i * 8) as i32);
+                }
+                let recv_v = self.read_reg(*recv);
+                let n_args = self.builder.ins().iconst(types::I32, n as i64);
+                self.m33_safepoint_enter();
+                let call = self.builder.ins().call(
+                    self.rt_closure_call_ref,
+                    &[self.vm_ptr, recv_v, buf, n_args],
                 );
                 self.m33_safepoint_leave();
                 let result = self.builder.inst_results(call)[0];
