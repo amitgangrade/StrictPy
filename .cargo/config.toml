@@ -1,0 +1,22 @@
+# Workspace-wide build configuration.
+#
+# Why this exists: the `sdl2` dependency (vm/Cargo.toml, `features = ["bundled"]`)
+# drives a CMake build for SDL2. With CMake's default Windows generator
+# (Visual Studio / MSBuild), the intermediate `.tlog` paths under
+#   target/release/build/sdl2-sys-*/out/build/CMakeFiles/CMakeScratch/TryCompile-*/...
+# exceed the Windows MAX_PATH (260 char) limit when the workspace itself sits at
+# a deep path — notably any git worktree under `.claude/worktrees/agent-*/`.
+# The build then fails with `MSB6003: CL.exe could not be run ... cmTC_*.tlog`.
+#
+# Forcing the Ninja generator produces flat scratch directories (no deep
+# per-TryCompile `.tlog` nesting), so the bundled-SDL2 build stays well under
+# MAX_PATH regardless of how deep the workspace lives. Ninja is bundled with the
+# installed VS Build Tools / available on PATH; the `cmake` crate injects the
+# MSVC toolchain environment, so this works from a plain (non-developer) shell.
+#
+# CMAKE_POLICY_VERSION_MINIMUM keeps the vendored SDL2 CMakeLists (which sets a
+# very old `cmake_minimum_required`) building under modern CMake (>= 4), which
+# otherwise errors on the stale compatibility floor.
+[env]
+CMAKE_GENERATOR = "Ninja"
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"
