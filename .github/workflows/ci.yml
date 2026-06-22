@@ -16,15 +16,6 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # sdl2-sys's vendored SDL2 source declares cmake_minimum_required < 3.5,
-  # which CMake 4.x (current GitHub runners) refuses to configure without
-  # this opt-in.
-  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-  # Run gfx/audio against SDL's headless backends — runners have no
-  # display or audio device. The runtime and the m52+ gfx tests already
-  # key off these (see vm/src/builtins.rs).
-  SDL_VIDEODRIVER: dummy
-  SDL_AUDIODRIVER: dummy
   # m33_precise_gc::recursive_allocation_does_not_leak_or_crash recurses
   # 5000 frames through the VM; MSVC debug frames overflow libtest's
   # default 2 MiB worker-thread stack (STATUS_STACK_OVERFLOW on the
@@ -32,6 +23,8 @@ env:
   RUST_MIN_STACK: "16777216"
 
 jobs:
+  # Fast, dependency-light job: the default build has NO graphics feature, so
+  # it needs no SDL2/SDL2_image C libraries. This is the core CI signal.
   test:
     name: test (${{ matrix.os }})
     strategy:
@@ -43,6 +36,54 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo build (debug, full workspace, no graphics)
+        run: cargo build --workspace --verbose
+
+      # producer_runs is back in the sweep on both platforms: the
+      # deadlock it used to hit (consumer's try_recv poll exiting on a
+      # transient empty, then the producer blocking forever on the full
+      # bounded channel) is root-caused and fixed — see BUG-045 in
+      # BUGS_KNOWN.md and examples/producer.spy's recv +
+      # ChannelClosedError drain.
+      - name: cargo test (debug, full workspace, no graphics)
+        run: cargo test --workspace --verbose
+
+      # Verify the interpreter-only build path still compiles. M8's JIT lives
+      # behind `feature = "jit"` (default on); --no-default-features should
+      # produce a working VM without Cranelift in the dependency tree.
+      - name: cargo build (vm, no JIT)
+        run: cargo build -p strictpy-vm --no-default-features --verbose
+
+  # Graphics job: builds + tests with the `graphics` feature enabled, which
+  # pulls SDL2 (bundled) + SDL2_image (system) + rodio + fontdue. Kept
+  # separate so the core `test` job stays fast and C-dependency-free.
+  graphics:
+    name: graphics (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      # sdl2-sys's vendored SDL2 source declares cmake_minimum_required < 3.5,
+      # which CMake 4.x (current GitHub runners) refuses to configure without
+      # this opt-in.
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+      # Run gfx/audio against SDL's headless backends — runners have no
+      # display or audio device. The runtime and the m52+ gfx tests already
+      # key off these (see vm/src/builtins.rs).
+      SDL_VIDEODRIVER: dummy
+      SDL_AUDIODRIVER: dummy
     steps:
       - uses: actions/checkout@v4
 
@@ -72,8 +113,8 @@ jobs:
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
 
-      - name: cargo build (debug, full workspace)
-        run: cargo build --workspace --verbose
+      - name: cargo build (vm, graphics)
+        run: cargo build -p strictpy-vm --features graphics --verbose
 
       # On a fresh build the sdl2-sys `bundled` build script copies
       # SDL2.dll into target\debug, but when rust-cache restores the
@@ -90,17 +131,5 @@ jobs:
           Copy-Item $dll.FullName target\debug\ -Force
           Copy-Item $dll.FullName target\debug\deps\ -Force
 
-      # producer_runs is back in the sweep on both platforms: the
-      # deadlock it used to hit (consumer's try_recv poll exiting on a
-      # transient empty, then the producer blocking forever on the full
-      # bounded channel) is root-caused and fixed — see BUG-045 in
-      # BUGS_KNOWN.md and examples/producer.spy's recv +
-      # ChannelClosedError drain.
-      - name: cargo test (debug, full workspace)
-        run: cargo test --workspace --verbose
-
-      # Verify the interpreter-only build path still compiles. M8's JIT lives
-      # behind `feature = "jit"` (default on); --no-default-features should
-      # produce a working VM without Cranelift in the dependency tree.
-      - name: cargo build (vm, no JIT)
-        run: cargo build -p strictpy-vm --no-default-features --verbose
+      - name: cargo test (vm, graphics)
+        run: cargo test -p strictpy-vm --features graphics --verbose

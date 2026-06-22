@@ -1,3 +1,4 @@
+#![cfg(feature = "graphics")]
 //! M54 integration tests for the GFX font/text functions (SDL_ttf).
 
 use std::fs;

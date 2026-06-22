@@ -24573,6 +24573,17 @@ fn m51_rw_agg_shortcut(
 }
 
 // ── M52 — gfx stdlib (windows + events + drawing) ──
+//
+// The entire gfx impl block (SDL2 + rodio + fontdue) is gated behind the
+// off-by-default `graphics` cargo feature so the core build needs no
+// SDL2/SDL2_image C dependencies. It lives in an inline module that
+// re-exports its dispatched fns via `use gfx_impl::*;` below, so the
+// dispatch arms in `dispatch()` resolve to the real fns when the feature is
+// on, or to the stubs (see the `#[cfg(not(feature = "graphics"))]` block at
+// the end) when it is off — with no changes to the arms themselves.
+#[cfg(feature = "graphics")]
+mod gfx_impl {
+    use super::*;
 
 struct M52SdlWrapper(sdl2::Sdl);
 unsafe impl Send for M52SdlWrapper {}
@@ -24635,7 +24646,7 @@ fn m52_store_payload_i32(recv_ptr: u64, value: i32, offset_bytes: usize) {
     }
 }
 
-fn m52_gfx_init(_interp: &mut Interpreter, _args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m52_gfx_init(_interp: &mut Interpreter, _args: &[u64]) -> Result<u64, VmError> {
     let mut guard = M52_SDL_CONTEXT.lock().unwrap();
     if guard.is_none() {
         let sdl = sdl2::init().map_err(|e| VmError::UncaughtException {
@@ -24647,7 +24658,7 @@ fn m52_gfx_init(_interp: &mut Interpreter, _args: &[u64]) -> Result<u64, VmError
     Ok(0)
 }
 
-fn m52_gfx_create_window(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m52_gfx_create_window(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let title_ptr = arg_u64(args, 0) as *const StringRepr;
     let width = arg_i64(args, 1) as u32;
     let height = arg_i64(args, 2) as u32;
@@ -24693,7 +24704,7 @@ fn m52_gfx_create_window(interp: &mut Interpreter, args: &[u64]) -> Result<u64, 
     Ok(recv as u64)
 }
 
-fn m52_gfx_close_window(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m52_gfx_close_window(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let win_obj = arg_u64(args, 0);
     let win_ptr = p4b_read_handle(win_obj);
     m52_deregister_and_free_window(win_ptr as u64)?;
@@ -24809,7 +24820,7 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-fn m52_gfx_poll_event(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m52_gfx_poll_event(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let win_obj = arg_u64(args, 0);
     let win_ptr = p4b_read_handle(win_obj);
     m52_get_window(win_ptr as u64)?;
@@ -24846,7 +24857,7 @@ fn m52_gfx_poll_event(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmE
     })
 }
 
-fn m52_gfx_clear(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m52_gfx_clear(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let win_obj = arg_u64(args, 0);
     let r = arg_i64(args, 1) as u8;
     let g = arg_i64(args, 2) as u8;
@@ -24862,7 +24873,7 @@ fn m52_gfx_clear(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError
     Ok(0)
 }
 
-fn m52_gfx_present(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m52_gfx_present(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let win_obj = arg_u64(args, 0);
     let win_ptr = p4b_read_handle(win_obj);
     let win = m52_get_window(win_ptr as u64)?;
@@ -24873,7 +24884,7 @@ fn m52_gfx_present(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmErr
     Ok(0)
 }
 
-fn m52_gfx_draw_rect(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m52_gfx_draw_rect(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let win_obj = arg_u64(args, 0);
     let x = arg_i64(args, 1) as i32;
     let y = arg_i64(args, 2) as i32;
@@ -24899,7 +24910,7 @@ fn m52_gfx_draw_rect(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmE
     Ok(0)
 }
 
-fn m52_gfx_draw_rect_outline(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m52_gfx_draw_rect_outline(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let win_obj = arg_u64(args, 0);
     let x = arg_i64(args, 1) as i32;
     let y = arg_i64(args, 2) as i32;
@@ -24925,7 +24936,7 @@ fn m52_gfx_draw_rect_outline(_interp: &mut Interpreter, args: &[u64]) -> Result<
     Ok(0)
 }
 
-fn m52_gfx_draw_line(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m52_gfx_draw_line(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let win_obj = arg_u64(args, 0);
     let x1 = arg_i64(args, 1) as i32;
     let y1 = arg_i64(args, 2) as i32;
@@ -24952,7 +24963,7 @@ fn m52_gfx_draw_line(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmE
     Ok(0)
 }
 
-fn m52_gfx_draw_point(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m52_gfx_draw_point(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let win_obj = arg_u64(args, 0);
     let x = arg_i64(args, 1) as i32;
     let y = arg_i64(args, 2) as i32;
@@ -24976,7 +24987,7 @@ fn m52_gfx_draw_point(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, Vm
     Ok(0)
 }
 
-fn m52_gfx_window_size(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m52_gfx_window_size(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let win_obj = arg_u64(args, 0);
     let win_ptr = p4b_read_handle(win_obj);
     let win = m52_get_window(win_ptr as u64)?;
@@ -24986,7 +24997,7 @@ fn m52_gfx_window_size(interp: &mut Interpreter, args: &[u64]) -> Result<u64, Vm
     Ok(tup as u64)
 }
 
-fn m52_gfx_set_window_title(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m52_gfx_set_window_title(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let win_obj = arg_u64(args, 0);
     let title_ptr = arg_u64(args, 1) as *const StringRepr;
     let title = unsafe { read_str(title_ptr) };
@@ -25009,7 +25020,7 @@ fn m52_gfx_set_window_title(_interp: &mut Interpreter, args: &[u64]) -> Result<u
 // fullscreen.  `enabled == true` → FullscreenType::Desktop; `false` →
 // FullscreenType::Off.  Modeled on m52_gfx_set_window_title's
 // window-mutation pattern.
-fn m58_gfx_set_fullscreen(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m58_gfx_set_fullscreen(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let win_obj = arg_u64(args, 0);
     // Bools arrive as i64 0/1 in the native-call ABI.
     let enabled = arg_i64(args, 1) != 0;
@@ -25043,7 +25054,7 @@ fn m58_gfx_set_fullscreen(_interp: &mut Interpreter, args: &[u64]) -> Result<u64
 // nonzero code.  We treat that as a documented no-op rather than raising
 // — the game's own `time.sleep_ms` pacing still works either way, and we
 // don't want a vsync-unsupported backend to abort an otherwise-fine game.
-fn m58_gfx_set_vsync(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m58_gfx_set_vsync(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let win_obj = arg_u64(args, 0);
     let enabled = arg_i64(args, 1) != 0;
 
@@ -25107,7 +25118,7 @@ fn m53_get_image(img_ptr: u64) -> Result<*mut M53Image, VmError> {
     }
 }
 
-fn m53_gfx_load_image(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m53_gfx_load_image(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     use sdl2::image::LoadTexture;
 
     let win_obj = arg_u64(args, 0);
@@ -25165,7 +25176,7 @@ fn m53_gfx_load_image(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmE
     Ok(recv as u64)
 }
 
-fn m53_gfx_image_size(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m53_gfx_image_size(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let img_obj = arg_u64(args, 0);
     let img_ptr = p4b_read_handle(img_obj);
     let img = m53_get_image(img_ptr as u64)?;
@@ -25176,7 +25187,7 @@ fn m53_gfx_image_size(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmE
     Ok(tup as u64)
 }
 
-fn m53_gfx_draw_image(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m53_gfx_draw_image(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let win_obj = arg_u64(args, 0);
     let img_obj = arg_u64(args, 1);
     let dst_x = arg_i64(args, 2) as i32;
@@ -25202,7 +25213,7 @@ fn m53_gfx_draw_image(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, Vm
     Ok(0)
 }
 
-fn m53_gfx_draw_image_rect(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m53_gfx_draw_image_rect(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let win_obj = arg_u64(args, 0);
     let img_obj = arg_u64(args, 1);
     let src_x = arg_i64(args, 2) as i32;
@@ -25233,7 +25244,7 @@ fn m53_gfx_draw_image_rect(_interp: &mut Interpreter, args: &[u64]) -> Result<u6
     Ok(0)
 }
 
-fn m53_gfx_draw_image_rotated(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m53_gfx_draw_image_rotated(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let win_obj = arg_u64(args, 0);
     let img_obj = arg_u64(args, 1);
     let dst_x = arg_i64(args, 2) as i32;
@@ -25268,7 +25279,7 @@ fn m53_gfx_draw_image_rotated(_interp: &mut Interpreter, args: &[u64]) -> Result
     Ok(0)
 }
 
-fn m53_gfx_free_image(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m53_gfx_free_image(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let img_obj = arg_u64(args, 0);
     let img_ptr = p4b_read_handle(img_obj);
     m53_deregister_and_free_image(img_ptr as u64)?;
@@ -25450,7 +25461,7 @@ fn m54_resolve_path(path_str: &str) -> std::path::PathBuf {
 
 // ─── Audio functions ─────────────────────────────────────────────────────────
 
-fn m54_gfx_audio_init(_interp: &mut Interpreter, _args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m54_gfx_audio_init(_interp: &mut Interpreter, _args: &[u64]) -> Result<u64, VmError> {
     let mut guard = M54_AUDIO_BACKEND.lock().unwrap();
     if guard.is_some() {
         return Ok(0); // idempotent
@@ -25481,7 +25492,7 @@ fn m54_gfx_audio_init(_interp: &mut Interpreter, _args: &[u64]) -> Result<u64, V
     Ok(0)
 }
 
-fn m54_gfx_load_sound(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m54_gfx_load_sound(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let path_ptr = arg_u64(args, 0) as *const StringRepr;
     let path_str = unsafe { read_str(path_ptr) };
     let path = m54_resolve_path(&path_str);
@@ -25519,7 +25530,7 @@ fn m54_gfx_load_sound(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmE
     Ok(recv as u64)
 }
 
-fn m54_gfx_play_sound(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m54_gfx_play_sound(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let snd_obj = arg_u64(args, 0);
     let snd_ptr = p4b_read_handle(snd_obj);
     let snd = m54_get_sound(snd_ptr as u64)?;
@@ -25544,14 +25555,14 @@ fn m54_gfx_play_sound(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, Vm
     Ok(0)
 }
 
-fn m54_gfx_free_sound(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m54_gfx_free_sound(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let snd_obj = arg_u64(args, 0);
     let snd_ptr = p4b_read_handle(snd_obj);
     m54_deregister_and_free_sound(snd_ptr as u64)?;
     Ok(0)
 }
 
-fn m54_gfx_load_music(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m54_gfx_load_music(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let path_ptr = arg_u64(args, 0) as *const StringRepr;
     let path_str = unsafe { read_str(path_ptr) };
     let path = m54_resolve_path(&path_str);
@@ -25586,7 +25597,7 @@ fn m54_gfx_load_music(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmE
     Ok(recv as u64)
 }
 
-fn m54_gfx_play_music(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m54_gfx_play_music(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let mus_obj = arg_u64(args, 0);
     let loops = arg_i64(args, 1) as i32;
     let mus_ptr = p4b_read_handle(mus_obj);
@@ -25637,7 +25648,7 @@ fn m54_gfx_play_music(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, Vm
     Ok(0)
 }
 
-fn m54_gfx_stop_music(_interp: &mut Interpreter, _args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m54_gfx_stop_music(_interp: &mut Interpreter, _args: &[u64]) -> Result<u64, VmError> {
     let guard = M54_AUDIO_BACKEND.lock().unwrap();
     if let Some(backend) = guard.as_ref() {
         let mut sink_guard = backend.music_sink.lock().unwrap();
@@ -25648,7 +25659,7 @@ fn m54_gfx_stop_music(_interp: &mut Interpreter, _args: &[u64]) -> Result<u64, V
     Ok(0)
 }
 
-fn m54_gfx_set_music_volume(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m54_gfx_set_music_volume(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let vol = (arg_i64(args, 0) as i32).clamp(0, 128);
     let vol_f32 = vol as f32 / 128.0;
     let guard = M54_AUDIO_BACKEND.lock().unwrap();
@@ -25661,7 +25672,7 @@ fn m54_gfx_set_music_volume(_interp: &mut Interpreter, args: &[u64]) -> Result<u
     Ok(0)
 }
 
-fn m54_gfx_set_sound_volume(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m54_gfx_set_sound_volume(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let snd_obj = arg_u64(args, 0);
     let vol = (arg_i64(args, 1) as i32).clamp(0, 128);
     let snd_ptr = p4b_read_handle(snd_obj);
@@ -25674,7 +25685,7 @@ fn m54_gfx_set_sound_volume(_interp: &mut Interpreter, args: &[u64]) -> Result<u
 
 // ─── Font/text functions (fontdue rasteriser → SDL2 texture) ─────────────────
 
-fn m54_gfx_load_font(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m54_gfx_load_font(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let path_ptr = arg_u64(args, 0) as *const StringRepr;
     let size_pt  = arg_i64(args, 1) as u16;
     let path_str = unsafe { read_str(path_ptr) };
@@ -25775,7 +25786,7 @@ fn m54_rasterise_text(
     (pixels, w, h)
 }
 
-fn m54_gfx_draw_text(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m54_gfx_draw_text(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let win_obj = arg_u64(args, 0);
     let fnt_obj = arg_u64(args, 1);
     let txt_ptr = arg_u64(args, 2) as *const StringRepr;
@@ -25859,7 +25870,7 @@ fn m54_gfx_draw_text(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmE
     Ok(0)
 }
 
-fn m54_gfx_text_size(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m54_gfx_text_size(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let fnt_obj = arg_u64(args, 0);
     let txt_ptr = arg_u64(args, 1) as *const StringRepr;
     let text    = unsafe { read_str(txt_ptr) };
@@ -25880,12 +25891,75 @@ fn m54_gfx_text_size(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmEr
     Ok(tup as u64)
 }
 
-fn m54_gfx_free_font(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+pub(super) fn m54_gfx_free_font(_interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
     let fnt_obj = arg_u64(args, 0);
     let fnt_ptr = p4b_read_handle(fnt_obj);
     m54_deregister_and_free_font(fnt_ptr as u64)?;
     Ok(0)
 }
+
+} // end mod gfx_impl
+
+// Bring the dispatched gfx fns into scope so the (unchanged) dispatch arms
+// resolve to the real impls when the `graphics` feature is enabled.
+#[cfg(feature = "graphics")]
+use gfx_impl::*;
+
+// When the `graphics` feature is OFF, the SDL2/rodio/fontdue impls above are
+// not compiled. Provide stubs for the 33 dispatched gfx natives so the
+// dispatch arms still resolve; calling one traps with a clear message.
+#[cfg(not(feature = "graphics"))]
+mod gfx_stubs {
+    use super::*;
+
+    macro_rules! gfx_stub {
+        ($name:ident) => {
+            pub(super) fn $name(_interp: &mut Interpreter, _args: &[u64]) -> Result<u64, VmError> {
+                Err(VmError::Trap(
+                    "graphics feature not enabled; rebuild with --features graphics".into(),
+                ))
+            }
+        };
+    }
+
+    gfx_stub!(m52_gfx_init);
+    gfx_stub!(m52_gfx_create_window);
+    gfx_stub!(m52_gfx_close_window);
+    gfx_stub!(m52_gfx_poll_event);
+    gfx_stub!(m52_gfx_clear);
+    gfx_stub!(m52_gfx_present);
+    gfx_stub!(m52_gfx_draw_rect);
+    gfx_stub!(m52_gfx_draw_rect_outline);
+    gfx_stub!(m52_gfx_draw_line);
+    gfx_stub!(m52_gfx_draw_point);
+    gfx_stub!(m52_gfx_set_window_title);
+    gfx_stub!(m52_gfx_window_size);
+    gfx_stub!(m53_gfx_load_image);
+    gfx_stub!(m53_gfx_draw_image);
+    gfx_stub!(m53_gfx_draw_image_rect);
+    gfx_stub!(m53_gfx_draw_image_rotated);
+    gfx_stub!(m53_gfx_free_image);
+    gfx_stub!(m53_gfx_image_size);
+    gfx_stub!(m54_gfx_audio_init);
+    gfx_stub!(m54_gfx_load_sound);
+    gfx_stub!(m54_gfx_play_sound);
+    gfx_stub!(m54_gfx_free_sound);
+    gfx_stub!(m54_gfx_load_music);
+    gfx_stub!(m54_gfx_play_music);
+    gfx_stub!(m54_gfx_stop_music);
+    gfx_stub!(m54_gfx_set_music_volume);
+    gfx_stub!(m54_gfx_set_sound_volume);
+    gfx_stub!(m54_gfx_load_font);
+    gfx_stub!(m54_gfx_draw_text);
+    gfx_stub!(m54_gfx_text_size);
+    gfx_stub!(m54_gfx_free_font);
+    gfx_stub!(m58_gfx_set_fullscreen);
+    gfx_stub!(m58_gfx_set_vsync);
+}
+
+#[cfg(not(feature = "graphics"))]
+use gfx_stubs::*;
+
 #[cfg(test)]
 mod tests {
     //! Per-native unit tests. Each test constructs a minimal interpreter

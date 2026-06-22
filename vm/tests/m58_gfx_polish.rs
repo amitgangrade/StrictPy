@@ -1,3 +1,4 @@
+#![cfg(feature = "graphics")]
 //! M58 integration tests for the gfx polish natives
 //! (`gfx.set_fullscreen` / `gfx.set_vsync`).
 //!

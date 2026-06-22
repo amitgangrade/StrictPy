@@ -21,6 +21,10 @@ default = ["jit"]
 # (useful for sanity-checking the interpreter alone or for environments
 # where Cranelift cannot be built).
 jit = ["dep:cranelift", "dep:cranelift-jit", "dep:cranelift-module", "dep:cranelift-codegen", "dep:cranelift-frontend"]
+# Enable the SDL2-based graphics/audio/text stack (gfx natives). OFF by
+# default so the core build needs no SDL2/SDL2_image C dependencies. Build
+# with `--features graphics` to compile the gfx impls and gfx tests.
+graphics = ["dep:sdl2", "dep:rodio", "dep:fontdue"]
 
 [dependencies]
 strictpy-shared.workspace = true
@@ -110,7 +114,7 @@ rustls-pemfile = "2"
 # hand-roll variations of the RFC 3986 grammar).
 ureq = { version = "2", default-features = false, features = ["tls"] }
 url = "2"
-sdl2 = { version = "0.37", features = ["bundled", "image"] }
+sdl2 = { version = "0.37", features = ["bundled", "image"], optional = true }
 cranelift = { version = "0.115", optional = true }
 cranelift-jit = { version = "0.115", optional = true }
 cranelift-codegen = { version = "0.115", optional = true }
@@ -119,11 +123,11 @@ cranelift-module = { version = "0.115", optional = true }
 # M54: pure-Rust audio (WAV + OGG streaming, no system SDL2_mixer required)
 # rodio provides a cross-platform audio output stream; the `wav` and `vorbis`
 # features add the respective decoders (both pure Rust, no C dependencies).
-rodio = { version = "0.19", default-features = false, features = ["wav", "vorbis"] }
+rodio = { version = "0.19", default-features = false, features = ["wav", "vorbis"], optional = true }
 # M54: pure-Rust TrueType rasteriser (no system SDL2_ttf required).
 # fontdue parses TTF/OTF and rasterises glyphs to alpha bitmaps that we
 # composite into SDL2 textures manually.
-fontdue = "0.7"
+fontdue = { version = "0.7", optional = true }
 # Dict speedup: the VM's string-keyed dict (see `strdict`) stores entries in
 # a `hashbrown::HashTable` keyed by an explicitly supplied 64-bit hash, so the
 # Dict* natives can reuse a hash cached in the key string's object header
