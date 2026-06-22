@@ -1115,6 +1115,24 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             result?;
             Ok(0)
         }
+        // P2: literal-lambda `sorted_by` / `sort_by` lowering. The compiler
+        // inlines the key function into an in-language loop that computes a
+        // *parallel key list* (no per-element interpreter re-entry, JITs as
+        // one function), then hands both the data list and the precomputed
+        // key list to this native. We do only the comparison + permutation
+        // here — the Schwartzian "decorate" pass already happened in-language.
+        // Args: [list_ptr, keys_ptr, key_tag]. Sorts `list` in place
+        // (stable) by the parallel `keys`. Returns 0.
+        NativeFn::SortByPrecomputed => {
+            let lst = arg_u64(args, 0) as *mut crate::object::ListRepr;
+            let keys = arg_u64(args, 1) as *const crate::object::ListRepr;
+            let key_tag = arg_u64(args, 2) as u8;
+            if lst.is_null() || keys.is_null() {
+                return Ok(0);
+            }
+            sort_list_by_precomputed(lst, keys, key_tag)?;
+            Ok(0)
+        }
 
         // ── Sets ────────────────────────────────────────────────────────
         // Set[T] is sugar on dict-with-unit-value: a Set value is a
@@ -10424,6 +10442,85 @@ fn sort_list_by_key(
     // Stable sort to match Python's `sorted(key=...)` semantics.
     idx.sort_by(|&a, &b| cmp(a, b));
     // Undecorate: write the elements back in key order.
+    let data = unsafe { (*lst).data as *mut u64 };
+    for (dst_i, &src_i) in idx.iter().enumerate() {
+        unsafe { std::ptr::write_unaligned(data.add(dst_i), elems[src_i]) };
+    }
+    Ok(())
+}
+
+/// P2: stable sort of `lst` in place using a parallel, already-computed
+/// `keys` list. Identical comparison/permutation logic to
+/// [`sort_list_by_key`], but the keys arrive precomputed (the compiler
+/// inlined the key function into an in-language loop), so there is no
+/// interpreter re-entry — and therefore no GC parking needed here: both
+/// `lst` and `keys` are live values supplied by the caller's IR, and we
+/// allocate nothing that a collection could free.
+///
+/// `keys[i]` is the sort key for `lst[i]`. `key_tag` selects the comparator
+/// (TypeTag::I64=3 / F64=9 / Ref→str=11), matching `sort_list_by_key`.
+fn sort_list_by_precomputed(
+    lst: *mut crate::object::ListRepr,
+    keys: *const crate::object::ListRepr,
+    key_tag: u8,
+) -> Result<(), VmError> {
+    let len = unsafe { (*lst).length };
+    if len <= 1 {
+        return Ok(());
+    }
+    let klen = unsafe { (*keys).length };
+    if klen != len {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!(
+                "sorted_by/sort_by: key list length {klen} != data length {len}"
+            ),
+        });
+    }
+    if !matches!(key_tag, 3 | 9 | 11) {
+        return Err(VmError::UncaughtException {
+            type_name: "TypeError".into(),
+            message: format!(
+                "sort_by/sorted_by key must be i64, f64, or str in v1; got key tag {key_tag}"
+            ),
+        });
+    }
+    // Snapshot keys + elements.
+    let mut elems: Vec<u64> = Vec::with_capacity(len);
+    let mut kvec: Vec<u64> = Vec::with_capacity(len);
+    for i in 0..len {
+        elems.push(unsafe { std::ptr::read_unaligned((*lst).data.cast::<u64>().add(i)) });
+        kvec.push(unsafe { std::ptr::read_unaligned((*keys).data.cast::<u64>().add(i)) });
+    }
+    let cmp = |a: usize, b: usize| -> std::cmp::Ordering {
+        let ka = kvec[a];
+        let kb = kvec[b];
+        match key_tag {
+            3 => (ka as i64).cmp(&(kb as i64)),
+            9 => {
+                let x = f64::from_bits(ka);
+                let y = f64::from_bits(kb);
+                match x.partial_cmp(&y) {
+                    Some(o) => o,
+                    None => match (x.is_nan(), y.is_nan()) {
+                        (true, true) => std::cmp::Ordering::Equal,
+                        (true, false) => std::cmp::Ordering::Greater,
+                        (false, true) => std::cmp::Ordering::Less,
+                        _ => std::cmp::Ordering::Equal,
+                    },
+                }
+            }
+            // TypeTag::Ref → str key pointers (kept reachable via `keys`).
+            _ => {
+                let sa = unsafe { read_str(ka as *const StringRepr) };
+                let sb = unsafe { read_str(kb as *const StringRepr) };
+                sa.cmp(&sb)
+            }
+        }
+    };
+    let mut idx: Vec<usize> = (0..len).collect();
+    // Stable sort to match Python's `sorted(key=...)` semantics.
+    idx.sort_by(|&a, &b| cmp(a, b));
     let data = unsafe { (*lst).data as *mut u64 };
     for (dst_i, &src_i) in idx.iter().enumerate() {
         unsafe { std::ptr::write_unaligned(data.add(dst_i), elems[src_i]) };
