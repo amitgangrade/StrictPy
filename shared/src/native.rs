@@ -148,6 +148,12 @@ pub enum NativeFn {
     /// In-place `xs.sort_by(key_fn)` — args:
     /// `[list_ptr, closure_ptr, key_tag_u32]`.
     ListSortBy = 112,
+    /// P2: `sorted_by` / `sort_by` with a *literal-lambda* key, lowered
+    /// compiler-side. The key function is inlined into an in-language loop
+    /// that builds a parallel key list; this native then sorts the data
+    /// list in place (stable) using those precomputed keys — no per-element
+    /// interpreter re-entry. Args: `[list_ptr, keys_ptr, key_tag_u32]`.
+    SortByPrecomputed = 1201,
     /// `StrCmp(a, b) -> i64` — lexicographic comparison of two StrictPy
     /// strings: negative if `a < b`, zero if equal, positive if `a > b`.
     /// Compiler-internal: the IR lowering of the `<` / `<=` / `>` / `>=`
@@ -3269,6 +3275,7 @@ impl NativeFn {
             1191 => Some(Self::GfxSetVsync),
             // ── container ops past the 90–119 block ──────────────────
             1200 => Some(Self::DictRemove),
+            1201 => Some(Self::SortByPrecomputed),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

@@ -4397,6 +4397,371 @@ fn lower_tuple_eq(
 /// Set comprehensions produce the same placeholder value as set *literals*
 /// today (the VM has no set runtime yet — see `Expr::Set`), but the loop and
 /// the body still lower so the element expressions are type-checked / emitted.
+/// P2: helper — resolve a lambda parameter's static type from the
+/// resolver's ast→Ty map, falling back to Unit.
+fn lambda_param_ty(ctx: &LowerCtx, p: &ast::Param) -> Ty {
+    ctx.typed
+        .resolved
+        .ast_type_to_ty
+        .get(&(ast_type_span(&p.ty).start, ast_type_span(&p.ty).end))
+        .cloned()
+        .unwrap_or(Ty::Primitive(PrimTy::Unit))
+}
+
+/// P2: resolve a lambda's return type from the resolver's ast→Ty map.
+fn lambda_ret_ty(ctx: &LowerCtx, return_ty: &ast::Type) -> Ty {
+    ctx.typed
+        .resolved
+        .ast_type_to_ty
+        .get(&(ast_type_span(return_ty).start, ast_type_span(return_ty).end))
+        .cloned()
+        .unwrap_or(Ty::Primitive(PrimTy::Unit))
+}
+
+/// P2: specialize `map`/`filter`/`reduce`/`sorted_by` with a *literal lambda*
+/// callback by inlining the lambda body into an in-language loop — the same
+/// shape comprehensions desugar to (see `lower_comprehension`). This removes
+/// the per-element interpreter re-entry of the M61a native HOFs: the body
+/// inlines and JITs as one function.
+///
+/// Returns `Some(value)` when it handled the call; `None` to fall through to
+/// the native path (non-literal callback, unsupported arity, etc.). Captured
+/// outer variables in the lambda body resolve naturally — `Expr::Ident`
+/// lowering is name-based against the enclosing `fb`'s slots, exactly like a
+/// comprehension's body reads enclosing-scope names.
+fn try_lower_hof_literal_lambda(
+    fb: &mut FuncBuilder,
+    ctx: &mut LowerCtx,
+    name: &str,
+    args: &[ast::Arg],
+    span: Span,
+) -> Option<ValueId> {
+    let result_ty = ctx.expr_ty(span);
+    let i64_ty = Ty::Primitive(PrimTy::I64);
+
+    // Pull a literal lambda out of `args[idx]`, or bail.
+    let as_lambda = |a: &ast::Arg| -> bool { matches!(&a.value, Expr::Lambda { .. }) };
+
+    match name {
+        "map" | "filter" if args.len() == 2 && as_lambda(&args[0]) => {
+            let is_map = name == "map";
+            let (lam_params, lam_body): (&[ast::Param], &Expr) = match &args[0].value {
+                Expr::Lambda { params, body, .. } => (params, body),
+                _ => return None,
+            };
+            if lam_params.len() != 1 {
+                return None;
+            }
+            let iter = &args[1].value;
+            let elem_ty = lambda_param_ty(ctx, &lam_params[0]);
+
+            // result collection (List). `map` → List[U]; `filter` → List[T].
+            let coll = fb.push_value(
+                result_ty.clone(),
+                ValueKind::Op { op: IROp::ArrayNew, args: vec![] },
+            );
+            let coll_slot = {
+                let n = format!("__hof_c_{}", fb.slot_ty.len());
+                let s = fb.alloc_slot(&n, result_ty.clone());
+                fb.emit_write_local(s, coll);
+                s
+            };
+
+            let arr = lower_expr(fb, ctx, iter);
+            let zero = fb.push_value(i64_ty.clone(), ValueKind::Const(IRConst::I64(0)));
+            let i_slot = {
+                let n = format!("__hof_i_{}", fb.slot_ty.len());
+                let s = fb.alloc_slot(&n, i64_ty.clone());
+                fb.emit_write_local(s, zero);
+                s
+            };
+            let len_v = fb.push_value(
+                i64_ty.clone(),
+                ValueKind::Op { op: IROp::ArrayLen, args: vec![arr] },
+            );
+            let n_slot = {
+                let n = format!("__hof_n_{}", fb.slot_ty.len());
+                let s = fb.alloc_slot(&n, i64_ty.clone());
+                fb.emit_write_local(s, len_v);
+                s
+            };
+            // Lambda parameter slot — the inlined body reads this by name.
+            let var_slot = fb.alloc_slot(&lam_params[0].name, elem_ty.clone());
+
+            let header = fb.new_block();
+            let body_b = fb.new_block();
+            let exit = fb.new_block();
+            fb.terminate(Terminator::Branch { target: header });
+
+            fb.switch_to(header);
+            let i_cur = fb.emit_read_local(i_slot);
+            let n_cur = fb.emit_read_local(n_slot);
+            let test = fb.push_value(
+                Ty::Primitive(PrimTy::Bool),
+                ValueKind::Op { op: IROp::ILt, args: vec![i_cur, n_cur] },
+            );
+            fb.terminate(Terminator::CondBranch { cond: test, t: body_b, f: exit });
+
+            fb.switch_to(body_b);
+            let i_now = fb.emit_read_local(i_slot);
+            let elt = fb.push_value(
+                elem_ty.clone(),
+                ValueKind::Op { op: IROp::ArrayGet, args: vec![arr, i_now] },
+            );
+            fb.emit_write_local(var_slot, elt);
+
+            if is_map {
+                // append fn(x) to coll
+                let ev = lower_expr(fb, ctx, lam_body);
+                let coll_v = fb.emit_read_local(coll_slot);
+                fb.push_value(
+                    Ty::Primitive(PrimTy::Unit),
+                    ValueKind::Op { op: IROp::ListPush, args: vec![coll_v, ev] },
+                );
+            } else {
+                // filter: if fn(x): append x
+                let keep = lower_expr(fb, ctx, lam_body);
+                let keep_b = fb.new_block();
+                let skip_b = fb.new_block();
+                fb.terminate(Terminator::CondBranch { cond: keep, t: keep_b, f: skip_b });
+                fb.switch_to(keep_b);
+                let x_v = fb.emit_read_local(var_slot);
+                let coll_v = fb.emit_read_local(coll_slot);
+                fb.push_value(
+                    Ty::Primitive(PrimTy::Unit),
+                    ValueKind::Op { op: IROp::ListPush, args: vec![coll_v, x_v] },
+                );
+                fb.terminate(Terminator::Branch { target: skip_b });
+                fb.switch_to(skip_b);
+            }
+
+            let i_again = fb.emit_read_local(i_slot);
+            let one = fb.push_value(i64_ty.clone(), ValueKind::Const(IRConst::I64(1)));
+            let next_i = fb.push_value(
+                i64_ty.clone(),
+                ValueKind::Op { op: IROp::IAdd, args: vec![i_again, one] },
+            );
+            fb.emit_write_local(i_slot, next_i);
+            fb.terminate(Terminator::Branch { target: header });
+
+            fb.switch_to(exit);
+            Some(fb.emit_read_local(coll_slot))
+        }
+
+        "reduce" if args.len() == 3 && as_lambda(&args[0]) => {
+            let (lam_params, lam_body): (&[ast::Param], &Expr) = match &args[0].value {
+                Expr::Lambda { params, body, .. } => (params, body),
+                _ => return None,
+            };
+            if lam_params.len() != 2 {
+                return None;
+            }
+            let iter = &args[1].value;
+            let acc_ty = lambda_param_ty(ctx, &lam_params[0]);
+            let elem_ty = lambda_param_ty(ctx, &lam_params[1]);
+
+            // init → accumulator slot (also the lambda's first param slot).
+            let init_v = lower_expr(fb, ctx, &args[2].value);
+            let acc_slot = fb.alloc_slot(&lam_params[0].name, acc_ty.clone());
+            fb.emit_write_local(acc_slot, init_v);
+
+            let arr = lower_expr(fb, ctx, iter);
+            let zero = fb.push_value(i64_ty.clone(), ValueKind::Const(IRConst::I64(0)));
+            let i_slot = {
+                let n = format!("__hof_i_{}", fb.slot_ty.len());
+                let s = fb.alloc_slot(&n, i64_ty.clone());
+                fb.emit_write_local(s, zero);
+                s
+            };
+            let len_v = fb.push_value(
+                i64_ty.clone(),
+                ValueKind::Op { op: IROp::ArrayLen, args: vec![arr] },
+            );
+            let n_slot = {
+                let n = format!("__hof_n_{}", fb.slot_ty.len());
+                let s = fb.alloc_slot(&n, i64_ty.clone());
+                fb.emit_write_local(s, len_v);
+                s
+            };
+            let elem_slot = fb.alloc_slot(&lam_params[1].name, elem_ty.clone());
+
+            let header = fb.new_block();
+            let body_b = fb.new_block();
+            let exit = fb.new_block();
+            fb.terminate(Terminator::Branch { target: header });
+
+            fb.switch_to(header);
+            let i_cur = fb.emit_read_local(i_slot);
+            let n_cur = fb.emit_read_local(n_slot);
+            let test = fb.push_value(
+                Ty::Primitive(PrimTy::Bool),
+                ValueKind::Op { op: IROp::ILt, args: vec![i_cur, n_cur] },
+            );
+            fb.terminate(Terminator::CondBranch { cond: test, t: body_b, f: exit });
+
+            fb.switch_to(body_b);
+            let i_now = fb.emit_read_local(i_slot);
+            let elt = fb.push_value(
+                elem_ty.clone(),
+                ValueKind::Op { op: IROp::ArrayGet, args: vec![arr, i_now] },
+            );
+            fb.emit_write_local(elem_slot, elt);
+            // acc = fn(acc, x) — body reads acc/x slots by name.
+            let nv = lower_expr(fb, ctx, lam_body);
+            fb.emit_write_local(acc_slot, nv);
+
+            let i_again = fb.emit_read_local(i_slot);
+            let one = fb.push_value(i64_ty.clone(), ValueKind::Const(IRConst::I64(1)));
+            let next_i = fb.push_value(
+                i64_ty.clone(),
+                ValueKind::Op { op: IROp::IAdd, args: vec![i_again, one] },
+            );
+            fb.emit_write_local(i_slot, next_i);
+            fb.terminate(Terminator::Branch { target: header });
+
+            fb.switch_to(exit);
+            Some(fb.emit_read_local(acc_slot))
+        }
+
+        "sorted_by" if args.len() == 2 && as_lambda(&args[1]) => {
+            // Schwartzian: compute keys once into a parallel list via the
+            // inlined key fn, copy the data into a fresh list, then sort the
+            // copy in place using the precomputed keys (one native call total).
+            let (lam_params, lam_body, lam_ret): (&[ast::Param], &Expr, Ty) =
+                match &args[1].value {
+                    Expr::Lambda { params, body, return_ty, .. } =>
+                        (params, body, lambda_ret_ty(ctx, return_ty)),
+                    _ => return None,
+                };
+            if lam_params.len() != 1 {
+                return None;
+            }
+            let key_tag = sort_type_tag_for(&lam_ret);
+            // v1 only sorts i64/f64/str keys; bail to native otherwise so the
+            // native path emits the proper TypeError (keeps semantics identical).
+            if !matches!(key_tag, 3 | 9 | 11) {
+                return None;
+            }
+            let iter = &args[0].value;
+            let elem_ty = lambda_param_ty(ctx, &lam_params[0]);
+            let key_list_ty = Ty::Generic {
+                base: TypeCtor::List,
+                args: vec![lam_ret.clone()],
+            };
+
+            // Source list value.
+            let arr = lower_expr(fb, ctx, iter);
+
+            // dst = copy of source (fresh List[T]); we sort the copy in place.
+            let dst = fb.push_value(
+                result_ty.clone(),
+                ValueKind::Op { op: IROp::ArrayNew, args: vec![] },
+            );
+            let dst_slot = {
+                let n = format!("__hof_d_{}", fb.slot_ty.len());
+                let s = fb.alloc_slot(&n, result_ty.clone());
+                fb.emit_write_local(s, dst);
+                s
+            };
+            // keys = fresh List[KeyTy].
+            let keys = fb.push_value(
+                key_list_ty.clone(),
+                ValueKind::Op { op: IROp::ArrayNew, args: vec![] },
+            );
+            let keys_slot = {
+                let n = format!("__hof_k_{}", fb.slot_ty.len());
+                let s = fb.alloc_slot(&n, key_list_ty.clone());
+                fb.emit_write_local(s, keys);
+                s
+            };
+
+            let zero = fb.push_value(i64_ty.clone(), ValueKind::Const(IRConst::I64(0)));
+            let i_slot = {
+                let n = format!("__hof_i_{}", fb.slot_ty.len());
+                let s = fb.alloc_slot(&n, i64_ty.clone());
+                fb.emit_write_local(s, zero);
+                s
+            };
+            let len_v = fb.push_value(
+                i64_ty.clone(),
+                ValueKind::Op { op: IROp::ArrayLen, args: vec![arr] },
+            );
+            let n_slot = {
+                let n = format!("__hof_n_{}", fb.slot_ty.len());
+                let s = fb.alloc_slot(&n, i64_ty.clone());
+                fb.emit_write_local(s, len_v);
+                s
+            };
+            let var_slot = fb.alloc_slot(&lam_params[0].name, elem_ty.clone());
+
+            let header = fb.new_block();
+            let body_b = fb.new_block();
+            let exit = fb.new_block();
+            fb.terminate(Terminator::Branch { target: header });
+
+            fb.switch_to(header);
+            let i_cur = fb.emit_read_local(i_slot);
+            let n_cur = fb.emit_read_local(n_slot);
+            let test = fb.push_value(
+                Ty::Primitive(PrimTy::Bool),
+                ValueKind::Op { op: IROp::ILt, args: vec![i_cur, n_cur] },
+            );
+            fb.terminate(Terminator::CondBranch { cond: test, t: body_b, f: exit });
+
+            fb.switch_to(body_b);
+            let i_now = fb.emit_read_local(i_slot);
+            let elt = fb.push_value(
+                elem_ty.clone(),
+                ValueKind::Op { op: IROp::ArrayGet, args: vec![arr, i_now] },
+            );
+            fb.emit_write_local(var_slot, elt);
+            // push element into dst copy
+            let dst_v = fb.emit_read_local(dst_slot);
+            fb.push_value(
+                Ty::Primitive(PrimTy::Unit),
+                ValueKind::Op { op: IROp::ListPush, args: vec![dst_v, elt] },
+            );
+            // compute key = key_fn(x), push into keys
+            let kv = lower_expr(fb, ctx, lam_body);
+            let keys_v = fb.emit_read_local(keys_slot);
+            fb.push_value(
+                Ty::Primitive(PrimTy::Unit),
+                ValueKind::Op { op: IROp::ListPush, args: vec![keys_v, kv] },
+            );
+
+            let i_again = fb.emit_read_local(i_slot);
+            let one = fb.push_value(i64_ty.clone(), ValueKind::Const(IRConst::I64(1)));
+            let next_i = fb.push_value(
+                i64_ty.clone(),
+                ValueKind::Op { op: IROp::IAdd, args: vec![i_again, one] },
+            );
+            fb.emit_write_local(i_slot, next_i);
+            fb.terminate(Terminator::Branch { target: header });
+
+            fb.switch_to(exit);
+            // sort dst in place by precomputed keys.
+            let dst_v = fb.emit_read_local(dst_slot);
+            let keys_v = fb.emit_read_local(keys_slot);
+            let tag_v = fb.push_value(
+                i64_ty.clone(),
+                ValueKind::Const(IRConst::I64(key_tag as i64)),
+            );
+            fb.push_value(
+                Ty::Primitive(PrimTy::Unit),
+                ValueKind::Op {
+                    op: IROp::NativeCall {
+                        native_id: NativeFn::SortByPrecomputed as u32,
+                    },
+                    args: vec![dst_v, keys_v, tag_v],
+                },
+            );
+            Some(fb.emit_read_local(dst_slot))
+        }
+
+        _ => None,
+    }
+}
+
 fn lower_comprehension(fb: &mut FuncBuilder, ctx: &mut LowerCtx, e: &Expr) -> ValueId {
     let (kind, var, var_ty, iter, body, value, cond, span) = match e {
         Expr::Comprehension { kind, var, var_ty, iter, body, value, cond, span, .. } =>
@@ -4873,6 +5238,22 @@ fn lower_call(
     // arg lowering, so every existing call path below sees the unchanged ABI.
     let normalized = normalize_call_args(ctx, callee, args);
     let args: &[ast::Arg] = normalized.as_deref().unwrap_or(args);
+
+    // P2: specialize `map`/`filter`/`reduce`/`sorted_by` when the callback is a
+    // *literal lambda*. Instead of emitting a NativeCall that re-enters the
+    // interpreter once per element (a boundary that dominates the M61a HOF
+    // builtins), inline the lambda body into the same in-language loop that
+    // comprehensions desugar to — the body then JITs as one function with no
+    // per-element call. Non-literal callbacks (a closure in a variable) keep
+    // the native fallback below. Only applies to the prelude builtins, never a
+    // user function that happens to share the name.
+    if let Expr::Ident { name, .. } = callee {
+        if ctx.fn_id_by_name.get(name).is_none() {
+            if let Some(v) = try_lower_hof_literal_lambda(fb, ctx, name, args, span) {
+                return v;
+            }
+        }
+    }
 
     // M19: namespaced stdlib call — `sys.exit(0)`.  Detect *before* the
     // generic Ident handling so the callee's Attr isn't lowered as a
@@ -5940,6 +6321,118 @@ fn lower_method_call(
     // key function. NativeFn::ListSortBy wants [list, closure, key_tag];
     // `arg_vs` is already [list, closure], so append the key-type tag
     // inferred from the key fn's return type.
+    // P2: in-place `xs.sort_by(fn(s) -> K: ...)` with a *literal lambda* key.
+    // Schwartzian transform inlined: build a parallel key list via the inlined
+    // key fn (no per-element interpreter re-entry), then sort `xs` in place by
+    // the precomputed keys (one native call). `recv` is the already-lowered
+    // list value. Non-literal callbacks fall through to the native path below.
+    if method == "sort_by" && args.len() == 1 {
+        if let Ty::Generic { base: TypeCtor::List, .. } = &recv_ty {
+            if let Expr::Lambda { params, body, return_ty, .. } = &args[0].value {
+                if params.len() == 1 {
+                    let lam_ret = lambda_ret_ty(ctx, return_ty);
+                    let key_tag = sort_type_tag_for(&lam_ret);
+                    if matches!(key_tag, 3 | 9 | 11) {
+                        let i64_ty = Ty::Primitive(PrimTy::I64);
+                        let elem_ty = lambda_param_ty(ctx, &params[0]);
+                        let key_list_ty = Ty::Generic {
+                            base: TypeCtor::List,
+                            args: vec![lam_ret.clone()],
+                        };
+                        // keys = fresh List[KeyTy]
+                        let keys = fb.push_value(
+                            key_list_ty.clone(),
+                            ValueKind::Op { op: IROp::ArrayNew, args: vec![] },
+                        );
+                        let keys_slot = {
+                            let n = format!("__hof_k_{}", fb.slot_ty.len());
+                            let s = fb.alloc_slot(&n, key_list_ty.clone());
+                            fb.emit_write_local(s, keys);
+                            s
+                        };
+                        let zero =
+                            fb.push_value(i64_ty.clone(), ValueKind::Const(IRConst::I64(0)));
+                        let i_slot = {
+                            let n = format!("__hof_i_{}", fb.slot_ty.len());
+                            let s = fb.alloc_slot(&n, i64_ty.clone());
+                            fb.emit_write_local(s, zero);
+                            s
+                        };
+                        let len_v = fb.push_value(
+                            i64_ty.clone(),
+                            ValueKind::Op { op: IROp::ArrayLen, args: vec![recv] },
+                        );
+                        let n_slot = {
+                            let n = format!("__hof_n_{}", fb.slot_ty.len());
+                            let s = fb.alloc_slot(&n, i64_ty.clone());
+                            fb.emit_write_local(s, len_v);
+                            s
+                        };
+                        let var_slot = fb.alloc_slot(&params[0].name, elem_ty.clone());
+
+                        let header = fb.new_block();
+                        let body_b = fb.new_block();
+                        let exit = fb.new_block();
+                        fb.terminate(Terminator::Branch { target: header });
+
+                        fb.switch_to(header);
+                        let i_cur = fb.emit_read_local(i_slot);
+                        let n_cur = fb.emit_read_local(n_slot);
+                        let test = fb.push_value(
+                            Ty::Primitive(PrimTy::Bool),
+                            ValueKind::Op { op: IROp::ILt, args: vec![i_cur, n_cur] },
+                        );
+                        fb.terminate(Terminator::CondBranch {
+                            cond: test,
+                            t: body_b,
+                            f: exit,
+                        });
+
+                        fb.switch_to(body_b);
+                        let i_now = fb.emit_read_local(i_slot);
+                        let elt = fb.push_value(
+                            elem_ty.clone(),
+                            ValueKind::Op { op: IROp::ArrayGet, args: vec![recv, i_now] },
+                        );
+                        fb.emit_write_local(var_slot, elt);
+                        let kv = lower_expr(fb, ctx, body);
+                        let keys_v = fb.emit_read_local(keys_slot);
+                        fb.push_value(
+                            Ty::Primitive(PrimTy::Unit),
+                            ValueKind::Op { op: IROp::ListPush, args: vec![keys_v, kv] },
+                        );
+
+                        let i_again = fb.emit_read_local(i_slot);
+                        let one =
+                            fb.push_value(i64_ty.clone(), ValueKind::Const(IRConst::I64(1)));
+                        let next_i = fb.push_value(
+                            i64_ty.clone(),
+                            ValueKind::Op { op: IROp::IAdd, args: vec![i_again, one] },
+                        );
+                        fb.emit_write_local(i_slot, next_i);
+                        fb.terminate(Terminator::Branch { target: header });
+
+                        fb.switch_to(exit);
+                        let keys_v = fb.emit_read_local(keys_slot);
+                        let tag_v = fb.push_value(
+                            i64_ty.clone(),
+                            ValueKind::Const(IRConst::I64(key_tag as i64)),
+                        );
+                        return fb.push_value(
+                            ret_ty,
+                            ValueKind::Op {
+                                op: IROp::NativeCall {
+                                    native_id: NativeFn::SortByPrecomputed as u32,
+                                },
+                                args: vec![recv, keys_v, tag_v],
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     if method == "sort_by" {
         if let Ty::Generic { base: TypeCtor::List, .. } = &recv_ty {
             if let Some(key_arg) = args.first() {
