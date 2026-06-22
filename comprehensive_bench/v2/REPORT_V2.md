@@ -6,6 +6,46 @@ _Generated 2026-06-11 · StrictPy `spy 0.2.0` (commit 3825315, branch `perf/sing
 
 Speedup = CPython time ÷ StrictPy time. **>1 means StrictPy is faster.**
 
+> **The sections below are dated milestone snapshots, kept for provenance. The current standing is at the top here. For the live per-benchmark table, see [REPORT_V2_tables.md](REPORT_V2_tables.md) (auto-generated from the latest run).**
+
+---
+
+## ✅ Current standing — StrictPy is net-faster than CPython (2026-06-22)
+
+Run on `main` after all of: P0 (de-lock dict/set + mimalloc, #20), GC-during-JIT (#21) + its O(n²) fix (#23), strings round 2 + dict-hash + struct-writer (#18), and P1 (JIT closure opcodes + tuple scalar replacement, #22). 59/59 byte-identical.
+
+| | run-3 (prev published) | **current `main`** |
+|---|---|---|
+| **Geomean speedup (all 59)** | 0.96× | **1.28× — net faster than CPython** |
+| Wins (≥1.15×) / ties / losses | 26 / 0 / 33 | **28 / 4 / 27** |
+| Core compute | 4.72× | **4.87×** |
+| Systems & concurrency | 1.39× | **1.80×** |
+| Data structures | 0.58× (1.7× slower) | **0.69× (1.4× slower)** |
+| Strings & text | 0.15→0.31× | **0.59× (1.7× slower)** |
+
+**This is the first run where the overall geometric mean is above 1.0×** — averaged across the whole 59-program suite, StrictPy now beats CPython 3.12. Every track improved; strings nearly doubled again.
+
+**Biggest gains since run-3** (CPython-relative ratio, lower = better for StrictPy):
+
+| Benchmark | run-3 | now |
+|---|---|---|
+| `str_http_parse` | 12.5× slower | **3.0×** |
+| `str_fstring_format` | 8.2× | **2.8×** |
+| `str_csv_parse` | 5.8× | **3.3×** |
+| `str_template_render` | 5.1× | **2.6×** |
+| `str_join_build` | 5.4× | **2.1×** |
+| `sys_struct_pack` | 4.2× | **2.1×** |
+| `str_methods_mix` | 4.8× | **2.7×** |
+| `ds_dict_ops` | 5.6× | **4.0×** |
+| `ds_closures_hof` | 3.8× | **2.5×** (P1 closure JIT) |
+| `ds_class_alloc` | 135× (regressed) | **0.71× — faster than CPython** (GC fix #23) |
+
+Notable new wins vs CPython: `str_slice_scan` 0.72×, `str_regex` 0.50×, `ds_tuple_ops` 0.89× (P1 scalar replacement), `str_concat_build` 0.77×.
+
+**Remaining losers (the P2/P3/P4 + future targets), worst first:** `ds_dict_ops` 4.0× (key `str()` construction, not hashing), `sys_file_io` 3.8× (no buffered IO), `ds_set_ops` 3.3× (dict-emulated), the string-formatting cluster (`str_csv_parse` 3.3×, `str_http_parse` 3.0×, `str_fstring_format` 2.8×, `str_split_scan` 2.8×, `str_methods_mix` 2.7×, `str_template_render` 2.6×), `ds_closures_hof` 2.5× / `ds_sort_by_key` 1.7× (P2), `ds_exceptions` 2.3× (P3), `ds_nullable` 1.7× / `ds_generics` now ~1.0× (P4 — generics already near parity).
+
+_Caveat: cross-run **ratios** are the fair comparison (each pair runs interleaved); absolute ms vary with machine load between runs. Artifacts: [results_v2_main_postfix.json](results_v2_main_postfix.json) (this run), [results_v2_run3.json](results_v2_run3.json) (prev baseline)._
+
 ---
 
 ## ⏩⏩ Run-3 update — parity reached (after dict-FxHash + batch-struct + char-scan VM work)
