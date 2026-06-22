@@ -26,7 +26,7 @@
 //! is deallocated. Survivors get their mark bit cleared.
 
 use std::alloc::{alloc as sys_alloc, dealloc, Layout};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -206,10 +206,16 @@ impl Heap {
 
     /// Run a full mark-sweep collection.
     pub fn collect(&mut self, roots: &[&[u64]]) {
-        // 1. Build a set of live object pointers.
-        let mut alive: HashSet<usize> = HashSet::with_capacity(self.objects.len());
+        // 1. Build a map of live object pointer -> allocation size. The size
+        //    is needed to bound the conservative scan of each Class/Closure/
+        //    Generator object; keeping it here makes that lookup O(1). (A
+        //    prior `size_of` did a linear scan of `self.objects` per traced
+        //    object, making each collection O(n^2) — catastrophic once a
+        //    JIT'd allocation loop started collecting against a large live
+        //    heap. See the GC pacing/cost fix.)
+        let mut alive: HashMap<usize, usize> = HashMap::with_capacity(self.objects.len());
         for o in &self.objects {
-            alive.insert(o.ptr as usize);
+            alive.insert(o.ptr as usize, o.size);
         }
 
         // 2. Mark from roots, then trace.
@@ -217,7 +223,7 @@ impl Heap {
         for slot_window in roots {
             for &slot in *slot_window {
                 let p = slot as usize;
-                if alive.contains(&p) {
+                if alive.contains_key(&p) {
                     let obj = p as *mut u8;
                     // SAFETY: alive set guarantees `obj` is a valid header.
                     unsafe {
@@ -278,7 +284,7 @@ impl Heap {
     unsafe fn trace_object(
         &self,
         obj: *mut u8,
-        alive: &HashSet<usize>,
+        alive: &HashMap<usize, usize>,
         worklist: &mut Vec<*mut u8>,
     ) {
         let hdr = obj as *mut ObjectHeader;
@@ -308,8 +314,13 @@ impl Heap {
                 // The fixed numeric fields (fn_id / state / saved_pc / nregs)
                 // are scanned too, but a stray integer that aliases a live
                 // heap address is merely kept alive — never unsafe.
-                let total_size = self.size_of(obj);
                 let header_size = std::mem::size_of::<ObjectHeader>();
+                // O(1) size lookup from the live map built at the top of
+                // `collect` (was an O(n) linear scan — the O(n^2) bug).
+                let total_size = alive
+                    .get(&(obj as usize))
+                    .copied()
+                    .unwrap_or(header_size);
                 let mut off = header_size;
                 while off + 8 <= total_size {
                     let slot_ptr = obj.add(off) as *const u64;
@@ -333,9 +344,9 @@ impl Heap {
         }
     }
 
-    unsafe fn maybe_push(val: u64, alive: &HashSet<usize>, worklist: &mut Vec<*mut u8>) {
+    unsafe fn maybe_push(val: u64, alive: &HashMap<usize, usize>, worklist: &mut Vec<*mut u8>) {
         let p = val as usize;
-        if alive.contains(&p) {
+        if alive.contains_key(&p) {
             let inner = p as *mut u8;
             let inner_hdr = inner as *mut ObjectHeader;
             if !is_marked(inner_hdr) {
@@ -343,15 +354,6 @@ impl Heap {
                 worklist.push(inner);
             }
         }
-    }
-
-    fn size_of(&self, ptr: *mut u8) -> usize {
-        for o in &self.objects {
-            if o.ptr == ptr {
-                return o.size;
-            }
-        }
-        std::mem::size_of::<ObjectHeader>()
     }
 
     /// Free any heap-owned buffers reachable only through this object.
