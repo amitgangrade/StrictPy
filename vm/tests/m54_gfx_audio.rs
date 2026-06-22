@@ -1,3 +1,4 @@
+#![cfg(feature = "graphics")]
 //! M54 integration tests for the GFX audio functions (SDL_mixer).
 
 use std::fs;

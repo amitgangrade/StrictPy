@@ -1,3 +1,4 @@
+#![cfg(feature = "graphics")]
 //! M52 integration tests for the `gfx` module.
 
 use std::fs;

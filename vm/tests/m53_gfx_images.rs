@@ -1,3 +1,4 @@
+#![cfg(feature = "graphics")]
 //! M53 integration tests for the GFX image functions.
 
 use std::fs;
