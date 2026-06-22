@@ -9300,6 +9300,25 @@ fn write_pretty(v: &serde_json::Value, indent: usize, level: usize, out: &mut St
 /// Set the high bit so payload values like `0` (the first value sent by
 /// producer.spy) round-trip cleanly through Some(0). M3 lowers `is none`
 /// to a comparison against this exact constant.
+///
+/// This is also the **niche** that makes `T?` allocation-free for every `T`,
+/// primitive or reference: a `T?` is just `T`'s bits, with this one reserved
+/// pattern meaning `none` (see compiler/src/ir.rs `Expr::NullCoalesce` and
+/// `AstBinOp::Is`, which lower `??` / `is none` to register `RefEq` against
+/// `ConstNone`; the JIT mirrors it as `Op::ConstNoneSentinel`). There is no
+/// heap box for primitive optionals — see docs/thesis/agent_reports/
+/// p4_nullable_niche.md.
+///
+/// GC-SAFETY INVARIANT (do not weaken): the conservative collector
+/// (vm/src/gc.rs) treats every u64 as a potential pointer and keeps an object
+/// alive iff its bits match a real allocation. The top bit set here puts the
+/// sentinel in the non-canonical / kernel address half, which the system
+/// allocator never hands out, so `none` can never be mistaken for a live heap
+/// pointer, and a *reference* optional holding `Some(ptr)` still carries a real
+/// low-half address that is traced normally. Moving the marker into low /
+/// canonical bits, or packing a tag into the payload, would risk either
+/// retaining garbage or freeing a live object under a reference — keep the
+/// high-bit scheme.
 pub(crate) const NONE_SENTINEL: u64 = 0x8000_0000_0000_0000;
 
 fn parse_mode(s: &str) -> Result<(bool, bool, bool, bool, bool), VmError> {
