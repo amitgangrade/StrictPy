@@ -8,3 +8,4 @@
 pub mod constant_fold;
 pub mod copy_prop;
 pub mod dead_code;
+pub mod tuple_scalar;
