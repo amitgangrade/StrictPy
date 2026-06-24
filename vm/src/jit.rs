@@ -113,6 +113,9 @@ pub struct Jit {
     /// register-resident pointers without walking machine stacks.
     m33_safepoint_push_id: Option<FuncId>,
     m33_safepoint_pop_id: Option<FuncId>,
+    /// Returns the stable per-thread shadow-state address; cached once per
+    /// JIT'd function and used by the inline push/pop sequences.
+    m33_shadow_state_id: Option<FuncId>,
 }
 
 impl Jit {
@@ -176,6 +179,12 @@ impl Jit {
             "rt_shadow_pop",
             crate::stackmap_registry::rt_shadow_pop as *const u8,
         );
+        // Inline-publish: the JIT reads/writes the stable per-thread state
+        // struct directly; `rt_shadow_state` hands it the address.
+        builder.symbol(
+            "rt_shadow_state",
+            crate::stackmap_registry::rt_shadow_state as *const u8,
+        );
         let module = JITModule::new(builder);
         Self {
             module: Some(module),
@@ -192,6 +201,7 @@ impl Jit {
             rt_closure_call_id: None,
             m33_safepoint_push_id: None,
             m33_safepoint_pop_id: None,
+            m33_shadow_state_id: None,
         }
     }
 
@@ -261,6 +271,7 @@ impl Jit {
         let rt_closure_call_sig = make_rt_closure_call_sig();
         let m33_safepoint_push_sig = make_m33_safepoint_push_sig();
         let m33_safepoint_pop_sig = make_m33_safepoint_pop_sig();
+        let m33_shadow_state_sig = make_m33_shadow_state_sig();
 
         // Declare the native trampoline.
         let m = self.module.as_mut().expect("jit module live");
@@ -370,6 +381,16 @@ impl Jit {
         };
         self.m33_safepoint_pop_id = Some(m33_safepoint_pop_id);
 
+        let m33_shadow_state_id = match m.declare_function(
+            "rt_shadow_state",
+            Linkage::Import,
+            &m33_shadow_state_sig,
+        ) {
+            Ok(id) => id,
+            Err(_) => return (0, module.functions.len()),
+        };
+        self.m33_shadow_state_id = Some(m33_shadow_state_id);
+
         // Declare every JIT-eligible function up front for cross-calls.
         for (i, f) in module.functions.iter().enumerate() {
             if decoded[i].is_some() {
@@ -415,8 +436,12 @@ impl Jit {
             let rt_closure_call_ref = m.declare_func_in_func(rt_cc_id, &mut ctx.func);
             let m33_safepoint_push_ref =
                 m.declare_func_in_func(m33_safepoint_push_id, &mut ctx.func);
-            let m33_safepoint_pop_ref =
-                m.declare_func_in_func(m33_safepoint_pop_id, &mut ctx.func);
+            // rt_shadow_pop is no longer called by JIT'd code (pop is inline);
+            // keep the FuncId declared for the exported symbol/tests, but we
+            // don't import it per-function.
+            let _ = m33_safepoint_pop_id;
+            let m33_shadow_state_ref =
+                m.declare_func_in_func(m33_shadow_state_id, &mut ctx.func);
 
             let helpers = RuntimeHelpers {
                 rt_list_push: rt_list_push_ref,
@@ -427,7 +452,7 @@ impl Jit {
                 rt_closure_new: rt_closure_new_ref,
                 rt_closure_call: rt_closure_call_ref,
                 m33_safepoint_push: m33_safepoint_push_ref,
-                m33_safepoint_pop: m33_safepoint_pop_ref,
+                m33_shadow_state: m33_shadow_state_ref,
             };
 
             let ok = translate_function(
@@ -620,7 +645,9 @@ struct RuntimeHelpers {
     /// M33 shadow-stack publishers, called around every allocation
     /// helper so the GC sees this frame's register-resident pointers.
     m33_safepoint_push: FuncRef,
-    m33_safepoint_pop: FuncRef,
+    /// `rt_shadow_state() -> *mut ShadowState`. Called once per function to
+    /// obtain the stable per-thread state pointer for inline push/pop.
+    m33_shadow_state: FuncRef,
 }
 
 /// `rt_virtual_call(vm, vtable_slot, args_ptr, n_args) -> u64`.
@@ -667,6 +694,14 @@ fn make_m33_safepoint_push_sig() -> Signature {
 /// `rt_shadow_pop()` — M33 root unpublisher.
 fn make_m33_safepoint_pop_sig() -> Signature {
     Signature::new(host_call_conv())
+}
+
+/// `rt_shadow_state() -> *mut ShadowState` — returns the stable per-thread
+/// shadow-state struct address used by the inline push/pop sequences.
+fn make_m33_shadow_state_sig() -> Signature {
+    let mut sig = Signature::new(host_call_conv());
+    sig.returns.push(AbiParam::new(types::I64));
+    sig
 }
 
 /// Emit a stub body that returns 0 immediately. Used when translation
@@ -747,6 +782,16 @@ fn translate_function(
         builder.def_var(reg_var[i], zero64);
     }
 
+    // M33 inline-publish: fetch the stable per-thread shadow-state address
+    // once, here in the entry block, and cache it. Every inline push/pop in
+    // this function reuses this value. The address lives in thread-local
+    // storage and is stable for the life of the thread, so caching is sound
+    // (a slow-path grow may move the backing Vec, but the JIT reloads
+    // `base`/`cap`/`depth` from *this* struct on every push, so it sees the
+    // updated pointer).
+    let m33_state_call = builder.ins().call(helpers.m33_shadow_state, &[]);
+    let m33_state_ptr = builder.inst_results(m33_state_call)[0];
+
     // Group ops by block.
     let mut by_block: HashMap<usize, Vec<&decompile::DecodedOp>> = HashMap::new();
     let mut current_block_pc = entry_pc;
@@ -781,7 +826,7 @@ fn translate_function(
         rt_closure_call_ref: helpers.rt_closure_call,
         m33_shadow_slot,
         m33_safepoint_push_ref: helpers.m33_safepoint_push,
-        m33_safepoint_pop_ref: helpers.m33_safepoint_pop,
+        m33_state_ptr,
         module,
     };
 
@@ -860,8 +905,14 @@ struct Translator<'a> {
     /// heap-allocating runtime helper call and published via
     /// `rt_shadow_push` so the GC can scan it as a root window.
     m33_shadow_slot: cranelift::codegen::ir::StackSlot,
+    /// `rt_shadow_push` slow-path/overflow grow helper. Called inline only
+    /// when the fast path finds the backing store full.
     m33_safepoint_push_ref: FuncRef,
-    m33_safepoint_pop_ref: FuncRef,
+    /// Cached result of `rt_shadow_state()` for this function: the stable
+    /// per-thread `ShadowState` address. Computed once at entry and reused
+    /// by every inline push/pop. The address is thread-local-stable so this
+    /// is valid for the whole function.
+    m33_state_ptr: cranelift::codegen::ir::Value,
     module: &'a Module,
 }
 
@@ -946,15 +997,77 @@ impl<'a> Translator<'a> {
             .ins()
             .stack_addr(types::I64, self.m33_shadow_slot, 0);
         let len_v = self.builder.ins().iconst(types::I64, nregs as i64);
+
+        // Inline PUSH (replaces the rt_shadow_push call). The state struct
+        // layout (see stackmap_registry::ShadowState, #[repr(C)]):
+        //   [0]  base  : *mut ShadowFrame
+        //   [8]  depth : usize
+        //   [16] cap   : usize
+        // ShadowFrame is { buf @0, len @8 }, size 16.
+        let state = self.m33_state_ptr;
+        let trusted = MemFlags::trusted();
+        // Load depth and cap (base is reloaded only on the fast path, after
+        // we know depth < cap, so a slow-path grow that moved the Vec is
+        // always picked up here).
+        let depth = self.builder.ins().load(types::I64, trusted, state, 8);
+        let cap = self.builder.ins().load(types::I64, trusted, state, 16);
+
+        let fast_blk = self.builder.create_block();
+        let slow_blk = self.builder.create_block();
+        let merge_blk = self.builder.create_block();
+
+        // if depth < cap -> fast, else -> slow.
+        let lt = self.builder.ins().icmp(
+            cranelift::codegen::ir::condcodes::IntCC::UnsignedLessThan,
+            depth,
+            cap,
+        );
+        self.builder
+            .ins()
+            .brif(lt, fast_blk, &[], slow_blk, &[]);
+        // Both have a single predecessor (this block); safe to seal now.
+        self.builder.seal_block(fast_blk);
+        self.builder.seal_block(slow_blk);
+
+        // ── fast path: base[depth] = (buf, len); depth += 1 ──
+        self.builder.switch_to_block(fast_blk);
+        let base = self.builder.ins().load(types::I64, trusted, state, 0);
+        // off = depth * 16
+        let off = self.builder.ins().imul_imm(depth, 16);
+        let slot_addr = self.builder.ins().iadd(base, off);
+        self.builder
+            .ins()
+            .store(trusted, buf_addr, slot_addr, 0);
+        self.builder.ins().store(trusted, len_v, slot_addr, 8);
+        let depth1 = self.builder.ins().iadd_imm(depth, 1);
+        self.builder.ins().store(trusted, depth1, state, 8);
+        self.builder.ins().jump(merge_blk, &[]);
+
+        // ── slow path: call rt_shadow_push(buf, len) (grows + syncs) ──
+        self.builder.switch_to_block(slow_blk);
         self.builder
             .ins()
             .call(self.m33_safepoint_push_ref, &[buf_addr, len_v]);
+        self.builder.ins().jump(merge_blk, &[]);
+
+        // ── merge: continue emitting into this block ──
+        self.builder.seal_block(merge_blk);
+        self.builder.switch_to_block(merge_blk);
     }
 
     /// M33: pop the matching shadow-stack window after the helper call
     /// returns. Must balance every prior [`Self::m33_safepoint_enter`].
+    ///
+    /// Inline POP (replaces the rt_shadow_pop call): load depth, store
+    /// depth - 1. No call. (depth is guaranteed > 0 here because every pop
+    /// is emitted to balance a prior push in the same straight-line
+    /// region.)
     fn m33_safepoint_leave(&mut self) {
-        self.builder.ins().call(self.m33_safepoint_pop_ref, &[]);
+        let state = self.m33_state_ptr;
+        let trusted = MemFlags::trusted();
+        let depth = self.builder.ins().load(types::I64, trusted, state, 8);
+        let depth1 = self.builder.ins().iadd_imm(depth, -1);
+        self.builder.ins().store(trusted, depth1, state, 8);
     }
 
     fn emit(&mut self, op: &Op) -> bool {
