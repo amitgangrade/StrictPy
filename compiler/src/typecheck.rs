@@ -2338,6 +2338,92 @@ impl TypeChecker {
                 let _ = self.check_or_synth(&args[0].value, Some(&Ty::Primitive(PrimTy::I64)), env, ctx, r)?;
                 return Ok(Ty::Primitive(PrimTy::Str));
             }
+            // ── LANE E: expanded str methods (item 1). These mirror the
+            // CPython str API.  All take str/i64 args and dispatch via
+            // `NativeFn::from_name` (collision-free names), so no ir.rs
+            // change is needed.  Impls live in vm/src/builtins.rs.
+            //
+            // search family: count / index / rindex return i64;
+            // index/rindex raise ValueError at runtime when absent.
+            (Ty::Primitive(PrimTy::Str), "count" | "rfind" | "index" | "rindex") => {
+                if args.len() != 1 {
+                    return Err(type_err(span, codes::TYPE_ARITY,
+                        format!("str.{method} takes 1 argument: (sub: str)")));
+                }
+                let _ = self.check_or_synth(&args[0].value, Some(&Ty::Primitive(PrimTy::Str)), env, ctx, r)?;
+                return Ok(Ty::Primitive(PrimTy::I64));
+            }
+            // splitlines() -> List[str]
+            (Ty::Primitive(PrimTy::Str), "splitlines") => {
+                if !args.is_empty() {
+                    return Err(type_err(span, codes::TYPE_ARITY,
+                        "str.splitlines() takes no arguments".into()));
+                }
+                return Ok(Ty::Generic {
+                    base: TypeCtor::List,
+                    args: vec![Ty::Primitive(PrimTy::Str)],
+                });
+            }
+            // partition / rpartition(sep) -> (str, str, str)
+            (Ty::Primitive(PrimTy::Str), "partition" | "rpartition") => {
+                if args.len() != 1 {
+                    return Err(type_err(span, codes::TYPE_ARITY,
+                        format!("str.{method} takes 1 argument: (sep: str)")));
+                }
+                let _ = self.check_or_synth(&args[0].value, Some(&Ty::Primitive(PrimTy::Str)), env, ctx, r)?;
+                return Ok(Ty::Tuple(vec![
+                    Ty::Primitive(PrimTy::Str),
+                    Ty::Primitive(PrimTy::Str),
+                    Ty::Primitive(PrimTy::Str),
+                ]));
+            }
+            // padding family: width is i64, fill defaults to ' ' (1 arg only)
+            (Ty::Primitive(PrimTy::Str), "zfill" | "ljust" | "rjust" | "center") => {
+                if args.len() != 1 {
+                    return Err(type_err(span, codes::TYPE_ARITY,
+                        format!("str.{method} takes 1 argument: (width: i64)")));
+                }
+                let _ = self.check_or_synth(&args[0].value, Some(&Ty::Primitive(PrimTy::I64)), env, ctx, r)?;
+                return Ok(Ty::Primitive(PrimTy::Str));
+            }
+            // case/format family (no args) -> str
+            (Ty::Primitive(PrimTy::Str),
+                "title" | "swapcase" | "casefold" | "capitalize") => {
+                if !args.is_empty() {
+                    return Err(type_err(span, codes::TYPE_ARITY,
+                        format!("str.{method}() takes no arguments")));
+                }
+                return Ok(Ty::Primitive(PrimTy::Str));
+            }
+            // predicate family (no args) -> bool
+            (Ty::Primitive(PrimTy::Str),
+                "isdigit" | "isalpha" | "isalnum" | "isspace" | "isupper" | "islower") => {
+                if !args.is_empty() {
+                    return Err(type_err(span, codes::TYPE_ARITY,
+                        format!("str.{method}() takes no arguments")));
+                }
+                return Ok(Ty::Primitive(PrimTy::Bool));
+            }
+            // removeprefix / removesuffix(fix: str) -> str
+            (Ty::Primitive(PrimTy::Str), "removeprefix" | "removesuffix") => {
+                if args.len() != 1 {
+                    return Err(type_err(span, codes::TYPE_ARITY,
+                        format!("str.{method} takes 1 argument: (fix: str)")));
+                }
+                let _ = self.check_or_synth(&args[0].value, Some(&Ty::Primitive(PrimTy::Str)), env, ctx, r)?;
+                return Ok(Ty::Primitive(PrimTy::Str));
+            }
+            // expandtabs(tabsize: i64 = 8) -> str — accepts 0 or 1 arg
+            (Ty::Primitive(PrimTy::Str), "expandtabs") => {
+                if args.len() > 1 {
+                    return Err(type_err(span, codes::TYPE_ARITY,
+                        "str.expandtabs takes at most 1 argument: (tabsize: i64)".into()));
+                }
+                if let Some(a) = args.first() {
+                    let _ = self.check_or_synth(&a.value, Some(&Ty::Primitive(PrimTy::I64)), env, ctx, r)?;
+                }
+                return Ok(Ty::Primitive(PrimTy::Str));
+            }
             // Channel methods — stdlib: producer.spy
             (Ty::Generic { base: TypeCtor::Channel, args: a }, "send") if a.len() == 1 => {
                 if args.len() == 1 {

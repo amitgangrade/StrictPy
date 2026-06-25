@@ -2475,6 +2475,124 @@ pub enum NativeFn {
     /// statement silently no-opped (see vm/tests/dict_remove.rs).
     DictRemove = 1200,
 
+    // ═══════════════════════════════════════════════════════════════════
+    // === LANE E ADDITIONS (stdlib expansion) — block 1300–1419 ==========
+    // ═══════════════════════════════════════════════════════════════════
+    // All ids appended at the very end of the numeric space so existing
+    // discriminants are never perturbed.  Sub-blocks:
+    //   1300–1339  expanded `str` methods (route via `from_name`)
+    //   1340–1359  `functools` (lru_cache memo table)
+    //   1360–1369  FIFO `queue.Queue`
+    //   1370–1379  `enum`
+    //   1380–1389  `bytearray`
+    //   1390–1399  `unittest` assert helpers + runner
+    //   1400–1419  `decimal` / `fractions`
+
+    // ── 1300–1339: expanded str methods (LANE E item 1) ─────────────────
+    StrCount         = 1300,
+    StrRfind         = 1301,
+    StrRindex        = 1302,
+    StrSplitlines    = 1303,
+    StrPartition     = 1304,
+    StrRpartition    = 1305,
+    StrZfill         = 1306,
+    StrLjust         = 1307,
+    StrRjust         = 1308,
+    StrCenter        = 1309,
+    StrTitle         = 1310,
+    StrSwapcase      = 1311,
+    StrCasefold      = 1312,
+    StrIsdigit       = 1313,
+    StrIsalpha       = 1314,
+    StrIsalnum       = 1315,
+    StrIsspace       = 1316,
+    StrRemoveprefix  = 1317,
+    StrRemovesuffix  = 1318,
+    StrExpandtabs    = 1319,
+    StrIndex         = 1320,
+    StrIsupper       = 1321,
+    StrIslower       = 1322,
+    StrCapitalize    = 1323,
+
+    // ── 1340–1359: functools (LANE E item 2) ────────────────────────────
+    // String-keyed memo cache.  `cache_new()` allocates a table; the user
+    // memoizes manually around an expensive call: look up by a key string,
+    // compute + `cache_set` on miss.  Idiomatic given decorators are no-ops.
+    FunctoolsCacheNew     = 1340,
+    FunctoolsCacheGetI64  = 1341,
+    FunctoolsCacheSetI64  = 1342,
+    FunctoolsCacheHasKey  = 1343,
+    FunctoolsCacheGetStr  = 1344,
+    FunctoolsCacheSetStr  = 1345,
+    FunctoolsCacheLen     = 1346,
+    FunctoolsCacheClear   = 1347,
+    FunctoolsCacheHitsI64 = 1348, // for-test introspection: hit count
+    FunctoolsCacheGetF64  = 1349,
+    FunctoolsCacheSetF64  = 1350,
+
+    // ── 1360–1369: FIFO queue.Queue (LANE E item 3) ─────────────────────
+    QueueFifoNewI64   = 1360,
+    QueueFifoPutI64   = 1361,
+    QueueFifoGetI64   = 1362,
+    QueueFifoNewStr   = 1363,
+    QueueFifoPutStr   = 1364,
+    QueueFifoGetStr   = 1365,
+    QueueFifoEmpty    = 1366,
+    QueueFifoQsize    = 1367,
+
+    // ── 1370–1379: enum (LANE E item 4) ─────────────────────────────────
+    // A registry-backed named-constant facility.  `enum_new(name)` makes a
+    // namespace; `enum_add(e, member, value)` registers a member; lookups go
+    // both ways (name->value, value->name).
+    EnumNew        = 1370,
+    EnumAdd        = 1371,
+    EnumValueOf    = 1372,
+    EnumNameOf     = 1373,
+    EnumHasName    = 1374,
+    EnumLen        = 1375,
+
+    // ── 1380–1389: bytearray (LANE E item 6) ────────────────────────────
+    BytearrayNew     = 1380,
+    BytearrayFromStr = 1381,
+    BytearrayAppend  = 1382,
+    BytearrayGet     = 1383,
+    BytearraySet     = 1384,
+    BytearrayLen     = 1385,
+    BytearrayToStr   = 1386,
+    BytearrayHex     = 1387,
+    BytearrayPop     = 1388,
+    BytearrayClear   = 1389,
+
+    // ── 1390–1399: unittest (LANE E item 7) ─────────────────────────────
+    UnittestNew         = 1390,
+    UnittestAssertTrue  = 1391,
+    UnittestAssertEqI64 = 1392,
+    UnittestAssertEqStr = 1393,
+    UnittestRun         = 1394,
+    UnittestAssertEqF64 = 1395,
+    UnittestFailures    = 1396,
+    UnittestRan         = 1397,
+
+    // ── 1400–1419: decimal / fractions (LANE E item 5) ──────────────────
+    // Decimal is fixed-point: an i64 scaled mantissa + scale stored behind
+    // an i64 handle.  Fraction is an i64 num/den pair table.
+    DecimalFromStr   = 1400,
+    DecimalAdd       = 1401,
+    DecimalSub       = 1402,
+    DecimalMul       = 1403,
+    DecimalToStr     = 1404,
+    DecimalCmp       = 1405,
+    FractionNew      = 1406,
+    FractionAdd      = 1407,
+    FractionSub      = 1408,
+    FractionMul      = 1409,
+    FractionDiv      = 1410,
+    FractionNum      = 1411,
+    FractionDen      = 1412,
+    FractionToStr    = 1413,
+    DecimalToF64     = 1414,
+    // === END LANE E ADDITIONS ==========================================
+
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
     /// encounters. The VM treats this as a runtime error.
@@ -3276,6 +3394,89 @@ impl NativeFn {
             // ── container ops past the 90–119 block ──────────────────
             1200 => Some(Self::DictRemove),
             1201 => Some(Self::SortByPrecomputed),
+            // ── LANE E additions (stdlib expansion) ──────────────────
+            1300 => Some(Self::StrCount),
+            1301 => Some(Self::StrRfind),
+            1302 => Some(Self::StrRindex),
+            1303 => Some(Self::StrSplitlines),
+            1304 => Some(Self::StrPartition),
+            1305 => Some(Self::StrRpartition),
+            1306 => Some(Self::StrZfill),
+            1307 => Some(Self::StrLjust),
+            1308 => Some(Self::StrRjust),
+            1309 => Some(Self::StrCenter),
+            1310 => Some(Self::StrTitle),
+            1311 => Some(Self::StrSwapcase),
+            1312 => Some(Self::StrCasefold),
+            1313 => Some(Self::StrIsdigit),
+            1314 => Some(Self::StrIsalpha),
+            1315 => Some(Self::StrIsalnum),
+            1316 => Some(Self::StrIsspace),
+            1317 => Some(Self::StrRemoveprefix),
+            1318 => Some(Self::StrRemovesuffix),
+            1319 => Some(Self::StrExpandtabs),
+            1320 => Some(Self::StrIndex),
+            1321 => Some(Self::StrIsupper),
+            1322 => Some(Self::StrIslower),
+            1323 => Some(Self::StrCapitalize),
+            1340 => Some(Self::FunctoolsCacheNew),
+            1341 => Some(Self::FunctoolsCacheGetI64),
+            1342 => Some(Self::FunctoolsCacheSetI64),
+            1343 => Some(Self::FunctoolsCacheHasKey),
+            1344 => Some(Self::FunctoolsCacheGetStr),
+            1345 => Some(Self::FunctoolsCacheSetStr),
+            1346 => Some(Self::FunctoolsCacheLen),
+            1347 => Some(Self::FunctoolsCacheClear),
+            1348 => Some(Self::FunctoolsCacheHitsI64),
+            1349 => Some(Self::FunctoolsCacheGetF64),
+            1350 => Some(Self::FunctoolsCacheSetF64),
+            1360 => Some(Self::QueueFifoNewI64),
+            1361 => Some(Self::QueueFifoPutI64),
+            1362 => Some(Self::QueueFifoGetI64),
+            1363 => Some(Self::QueueFifoNewStr),
+            1364 => Some(Self::QueueFifoPutStr),
+            1365 => Some(Self::QueueFifoGetStr),
+            1366 => Some(Self::QueueFifoEmpty),
+            1367 => Some(Self::QueueFifoQsize),
+            1370 => Some(Self::EnumNew),
+            1371 => Some(Self::EnumAdd),
+            1372 => Some(Self::EnumValueOf),
+            1373 => Some(Self::EnumNameOf),
+            1374 => Some(Self::EnumHasName),
+            1375 => Some(Self::EnumLen),
+            1380 => Some(Self::BytearrayNew),
+            1381 => Some(Self::BytearrayFromStr),
+            1382 => Some(Self::BytearrayAppend),
+            1383 => Some(Self::BytearrayGet),
+            1384 => Some(Self::BytearraySet),
+            1385 => Some(Self::BytearrayLen),
+            1386 => Some(Self::BytearrayToStr),
+            1387 => Some(Self::BytearrayHex),
+            1388 => Some(Self::BytearrayPop),
+            1389 => Some(Self::BytearrayClear),
+            1390 => Some(Self::UnittestNew),
+            1391 => Some(Self::UnittestAssertTrue),
+            1392 => Some(Self::UnittestAssertEqI64),
+            1393 => Some(Self::UnittestAssertEqStr),
+            1394 => Some(Self::UnittestRun),
+            1395 => Some(Self::UnittestAssertEqF64),
+            1396 => Some(Self::UnittestFailures),
+            1397 => Some(Self::UnittestRan),
+            1400 => Some(Self::DecimalFromStr),
+            1401 => Some(Self::DecimalAdd),
+            1402 => Some(Self::DecimalSub),
+            1403 => Some(Self::DecimalMul),
+            1404 => Some(Self::DecimalToStr),
+            1405 => Some(Self::DecimalCmp),
+            1406 => Some(Self::FractionNew),
+            1407 => Some(Self::FractionAdd),
+            1408 => Some(Self::FractionSub),
+            1409 => Some(Self::FractionMul),
+            1410 => Some(Self::FractionDiv),
+            1411 => Some(Self::FractionNum),
+            1412 => Some(Self::FractionDen),
+            1413 => Some(Self::FractionToStr),
+            1414 => Some(Self::DecimalToF64),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }
@@ -3354,6 +3555,35 @@ impl NativeFn {
             // from_name entry, so the IR emitted NativeFn::Unknown and the
             // VM trapped with "unknown native id" at runtime.
             "char_at"     => Some(Self::StrCharAt),
+
+            // ── LANE E: expanded str methods.  Each name here is
+            // collision-free against the entries above, so the IR's
+            // str-receiver dispatch falls through to `from_name` and
+            // resolves correctly without an explicit override in ir.rs.
+            "count"        => Some(Self::StrCount),
+            "rfind"        => Some(Self::StrRfind),
+            "rindex"       => Some(Self::StrRindex),
+            "splitlines"   => Some(Self::StrSplitlines),
+            "partition"    => Some(Self::StrPartition),
+            "rpartition"   => Some(Self::StrRpartition),
+            "zfill"        => Some(Self::StrZfill),
+            "ljust"        => Some(Self::StrLjust),
+            "rjust"        => Some(Self::StrRjust),
+            "center"       => Some(Self::StrCenter),
+            "title"        => Some(Self::StrTitle),
+            "swapcase"     => Some(Self::StrSwapcase),
+            "casefold"     => Some(Self::StrCasefold),
+            "isdigit"      => Some(Self::StrIsdigit),
+            "isalpha"      => Some(Self::StrIsalpha),
+            "isalnum"      => Some(Self::StrIsalnum),
+            "isspace"      => Some(Self::StrIsspace),
+            "removeprefix" => Some(Self::StrRemoveprefix),
+            "removesuffix" => Some(Self::StrRemovesuffix),
+            "expandtabs"   => Some(Self::StrExpandtabs),
+            "index"        => Some(Self::StrIndex),
+            "isupper"      => Some(Self::StrIsupper),
+            "islower"      => Some(Self::StrIslower),
+            "capitalize"   => Some(Self::StrCapitalize),
 
             // real-world: csv_aggregate — str→number parsing.
             "parse_f64"   => Some(Self::F64FromStr),

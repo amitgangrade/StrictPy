@@ -1,0 +1,45 @@
+"""functools_demo.spy — LANE E `functools` memoization cache (spec §9.x).
+
+StrictPy function decorators are no-ops, so `lru_cache` ships as an
+explicit cache object you wrap an expensive call around.  This demo
+memoizes a (deliberately naive, recursive) Fibonacci using a string key
+and shows the hit counter climbing as repeated sub-problems are reused.
+
+Tests:
+  * compiler/tests/functools_demo_runs.rs — subprocess assertion.
+"""
+
+import functools
+
+# Memoized fib over a shared cache handle.
+fn fib(cache: i64, n: i64) -> i64:
+    if n < 2i64:
+        return n
+    key: str = str(n)
+    if functools.cache_has(cache, key):
+        return functools.cache_get_i64(cache, key)
+    v: i64 = fib(cache, n - 1i64) + fib(cache, n - 2i64)
+    functools.cache_set_i64(cache, key, v)
+    return v
+
+fn main() -> i32:
+    cache: i64 = functools.cache_new()
+
+    println("fib10=" + str(fib(cache, 10i64)))        # 55
+    println("fib20=" + str(fib(cache, 20i64)))        # 6765
+
+    # The cache now holds entries for n=2..=20 (n<2 short-circuits).
+    println("cache_len=" + str(functools.cache_len(cache)))
+    # Hits accumulate every time a memoized value is reused.
+    println("has_hits=" + str(functools.cache_hits(cache) > 0i64))   # true
+
+    # str + f64 cache surfaces.
+    functools.cache_set_str(cache, "greeting", "hi")
+    println("get_str=" + functools.cache_get_str(cache, "greeting"))
+    functools.cache_set_f64(cache, "pi", 3.14)
+    println("get_f64=" + str(functools.cache_get_f64(cache, "pi")))
+
+    functools.cache_clear(cache)
+    println("after_clear=" + str(functools.cache_len(cache)))        # 0
+
+    return 0

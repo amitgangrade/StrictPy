@@ -1,0 +1,48 @@
+"""decimal_fractions_demo.spy — LANE E exact arithmetic (spec §9.x).
+
+`decimal` is exact fixed-point: 0.1 + 0.2 == 0.3 exactly (no binary
+float drift).  `fractions` is exact rationals kept in lowest terms.
+Both live behind i64 handles.
+
+Tests:
+  * compiler/tests/decimal_fractions_demo_runs.rs — subprocess assertion.
+"""
+
+import decimal
+import fractions
+
+fn main() -> i32:
+    # ── decimal: the classic 0.1 + 0.2 ────────────────────────────
+    a: i64 = decimal.from_str("0.1")
+    b: i64 = decimal.from_str("0.2")
+    c: i64 = decimal.add(a, b)
+    println("sum=" + decimal.to_str(c))               # 0.3
+
+    # Multiplication scales add: 1.5 * 1.5 = 2.25 .
+    x: i64 = decimal.from_str("1.5")
+    prod: i64 = decimal.mul(x, x)
+    println("prod=" + decimal.to_str(prod))           # 2.25
+
+    # Subtraction and comparison.
+    d: i64 = decimal.sub(decimal.from_str("5.00"), decimal.from_str("1.25"))
+    println("diff=" + decimal.to_str(d))              # 3.75
+    println("cmp=" + str(decimal.cmp(a, b)))          # -1 (0.1 < 0.2)
+    println("as_f64=" + str(decimal.to_f64(c)))       # ~0.3
+
+    # ── fractions: exact rationals ────────────────────────────────
+    f: i64 = fractions.new(1i64, 3i64)
+    g: i64 = fractions.new(1i64, 6i64)
+    s: i64 = fractions.add(f, g)                      # 1/2
+    println("frac_sum=" + fractions.to_str(s))        # 1/2
+    println("num=" + str(fractions.num(s)))           # 1
+    println("den=" + str(fractions.den(s)))           # 2
+
+    # 2/3 * 3/4 = 1/2 (reduced).
+    m: i64 = fractions.mul(fractions.new(2i64, 3i64), fractions.new(3i64, 4i64))
+    println("frac_mul=" + fractions.to_str(m))        # 1/2
+
+    # Division: (1/2) / (1/4) = 2/1 .
+    q: i64 = fractions.div(fractions.new(1i64, 2i64), fractions.new(1i64, 4i64))
+    println("frac_div=" + fractions.to_str(q))        # 2/1
+
+    return 0

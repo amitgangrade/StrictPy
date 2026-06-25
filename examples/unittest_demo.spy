@@ -1,0 +1,37 @@
+"""unittest_demo.spy — LANE E test-runner module (spec §9.x).
+
+A minimal assertion collector matching how the repo structures its own
+checks: make a result accumulator, record assert_* outcomes, then `run`
+to print a summary and get the failure count back (0 == all green).
+
+This demo runs an all-passing suite so the integration test can assert
+the green summary line.
+
+Tests:
+  * compiler/tests/unittest_demo_runs.rs — subprocess assertion.
+"""
+
+import unittest
+
+# A function under test.
+fn add(a: i64, b: i64) -> i64:
+    return a + b
+
+fn greet(name: str) -> str:
+    return "hi " + name
+
+fn main() -> i32:
+    t: i64 = unittest.new()
+
+    unittest.assert_eq_i64(t, add(2i64, 3i64), 5i64, "add positives")
+    unittest.assert_eq_i64(t, add(-1i64, 1i64), 0i64, "add to zero")
+    unittest.assert_eq_str(t, greet("ada"), "hi ada", "greet")
+    unittest.assert_true(t, add(1i64, 1i64) == 2i64, "one plus one")
+    unittest.assert_eq_f64(t, 1.5 + 1.5, 3.0, "float add")
+
+    println("ran=" + str(unittest.ran(t)))            # 5
+    failures: i64 = unittest.run(t)                   # prints "ran 5 checks: OK"
+    println("failures=" + str(failures))              # 0
+    println("failure_count=" + str(unittest.failures(t)))  # 0
+
+    return 0

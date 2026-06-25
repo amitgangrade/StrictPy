@@ -1,0 +1,44 @@
+"""bytearray_demo.spy — LANE E mutable byte buffer (spec §9.x).
+
+A growable Vec<u8> behind an i64 handle: append / get / set / pop /
+len, plus UTF-8 and hex rendering.  Bytes are 0..=255; out-of-range
+writes raise ValueError.
+
+Tests:
+  * compiler/tests/bytearray_demo_runs.rs — subprocess assertion.
+"""
+
+import bytearray
+
+fn main() -> i32:
+    b: i64 = bytearray.new()
+    println("len0=" + str(bytearray.len(b)))          # 0
+
+    # Spell "ABC" by byte value.
+    bytearray.append(b, 65i64)   # A
+    bytearray.append(b, 66i64)   # B
+    bytearray.append(b, 67i64)   # C
+    println("len3=" + str(bytearray.len(b)))          # 3
+    println("get0=" + str(bytearray.get(b, 0i64)))    # 65
+    println("get_neg=" + str(bytearray.get(b, -1i64))) # 67 (C)
+    println("text=" + bytearray.to_str(b))            # ABC
+    println("hex=" + bytearray.hex(b))                # 414243
+
+    # Mutate in place.
+    bytearray.set(b, 1i64, 90i64)  # B -> Z
+    println("after_set=" + bytearray.to_str(b))       # AZC
+
+    # Pop the tail.
+    popped: i64 = bytearray.pop(b)
+    println("popped=" + str(popped))                  # 67
+    println("after_pop=" + bytearray.to_str(b))       # AZ
+
+    # Build from a string.
+    b2: i64 = bytearray.from_str("hi")
+    println("from_str_len=" + str(bytearray.len(b2))) # 2
+    println("from_str_hex=" + bytearray.hex(b2))      # 6869
+
+    bytearray.clear(b)
+    println("after_clear=" + str(bytearray.len(b)))   # 0
+
+    return 0
