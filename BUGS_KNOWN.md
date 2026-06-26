@@ -13,6 +13,25 @@ landed the class/vtable cleanup + primitive-ctor dispatch fix (see
 
 ---
 
+## Fixed in Wave-1 (Lane D — correctness / silent footguns)
+
+Six silent miscompiles closed. Each was *quietly wrong* (compiled, ran, gave
+wrong/unsafe behaviour with no diagnostic), so each fix ships a regression test
+proving the new behaviour.
+
+| # | Footgun (was) | Fix location | Regression test |
+|---|---------------|--------------|-----------------|
+| 1 | `try/except/else` — the `else` clause was dropped at lowering (its body silently never ran). | `compiler/src/ir.rs::lower_try` now takes `else_block` and lowers it on the body's no-exception edge, after `TryLeave`, before finally. | `compiler/src/ir.rs::tests::try_else_block_is_lowered`; `examples/exception_control_flow_demo.spy` + `compiler/tests/exception_control_flow_demo_runs.rs` (else-runs-only-on-success). |
+| 2 | `except (A, B)` — a tuple filter silently degraded to bare catch-everything. | `compiler/src/ir.rs::exception_filter_names` (tuple → one VM arm per listed type + subclasses); `compiler/src/resolver.rs::Stmt::Try` binds `e` to the first listed type so `e.message` works. | `compiler/src/ir.rs::tests::except_tuple_lowers_one_arm_per_type`; the demo asserts `(ValueError, KeyError)` does NOT catch `IndexError`. |
+| 3 | `raise X from Y` — the `from` cause was parsed then dropped (never type-checked, never lowered). | `compiler/src/typecheck.rs::Stmt::Raise` validates the cause is an `Exception`; `compiler/src/ir.rs::lower_raise`/`lower_cause_chain` folds the cause into the raised `message` (`"<msg> [caused by <Type>: <msg>]"`). | `typecheck::tests::raise_from_non_exception_rejected`; demo asserts `chained: wrapped [caused by ValueError: ve]`. |
+| 4 | `with` ran `__exit__` only for `io.File`; any other context manager's cleanup was a silent no-op (broken RAII). | `compiler/src/typecheck.rs::Stmt::With` rejects non-`io.File` resources with `E2070` (full `__enter__`/`__exit__` dispatch deferred). | `typecheck::tests::with_non_file_rejected`; `conformance_negative::with_non_file_rejected`. |
+| 5 | No-op decorators — `@lru_cache`/`@retry` parsed but were never read (silent no-op). | `compiler/src/resolver.rs::resolve_func_decl` rejects any decorator with `E2071` (empty allow-list until one is implemented). | `resolver::tests::test_unknown_decorator_rejected` / `test_decorator_with_args_rejected`; `typecheck::tests::unknown_method_decorator_rejected`. |
+| 6 | `Dict[K, V]` with non-`str` `K` compiled then SEGFAULTed at subscript (runtime dict is string-keyed). | `compiler/src/typecheck.rs` — `ty_first_bad_dict_key` scan at `check()` start + guards on both dict-literal synth paths reject non-`str` keys with `E2072`. | `typecheck::tests::dict_non_str_key_annotation_rejected` / `dict_tuple_key_rejected` / `dict_literal_int_key_rejected` / `dict_nested_bad_key_in_value_rejected`; `conformance_negative` (3 cases). |
+
+Spec updates: §5.1.2 (Dict key = `str`), §7.5.3/§7.5.5/§7.5.6 (raise-from, tuple-except, else), §7.6 (`with` restriction), §18.2 (E2050/E2070/E2071/E2072), grammar decorator note.
+
+---
+
 ## 1. ~~Sealed-class virtual dispatch drops to the base method~~  *(Fixed in M11)*
 
 See bottom of this file. Sealed receivers now dispatch through the vtable
@@ -230,7 +249,7 @@ from `xs[i]`, `IOError` from `open(missing)`, `DivisionByZeroError` from
 
 - **JIT carve-out is already in place.** `vm/src/decompile.rs::decode_function`'s `_ => return Err(DecodeError::Unsupported(...))` arm rejects any function whose bytecode contains `Opcode::Throw`, `EnterTry`, `LeaveTry`, or `Rethrow`. Those reject paths were dormant before M15 (no codegen emitted those opcodes); now that try/except programs hit them, the JIT correctly falls back to the interpreter per `docs/thesis/design_decisions/per_function_jit_opt_in.md`. Confirmed by running the full m15_try_except suite under the JIT feature.
 - **Native exception type names.** The runtime emits `"DivisionByZeroError"` (legacy from M3) for `a / 0`. The resolver registers both `DivisionByZeroError` AND the Python-conformant alias `ZeroDivisionError` as catchable type names so `except ZeroDivisionError as e:` works on the existing runtime errors. Renaming the runtime emission to `ZeroDivisionError` is a follow-up cosmetic change — would require updating any test that asserts on the legacy name (none ship today besides the M15 div-by-zero test, which intentionally accepts either spelling).
-- **User-defined exception subclasses (`class MyError(Exception):`)** still parse but are not part of the M15 catch dispatch. The runtime matches by exact `type_name` string against the built-in name list. A subsequent round can extend `propagate_exception` to also accept user class names by querying the type bundle.
+- **User-defined exception subclasses (`class MyError(Exception):`)** still parse but are not part of the M15 catch dispatch. The runtime matches by exact `type_name` string against the built-in name list. A subsequent round can extend `propagate_exception` to also accept user class names by querying the type bundle. *(Subclass matching landed in M63a; tuple-except + try/else + raise-from chaining landed in Wave-1 Lane D — see "Fixed in Wave-1" at the top.)*
 - **Early `return` from inside `try`** is not threaded through any active finally. Spec §7.5.6 lists this as "undefined for v0.1"; programs that need a guaranteed finally can structure the try with no early return (the existing `safe_open.spy` example does this). Wiring return-into-finally would need a per-frame "pending return value" slot mirroring `pending_exception`.
 
 ---

@@ -1,0 +1,74 @@
+"""Wave-1 Lane D — exception control-flow correctness.
+
+Regression coverage for three silent miscompiles that were fixed:
+
+  1. `try/except/else` — the `else` clause was dropped at lowering. It must run
+     iff the body completed with NO exception (and is NOT protected by the
+     handlers).
+  2. `except (A, B)` — a tuple of exception types silently degraded to a bare
+     catch-everything. It must catch A or B but NOT an unrelated C.
+  3. `raise X from Y` — the `from` cause was parsed then dropped. The cause is
+     now preserved (folded into the raised exception's message).
+"""
+
+
+fn raises(which: i32) -> i32:
+    # 1 -> ValueError, 2 -> KeyError, 3 -> IndexError, 0 -> no raise
+    if which == 1i32:
+        raise ValueError("ve")
+    if which == 2i32:
+        raise KeyError("ke")
+    if which == 3i32:
+        raise IndexError("ie")
+    return 0
+
+
+fn main() -> i32:
+    # ── 1. try/else runs only on the success path ────────────────────────
+    try:
+        x: i32 = raises(0i32)   # no exception
+    except ValueError as e:
+        println("else-test: WRONG handler ran")
+    else:
+        println("else ran: success")
+
+    # The else must NOT run when the body raised.
+    try:
+        y: i32 = raises(1i32)   # raises ValueError
+    except ValueError as e:
+        println("else-test: handler ran for " + e.message)
+    else:
+        println("else ran: WRONG (body raised)")
+
+    # ── 2. except (A, B) catches A or B but not C ────────────────────────
+    try:
+        a: i32 = raises(1i32)   # ValueError — in the tuple
+    except (ValueError, KeyError) as e:
+        println("tuple caught: " + e.message)
+
+    try:
+        b: i32 = raises(2i32)   # KeyError — also in the tuple
+    except (ValueError, KeyError) as e:
+        println("tuple caught: " + e.message)
+
+    # IndexError is NOT in the tuple, so the inner clause must miss and the
+    # outer catch-all handles it — proving the tuple is not catch-everything.
+    try:
+        try:
+            c: i32 = raises(3i32)   # IndexError — NOT in the tuple
+        except (ValueError, KeyError) as e:
+            println("tuple caught: WRONG (IndexError leaked through)")
+    except Exception as e:
+        println("outer caught uncaught-by-tuple: " + e.message)
+
+    # ── 3. raise X from Y preserves the cause ────────────────────────────
+    try:
+        try:
+            d: i32 = raises(1i32)   # original ValueError
+        except ValueError as cause:
+            raise KeyError("wrapped") from cause
+    except KeyError as e:
+        println("chained: " + e.message)
+
+    println("done")
+    return 0

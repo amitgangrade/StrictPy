@@ -417,6 +417,96 @@ fn main() -> i32:
                       evaluable (a call is not); silently lowering to 0 was \
                       the historical bug",
     },
+
+    // ── Wave-1 correctness (Lane D): silent-footgun fixes ───────────────
+    // Dict non-`str` key (E2072): `Dict[i64, _]` compiled then SEGFAULTed at
+    // subscript because the runtime dict is hardcoded to string keys.
+    NegativeCase {
+        name: "dict_i64_key_rejected",
+        source: "\
+fn main() -> i32:
+    d: Dict[i64, i64] = {}
+    d[1i64] = 10i64
+    return 0
+",
+        expected_category: ErrorCategory::Type,
+        spec_section: "§7.x",
+        description: "Dict key type must be str; non-str keys would segfault",
+    },
+    // Dict non-`str` key inferred from a literal. The literal `{1i64: "a"}`
+    // synthesises `Dict[i64, str]`; the dict-literal key check rejects it.
+    NegativeCase {
+        name: "dict_int_literal_key_rejected",
+        source: "\
+fn sink(d: Dict[str, str]) -> None:
+    pass
+
+fn main() -> i32:
+    sink({1i64: \"a\"})
+    return 0
+",
+        expected_category: ErrorCategory::Type,
+        spec_section: "§7.x",
+        description: "dict literal with int key inferred as non-str is rejected",
+    },
+    // Tuple-keyed dict (E2072) — `Dict[Tuple[i64,i64], _]`.
+    NegativeCase {
+        name: "dict_tuple_key_rejected",
+        source: "\
+fn main() -> i32:
+    d: Dict[Tuple[i64, i64], str] = {}
+    return 0
+",
+        expected_category: ErrorCategory::Type,
+        spec_section: "§7.x",
+        description: "Dict with a tuple key type is rejected",
+    },
+    // Unknown decorator (E2071): decorators parse but do nothing, so an
+    // unrecognized `@deco` is now a hard error instead of a silent no-op.
+    NegativeCase {
+        name: "unknown_decorator_rejected",
+        source: "\
+@lru_cache
+fn fib(n: i32) -> i32:
+    return n
+
+fn main() -> i32:
+    return 0
+",
+        expected_category: ErrorCategory::Type,
+        spec_section: "§5.x",
+        description: "unknown decorator is a hard error, not a silent no-op",
+    },
+    // Unsupported context manager (E2070): `with` only supports io.File; any
+    // other resource's cleanup used to silently never run.
+    NegativeCase {
+        name: "with_non_file_rejected",
+        source: "\
+final class Lock:
+    held: bool = false
+
+fn main() -> i32:
+    with Lock() as l: Lock:
+        return 0
+    return 0
+",
+        expected_category: ErrorCategory::Type,
+        spec_section: "§7.6",
+        description: "with on a non-io.File context manager is rejected (cleanup would be a no-op)",
+    },
+    // `raise X from Y` where Y is not an exception (E2050): the cause used to
+    // be parsed then silently dropped; now it is type-checked.
+    NegativeCase {
+        name: "raise_from_non_exception_rejected",
+        source: "\
+fn main() -> i32:
+    raise ValueError(\"bad\") from 42
+    return 0
+",
+        expected_category: ErrorCategory::Type,
+        spec_section: "§7.5",
+        description: "raise X from Y requires Y to be an exception value",
+    },
 ];
 
 #[test]

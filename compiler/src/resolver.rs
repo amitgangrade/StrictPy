@@ -7451,6 +7451,32 @@ impl Resolver {
     fn resolve_func_decl(&mut self, f: &FuncDecl, parent_scope: ScopeId, receiver: Option<ClassId>)
         -> Result<(), CompileError>
     {
+        // Decorators parse but v1 has NO decorator semantics wired through the
+        // resolver / typechecker / IR. An unrecognized `@deco` therefore used
+        // to compile to a silent no-op — `@lru_cache`, `@retry`, `@property`
+        // and friends all did nothing while looking like they worked. Reject
+        // any decorator as a hard compile error rather than letting it lie.
+        // (When a real decorator is implemented, add its dotted name to the
+        // allow-list below and lower it in IR.)
+        const RECOGNIZED_DECORATORS: &[&str] = &[];
+        for dec in &f.decorators {
+            let name = dec.path.join(".");
+            if !RECOGNIZED_DECORATORS.contains(&name.as_str()) {
+                return Err(CompileError::Type {
+                    file: String::new(),
+                    line: dec.span.line,
+                    col: dec.span.col,
+                    code: crate::error::codes::TYPE_UNKNOWN_DECORATOR,
+                    message: format!(
+                        "unknown decorator `@{}`: StrictPy v1 has no decorator support, \
+                         so this would silently do nothing. Remove it (decorators are not \
+                         yet implemented).",
+                        name
+                    ),
+                });
+            }
+        }
+
         // Build a fresh function scope chained to the parent.
         let fn_scope = self.table.new_scope(Some(parent_scope), true);
 
@@ -7614,7 +7640,20 @@ impl Resolver {
                     let hs = self.table.new_scope(Some(scope), false);
                     let _t = self.lower_ast_type(&h.exc_ty, scope).unwrap_or(Ty::Never);
                     if let Some(b) = &h.binding {
-                        let t = self.lower_ast_type(&h.exc_ty, scope).unwrap_or(Ty::Never);
+                        // `except (A, B) as e:` — the filter is a *tuple* of
+                        // exception types, but the bound `e` is a single caught
+                        // exception, not a tuple. Bind it to the first listed
+                        // type's class so field access like `e.message` works
+                        // (every listed type descends from `Exception`, so the
+                        // inherited fields are present). Without this, `e` got
+                        // the `Tuple[...]` type and `e.message` failed with
+                        // "no field message on Tuple" (silent footgun #2's
+                        // missing half).
+                        let bind_ast_ty: &ast::Type = match &h.exc_ty {
+                            ast::Type::Tuple { elems, .. } => elems.first().unwrap_or(&h.exc_ty),
+                            other => other,
+                        };
+                        let t = self.lower_ast_type(bind_ast_ty, scope).unwrap_or(Ty::Never);
                         self.make_symbol(hs, b, SymbolKind::Local, h.body.span, Some(t));
                     }
                     self.resolve_block(&h.body, hs)?;
@@ -8083,6 +8122,30 @@ mod tests {
     fn test_prelude_println_visible() {
         let m = parse("fn main() -> i32:\n    println(\"hi\")\n    return 0\n");
         let _r = Resolver::new().resolve(m).expect("ok");
+    }
+
+    #[test]
+    fn test_unknown_decorator_rejected() {
+        // Decorators have no v1 semantics, so an unrecognized one is a hard
+        // error (E2071) rather than a silent no-op (Wave-1 Lane D).
+        let m = parse("@lru_cache\nfn f() -> i32:\n    return 0\nfn main() -> i32:\n    return 0\n");
+        let r = Resolver::new().resolve(m);
+        assert!(
+            matches!(&r, Err(CompileError::Type { code, .. }) if *code == codes::TYPE_UNKNOWN_DECORATOR),
+            "expected E2071 unknown-decorator, got {r:?}"
+        );
+    }
+
+    #[test]
+    fn test_decorator_with_args_rejected() {
+        let m = parse(
+            "@retry(3)\nfn f() -> i32:\n    return 0\nfn main() -> i32:\n    return 0\n",
+        );
+        let r = Resolver::new().resolve(m);
+        assert!(
+            matches!(&r, Err(CompileError::Type { code, .. }) if *code == codes::TYPE_UNKNOWN_DECORATOR),
+            "expected E2071 unknown-decorator, got {r:?}"
+        );
     }
 
     #[test]

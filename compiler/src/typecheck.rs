@@ -111,6 +111,23 @@ impl TypeChecker {
         }
         let mut ctx = Ctx { classes: &classes, protocols: &protocols, base_types };
 
+        // Dict non-`str`-key guard (Lane D / Wave-1 correctness). The runtime
+        // dict is hardcoded to string keys (`vm/src/strdict.rs`), but nothing
+        // restricted the *type* of K — so `Dict[i64, V]` / `Dict[Tuple, V]`
+        // compiled and then SEGFAULTed at subscript. Reject any declared type
+        // carrying a non-`str` Dict key up front, at the declaration's span.
+        // Inferred dict-literal keys are checked separately at the literal site.
+        for s in &resolved.symbols.symbols {
+            if let Some(t) = &s.ty {
+                if let Some(bad_key) = ty_first_bad_dict_key(t) {
+                    return Err(type_err(s.def_span, codes::TYPE_DICT_NON_STR_KEY,
+                        format!("Dict key type must be `str`, got `{}` (in `{}`); non-`str` \
+                                 dict keys are not supported and would crash at runtime",
+                                bad_key.display(), s.name)));
+                }
+            }
+        }
+
         // Walk top-level decls.
         for decl in resolved.module.decls.clone().iter() {
             match decl {
@@ -592,11 +609,49 @@ impl TypeChecker {
                 if let Some(eb) = else_block { self.check_block(eb, ret, env, ctx, r)?; }
                 if let Some(fb) = finally_block { self.check_block(fb, ret, env, ctx, r)?; }
             }
-            Stmt::With { expr, body, .. } => {
-                let _ = self.check_or_synth(expr, None, env, ctx, r)?;
+            Stmt::With { expr, body, span, .. } => {
+                let res_ty = self.check_or_synth(expr, None, env, ctx, r)?;
+                // v1 only knows how to run cleanup (`__exit__`) for `io.File`.
+                // Every other context manager used to lower its cleanup to a
+                // silent no-op — locks/DB handles/etc. were never released, so
+                // RAII was quietly broken. Until general `__enter__`/`__exit__`
+                // dispatch lands, reject any non-`io.File` `with` resource with
+                // a clear compile error rather than emitting a no-op cleanup.
+                let is_file = matches!(
+                    &res_ty,
+                    Ty::Class(cid) if ctx.classes.get(cid)
+                        .map(|l| l.name == "io.File")
+                        .unwrap_or(false)
+                );
+                if !is_file {
+                    return Err(type_err(*span, codes::TYPE_UNSUPPORTED_CONTEXT_MANAGER,
+                        format!("`with` is only supported for `io.File` resources in v1; \
+                                 `{}` has no cleanup wired through `with` (its `__exit__` \
+                                 would silently never run). Use an explicit try/finally \
+                                 instead.", res_ty.display())));
+                }
                 self.check_block(body, ret, env, ctx, r)?;
             }
-            Stmt::Raise { exc, span, .. } => {
+            Stmt::Raise { exc, cause, span } => {
+                // `raise X from Y`: the `from` cause used to be parsed then
+                // silently dropped (never type-checked, never lowered). Validate
+                // it here so a stray `raise E from 42` is rejected, and so its
+                // side effects are evaluated; IR lowering folds the cause into
+                // the raised exception's message (see `IR::lower_cause_chain`).
+                if let Some(c) = cause {
+                    let cause_ty = self.check_or_synth(c, None, env, ctx, r)?;
+                    if let Ty::Class(cid) = &cause_ty {
+                        if !crate::types::class_is_exception(*cid, ctx.classes) {
+                            return Err(type_err(*span, codes::TYPE_NOT_AN_EXCEPTION,
+                                "`raise X from Y`: the cause `Y` must be an exception value \
+                                 (a subclass of `Exception`)".into()));
+                        }
+                    } else {
+                        return Err(type_err(*span, codes::TYPE_NOT_AN_EXCEPTION,
+                            "`raise X from Y`: the cause `Y` must be an exception value \
+                             (a subclass of `Exception`)".into()));
+                    }
+                }
                 // M15: `raise IOError("msg")` is the supported v0.1 shape.
                 // Recognise the (ExceptionName, single-str-arg) pattern and
                 // verify the message argument is `str`-typed — without going
@@ -884,6 +939,11 @@ impl TypeChecker {
                 }
                 let kk = kty.unwrap_or(Ty::Never);
                 let vv = vty.unwrap_or(Ty::Never);
+                if !is_valid_dict_key(&kk) {
+                    return Err(type_err(*span, codes::TYPE_DICT_NON_STR_KEY,
+                        format!("Dict key type must be `str`, got `{}`; non-`str` dict keys \
+                                 are not supported and would crash at runtime", kk.display())));
+                }
                 let ty = Ty::Generic { base: TypeCtor::Dict, args: vec![kk, vv] };
                 self.expr_types.insert((span.start, span.end), ty.clone());
                 return Ok(ty);
@@ -989,15 +1049,21 @@ impl TypeChecker {
                 check_set_elem_ty(&elem, *span)?;
                 Ok(Ty::Generic { base: TypeCtor::Set, args: vec![elem] })
             }
-            Expr::Dict { entries, .. } => {
+            Expr::Dict { entries, span } => {
                 let mut kty: Option<Ty> = None;
                 let mut vty: Option<Ty> = None;
                 for (k, v) in entries {
                     kty = Some(self.synth_expr(k, env, ctx, r)?);
                     vty = Some(self.synth_expr(v, env, ctx, r)?);
                 }
+                let kk = kty.unwrap_or(Ty::Never);
+                if !is_valid_dict_key(&kk) {
+                    return Err(type_err(*span, codes::TYPE_DICT_NON_STR_KEY,
+                        format!("Dict key type must be `str`, got `{}`; non-`str` dict keys \
+                                 are not supported and would crash at runtime", kk.display())));
+                }
                 Ok(Ty::Generic { base: TypeCtor::Dict, args: vec![
-                    kty.unwrap_or(Ty::Never), vty.unwrap_or(Ty::Never)] })
+                    kk, vty.unwrap_or(Ty::Never)] })
             }
             Expr::Unary { op, operand, span } => {
                 let t = self.synth_expr(operand, env, ctx, r)?;
@@ -2558,6 +2624,42 @@ fn type_err(span: Span, code: ErrorCode, message: String) -> CompileError {
     }
 }
 
+/// True iff `k` is an acceptable Dict key type. The runtime dict keys on
+/// strings only (`vm/src/strdict.rs`), so a non-`str` key would crash at
+/// subscript. `Never` is allowed (it is the key of an empty `{}` literal —
+/// it never reaches a subscript with a real key). See `ty_first_bad_dict_key`.
+fn is_valid_dict_key(k: &Ty) -> bool {
+    matches!(k, Ty::Primitive(PrimTy::Str) | Ty::Never)
+}
+
+/// Recursively search a type for any `Dict[K, V]` whose key type `K` is not
+/// `str`. Returns the first offending key type found (so the error message can
+/// name it), or `None` if every nested Dict keys on `str`.
+///
+/// Lane D / Wave-1: the typechecker previously placed no restriction on K, so
+/// `Dict[i64, V]` compiled and then SEGFAULTed at the hardcoded-string-key
+/// runtime dict. This closes that footgun by rejecting the type.
+fn ty_first_bad_dict_key(t: &Ty) -> Option<&Ty> {
+    match t {
+        Ty::Generic { base: TypeCtor::Dict, args } if args.len() == 2 => {
+            if !is_valid_dict_key(&args[0]) {
+                return Some(&args[0]);
+            }
+            // Still recurse into K and V (e.g. a Dict value that is itself a
+            // bad Dict).
+            ty_first_bad_dict_key(&args[0]).or_else(|| ty_first_bad_dict_key(&args[1]))
+        }
+        Ty::Generic { args, .. } => args.iter().find_map(ty_first_bad_dict_key),
+        Ty::Tuple(ts) => ts.iter().find_map(ty_first_bad_dict_key),
+        Ty::Nullable(inner) => ty_first_bad_dict_key(inner),
+        Ty::Function { params, ret } => params
+            .iter()
+            .find_map(ty_first_bad_dict_key)
+            .or_else(|| ty_first_bad_dict_key(ret)),
+        _ => None,
+    }
+}
+
 /// M63b: verify each concrete type argument satisfies the bound (if any)
 /// declared on the matching generic type parameter. `tvars` and `type_args`
 /// are parallel (declaration order); bounds are looked up in
@@ -3202,5 +3304,122 @@ mod tests {
     fn test_no_implicit_coercion() {
         let r = check_src("fn main() -> i32:\n    a: i32 = 1\n    b: i64 = 2\n    c: i64 = a + b\n    return 0\n");
         assert!(r.is_err());
+    }
+
+    // ── Wave-1 Lane D: silent-footgun regression tests ──────────────────
+
+    fn err_code(r: Result<TypedModule, CompileError>) -> String {
+        match r {
+            Ok(_) => "<no error>".into(),
+            Err(CompileError::Type { code, .. }) => code.to_string(),
+            Err(CompileError::Resolve { code, .. }) => code.to_string(),
+            Err(CompileError::Semantic { code, .. }) => code.to_string(),
+            Err(other) => format!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn dict_non_str_key_annotation_rejected() {
+        // `Dict[i64, V]` previously compiled then SEGFAULTed at subscript.
+        let r = check_src("fn main() -> i32:\n    d: Dict[i64, i64] = {}\n    return 0\n");
+        assert_eq!(err_code(r), codes::TYPE_DICT_NON_STR_KEY);
+    }
+
+    #[test]
+    fn dict_str_key_still_ok() {
+        check_src("fn main() -> i32:\n    d: Dict[str, i64] = {}\n    return 0\n").unwrap();
+    }
+
+    #[test]
+    fn dict_tuple_key_rejected() {
+        let r = check_src(
+            "fn main() -> i32:\n    d: Dict[Tuple[i64, i64], str] = {}\n    return 0\n",
+        );
+        assert_eq!(err_code(r), codes::TYPE_DICT_NON_STR_KEY);
+    }
+
+    #[test]
+    fn dict_nested_bad_key_in_value_rejected() {
+        // `Dict[str, Dict[i64, str]]` — the bad key is nested in the value.
+        let r = check_src(
+            "fn main() -> i32:\n    d: Dict[str, Dict[i64, str]] = {}\n    return 0\n",
+        );
+        assert_eq!(err_code(r), codes::TYPE_DICT_NON_STR_KEY);
+    }
+
+    #[test]
+    fn dict_literal_int_key_rejected() {
+        // Synthesised dict literal with an int key (no annotation forcing it).
+        let r = check_src(
+            "fn sink(d: Dict[str, str]) -> None:\n    pass\n\
+             fn main() -> i32:\n    print(str({1i64: \"a\"}))\n    return 0\n",
+        );
+        assert_eq!(err_code(r), codes::TYPE_DICT_NON_STR_KEY);
+    }
+
+    #[test]
+    fn unknown_decorator_rejected() {
+        let r = check_src(
+            "@lru_cache\nfn fib(n: i32) -> i32:\n    return n\n\
+             fn main() -> i32:\n    return 0\n",
+        );
+        assert_eq!(err_code(r), codes::TYPE_UNKNOWN_DECORATOR);
+    }
+
+    #[test]
+    fn unknown_method_decorator_rejected() {
+        let r = check_src(
+            "final class C:\n    x: i32 = 0\n    @staticmethod\n    fn f(self) -> i32:\n        return 0\n\
+             fn main() -> i32:\n    return 0\n",
+        );
+        assert_eq!(err_code(r), codes::TYPE_UNKNOWN_DECORATOR);
+    }
+
+    #[test]
+    fn with_non_file_rejected() {
+        let r = check_src(
+            "final class Lock:\n    held: bool = false\n\
+             fn main() -> i32:\n    with Lock() as l: Lock:\n        return 0\n    return 0\n",
+        );
+        assert_eq!(err_code(r), codes::TYPE_UNSUPPORTED_CONTEXT_MANAGER);
+    }
+
+    #[test]
+    fn raise_from_non_exception_rejected() {
+        let r = check_src(
+            "fn main() -> i32:\n    raise ValueError(\"x\") from 42\n    return 0\n",
+        );
+        assert_eq!(err_code(r), codes::TYPE_NOT_AN_EXCEPTION);
+    }
+
+    #[test]
+    fn raise_from_exception_ok() {
+        // `raise X from cause` where cause is a caught exception type-checks.
+        check_src(
+            "fn main() -> i32:\n    try:\n        raise ValueError(\"x\")\n    \
+             except ValueError as cause:\n        raise KeyError(\"y\") from cause\n    return 0\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn except_tuple_binding_has_message_field() {
+        // `except (A, B) as e:` — `e.message` must type-check (the bind type is
+        // the first listed exception class, not the tuple itself).
+        check_src(
+            "fn main() -> i32:\n    try:\n        raise ValueError(\"x\")\n    \
+             except (ValueError, KeyError) as e:\n        print(e.message)\n    return 0\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn try_else_type_checks() {
+        check_src(
+            "fn main() -> i32:\n    try:\n        x: i32 = 1\n    \
+             except ValueError as e:\n        print(\"caught\")\n    \
+             else:\n        print(\"ok\")\n    return 0\n",
+        )
+        .unwrap();
     }
 }
