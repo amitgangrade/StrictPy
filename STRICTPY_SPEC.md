@@ -150,15 +150,24 @@ ASCII only in v0.1. Identifiers starting with `__` are reserved for the compiler
 
 #### Integer literals
 ```
-0           // i32 by default
-42          // i32
+0           // i64 by default
+42          // i64
 0i64        // i64
+0i32        // i32 (explicit suffix)
 0u32        // u32
-0xff        // i32 hex
-0b1010      // i32 binary
-0o755       // i32 octal
+0xff        // i64 hex
+0b1010      // i64 binary
+0o755       // i64 octal
 1_000_000   // underscores allowed
 ```
+
+A bare (unsuffixed) integer literal defaults to **`i64`**. In a typed
+context the literal adopts the annotation when it fits (`x: i32 = 0`
+makes `0` an `i32`, and `t: Tuple[i32, i32] = (1, 2)` makes both `1` and
+`2` `i32`); otherwise use an explicit suffix (`0i32`). Generic call sites
+infer the type parameter from the *synthesised* argument type, so a bare
+literal there infers `i64` — annotate the literal (`id(0i32)`) when a
+narrower instantiation is wanted.
 
 If the literal value exceeds the chosen type's range, it is a compile error.
 
@@ -673,13 +682,33 @@ Subtyping is **structural for protocols, nominal for classes**.
 
 ### 5.3 Numeric coercion
 
-There is **no implicit numeric coercion**. `i32 + i64` is a type error. Use explicit conversions:
+A binary operation on two numeric operands of **different** types applies
+**lossless implicit widening** to a common type, then operates there. The
+narrower operand is widened with a lossless cast inserted at IR lowering:
+
+| operands                              | common type |
+|---------------------------------------|-------------|
+| `i8`/`i16`/`i32` with `i64`           | `i64`       |
+| `i8`/`i16` with `i32`                 | `i32`       |
+| any integer with `f64`                | `f64`       |
+| `f32` with any integer                | `f64`       |
+| `f32` with `f32`                      | `f32`       |
+| `f64` with anything numeric           | `f64`       |
 
 ```python
 x: i32 = 1
 y: i64 = 2
-z: i64 = i64(x) + y    // OK
+z: i64 = x + y         // OK — x widens to i64
+w: f64 = y + 0.5       // OK — y widens to f64
 ```
+
+Widening is **conservative**: only the conversions above (each backed by a
+lossless cast) are implicit. Mixed signedness (`u32 + i32`), `u64`, and
+disjoint small widths still require an **exact match** or an explicit
+conversion — there is no lossless cast for them. Narrowing is never
+implicit: the *result* of a widened op cannot be silently stored into a
+narrower target (`a: i32 = i32_var + i64_var` is an error because the
+result is `i64`).
 
 Allowed lossless explicit conversions never fail. Lossy conversions (e.g., `i64` → `i32`) trap on overflow in debug builds, wrap silently in release builds (configurable per-module via `@overflow("trap")` / `@overflow("wrap")`).
 
@@ -901,10 +930,18 @@ Strict left-to-right for arguments. Short-circuit for `and`, `or`, `??`.
 
 ### 7.2 Integer arithmetic
 
-- Signed overflow: traps in debug builds (raises `OverflowError`), wraps in release builds.
+- Signed overflow: traps in debug builds (raises `OverflowError`), wraps in release builds. (`+`, `-`, `*` on `i32`/`i64` are checked in debug.)
 - Unsigned overflow: always wraps.
-- Division by zero: raises `DivisionByZeroError`.
-- `//` is truncated division for ints, floored for floats.
+- `/` is **true division** (Python 3 semantics): it always yields `f64`,
+  even for integer operands (`7 / 2 == 3.5`). Both operands are widened to
+  `f64` first. Use `//` for integer division. Because the result is `f64`,
+  `/=` requires a float target; an integer target is a compile error
+  (use `//=`).
+- `//` is integer (truncated, toward zero) division for ints — keeping the
+  (widened) integer operand type — and plain division for floats.
+- Division by zero: integer `/0` and `//0` raise `ZeroDivisionError`
+  (legacy alias `DivisionByZeroError`). Float `/0.0` yields `inf`/`nan`
+  per IEEE 754 (no trap).
 - `%` follows the sign of the divisor (Python semantics).
 
 ### 7.3 Float arithmetic

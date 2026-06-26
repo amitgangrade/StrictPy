@@ -257,7 +257,7 @@ fn main() -> i32:
     a: i32 = 1i32
     b: i32 = 0i32
     try:
-        c: i32 = a / b
+        c: i32 = a // b
         println(\"never: \" + str(c))
     except Exception as e:
         println(\"caught: \" + e.type_name)

@@ -32,7 +32,7 @@ fn except_zero_division_error_catches_canonical_name() {
     let src = "\
 fn main() -> i32:
     try:
-        z: i64 = 1i64 / 0i64
+        z: i64 = 1i64 // 0i64
         println(\"never: \" + str(z))
     except ZeroDivisionError as e:
         println(\"canonical: \" + e.type_name)
@@ -53,7 +53,7 @@ fn except_division_by_zero_error_legacy_name_still_catches() {
     let src = "\
 fn main() -> i32:
     try:
-        z: i64 = 1i64 / 0i64
+        z: i64 = 1i64 // 0i64
         println(\"never: \" + str(z))
     except DivisionByZeroError as e:
         println(\"legacy: \" + e.type_name)
@@ -77,7 +77,7 @@ fn divzero_in_i32_path_emits_canonical_name() {
     let src = "\
 fn main() -> i32:
     try:
-        z: i32 = 1i32 / 0i32
+        z: i32 = 1i32 // 0i32
         println(\"never: \" + str(z))
     except ZeroDivisionError as e:
         println(\"i32: \" + e.type_name)

@@ -71,7 +71,7 @@ fn main() -> i32:
 
     # ── Pair[str, i32] — two type parameters, no methods, just typed
     # field access.
-    p: Pair[str, i32] = Pair("answer", 42)
+    p: Pair[str, i32] = Pair("answer", 42i32)
     println(p.first)
     println(str(p.second))
 

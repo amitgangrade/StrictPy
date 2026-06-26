@@ -13,6 +13,70 @@ landed the class/vtable cleanup + primitive-ctor dispatch fix (see
 
 ---
 
+## 0. ~~Numeric core: integer `/`, no coercion, i32-default, silent overflow~~ *(Fixed — wave1 Lane A)*
+
+Four numeric-core gaps, all fixed in the wave-1 Lane A pass:
+
+- **`/` floor-divided integers.** `7 / 2` returned `3` (operand type) instead
+  of `3.5`. `/` is now **true division** and always yields `f64`
+  (`compiler/src/typecheck.rs` binop rule + `compiler/src/ir.rs::lower_binop_coerced`,
+  which widens both operands to f64 and emits `FDiv`). `//` is the integer
+  (truncating) form. `/=` on an integer target is now a compile error.
+- **No implicit numeric coercion.** `1 + 2.0`, `i32 + i64`, `f64 * int` were
+  compile errors. Implemented lossless widening (i8/i16/i32→i64, int→f64,
+  f32→f64) with casts inserted at IR lowering via the existing
+  `NativeFn::{I64FromI32,F64FromI32,F64FromI64}` / `FExt` conversions — no
+  new opcode. Conservative: mixed signedness / `u32`/`u64` still require an
+  exact match. See `numeric_common_ty` (typecheck) / `numeric_common_ty_ir`
+  (ir) and spec §5.3.
+- **Bare integer literals defaulted to `i32`.** They now default to `i64`
+  (spec §3). Typed contexts still adopt the annotation (`x: i32 = 0`), and
+  tuple literals now push expected element types so
+  `t: Tuple[i32, i32] = (1, 2)` keeps both at i32. Generic call sites infer
+  from the synthesised arg type, so annotate the literal (`id(0i32)`) for a
+  narrower instantiation.
+- **Silent signed overflow.** `+`/`-`/`*` on `i32`/`i64` used `wrapping_*`
+  in both debug and release. They now **trap with `OverflowError` in debug
+  builds** (spec §7.2) and wrap in release (matching the JIT and the
+  documented release contract) via `Interpreter::bin_i32_ovf` /
+  `bin_i64_ovf` in `vm/src/interp.rs`.
+
+Tests: `compiler/tests/numeric_coercion_runs.rs`, unit tests in
+`compiler/src/typecheck.rs` / `compiler/src/ir.rs` / `vm/src/interp.rs`, and
+`examples/numeric_coercion_demo.spy`.
+
+**Deferred (not in this pass):** `BigInt`, integer `**` (`Pow`), and floored
+float `//` — see "BigInt and remaining numeric work" immediately below.
+
+---
+
+## 0b. BigInt and remaining numeric work *(Deferred — wave1 Lane A)*
+
+`BigInt` resolves as a type name but is **non-functional**:
+
+- `Opcode::I32ToBigInt` traps (`vm/src/interp.rs` — "not implemented (M5)").
+- There are no BigInt opcodes, no heap representation, no construction path,
+  no `+`/`-`/`*`/comparison/`str()`, and no integer `Pow`.
+
+This was left out of the wave-1 Lane A pass because a correct
+arbitrary-precision path needs a heap object repr in `vm/src/object.rs`, new
+opcodes (which live in `shared/src/opcode.rs`, outside the Lane A ownership
+set this wave), and JIT support in `vm/src/jit.rs` to stay consistent with
+the interpreter. The interim safety improvement that *did* land: fixed-width
+signed overflow is no longer silent in debug builds (it raises
+`OverflowError` — see §0), so a program that would have silently corrupted a
+value now fails loudly during testing.
+
+Also still open:
+
+- **Integer `**` (`Pow`)** lowers to the `IMul` placeholder
+  (`compiler/src/ir.rs::emit_binop`), so `2 ** 10` computes `2 * 10`. Needs a
+  real `IPow`/native helper (and a BigInt result for large exponents).
+- **Float `//`** lowers to plain `FDiv` with no floor (spec §7.2 wants it
+  floored).
+
+---
+
 ## 1. ~~Sealed-class virtual dispatch drops to the base method~~  *(Fixed in M11)*
 
 See bottom of this file. Sealed receivers now dispatch through the vtable

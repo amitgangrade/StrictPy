@@ -455,9 +455,10 @@ fn eval_expr(env: Env, e: Expr) -> Value:
             if op == "/":
                 an4: i64 = require_int(a, "/")
                 bn4: i64 = require_int(b, "/")
-                # Native ZeroDivisionError fires here from /; we deliberately
+                # Native ZeroDivisionError fires here from //; we deliberately
                 # don't pre-check, to exercise the native-trap propagation.
-                return IntVal(an4 / bn4)
+                # `//` is integer (truncating) division — `/` now yields f64.
+                return IntVal(an4 // bn4)
             if op == "<":
                 an5: i64 = require_int(a, "<")
                 bn5: i64 = require_int(b, "<")

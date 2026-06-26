@@ -62,7 +62,7 @@ fn int_const_chain_is_declaration_order_independent() {
 final AREA: i64 = WIDTH * HEIGHT
 final WIDTH: i64 = 60
 final HEIGHT: i64 = 30
-final HALF: i64 = AREA / 2
+final HALF: i64 = AREA // 2
 
 fn main() -> i32:
     println(str(AREA))

@@ -1307,9 +1307,9 @@ impl Interpreter {
             Opcode::Yield => return self.op_yield(),
             Opcode::GenNext => return self.op_gen_next(),
 
-            Opcode::IAddI32 => self.bin_i32(|a, b| a.wrapping_add(b))?,
-            Opcode::ISubI32 => self.bin_i32(|a, b| a.wrapping_sub(b))?,
-            Opcode::IMulI32 => self.bin_i32(|a, b| a.wrapping_mul(b))?,
+            Opcode::IAddI32 => self.bin_i32_ovf(|a, b| a.checked_add(b), |a, b| a.wrapping_add(b))?,
+            Opcode::ISubI32 => self.bin_i32_ovf(|a, b| a.checked_sub(b), |a, b| a.wrapping_sub(b))?,
+            Opcode::IMulI32 => self.bin_i32_ovf(|a, b| a.checked_mul(b), |a, b| a.wrapping_mul(b))?,
             Opcode::IDivI32 => self.bin_i32_chk(|a, b| a.wrapping_div(b))?,
             Opcode::IRemI32 => self.bin_i32_chk(|a, b| a.wrapping_rem(b))?,
             Opcode::INegI32 => self.un_i32(|a| a.wrapping_neg())?,
@@ -1320,9 +1320,9 @@ impl Interpreter {
             Opcode::IShrI32 => self.bin_i32(|a, b| a.wrapping_shr(b as u32))?,
             Opcode::INotI32 => self.un_i32(|a| !a)?,
 
-            Opcode::IAddI64 => self.bin_i64(|a, b| a.wrapping_add(b))?,
-            Opcode::ISubI64 => self.bin_i64(|a, b| a.wrapping_sub(b))?,
-            Opcode::IMulI64 => self.bin_i64(|a, b| a.wrapping_mul(b))?,
+            Opcode::IAddI64 => self.bin_i64_ovf(|a, b| a.checked_add(b), |a, b| a.wrapping_add(b))?,
+            Opcode::ISubI64 => self.bin_i64_ovf(|a, b| a.checked_sub(b), |a, b| a.wrapping_sub(b))?,
+            Opcode::IMulI64 => self.bin_i64_ovf(|a, b| a.checked_mul(b), |a, b| a.wrapping_mul(b))?,
             Opcode::IDivI64 => self.bin_i64_chk(|a, b| a.wrapping_div(b))?,
             Opcode::IRemI64 => self.bin_i64_chk(|a, b| a.wrapping_rem(b))?,
             Opcode::INegI64 => self.un_i64(|a| a.wrapping_neg())?,
@@ -1564,6 +1564,63 @@ impl Interpreter {
         let a = self.read_u16()?;
         let av = self.read_reg(a) as i32;
         self.write_reg(dst, f(av) as i64 as u64);
+        Ok(())
+    }
+    /// Lane A: signed i32 add/sub/mul with overflow detection. Per spec §7.2,
+    /// signed overflow *traps* in debug builds (raises `OverflowError`) and
+    /// *wraps* in release builds. `chk` is the `checked_*` op (returns `None`
+    /// on overflow); `wrap` is the `wrapping_*` op used in release / on the
+    /// non-overflowing path. Release codegen is byte-identical to the prior
+    /// plain-wrapping behaviour because the `cfg!(debug_assertions)` branch is
+    /// const-folded away.
+    fn bin_i32_ovf(
+        &mut self,
+        chk: impl Fn(i32, i32) -> Option<i32>,
+        wrap: impl Fn(i32, i32) -> i32,
+    ) -> Result<(), VmError> {
+        let dst = self.read_u16()?;
+        let a = self.read_u16()?;
+        let b = self.read_u16()?;
+        let av = self.read_reg(a) as i32;
+        let bv = self.read_reg(b) as i32;
+        let r = if cfg!(debug_assertions) {
+            match chk(av, bv) {
+                Some(v) => v,
+                None => return Err(VmError::UncaughtException {
+                    type_name: "OverflowError".into(),
+                    message: "signed integer overflow".into(),
+                }),
+            }
+        } else {
+            wrap(av, bv)
+        };
+        self.write_reg(dst, r as i64 as u64);
+        Ok(())
+    }
+    /// Lane A: signed i64 add/sub/mul with overflow detection (see
+    /// [`Self::bin_i32_ovf`]).
+    fn bin_i64_ovf(
+        &mut self,
+        chk: impl Fn(i64, i64) -> Option<i64>,
+        wrap: impl Fn(i64, i64) -> i64,
+    ) -> Result<(), VmError> {
+        let dst = self.read_u16()?;
+        let a = self.read_u16()?;
+        let b = self.read_u16()?;
+        let av = self.read_reg(a) as i64;
+        let bv = self.read_reg(b) as i64;
+        let r = if cfg!(debug_assertions) {
+            match chk(av, bv) {
+                Some(v) => v,
+                None => return Err(VmError::UncaughtException {
+                    type_name: "OverflowError".into(),
+                    message: "signed integer overflow".into(),
+                }),
+            }
+        } else {
+            wrap(av, bv)
+        };
+        self.write_reg(dst, r as u64);
         Ok(())
     }
     fn bin_i64(&mut self, f: impl Fn(i64, i64) -> i64) -> Result<(), VmError> {
@@ -3570,5 +3627,49 @@ mod tests {
         let mut i = Interpreter::new(m);
         let r = i.invoke(0, &[3, 4]).unwrap();
         assert_eq!(r as i32, 7);
+    }
+
+    /// Lane A: a non-overflowing i64 multiply returns the exact product
+    /// (the overflow-checking helper must not alter normal results).
+    #[test]
+    fn imul_i64_no_overflow_returns_product() {
+        // IMUL_I64 dst=2 a=0 b=1 ; RET src=2
+        let mut code = vec![Opcode::IMulI64 as u8];
+        code.extend_from_slice(&2u16.to_le_bytes());
+        code.extend_from_slice(&0u16.to_le_bytes());
+        code.extend_from_slice(&1u16.to_le_bytes());
+        code.push(Opcode::Ret as u8);
+        code.extend_from_slice(&2u16.to_le_bytes());
+
+        let m = make_module(code, 3);
+        let mut i = Interpreter::new(m);
+        let r = i.invoke(0, &[1_000_000u64, 1_000_000u64]).unwrap();
+        assert_eq!(r as i64, 1_000_000_000_000i64);
+    }
+
+    /// Lane A: in a debug build, signed i64 overflow raises a catchable
+    /// `OverflowError` instead of silently wrapping (spec §7.2). In release
+    /// the helper wraps, so the assertion is gated on `debug_assertions`.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn imul_i64_overflow_raises_overflow_error() {
+        // IMUL_I64 dst=2 a=0 b=1 ; RET src=2
+        let mut code = vec![Opcode::IMulI64 as u8];
+        code.extend_from_slice(&2u16.to_le_bytes());
+        code.extend_from_slice(&0u16.to_le_bytes());
+        code.extend_from_slice(&1u16.to_le_bytes());
+        code.push(Opcode::Ret as u8);
+        code.extend_from_slice(&2u16.to_le_bytes());
+
+        let m = make_module(code, 3);
+        let mut i = Interpreter::new(m);
+        // i64::MAX * 2 overflows.
+        let err = i.invoke(0, &[i64::MAX as u64, 2u64]).unwrap_err();
+        match err {
+            VmError::UncaughtException { type_name, .. } => {
+                assert_eq!(type_name, "OverflowError");
+            }
+            other => panic!("expected OverflowError, got {other:?}"),
+        }
     }
 }
