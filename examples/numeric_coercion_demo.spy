@@ -1,0 +1,49 @@
+"""numeric_coercion_demo.spy — Lane A numeric core.
+
+Exercises the Python-3-style numeric semantics added in wave 1:
+
+  1. `/` is true division and always yields f64 (so `7 / 2 == 3.5`).
+  2. `//` is integer (truncating) division and keeps the integer type.
+  3. Implicit numeric widening in mixed binops:
+        i32 + i64  -> i64
+        i64 + f64  -> f64
+        i32 * f64  -> f64
+     The narrower operand is losslessly widened before the operation.
+  4. Bare integer literals default to i64 (so `1000000 * 1000000` does
+     not overflow an i32).
+"""
+
+fn main() -> i32:
+    # 1. True division: integer operands, float result.
+    a: i64 = 7
+    b: i64 = 2
+    q: f64 = a / b
+    println("7 / 2 = " + str(q))                 # 3.5
+
+    # 2. Floor (integer) division keeps the integer type.
+    fq: i64 = a // b
+    println("7 // 2 = " + str(fq))               # 3
+
+    # 3a. Mixed-width integer widening: i32 + i64 -> i64.
+    small: i32 = 1000i32
+    big: i64 = 2000000000000
+    mixed_int: i64 = small + big
+    println("i32 + i64 = " + str(mixed_int))     # 2000000001000
+
+    # 3b. int + float widening: i64 + f64 -> f64.
+    n: i64 = 10
+    half: f64 = 0.5
+    mixed_float: f64 = n + half
+    println("10 + 0.5 = " + str(mixed_float))    # 10.5
+
+    # 3c. i32 * f64 -> f64.
+    count: i32 = 3i32
+    price: f64 = 1.5
+    total: f64 = count * price
+    println("3 * 1.5 = " + str(total))           # 4.5
+
+    # 4. Bare literals are i64, so this product does not wrap an i32.
+    wide: i64 = 1000000 * 1000000
+    println("1e6 * 1e6 = " + str(wide))          # 1000000000000
+
+    return 0

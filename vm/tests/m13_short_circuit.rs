@@ -100,13 +100,15 @@ fn main() -> i32:
 
 #[test]
 fn and_first_false_skips_division_by_zero_in_rhs() {
-    // `1i32 / 0i32 == 0i32` would trap with "division by zero" if it
+    // `1i32 // 0i32 == 0i32` would trap with "division by zero" if it
     // ran. Under short-circuit semantics, the false lhs means the rhs
     // never executes. Asserts both: program exits 0 AND `r == false`.
+    // (Uses `//` integer division: Lane A made `/` true division -> f64,
+    // which yields +inf rather than trapping on `/0`.)
     let src = "\
 fn main() -> i32:
     z: i32 = 0i32
-    r: bool = false and (1i32 / z == 0i32)
+    r: bool = false and (1i32 // z == 0i32)
     println(\"r=\" + str(r))
     return 0
 ";
@@ -125,7 +127,7 @@ fn or_first_true_skips_division_by_zero_in_rhs() {
     let src = "\
 fn main() -> i32:
     z: i32 = 0i32
-    r: bool = true or (1i32 / z == 0i32)
+    r: bool = true or (1i32 // z == 0i32)
     println(\"r=\" + str(r))
     return 0
 ";

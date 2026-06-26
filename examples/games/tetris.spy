@@ -374,7 +374,7 @@ fn after_lock(state: GameState, clear_sfx: Sound, tetris_sfx: Sound, die_sfx: So
     if cleared > 0i32:
         state.score = state.score + score_for_clear(cleared, state.level)
         state.lines = state.lines + i64(cleared)
-        new_level: i64 = 1i64 + state.lines / 10i64
+        new_level: i64 = 1i64 + state.lines // 10i64
         if new_level > state.level:
             state.level = new_level
         state.last_clear_count = cleared
@@ -598,23 +598,23 @@ fn render(win: Window, font: Font, state: GameState) -> None:
         msg1: str = "GAME OVER"
         sz1: Tuple[i32, i32] = gfx.text_size(font, msg1)
         gfx.draw_text(win, font, msg1,
-                      (BOARD_W - sz1.0) / 2i32,
-                      BOARD_H / 2i32 - 40i32,
+                      (BOARD_W - sz1.0) // 2i32,
+                      BOARD_H // 2i32 - 40i32,
                       240i32, 100i32, 100i32)
         msg2: str = "R to restart"
         sz2: Tuple[i32, i32] = gfx.text_size(font, msg2)
         gfx.draw_text(win, font, msg2,
-                      (BOARD_W - sz2.0) / 2i32,
-                      BOARD_H / 2i32 + 4i32,
+                      (BOARD_W - sz2.0) // 2i32,
+                      BOARD_H // 2i32 + 4i32,
                       220i32, 220i32, 220i32)
 
         # M58: top-5 high scores, read fresh from sqlite.
         top: List[Tuple[str, i64]] = hs_top_scores(HS_GAME, 5i64)
         hdr: str = "HIGH SCORES"
         szh: Tuple[i32, i32] = gfx.text_size(font, hdr)
-        ty: i32 = BOARD_H / 2i32 + 48i32
+        ty: i32 = BOARD_H // 2i32 + 48i32
         gfx.draw_text(win, font, hdr,
-                      (BOARD_W - szh.0) / 2i32, ty,
+                      (BOARD_W - szh.0) // 2i32, ty,
                       255i32, 220i32, 120i32)
         ti: i32 = 0i32
         tn: i32 = i32(i64(len(top)))
@@ -623,7 +623,7 @@ fn render(win: Window, font: Font, state: GameState) -> None:
             line: str = str(ti + 1i32) + ". " + te.0 + "  " + str(te.1)
             szl: Tuple[i32, i32] = gfx.text_size(font, line)
             gfx.draw_text(win, font, line,
-                          (BOARD_W - szl.0) / 2i32,
+                          (BOARD_W - szl.0) // 2i32,
                           ty + 28i32 + ti * 24i32,
                           220i32, 220i32, 220i32)
             ti = ti + 1i32

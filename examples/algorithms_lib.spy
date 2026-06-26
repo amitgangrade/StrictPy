@@ -366,7 +366,7 @@ fn test_split_half() -> bool:
 fn test_id_mangle_collision() -> bool:
     # The M18 brief calls this out as a worklist mangling probe:
     # `id__i32` vs `id__tuple_i32_i32` must be distinct instantiations.
-    a: i32 = id(42)
+    a: i32 = id(42i32)
     pair: Tuple[i32, i32] = (42, 42)
     p: Tuple[i32, i32] = id(pair)
     ok: bool = a == 42 and p.0 == 42 and p.1 == 42
@@ -376,7 +376,7 @@ fn test_transitive_depth_three() -> bool:
     # outer → middle → inner, all generic, all over three different
     # element types in the same program. Probes worklist drain depth
     # and per-instantiation lowering across i32, str, and a class type.
-    a: i32 = outer(7)
+    a: i32 = outer(7i32)
     b: str = outer("hello")
     item: Item = Item("widget", 42)
     c: Item = outer(item)

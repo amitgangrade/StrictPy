@@ -262,13 +262,13 @@ fn render(win: Window, font: Font, state: GameState) -> None:
         hint: str = "Press an arrow key to start"
         hsz: Tuple[i32, i32] = gfx.text_size(font, hint)
         gfx.draw_rect(win,
-                      (WIN_W - hsz.0) / 2i32 - 12i32,
+                      (WIN_W - hsz.0) // 2i32 - 12i32,
                       TOPBAR_H + 16i32,
                       hsz.0 + 24i32,
                       hsz.1 + 12i32,
                       0i32, 0i32, 0i32, 160i32)
         gfx.draw_text(win, font, hint,
-                      (WIN_W - hsz.0) / 2i32,
+                      (WIN_W - hsz.0) // 2i32,
                       TOPBAR_H + 22i32,
                       240i32, 240i32, 160i32)
 
@@ -279,23 +279,23 @@ fn render(win: Window, font: Font, state: GameState) -> None:
         msg1: str = "GAME OVER"
         sz1: Tuple[i32, i32] = gfx.text_size(font, msg1)
         gfx.draw_text(win, font, msg1,
-                      (WIN_W - sz1.0) / 2i32,
-                      TOPBAR_H + (WIN_H - TOPBAR_H) / 2i32 - 40i32,
+                      (WIN_W - sz1.0) // 2i32,
+                      TOPBAR_H + (WIN_H - TOPBAR_H) // 2i32 - 40i32,
                       240i32, 100i32, 100i32)
         msg2: str = "Press R to restart, Escape to quit"
         sz2: Tuple[i32, i32] = gfx.text_size(font, msg2)
         gfx.draw_text(win, font, msg2,
-                      (WIN_W - sz2.0) / 2i32,
-                      TOPBAR_H + (WIN_H - TOPBAR_H) / 2i32 + 4i32,
+                      (WIN_W - sz2.0) // 2i32,
+                      TOPBAR_H + (WIN_H - TOPBAR_H) // 2i32 + 4i32,
                       220i32, 220i32, 220i32)
 
         # M58: top-5 high scores, read fresh from sqlite.
         top: List[Tuple[str, i64]] = hs_top_scores(HS_GAME, 5i64)
         hdr: str = "HIGH SCORES"
         szh: Tuple[i32, i32] = gfx.text_size(font, hdr)
-        hy: i32 = TOPBAR_H + (WIN_H - TOPBAR_H) / 2i32 + 48i32
+        hy: i32 = TOPBAR_H + (WIN_H - TOPBAR_H) // 2i32 + 48i32
         gfx.draw_text(win, font, hdr,
-                      (WIN_W - szh.0) / 2i32, hy,
+                      (WIN_W - szh.0) // 2i32, hy,
                       255i32, 220i32, 120i32)
         ti: i32 = 0i32
         tn: i32 = i32(i64(len(top)))
@@ -304,7 +304,7 @@ fn render(win: Window, font: Font, state: GameState) -> None:
             line: str = str(ti + 1i32) + ". " + te.0 + "  " + str(te.1)
             szl: Tuple[i32, i32] = gfx.text_size(font, line)
             gfx.draw_text(win, font, line,
-                          (WIN_W - szl.0) / 2i32,
+                          (WIN_W - szl.0) // 2i32,
                           hy + 28i32 + ti * 24i32,
                           220i32, 220i32, 220i32)
             ti = ti + 1i32

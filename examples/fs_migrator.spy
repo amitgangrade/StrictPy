@@ -429,7 +429,7 @@ fn main() -> i32:
         age_days: i64 = -1i64
         if mtime >= 0i64:
             secs: i64 = datetime.diff_seconds(now, mtime)
-            age_days = secs / 86400i64
+            age_days = secs // 86400i64
         cat: str = classify_age(age_days)
         # Compose tree-style line.
         println("  " + path + " -> name=" + nm + " stem=" + st + " suffix=" + sf + " age_days=" + str(age_days) + " cat=" + cat)

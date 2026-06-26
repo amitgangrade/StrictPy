@@ -3447,9 +3447,14 @@ fn lower_expr(fb: &mut FuncBuilder, ctx: &mut LowerCtx, e: &Expr) -> ValueId {
                     return lower_tuple_eq(fb, ctx, *op, lhs, rhs, &elem_tys);
                 }
             }
+            let lty = ctx.expr_ty(expr_span(lhs));
+            let rty = ctx.expr_ty(expr_span(rhs));
             let l = lower_expr(fb, ctx, lhs);
             let r = lower_expr(fb, ctx, rhs);
-            emit_binop(fb, *op, l, r, ty)
+            // Lane A: numeric operand widening + Python-3 `/`-is-float. The
+            // helper only rewrites the all-numeric case; everything else
+            // (str/tuple/container ops) falls through to emit_binop unchanged.
+            lower_binop_coerced(fb, *op, l, &lty, r, &rty, ty)
         }
         Expr::Call { callee, args, span } => lower_call(fb, ctx, callee, args, *span),
         Expr::MethodCall { receiver, method, args, span } => {
@@ -3969,6 +3974,121 @@ fn lower_literal(
         Literal::None => ValueKind::Const(IRConst::None),
     };
     fb.push_value(ty, kind)
+}
+
+/// Lane A: insert a lossless numeric cast so `v` (currently typed `from`)
+/// is materialised at primitive type `to`. Reuses the existing conversion
+/// `NativeFn`s / cast `IROp`s — no new opcode. Returns `v` unchanged when the
+/// types already match or no cast is needed (small-int -> i32 is a no-op
+/// because the register already holds the sign-extended value).
+fn coerce_numeric(fb: &mut FuncBuilder, v: ValueId, from: PrimTy, to: PrimTy) -> ValueId {
+    use PrimTy::*;
+    if from == to {
+        return v;
+    }
+    let native = match (from, to) {
+        // integer -> i64
+        (I8 | I16 | I32 | U8 | U16 | U32 | Bool, I64) => Some(NativeFn::I64FromI32 as u32),
+        // small signed int -> f64
+        (I8 | I16 | I32 | Bool, F64) => Some(NativeFn::F64FromI32 as u32),
+        // i64 -> f64
+        (I64, F64) => Some(NativeFn::F64FromI64 as u32),
+        _ => None,
+    };
+    if let Some(native_id) = native {
+        return fb.push_value(
+            Ty::Primitive(to),
+            ValueKind::Op { op: IROp::NativeCall { native_id }, args: vec![v] },
+        );
+    }
+    // f32 -> f64 uses the dedicated widening opcode (FExt -> F32ToF64).
+    if from == F32 && to == F64 {
+        return fb.push_value(
+            Ty::Primitive(F64),
+            ValueKind::Op { op: IROp::FExt, args: vec![v] },
+        );
+    }
+    // small signed int -> i32: the register already holds the sign-extended
+    // value, so a re-typed copy is sufficient.
+    if matches!(from, I8 | I16 | Bool) && to == I32 {
+        return fb.push_value(
+            Ty::Primitive(I32),
+            ValueKind::Op { op: IROp::Copy, args: vec![v] },
+        );
+    }
+    // No lossless cast available — leave `v` as-is. The typechecker only
+    // permits operand pairs that `numeric_common_ty` accepts, so this is
+    // unreachable for well-typed programs; keep it total for safety.
+    v
+}
+
+/// Lane A: lower a numeric binary op with implicit operand widening + the
+/// Python-3 `/`-is-float rule. Computes the common type, coerces both
+/// operands to it, then defers to [`emit_binop`].
+///
+/// `lty` / `rty` are the *operand* types from the typechecker; `result_ty`
+/// is the binop node's type. For `/` the operands are widened to f64 and the
+/// op becomes a float divide.
+fn lower_binop_coerced(
+    fb: &mut FuncBuilder,
+    op: AstBinOp,
+    l: ValueId,
+    lty: &Ty,
+    r: ValueId,
+    rty: &Ty,
+    result_ty: Ty,
+) -> ValueId {
+    fn prim_of(t: &Ty) -> Option<PrimTy> {
+        let inner = match t { Ty::Nullable(b) => b.as_ref(), other => other };
+        match inner { Ty::Primitive(p) if p.is_numeric() => Some(*p), _ => None }
+    }
+    let lp = prim_of(lty);
+    let rp = prim_of(rty);
+    // Only the all-numeric case participates in widening; everything else
+    // (str concat, comparisons on strings/tuples, container `in`, etc.) is
+    // handled by emit_binop's own dispatch on the raw operands.
+    if let (Some(lp), Some(rp)) = (lp, rp) {
+        // True division always operates in f64.
+        let target = if matches!(op, AstBinOp::Div) {
+            PrimTy::F64
+        } else if matches!(op, AstBinOp::Shl | AstBinOp::Shr) {
+            // Shifts: keep operands at their own widths; result follows LHS.
+            return emit_binop(fb, op, l, r, result_ty);
+        } else {
+            numeric_common_ty_ir(lp, rp).unwrap_or(lp)
+        };
+        let lc = coerce_numeric(fb, l, lp, target);
+        let rc = coerce_numeric(fb, r, rp, target);
+        // The emitted op's operand width is read from `lc`'s type, so pass a
+        // result type at `target` (or f64 for `/`) so codegen picks the right
+        // sized opcode.
+        let emit_ty = if matches!(op, AstBinOp::Div) {
+            Ty::Primitive(PrimTy::F64)
+        } else {
+            result_ty
+        };
+        return emit_binop(fb, op, lc, rc, emit_ty);
+    }
+    emit_binop(fb, op, l, r, result_ty)
+}
+
+/// IR-side mirror of `typecheck::numeric_common_ty` (kept in sync). Returns
+/// the widened common type for two numeric primitives.
+fn numeric_common_ty_ir(a: PrimTy, b: PrimTy) -> Option<PrimTy> {
+    use PrimTy::*;
+    if a == b { return Some(a); }
+    if a == F64 || b == F64 { return Some(F64); }
+    if a == F32 || b == F32 {
+        let other = if a == F32 { b } else { a };
+        if other.is_integer() { return Some(F64); }
+        return None;
+    }
+    let signed_small = |p: PrimTy| matches!(p, I8 | I16 | I32);
+    if a == I64 && signed_small(b) { return Some(I64); }
+    if b == I64 && signed_small(a) { return Some(I64); }
+    if matches!(a, I8 | I16) && b == I32 { return Some(I32); }
+    if matches!(b, I8 | I16) && a == I32 { return Some(I32); }
+    None
 }
 
 fn emit_binop(
@@ -7432,5 +7552,65 @@ fn main() -> i32:
             matches!(b.terminator, Terminator::CondBranch { .. })
         });
         assert!(has_condbr, "for-in must terminate the header with a CondBranch");
+    }
+
+    /// Lane A: the IR-side widening table mirrors the typechecker's.
+    #[test]
+    fn numeric_common_ty_ir_table() {
+        use PrimTy::*;
+        assert_eq!(numeric_common_ty_ir(I32, I64), Some(I64));
+        assert_eq!(numeric_common_ty_ir(I64, I32), Some(I64));
+        assert_eq!(numeric_common_ty_ir(I32, F64), Some(F64));
+        assert_eq!(numeric_common_ty_ir(I64, F64), Some(F64));
+        assert_eq!(numeric_common_ty_ir(F32, I64), Some(F64));
+        assert_eq!(numeric_common_ty_ir(F32, F64), Some(F64));
+        assert_eq!(numeric_common_ty_ir(U32, I32), None);
+    }
+
+    /// Lane A: `7 / 2` lowers to a float divide (FDiv), not IDiv — true
+    /// division coerces the integer operands to f64.
+    #[test]
+    fn true_division_lowers_to_fdiv() {
+        let src = "\
+fn main() -> i32:
+    a: i64 = 7
+    b: i64 = 2
+    q: f64 = a / b
+    return 0
+";
+        let m = lower_src(src);
+        let main = m.functions.iter().find(|f| f.name == "main").unwrap();
+        let mut saw_fdiv = false;
+        let mut saw_idiv = false;
+        for b in &main.blocks {
+            for v in &b.values {
+                if let ValueKind::Op { op, .. } = &v.kind {
+                    match op {
+                        IROp::FDiv => saw_fdiv = true,
+                        IROp::IDiv => saw_idiv = true,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert!(saw_fdiv, "`/` on integers must lower to FDiv");
+        assert!(!saw_idiv, "`/` must not lower to integer IDiv");
+    }
+
+    /// Lane A: `7 // 2` keeps integer (truncating) division — IDiv, not FDiv.
+    #[test]
+    fn floor_division_lowers_to_idiv() {
+        let src = "\
+fn main() -> i32:
+    a: i64 = 7
+    b: i64 = 2
+    q: i64 = a // b
+    return 0
+";
+        let m = lower_src(src);
+        let main = m.functions.iter().find(|f| f.name == "main").unwrap();
+        let saw_idiv = main.blocks.iter().any(|b| b.values.iter().any(|v|
+            matches!(&v.kind, ValueKind::Op { op: IROp::IDiv, .. })));
+        assert!(saw_idiv, "`//` on integers must lower to IDiv");
     }
 }

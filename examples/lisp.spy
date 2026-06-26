@@ -566,7 +566,7 @@ fn builtin_div(st: State, args: List[Value]) -> Value:
         d: i64 = args[i].n
         if d == 0:
             return state_err(st, "/: division by zero")
-        acc = acc / d
+        acc = acc // d
         i = i + 1i64
     return mk_num(acc)
 

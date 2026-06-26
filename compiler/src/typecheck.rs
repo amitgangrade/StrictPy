@@ -371,7 +371,16 @@ impl TypeChecker {
             Stmt::AugAssign { target, value, op, span } => {
                 let lhs_ty = self.lvalue_type(target, env, ctx, r)?;
                 let rhs = self.check_or_synth(value, Some(&lhs_ty), env, ctx, r)?;
-                let _ = op;
+                // Lane A: `/=` is true division and yields f64, so the target
+                // must already be a float — otherwise we would store f64 bits
+                // back into an integer slot. (`//=` keeps integer semantics.)
+                if matches!(op, BinOp::Div) {
+                    let is_float_lhs = matches!(&lhs_ty, Ty::Primitive(p) if p.is_float());
+                    if !is_float_lhs {
+                        return Err(type_err(*span, codes::TYPE_BINOP_MISMATCH,
+                            format!("`/=` performs true (float) division; target `{}` is not a float — use `//=` for integer division", lhs_ty.display())));
+                    }
+                }
                 if !ty_eq(&lhs_ty, &rhs) {
                     return Err(type_err(*span, codes::TYPE_BINOP_MISMATCH,
                         format!("aug-assign type mismatch: {} vs {}", lhs_ty.display(), rhs.display())));
@@ -771,16 +780,17 @@ impl TypeChecker {
         if let Expr::Literal { lit, span } = e {
             let lit_ty = match lit {
                 Literal::Int { suffix, .. } => {
+                    // Lane A: bare integer literals default to i64 (spec §3).
                     if let Some(s) = suffix {
                         Ty::Primitive(int_suffix_to_prim(*s))
                     } else if let Ty::Primitive(p) = expected {
-                        if p.is_numeric() { Ty::Primitive(*p) } else { Ty::Primitive(PrimTy::I32) }
+                        if p.is_numeric() { Ty::Primitive(*p) } else { Ty::Primitive(PrimTy::I64) }
                     } else if let Ty::Nullable(inner) = expected {
                         if let Ty::Primitive(p) = inner.as_ref() {
-                            if p.is_numeric() { Ty::Primitive(*p) } else { Ty::Primitive(PrimTy::I32) }
-                        } else { Ty::Primitive(PrimTy::I32) }
+                            if p.is_numeric() { Ty::Primitive(*p) } else { Ty::Primitive(PrimTy::I64) }
+                        } else { Ty::Primitive(PrimTy::I64) }
                     } else {
-                        Ty::Primitive(PrimTy::I32)
+                        Ty::Primitive(PrimTy::I64)
                     }
                 }
                 Literal::Float { suffix, .. } => {
@@ -821,6 +831,37 @@ impl TypeChecker {
                 let inner = self.check_expr(operand, expected, env, ctx, r)?;
                 self.expr_types.insert((span.start, span.end), inner.clone());
                 return Ok(inner);
+            }
+        }
+        // Lane A: an arithmetic binop checked against a numeric primitive
+        // expectation propagates that width into literal operands, so
+        // `x: i32 = 1 + 2` keeps `1` and `2` at i32 (they would otherwise
+        // default to i64 and the i64 result would fail the i32 subtype
+        // check). Only kicks in when BOTH operands can adopt the expected
+        // type (numeric literals, or operands already of that type); mixed
+        // non-literal operands fall through to the widening synth path.
+        if let Expr::Binary { op, lhs, rhs, span } = e {
+            let is_arith = matches!(op,
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::FloorDiv
+                | BinOp::Rem | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor);
+            // `/` always yields f64, so it can only satisfy an f64 expectation;
+            // let the generic path produce f64 and subtype-check it.
+            if is_arith {
+                if let Ty::Primitive(ep) = expected {
+                    if ep.is_numeric()
+                        && operand_can_adopt(lhs, *ep)
+                        && operand_can_adopt(rhs, *ep)
+                    {
+                        let lt = self.check_expr(lhs, expected, env, ctx, r)?;
+                        let rt = self.check_expr(rhs, expected, env, ctx, r)?;
+                        if matches!(lt, Ty::Primitive(p) if p == *ep)
+                            && matches!(rt, Ty::Primitive(p) if p == *ep)
+                        {
+                            self.expr_types.insert((span.start, span.end), expected.clone());
+                            return Ok(expected.clone());
+                        }
+                    }
+                }
             }
         }
         // For collection literals, push expected type element-wise.
@@ -866,6 +907,35 @@ impl TypeChecker {
                         format!("expected {}, got {}", expected.display(), ty.display())));
                 }
                 return Ok(ty);
+            }
+            // Lane A: push expected element types into a tuple literal so
+            // `t: Tuple[i32, i32] = (42, 42)` checks each `42` against i32
+            // instead of synthesising Tuple[i64, i64] (bare ints now default
+            // to i64). Mirrors the List/Set/Dict branches above. Only applies
+            // when the expected type is a tuple of matching arity.
+            Expr::Tuple { elems, span } => {
+                if let Ty::Tuple(exp_elems) = expected {
+                    if exp_elems.len() == elems.len() {
+                        let mut tys = Vec::with_capacity(elems.len());
+                        for (el, exp) in elems.iter().zip(exp_elems) {
+                            tys.push(self.check_expr(el, exp, env, ctx, r)?);
+                        }
+                        let ty = Ty::Tuple(tys);
+                        self.expr_types.insert((span.start, span.end), ty.clone());
+                        if !is_subtype(&ty, expected, &ctx.ty_ctx()) {
+                            return Err(type_err(*span, codes::TYPE_MISMATCH,
+                                format!("expected {}, got {}", expected.display(), ty.display())));
+                        }
+                        return Ok(ty);
+                    }
+                }
+                // Fall through to the generic synth+subtype path.
+                let got = self.synth_expr(e, env, ctx, r)?;
+                if !is_subtype(&got, expected, &ctx.ty_ctx()) {
+                    return Err(type_err(*span, codes::TYPE_MISMATCH,
+                        format!("expected {}, got {}", expected.display(), got.display())));
+                }
+                return Ok(got);
             }
             Expr::Dict { entries, span } => {
                 let (kexp, vexp) = match expected {
@@ -924,8 +994,10 @@ impl TypeChecker {
         match e {
             Expr::Literal { lit, .. } => Ok(match lit {
                 Literal::Int { suffix, .. } => {
+                    // Lane A: bare (unsuffixed) integer literals default to i64
+                    // (spec §3 "0 // i64 by default"). Previously i32.
                     if let Some(s) = suffix { Ty::Primitive(int_suffix_to_prim(*s)) }
-                    else { Ty::Primitive(PrimTy::I32) }
+                    else { Ty::Primitive(PrimTy::I64) }
                 }
                 Literal::Float { suffix, .. } => {
                     if let Some(crate::lexer::FloatSuffix::F32) = suffix {
@@ -1451,24 +1523,88 @@ impl TypeChecker {
                     }
                     return Ok(Ty::Primitive(PrimTy::Str));
                 }
-                let rt = self.check_or_synth(rhs, Some(&lt), env, ctx, r)?;
+                // Lane A: synthesise the RHS. When the RHS is a bare (width-
+                // negotiable) numeric literal and the LHS is numeric, push the
+                // LHS type into it so `f64_var + 2` keeps `2` at f64 etc.
+                // Otherwise synth the RHS freely so its real type is available
+                // for the widening join below.
+                let rt = if is_unsuffixed_numeric_literal(rhs)
+                    && matches!(&lt, Ty::Primitive(p) if p.is_numeric())
+                {
+                    self.check_or_synth(rhs, Some(&lt), env, ctx, r)?
+                } else {
+                    self.synth_expr(rhs, env, ctx, r)?
+                };
                 if matches!(rt, Ty::Var(_)) {
                     return Ok(rt);
                 }
-                if !ty_eq(&lt, &rt) {
-                    return Err(type_err(span, codes::TYPE_BINOP_MISMATCH,
-                        format!("operand type mismatch: cannot apply `{:?}` to {} and {}",
-                                op, lt.display(), rt.display())));
-                }
-                if let Ty::Primitive(p) = &lt {
-                    if !p.is_numeric() {
-                        return Err(type_err(span, codes::TYPE_BINOP_MISMATCH,
-                            format!("`{:?}` requires numeric operands, got {}", op, lt.display())));
+                // Both operands must be numeric primitives. (`str + str` already
+                // returned above; user-class operands are Lane C, out of scope.)
+                let (lp, rp) = match (&lt, &rt) {
+                    (Ty::Primitive(lp), Ty::Primitive(rp)) if lp.is_numeric() && rp.is_numeric() => {
+                        (*lp, *rp)
                     }
-                    return Ok(Ty::Primitive(*p));
+                    _ => {
+                        // Preserve the old diagnostics: a non-numeric primitive
+                        // gives the "requires numeric operands" message; an
+                        // otherwise-unsupported operand the "not defined" one.
+                        if let Ty::Primitive(p) = &lt {
+                            if !p.is_numeric() {
+                                return Err(type_err(span, codes::TYPE_BINOP_MISMATCH,
+                                    format!("`{:?}` requires numeric operands, got {}", op, lt.display())));
+                            }
+                        } else {
+                            return Err(type_err(span, codes::TYPE_BINOP_MISMATCH,
+                                format!("`{:?}` not defined for {}", op, lt.display())));
+                        }
+                        return Err(type_err(span, codes::TYPE_BINOP_MISMATCH,
+                            format!("operand type mismatch: cannot apply `{:?}` to {} and {}",
+                                    op, lt.display(), rt.display())));
+                    }
+                };
+                // Lane A: if exactly one operand is a width-negotiable numeric
+                // literal and the other is a concrete numeric type, the literal
+                // adopts the concrete type. This keeps `5 + i32_var` (literal on
+                // the left) at i32 rather than defaulting the literal to i64 and
+                // forcing a widen. Re-record the literal's expr type so IR
+                // lowering sees the adopted width.
+                let lhs_lit = operand_can_adopt(lhs, rp);
+                let rhs_lit = operand_can_adopt(rhs, lp);
+                let (lp, rp) = if lhs_lit && !rhs_lit && rp != lp {
+                    let _ = self.check_expr(lhs, &Ty::Primitive(rp), env, ctx, r)?;
+                    (rp, rp)
+                } else if rhs_lit && !lhs_lit && rp != lp {
+                    let _ = self.check_expr(rhs, &Ty::Primitive(lp), env, ctx, r)?;
+                    (lp, lp)
+                } else {
+                    (lp, rp)
+                };
+                // Compute the common (widened) numeric type. Conservative: only
+                // the signed-int ladder (i8/i16/i32 -> i64) and int/f32 -> f64
+                // promotions widen automatically; anything else still requires
+                // an exact match (so `u32 + i32`, `u64`, mixed-signedness stay
+                // errors, matching the available lossless cast set).
+                let common = match numeric_common_ty(lp, rp) {
+                    Some(c) => c,
+                    None => {
+                        return Err(type_err(span, codes::TYPE_BINOP_MISMATCH,
+                            format!("operand type mismatch: cannot apply `{:?}` to {} and {}",
+                                    op, lt.display(), rt.display())));
+                    }
+                };
+                // Shifts: the result follows the LHS width; the RHS is just a
+                // shift count and is not widened into the result.
+                if matches!(op, BinOp::Shl | BinOp::Shr) {
+                    return Ok(Ty::Primitive(lp));
                 }
-                Err(type_err(span, codes::TYPE_BINOP_MISMATCH,
-                    format!("`{:?}` not defined for {}", op, lt.display())))
+                // `/` is true division: always yields f64 (Python 3 semantics).
+                if matches!(op, BinOp::Div) {
+                    return Ok(Ty::Primitive(PrimTy::F64));
+                }
+                // `//`, `%`, `**`, `+ - *`, bitwise: result is the common type.
+                // (`//` on ints is truncating per spec §7.2; on floats it is
+                // plain float division for now — see IR lowering.)
+                Ok(Ty::Primitive(common))
             }
         }
     }
@@ -2552,6 +2688,96 @@ fn is_unsuffixed_int_literal(e: &Expr) -> bool {
     }
 }
 
+/// Lane A: can this operand take on `target` when an arithmetic binop is
+/// checked against an expected numeric width? True for width-negotiable
+/// numeric literals (and unary +/- of them), and recursively for arithmetic
+/// sub-expressions built from such operands — so `x: i32 = 1 + 2 * 3` keeps
+/// every literal at i32. A *suffixed* literal only adopts its own type.
+/// Non-literal operands return false and are routed through the widening
+/// synth path instead (which already pushes the LHS type into literal RHSs).
+fn operand_can_adopt(e: &Expr, target: PrimTy) -> bool {
+    match e {
+        Expr::Literal { lit: Literal::Int { suffix, .. }, .. } => {
+            match suffix {
+                None => target.is_integer(),
+                Some(s) => int_suffix_to_prim(*s) == target,
+            }
+        }
+        Expr::Literal { lit: Literal::Float { suffix, .. }, .. } => {
+            match suffix {
+                None => target.is_float(),
+                Some(crate::lexer::FloatSuffix::F32) => target == PrimTy::F32,
+                Some(crate::lexer::FloatSuffix::F64) => target == PrimTy::F64,
+            }
+        }
+        Expr::Unary { op: UnaryOp::Neg | UnaryOp::Pos, operand, .. } => {
+            operand_can_adopt(operand, target)
+        }
+        Expr::Binary { op, lhs, rhs, .. } if matches!(op,
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::FloorDiv
+            | BinOp::Rem | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor) =>
+        {
+            operand_can_adopt(lhs, target) && operand_can_adopt(rhs, target)
+        }
+        _ => false,
+    }
+}
+
+/// Lane A: an int or float literal with no width suffix (so its type is still
+/// negotiable). Used by the binop rule to keep `f64_var + 2` typed at f64.
+fn is_unsuffixed_numeric_literal(e: &Expr) -> bool {
+    match e {
+        Expr::Literal { lit: Literal::Int { suffix, .. }, .. } => suffix.is_none(),
+        Expr::Literal { lit: Literal::Float { suffix, .. }, .. } => suffix.is_none(),
+        Expr::Unary { op: UnaryOp::Neg | UnaryOp::Pos, operand, .. } => {
+            is_unsuffixed_numeric_literal(operand)
+        }
+        _ => false,
+    }
+}
+
+/// Lane A: the common (widened) type for a numeric binary operation, or
+/// `None` when no *lossless* implicit widening applies.
+///
+/// Conservative on purpose — only the conversions backed by an existing
+/// lossless cast (`I64FromI32`, `F64FromI32`, `F64FromI64`, `f32 -> f64`)
+/// widen automatically:
+///   * `f64` with any numeric -> `f64`
+///   * `f32` with another `f32` -> `f32`; `f32` with any int -> `f64`
+///   * signed-int ladder: `i8/i16/i32` with `i64` -> `i64`; otherwise the
+///     equal type. `i32`-class widens to `i64`.
+/// Mixed signedness, `u32`/`u64`, and `i8`/`i16`/`u8`/`u16` against a
+/// *different* width still require an exact match (returns `None` unless equal).
+fn numeric_common_ty(a: PrimTy, b: PrimTy) -> Option<PrimTy> {
+    use PrimTy::*;
+    if a == b {
+        return Some(a);
+    }
+    // Float promotions.
+    if a == F64 || b == F64 {
+        // f64 absorbs any numeric.
+        if a.is_numeric() && b.is_numeric() { return Some(F64); }
+        return None;
+    }
+    if a == F32 || b == F32 {
+        // f32 mixed with an integer -> f64 (lossless via the int->f64 casts).
+        let other = if a == F32 { b } else { a };
+        if other.is_integer() { return Some(F64); }
+        return None;
+    }
+    // Both integers, different widths. Only widen within the signed ladder
+    // where a lossless cast exists (i8/i16/i32 -> i64).
+    let signed_small = |p: PrimTy| matches!(p, I8 | I16 | I32);
+    if a == I64 && signed_small(b) { return Some(I64); }
+    if b == I64 && signed_small(a) { return Some(I64); }
+    // i8/i16 with i32 -> i32 (both fit; widen to the larger signed width).
+    if matches!(a, I8 | I16) && b == I32 { return Some(I32); }
+    if matches!(b, I8 | I16) && a == I32 { return Some(I32); }
+    // Everything else (mixed signedness, u32/u64, disjoint small widths)
+    // stays an error to avoid lossy/unsound implicit conversions.
+    None
+}
+
 fn type_err(span: Span, code: ErrorCode, message: String) -> CompileError {
     CompileError::Type {
         file: String::new(), line: span.line, col: span.col, code, message,
@@ -3134,9 +3360,14 @@ mod tests {
     }
 
     #[test]
-    fn test_binary_op_mixed_fails() {
+    fn test_binary_op_mixed_widens_to_i64() {
+        // Lane A: `i32 + i64` now widens to i64 (was a hard error). Storing
+        // the i64 result back into an i32 is still rejected (narrowing).
         let r = check_src("fn main() -> i32:\n    a: i32 = 1\n    b: i64 = 2\n    c: i32 = a + b\n    return 0\n");
-        assert!(r.is_err());
+        assert!(r.is_err(), "i64 result cannot be narrowed to i32 implicitly");
+        // ...but binding it to an i64 target is fine.
+        check_src("fn main() -> i32:\n    a: i32 = 1\n    b: i64 = 2\n    c: i64 = a + b\n    return 0\n")
+            .expect("i32 + i64 must widen to i64");
     }
 
     #[test]
@@ -3199,8 +3430,53 @@ mod tests {
     }
 
     #[test]
-    fn test_no_implicit_coercion() {
-        let r = check_src("fn main() -> i32:\n    a: i32 = 1\n    b: i64 = 2\n    c: i64 = a + b\n    return 0\n");
-        assert!(r.is_err());
+    fn test_numeric_widening_coercion() {
+        // Lane A (supersedes the old `test_no_implicit_coercion`): the
+        // signed-int ladder and int->float promotions now widen implicitly.
+        check_src("fn main() -> i32:\n    a: i32 = 1\n    b: i64 = 2\n    c: i64 = a + b\n    return 0\n")
+            .expect("i32 + i64 -> i64");
+        check_src("fn main() -> i32:\n    a: i64 = 1\n    b: f64 = 2.0\n    c: f64 = a + b\n    return 0\n")
+            .expect("i64 + f64 -> f64");
+        // Mixed signedness still has no lossless cast, so it stays an error.
+        let r = check_src("fn main() -> i32:\n    a: u32 = 1u32\n    b: i32 = 2i32\n    c: i64 = a + b\n    return 0\n");
+        assert!(r.is_err(), "u32 + i32 has no lossless widening; must stay an error");
+    }
+
+    #[test]
+    fn test_true_division_is_float() {
+        // `/` yields f64 even for integer operands.
+        check_src("fn main() -> i32:\n    a: i64 = 7\n    b: i64 = 2\n    q: f64 = a / b\n    return 0\n")
+            .expect("integer `/` must yield f64");
+        // ...so binding it to an integer is a type error.
+        let r = check_src("fn main() -> i32:\n    a: i64 = 7\n    b: i64 = 2\n    q: i64 = a / b\n    return 0\n");
+        assert!(r.is_err(), "true division result is f64, not i64");
+        // `//` keeps the integer type.
+        check_src("fn main() -> i32:\n    a: i64 = 7\n    b: i64 = 2\n    q: i64 = a // b\n    return 0\n")
+            .expect("`//` must keep the integer type");
+    }
+
+    #[test]
+    fn test_bare_literal_defaults_to_i64() {
+        // A bare literal binds to i64 by default; assigning to i32 needs the
+        // literal to fit (it adopts the annotation), but a value that only
+        // fits i64 must NOT be accepted as i32 via the default.
+        check_src("fn main() -> i32:\n    x: i64 = 1\n    return 0\n").expect("bare 1 ok as i64");
+        check_src("fn main() -> i32:\n    x: i32 = 1\n    return 0\n").expect("bare 1 adopts i32");
+    }
+
+    #[test]
+    fn test_numeric_common_ty_table() {
+        use PrimTy::*;
+        assert_eq!(numeric_common_ty(I32, I64), Some(I64));
+        assert_eq!(numeric_common_ty(I64, I32), Some(I64));
+        assert_eq!(numeric_common_ty(I32, F64), Some(F64));
+        assert_eq!(numeric_common_ty(I64, F64), Some(F64));
+        assert_eq!(numeric_common_ty(F32, I32), Some(F64));
+        assert_eq!(numeric_common_ty(F64, F64), Some(F64));
+        assert_eq!(numeric_common_ty(I8, I32), Some(I32));
+        // No lossless implicit widening for these:
+        assert_eq!(numeric_common_ty(U32, I32), None);
+        assert_eq!(numeric_common_ty(U64, I64), None);
+        assert_eq!(numeric_common_ty(F32, F64), Some(F64));
     }
 }
