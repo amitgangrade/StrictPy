@@ -360,6 +360,30 @@ impl TypeChecker {
                     }
                 }
             }
+            // Lane B: star-unpack `before, *star, after = xs`. The RHS must be
+            // a `List[T]`. Each fixed name binds at `T`; the star name binds
+            // at `List[T]` (a fresh list of the middle elements).
+            Stmt::LetStarDestructure { before, star, after, init, span } => {
+                let got = self.check_or_synth(init, None, env, ctx, r)?;
+                let elem = match &got {
+                    Ty::Generic { base: TypeCtor::List, args } if args.len() == 1 => args[0].clone(),
+                    _ => return Err(type_err(*span, codes::TYPE_MISMATCH,
+                        format!("star-unpack requires a List[T] on the right, got {}", got.display()))),
+                };
+                let star_ty = Ty::Generic { base: TypeCtor::List, args: vec![elem.clone()] };
+                let bind = |this: &mut Self, env: &mut Env, name: &str, ty: &Ty| {
+                    if let Some(sym) = r.symbols.symbols.iter()
+                        .find(|s| s.name == *name && s.def_span.start == span.start
+                                  && s.def_span.end == span.end)
+                    {
+                        env.types.insert(sym.id, ty.clone());
+                    }
+                    let _ = this;
+                };
+                for n in before.iter() { bind(self, env, n, &elem); }
+                bind(self, env, star, &star_ty);
+                for n in after.iter() { bind(self, env, n, &elem); }
+            }
             Stmt::Assign { target, value, span } => {
                 let lhs_ty = self.lvalue_type(target, env, ctx, r)?;
                 let rhs = self.check_or_synth(value, Some(&lhs_ty), env, ctx, r)?;
@@ -1186,6 +1210,29 @@ impl TypeChecker {
                 }
                 for i in indices { let _ = self.synth_expr(i, env, ctx, r)?; }
                 self.index_type(&obj_ty, *span)
+            }
+            // Lane B: slice `obj[lo:hi:step]`. Supported on `str` and
+            // `List[T]`; the result type is the receiver type (a `str` slice
+            // is a `str`, a `List[T]` slice is a `List[T]`). Every present
+            // bound must be an integer.
+            Expr::Slice { obj, lo, hi, step, span } => {
+                let obj_ty = self.synth_expr(obj, env, ctx, r)?;
+                for bound in [lo, hi, step].into_iter().flatten() {
+                    let bt = self.synth_expr(bound, env, ctx, r)?;
+                    if !matches!(&bt, Ty::Primitive(p) if p.is_integer()) {
+                        return Err(type_err(expr_span(bound), codes::TYPE_MISMATCH,
+                            format!("slice bounds must be integers, got {}", bt.display())));
+                    }
+                }
+                match &obj_ty {
+                    Ty::Primitive(PrimTy::Str) => Ok(Ty::Primitive(PrimTy::Str)),
+                    Ty::Generic { base: TypeCtor::List, args } if args.len() == 1 => {
+                        Ok(Ty::Generic { base: TypeCtor::List, args: args.clone() })
+                    }
+                    _ => Err(type_err(*span, codes::TYPE_NO_METHOD,
+                        format!("type {} is not sliceable (slicing is supported on str and List[T])",
+                            obj_ty.display()))),
+                }
             }
             Expr::Lambda { params, return_ty, body, span: _ } => {
                 let mut env2 = env.clone();
@@ -2684,6 +2731,7 @@ fn expr_span(e: &Expr) -> Span {
         | Expr::MethodCall { span, .. } | Expr::Attr { span, .. } | Expr::Index { span, .. }
         | Expr::NullCoalesce { span, .. } | Expr::Ternary { span, .. }
         | Expr::Lambda { span, .. } | Expr::Cast { span, .. }
+        | Expr::Slice { span, .. }
         | Expr::Comprehension { span, .. } => *span,
     }
 }

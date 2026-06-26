@@ -1,0 +1,36 @@
+"""negative_index_demo.spy — Lane B negative indexing for str and List[T].
+
+`seq[-1]` is the last element, `seq[-2]` the second-to-last, etc. — for both
+`str` and `List[T]`, on read AND on list element assignment. Indexing past
+either end (after adjustment) raises IndexError, matching Python (previously
+list negatives raised and string OOB silently returned '\\0').
+
+Acceptance: `compiler/tests/negative_index_demo_runs.rs`;
+`vm/tests/lane_b_negative_index.rs` unit-tests the edge cases.
+"""
+
+fn main() -> i32:
+    xs: List[i64] = [10i64, 20i64, 30i64, 40i64]
+
+    # Negative read.
+    println("xs[-1]=" + str(xs[-1]))     # 40
+    println("xs[-2]=" + str(xs[-2]))     # 30
+    println("xs[-4]=" + str(xs[-4]))     # 10
+
+    # Negative write (element assignment).
+    xs[-1] = 99i64
+    println("after xs[-1]=99: " + str(xs[3]))   # 99
+
+    # Negative augmented assignment.
+    xs[-2] = xs[-2] + 5i64
+    println("xs[2]=" + str(xs[2]))       # 35
+
+    # Strings: negative indexing returns the codepoint; str() of a char.
+    s: str = "abcdef"
+    last: char = s[-1]
+    first: char = s[-6]
+    println("s[-1]=" + str(last))        # f
+    println("s[-6]=" + str(first))       # a
+
+    println("OK: negative-index")
+    return 0

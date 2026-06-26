@@ -1,0 +1,47 @@
+"""fstrings_demo.spy — Lane B f-strings (basic interpolation form).
+
+StrictPy f-strings desugar at parse time into string concatenation:
+
+  * `f"{x}"`           → `str(x)`
+  * `f"text {a} {b}"`  → `"text " + str(a) + " " + str(b)`
+  * `f"plain"`         → `"plain"` (no interpolation → a plain literal)
+
+`str(...)` dispatches on the static type of the interpolated expression,
+so ints, floats, bools, chars, strings and tuples all render correctly.
+
+Format specifiers (`f"{x:.2f}"`) are NOT supported in v0.3 — build
+formatted output with explicit code. See LANGUAGE_GUIDE §11.7.
+
+Acceptance: `compiler/tests/fstrings_demo_runs.rs` asserts exit 0 and the
+interpolated lines; `vm/tests/lane_b_fstrings.rs` unit-tests the forms.
+"""
+
+fn main() -> i32:
+    name: str = "world"
+    n: i64 = 42i64
+    pi: f64 = 3.5
+
+    # Single interpolation.
+    println(f"{name}")
+
+    # Text with interpolations on both sides.
+    println(f"hello, {name}!")
+
+    # Multiple interpolations of different static types.
+    println(f"n = {n}, name = {name}")
+
+    # Adjacent interpolations with no literal text between them.
+    println(f"{name}{n}")
+
+    # A float and a bool.
+    ready: bool = true
+    println(f"pi ~ {pi}, ready = {ready}")
+
+    # An f-string with no interpolation behaves like a plain literal.
+    println(f"plain text")
+
+    # An interpolation that is itself an expression.
+    println(f"sum = {n + 8i64}")
+
+    println("OK: fstrings")
+    return 0

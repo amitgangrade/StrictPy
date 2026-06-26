@@ -1,0 +1,50 @@
+"""slicing_demo.spy — Lane B slice syntax for str and List[T].
+
+Slices follow Python semantics: `seq[lo:hi:step]` where every bound is
+optional, negative bounds count from the end, and a negative step walks
+backwards (`seq[::-1]` reverses).
+
+Supported on `str` and `List[T]`; the result has the same type as the
+receiver. Out-of-range bounds clamp (they do not raise), matching Python.
+
+Acceptance: `compiler/tests/slicing_demo_runs.rs` (exit 0 + spot-checks);
+`vm/tests/lane_b_slicing.rs` unit-tests the edge cases.
+"""
+
+fn main() -> i32:
+    s: str = "hello world"
+
+    # Basic forward slices.
+    println(s[0:5])          # "hello"
+    println(s[6:11])         # "world"
+    println(s[:5])           # "hello"
+    println(s[6:])           # "world"
+    println(s[:])            # "hello world"
+
+    # Negative bounds.
+    println(s[-5:])          # "world"
+    println(s[:-6])          # "hello"
+    println(s[-5:-2])        # "wor"
+
+    # Step and reverse.
+    println(s[::-1])         # "dlrow olleh"
+    println(s[::2])          # "hlowrd"
+    println(s[1:8:2])        # "el o"
+
+    # List slices.
+    xs: List[i64] = [0i64, 1i64, 2i64, 3i64, 4i64, 5i64]
+    mid: List[i64] = xs[1:4]
+    println("mid len=" + str(i64(len(mid))))     # 3
+    println("mid[0]=" + str(mid[0]))             # 1
+    println("mid[2]=" + str(mid[2]))             # 3
+
+    rev: List[i64] = xs[::-1]
+    println("rev[0]=" + str(rev[0]))             # 5
+    println("rev[5]=" + str(rev[5]))             # 0
+
+    last_two: List[i64] = xs[-2:]
+    println("last_two[0]=" + str(last_two[0]))   # 4
+    println("last_two[1]=" + str(last_two[1]))   # 5
+
+    println("OK: slicing")
+    return 0

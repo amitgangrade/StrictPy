@@ -1,0 +1,52 @@
+"""star_unpack_demo.spy — Lane B iterable star-unpacking.
+
+`a, *rest = xs` binds `a` to the first element and `rest` to a fresh
+`List[T]` of the remaining elements. The star target may appear anywhere:
+
+  * `first, *rest = xs`
+  * `*init, last = xs`
+  * `head, *mid, tail = xs`
+
+Like the existing tuple-destructure form, a star-unpack introduces fresh
+bindings (the names must not already be declared). Element types are
+inferred from the right-hand `List[T]`: each fixed name binds at `T`, the
+starred name at `List[T]`.
+
+Acceptance: `compiler/tests/star_unpack_demo_runs.rs`;
+`vm/tests/lane_b_star_unpack.rs` unit-tests each position.
+"""
+
+fn main() -> i32:
+    xs: List[i64] = [1i64, 2i64, 3i64, 4i64, 5i64]
+
+    # Star at the end.
+    first, *rest = xs
+    println("first=" + str(first))                  # 1
+    println("rest len=" + str(i64(len(rest))))      # 4
+    println("rest[0]=" + str(rest[0]))              # 2
+    println("rest[3]=" + str(rest[3]))              # 5
+
+    # Star at the front.
+    *init, last = xs
+    println("last=" + str(last))                    # 5
+    println("init len=" + str(i64(len(init))))      # 4
+    println("init[0]=" + str(init[0]))              # 1
+    println("init[3]=" + str(init[3]))              # 4
+
+    # Star in the middle.
+    head, *mid, tail = xs
+    println("head=" + str(head))                    # 1
+    println("tail=" + str(tail))                    # 5
+    println("mid len=" + str(i64(len(mid))))        # 3
+    println("mid[0]=" + str(mid[0]))                # 2
+    println("mid[2]=" + str(mid[2]))                # 4
+
+    # Star captures empty when there is nothing left.
+    pair: List[i64] = [7i64, 8i64]
+    a, b, *empty = pair
+    println("a=" + str(a))                          # 7
+    println("b=" + str(b))                          # 8
+    println("empty len=" + str(i64(len(empty))))    # 0
+
+    println("OK: star-unpack")
+    return 0

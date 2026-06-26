@@ -903,13 +903,28 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         // Index-expr path. Returns the i-th Unicode codepoint (u32) of `s`.
         NativeFn::StrCharAt => {
             let sp = arg_u64(args, 0) as *const StringRepr;
-            let idx = arg_u64(args, 1) as usize;
+            // Lane B: a negative index counts from the end (`s[-1]` is the
+            // last char), matching Python and the list path. We compute the
+            // adjusted index against the string's code-point length; an index
+            // still out of range after adjustment raises IndexError (the old
+            // code silently produced `'\0'` for OOB — a quiet-wrong footgun).
+            let raw_idx = arg_u64(args, 1) as i64;
             if sp.is_null() {
                 return Err(VmError::UncaughtException {
                     type_name: "NullPointerError".into(),
                     message: "char-at on null string".into(),
                 });
             }
+            // SAFETY: sp is a heap pointer to StringRepr.
+            let cp_len = unsafe { (*sp).length } as i64;
+            let norm = if raw_idx < 0 { raw_idx + cp_len } else { raw_idx };
+            if norm < 0 || norm >= cp_len {
+                return Err(VmError::UncaughtException {
+                    type_name: "IndexError".into(),
+                    message: format!("string index {raw_idx} out of range"),
+                });
+            }
+            let idx = norm as usize;
             // ASCII fast path: flags bit 1 means 1 byte == 1 code point, so
             // `s[i]` is a direct O(1) byte load instead of an O(i) chars()
             // walk (which made per-char scanning loops quadratic).
@@ -26530,6 +26545,48 @@ mod tests {
         let r = dispatch(&mut i, NativeFn::StrSlice as u32, &[s, 6, 11]).unwrap();
         let got = unsafe { read_str(r as *const StringRepr) };
         assert_eq!(got, "world");
+    }
+
+    // ── Lane B: negative string indexing via StrCharAt ─────────────────
+
+    #[test]
+    fn str_char_at_positive_index() {
+        let mut i = empty_interp();
+        let s = alloc_s(&mut i, "abcdef");
+        let r = dispatch(&mut i, NativeFn::StrCharAt as u32, &[s, 0]).unwrap();
+        assert_eq!(char::from_u32(r as u32), Some('a'));
+        let r = dispatch(&mut i, NativeFn::StrCharAt as u32, &[s, 5]).unwrap();
+        assert_eq!(char::from_u32(r as u32), Some('f'));
+    }
+
+    #[test]
+    fn str_char_at_negative_index_counts_from_end() {
+        let mut i = empty_interp();
+        let s = alloc_s(&mut i, "abcdef");
+        // -1 → 'f', -6 → 'a'  (note: arg is passed as the raw u64 bit pattern
+        // of an i64, which is how the IR materialises a negative index).
+        let r = dispatch(&mut i, NativeFn::StrCharAt as u32, &[s, (-1i64) as u64]).unwrap();
+        assert_eq!(char::from_u32(r as u32), Some('f'));
+        let r = dispatch(&mut i, NativeFn::StrCharAt as u32, &[s, (-6i64) as u64]).unwrap();
+        assert_eq!(char::from_u32(r as u32), Some('a'));
+    }
+
+    #[test]
+    fn str_char_at_out_of_range_raises() {
+        let mut i = empty_interp();
+        let s = alloc_s(&mut i, "abc");
+        // Past the end.
+        let err = dispatch(&mut i, NativeFn::StrCharAt as u32, &[s, 3]).unwrap_err();
+        match err {
+            VmError::UncaughtException { type_name, .. } => assert_eq!(type_name, "IndexError"),
+            other => panic!("got {other:?}"),
+        }
+        // Too negative (before the start).
+        let err = dispatch(&mut i, NativeFn::StrCharAt as u32, &[s, (-4i64) as u64]).unwrap_err();
+        match err {
+            VmError::UncaughtException { type_name, .. } => assert_eq!(type_name, "IndexError"),
+            other => panic!("got {other:?}"),
+        }
     }
 
     // ── Numeric parsers (real-world: csv_aggregate) ────────────────────

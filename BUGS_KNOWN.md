@@ -682,3 +682,57 @@ the full-suite run.
   the BUG-043 notes, but without the parallel-sweep / loaded-box caveat.
 - **CI handling:** see BUG-043 notes (skipped in the parallel sweep,
   isolated+retried on Linux, skipped on Windows).
+
+---
+
+## Fixed in Wave-1 (Lane B — sequence syntax & f-strings)
+
+Four sequence/string syntax gaps closed in one pass. Each is independently
+mergeable and has both Rust unit tests and a `.spy` example + integration
+test (`examples/{fstrings,slicing,negative_index,star_unpack}_demo.spy`,
+`compiler/tests/{fstrings,slicing,negative_index,star_unpack}_demo_runs.rs`).
+
+- **~~f-strings had no parser arm~~** *(Fixed)* — the lexer emitted the
+  `FStr*` token stream but no parser consumed it, so even `f"v {x}"` failed
+  with `E0001: expected expression, found FStrStart` (despite docs claiming
+  support). `compiler/src/parser.rs::parse_fstring` now desugars an f-string
+  at parse time into string concatenation: each literal chunk is a `str`
+  literal, each `{e}` interpolation becomes `str(e)`, and the pieces are
+  folded with `BinOp::Add`. No new AST/IR/typecheck surface — it reuses the
+  existing per-type `str(...)` dispatch and `str + str` concat. **Deferred:**
+  format specifiers (`f"{x:.2f}"`) — the lexer tokenizes the post-colon spec
+  as ordinary tokens, so they'd need lexer support; a `:` inside an
+  interpolation is now a clear parse error instead of a mis-parse.
+
+- **~~No slice syntax~~** *(Fixed)* — `seq[a:b:c]` / `[::-1]` now parse to a
+  new `Expr::Slice` AST node (`compiler/src/parser.rs::parse_subscript_tail`,
+  kept distinct from `Expr::Index` so it never collides with the generic-type
+  `List[i32]` form). `compiler/src/ir.rs::lower_slice` materialises the slice
+  with full Python `slice.indices(len)` semantics (optional bounds, negatives
+  from the end, negative step / reverse) using only existing IR ops + natives
+  (so it works on the interpreter AND the JIT). Supported on `str` and
+  `List[T]`; result type matches the receiver.
+
+- **~~Negative indexing broken~~** *(Fixed)* — lists raised
+  `IndexError: index -1 out of range` and strings silently returned `'\0'`
+  for an out-of-bounds index (a quiet-wrong footgun). Lists now normalize the
+  index at IR level (`normalize_neg_list_index` — `idx < 0 ? idx + len : idx`
+  via a real `CondBranch`, covering read, write, and aug-assign on both the
+  interpreter and the JIT); strings normalize in the `StrCharAt` native
+  (`vm/src/builtins.rs`) and raise `IndexError` on a genuinely out-of-range
+  index instead of returning `'\0'`.
+
+- **~~Destructuring was fixed-arity only~~** *(Fixed)* — `a, *rest = xs`
+  iterable star-unpacking now parses to `Stmt::LetStarDestructure`
+  (`compiler/src/parser.rs::try_parse_destructure`; the star may be at the
+  front, middle, or end, at most one per target list). The RHS must be a
+  `List[T]`; `before`/`after` names bind at `T`, the starred name at a fresh
+  `List[T]` of the middle elements (`compiler/src/ir.rs`, `Stmt::LetStar-
+  Destructure` lowering builds the middle list with `ArrayNew` + a copy loop).
+
+> Implementation note: `IROp::Select` is a codegen placeholder that
+> unconditionally moves its `then` operand (see `compiler/src/codegen.rs`),
+> so it CANNOT be used for any value that depends on its condition. All of
+> the above conditionals are realised as real `CondBranch` + slot merges (the
+> same pattern `NullCoalesce` uses). Ternary expressions still rely on the
+> `Select` placeholder — a separate pre-existing limitation, out of scope here.
