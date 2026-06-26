@@ -1,15 +1,24 @@
-"""_probe_dict_in_i64.spy — segfault repro.
+"""_probe_dict_in_i64.spy — segfault repro, now closed at compile time.
 
-`<i64> in Dict[i64, i64]` crashes the VM (segfault on Linux).
+History: `<i64> in Dict[i64, i64]` used to crash the VM (segfault on Linux)
+because the runtime dict keys on strings only while the typechecker placed no
+restriction on the key type.
+
+As of Wave-1 Lane D, `Dict[i64, _]` (any non-`str` key) is a hard compile
+error (E2072) instead of a silent compile-then-segfault. The original repro
+body therefore no longer compiles; see `compiler/tests/conformance_negative.rs`
+(`dict_i64_key_rejected`) for the negative test that pins the new behaviour.
+
+This file is kept as a *compilable* str-key demonstration of `k in d`.
 """
 
 
 fn main() -> i32:
-    di: Dict[i64, i64] = {}
-    di[1i64] = 10i64
-    di[2i64] = 20i64
-    # This line segfaults.
-    if 1i64 in di:
+    di: Dict[str, i64] = {}
+    di["one"] = 10i64
+    di["two"] = 20i64
+    # `in` tests key membership (Python semantics).
+    if "one" in di:
         println("present")
     else:
         println("absent")

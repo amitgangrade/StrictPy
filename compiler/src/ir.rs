@@ -2445,12 +2445,12 @@ fn lower_stmt(fb: &mut FuncBuilder, ctx: &mut LowerCtx, s: &Stmt) -> Option<()> 
             }
             Some(())
         }
-        Stmt::Try { body, handlers, finally_block, .. } => {
-            lower_try(fb, ctx, body, handlers, finally_block.as_ref());
+        Stmt::Try { body, handlers, else_block, finally_block, .. } => {
+            lower_try(fb, ctx, body, handlers, else_block.as_ref(), finally_block.as_ref());
             Some(())
         }
-        Stmt::Raise { exc, .. } => {
-            lower_raise(fb, ctx, exc);
+        Stmt::Raise { exc, cause, .. } => {
+            lower_raise(fb, ctx, exc, cause.as_ref());
             Some(())
         }
         Stmt::Assert { cond, .. } => {
@@ -2867,10 +2867,17 @@ fn lower_try(
     ctx: &mut LowerCtx,
     body: &Block,
     handlers: &[ExceptHandler],
+    else_block: Option<&Block>,
     finally_block: Option<&Block>,
 ) {
     let after = fb.new_block();
     let finally_b: Option<BlockId> = finally_block.as_ref().map(|_| fb.new_block());
+    // The `else` clause runs iff the try body completes with NO exception. It
+    // is *not* protected by the handler frame (an exception inside `else`
+    // propagates past this try). We give it its own block reached only from the
+    // body's normal-completion edge; the handler arms branch straight to the
+    // post-body target and skip it.
+    let else_b: Option<BlockId> = else_block.as_ref().map(|_| fb.new_block());
 
     // Allocate handler blocks AND their bind slots up front, so the TryEnter
     // operand can reference them.
@@ -2900,15 +2907,22 @@ fn lower_try(
         } else {
             u32::MAX
         };
-        let filter_name = exception_filter_name(&h.exc_ty);
-        // Names this clause should match: the filter itself, then (unless it's
-        // the universal catch-all) every subclass of it discovered in the
-        // module's class layouts.
-        let mut match_names: Vec<String> = vec![filter_name.clone()];
-        if filter_name != "Exception" {
-            for sub in exception_subclass_names(ctx, &filter_name) {
-                if !match_names.contains(&sub) {
-                    match_names.push(sub);
+        // Filter name(s) for this clause — one for `except E:`, several for a
+        // tuple `except (A, B):`. Each name additionally pulls in its subclass
+        // names so `except Base` (or `except (Base, Other)`) also catches a
+        // raised `Derived`. All expanded arms share this clause's handler block
+        // and bind slot, and stay contiguous in clause order so the VM's
+        // first-match scan preserves "first matching except wins".
+        let mut match_names: Vec<String> = Vec::new();
+        for filter_name in exception_filter_names(&h.exc_ty) {
+            if !match_names.contains(&filter_name) {
+                match_names.push(filter_name.clone());
+            }
+            if filter_name != "Exception" {
+                for sub in exception_subclass_names(ctx, &filter_name) {
+                    if !match_names.contains(&sub) {
+                        match_names.push(sub);
+                    }
                 }
             }
         }
@@ -2933,17 +2947,30 @@ fn lower_try(
 
     // Body.
     lower_block(fb, ctx, body);
-    // Normal-completion path: pop the handler frame, then branch to finally
-    // (if any) else `after`.
+    // Normal-completion path: pop the handler frame (TryLeave), then run the
+    // `else` clause (if any), then branch to finally (if any) else `after`.
+    // The `else` clause runs *after* TryLeave so that an exception it raises is
+    // NOT caught by this try's handlers — exactly Python's semantics.
     fb.push_value(
         Ty::Primitive(PrimTy::Unit),
         ValueKind::Op { op: IROp::TryLeave, args: vec![] },
     );
     let post_body_target = finally_b.unwrap_or(after);
-    fb.terminate(Terminator::Branch { target: post_body_target });
+    // Where the body's normal exit goes: into `else` if present, else straight
+    // to the post-body (finally/after) target.
+    let normal_exit_target = else_b.unwrap_or(post_body_target);
+    fb.terminate(Terminator::Branch { target: normal_exit_target });
+
+    // `else` block (if present): runs only on the body's no-exception path.
+    if let (Some(eb_id), Some(eb)) = (else_b, else_block) {
+        fb.switch_to(eb_id);
+        lower_block(fb, ctx, eb);
+        fb.terminate(Terminator::Branch { target: post_body_target });
+    }
 
     // Handler arms — each starts in its own block, entered only via the VM's
     // exception dispatch. After running, branch to finally (if any) else after.
+    // Handlers deliberately bypass the `else` block.
     for (i, h) in handlers.iter().enumerate() {
         fb.switch_to(handler_blocks[i]);
         lower_block(fb, ctx, &h.body);
@@ -2974,7 +3001,7 @@ fn lower_try(
 /// the expression and throwing whatever it produced. The runtime will treat
 /// the resulting value as if it were an exception heap object — useful for
 /// re-raise scenarios once those land.
-fn lower_raise(fb: &mut FuncBuilder, ctx: &mut LowerCtx, exc: &Expr) {
+fn lower_raise(fb: &mut FuncBuilder, ctx: &mut LowerCtx, exc: &Expr, cause: Option<&Expr>) {
     // Recognise `<ExceptionName>("message")`.
     if let Expr::Call { callee, args, .. } = exc {
         if let Expr::Ident { name, .. } = callee.as_ref() {
@@ -3001,8 +3028,15 @@ fn lower_raise(fb: &mut FuncBuilder, ctx: &mut LowerCtx, exc: &Expr) {
                             args: vec![alloc, tname_v],
                         },
                     );
-                    // message field (offset 8).
-                    let msg_v = lower_expr(fb, ctx, &args[0].value);
+                    // message field (offset 8). `raise X("msg") from Y`
+                    // appends a chained-cause suffix so the cause is preserved
+                    // and observable via `e.message` (the 2-field exception
+                    // object has no dedicated `__cause__` slot — full
+                    // `__cause__` storage is deferred; see STRICTPY_SPEC §7.5).
+                    let mut msg_v = lower_expr(fb, ctx, &args[0].value);
+                    if let Some(c) = cause {
+                        msg_v = lower_cause_chain(fb, ctx, msg_v, c);
+                    }
                     fb.push_value(
                         Ty::Primitive(PrimTy::Unit),
                         ValueKind::Op {
@@ -3019,20 +3053,102 @@ fn lower_raise(fb: &mut FuncBuilder, ctx: &mut LowerCtx, exc: &Expr) {
         }
     }
     // Fallback path — lower whatever expression was raised and throw it.
+    // Evaluate the cause too (if any) so its side effects are preserved and it
+    // is not silently dropped; with a non-literal raised object we can't fold
+    // the chain into its message without mutating a possibly-shared object, so
+    // for this path we only guarantee evaluation. (`raise Builtin(..) from Y`
+    // — the common case — does fold the chain in, above.)
     let v = lower_expr(fb, ctx, exc);
+    if let Some(c) = cause {
+        let _ = lower_expr(fb, ctx, c);
+    }
     fb.terminate(Terminator::Throw { exc: v });
     let nb = fb.new_block();
     fb.switch_to(nb);
 }
 
-/// Extract the filter name from an `except T as e:` clause's AST type.
-/// `Type::Named { name, .. }` → `name.clone()`; everything else maps to
-/// "Exception" (catch-all) — defensive.
-fn exception_filter_name(ty: &ast::Type) -> String {
-    if let ast::Type::Named { name, .. } = ty {
-        name.clone()
-    } else {
-        "Exception".into()
+/// Build a chained-cause message value for `raise X(msg) from cause`.
+///
+/// Produces `"<msg> [caused by <CauseType>: <cause msg>]"` by concatenating
+/// the base message with the cause exception's `type_name` (offset 0) and
+/// `message` (offset 8) fields. `cause` must be an exception-typed value (the
+/// typechecker enforces this in `Stmt::Raise`). Until the exception object
+/// carries a real `__cause__` slot, this keeps the cause observable rather
+/// than silently dropping it.
+fn lower_cause_chain(
+    fb: &mut FuncBuilder,
+    ctx: &mut LowerCtx,
+    base_msg: ValueId,
+    cause: &Expr,
+) -> ValueId {
+    let cause_v = lower_expr(fb, ctx, cause);
+    let str_ty = Ty::Primitive(PrimTy::Str);
+    let mk_str = |fb: &mut FuncBuilder, s: &str| {
+        fb.push_value(str_ty.clone(), ValueKind::Const(IRConst::Str(s.to_string())))
+    };
+    let concat = |fb: &mut FuncBuilder, a: ValueId, b: ValueId| {
+        fb.push_value(
+            str_ty.clone(),
+            ValueKind::Op {
+                op: IROp::NativeCall { native_id: NativeFn::StrConcat as u32 },
+                args: vec![a, b],
+            },
+        )
+    };
+    // Load cause.type_name (offset 0) and cause.message (offset 8).
+    let cause_tname = fb.push_value(
+        str_ty.clone(),
+        ValueKind::Op { op: IROp::Load { offset: 0 }, args: vec![cause_v] },
+    );
+    let cause_msg = fb.push_value(
+        str_ty.clone(),
+        ValueKind::Op { op: IROp::Load { offset: 8 }, args: vec![cause_v] },
+    );
+    let pre = mk_str(fb, " [caused by ");
+    let sep = mk_str(fb, ": ");
+    let post = mk_str(fb, "]");
+    let mut acc = concat(fb, base_msg, pre);
+    acc = concat(fb, acc, cause_tname);
+    acc = concat(fb, acc, sep);
+    acc = concat(fb, acc, cause_msg);
+    acc = concat(fb, acc, post);
+    acc
+}
+
+/// Extract the filter name(s) from an `except T as e:` clause's AST type.
+///
+/// - `except E:`        → `["E"]`
+/// - `except (A, B):`   → `["A", "B"]`  (a tuple of exception types — each is
+///                         matched independently, exactly like CPython)
+/// - anything else      → `["Exception"]` (catch-all) — defensive.
+///
+/// Historically only the `Named` case was handled and a tuple silently
+/// degraded to the universal `"Exception"` catch-all, swallowing exceptions
+/// the program never meant to catch.  We now lower each element of the tuple
+/// to its own VM handler arm (see `lower_try`), so `except (A, B)` catches A
+/// or B but *not* an unrelated C.
+fn exception_filter_names(ty: &ast::Type) -> Vec<String> {
+    match ty {
+        ast::Type::Named { name, .. } => vec![name.clone()],
+        ast::Type::Tuple { elems, .. } => {
+            let mut names = Vec::with_capacity(elems.len());
+            for e in elems {
+                if let ast::Type::Named { name, .. } = e {
+                    names.push(name.clone());
+                } else {
+                    // A non-Named element inside the tuple is unexpected
+                    // (the typechecker rejects non-exception filters); fall
+                    // back to catch-all so we never silently drop the clause.
+                    names.push("Exception".into());
+                }
+            }
+            if names.is_empty() {
+                vec!["Exception".into()]
+            } else {
+                names
+            }
+        }
+        _ => vec!["Exception".into()],
     }
 }
 
@@ -3081,7 +3197,15 @@ fn exception_subclass_names(ctx: &LowerCtx, filter_name: &str) -> Vec<String> {
 /// the resolver's `ast_type_to_ty` so the slot's type matches what the
 /// typechecker recorded.
 fn exception_filter_ty(ctx: &LowerCtx, ty: &ast::Type) -> Ty {
-    let key = (ast_type_span(ty).start, ast_type_span(ty).end);
+    // For `except (A, B) as e:` there is no single class span recorded for the
+    // tuple; key the bind slot off the first listed type so the slot is at
+    // least a heap reference (8-byte) and the GC scans it correctly. The bind
+    // value at runtime is the original thrown object regardless of slot type.
+    let lookup_ty: &ast::Type = match ty {
+        ast::Type::Tuple { elems, .. } => elems.first().unwrap_or(ty),
+        other => other,
+    };
+    let key = (ast_type_span(lookup_ty).start, ast_type_span(lookup_ty).end);
     ctx.typed
         .resolved
         .ast_type_to_ty
@@ -7612,5 +7736,87 @@ fn main() -> i32:
         let saw_idiv = main.blocks.iter().any(|b| b.values.iter().any(|v|
             matches!(&v.kind, ValueKind::Op { op: IROp::IDiv, .. })));
         assert!(saw_idiv, "`//` on integers must lower to IDiv");
+    }
+
+    // ── Wave-1 Lane D: try/except/else + except-tuple + raise-from ──────
+
+    fn named_ty(name: &str) -> ast::Type {
+        ast::Type::Named { name: name.into(), args: vec![], span: crate::ast::Span::DUMMY }
+    }
+
+    #[test]
+    fn exception_filter_names_single() {
+        assert_eq!(exception_filter_names(&named_ty("ValueError")), vec!["ValueError"]);
+    }
+
+    #[test]
+    fn exception_filter_names_tuple_expands() {
+        // `except (A, B)` must yield both names — historically it degraded to
+        // the universal `"Exception"` catch-all.
+        let tup = ast::Type::Tuple {
+            elems: vec![named_ty("ValueError"), named_ty("KeyError")],
+            span: crate::ast::Span::DUMMY,
+        };
+        assert_eq!(exception_filter_names(&tup), vec!["ValueError", "KeyError"]);
+    }
+
+    /// `try/except/else` must lower the `else` block (it used to be dropped):
+    /// the const string from the else body must appear in the lowered IR.
+    #[test]
+    fn try_else_block_is_lowered() {
+        let src = "\
+fn main() -> i32:
+    try:
+        x: i32 = 1
+    except ValueError as e:
+        print(\"caught\")
+    else:
+        print(\"else-ran-marker\")
+    return 0
+";
+        let ir = lower_src(src);
+        let saw_marker = ir.functions.iter().any(|f| {
+            f.blocks.iter().any(|b| {
+                b.values.iter().any(|v| {
+                    matches!(&v.kind, ValueKind::Const(IRConst::Str(s)) if s == "else-ran-marker")
+                })
+            })
+        });
+        assert!(saw_marker, "the try/else block body was dropped at lowering");
+    }
+
+    /// `except (A, B)` must produce a VM handler arm for each listed type, so
+    /// it does not silently degrade to a catch-all. We assert the lowered
+    /// TryEnter carries arms filtering on both names.
+    #[test]
+    fn except_tuple_lowers_one_arm_per_type() {
+        let src = "\
+fn main() -> i32:
+    try:
+        raise ValueError(\"x\")
+    except (ValueError, KeyError) as e:
+        print(e.message)
+    return 0
+";
+        let ir = lower_src(src);
+        let mut filters: Vec<String> = Vec::new();
+        for f in &ir.functions {
+            for b in &f.blocks {
+                for v in &b.values {
+                    if let ValueKind::Op { op: IROp::TryEnter { arms, .. }, .. } = &v.kind {
+                        for a in arms {
+                            filters.push(ir.string_table[a.filter_str_idx as usize].clone());
+                        }
+                    }
+                }
+            }
+        }
+        assert!(filters.iter().any(|s| s == "ValueError"),
+            "tuple-except must filter on ValueError; got {filters:?}");
+        assert!(filters.iter().any(|s| s == "KeyError"),
+            "tuple-except must filter on KeyError; got {filters:?}");
+        // It must NOT have degraded to a bare `Exception` catch-all.
+        assert!(!filters.iter().any(|s| s == "Exception"),
+            "tuple-except must not degrade to a catch-all; got {filters:?}");
     }
 }

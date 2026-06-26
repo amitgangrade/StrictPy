@@ -257,6 +257,11 @@ generic_params  ::= "[" type_param { "," type_param } "]"
 type_param      ::= identifier [ ":" type_bound ]
 type_bound      ::= type { "+" type }
 decorator       ::= "@" dotted_name [ "(" [ arg_list ] ")" ] NEWLINE
+                    # NOTE: decorators parse but have NO semantics in v1. Any
+                    # decorator is a hard compile error (E2071) rather than a
+                    # silent no-op — `@lru_cache`/`@retry` etc. must not appear
+                    # to "work" while doing nothing. The allow-list is empty
+                    # until a real decorator is implemented and lowered.
 
 class_decl      ::= [ class_modifier ] "class" identifier [ generic_params ]
                     [ "(" type_list ")" ] ":" class_body
@@ -399,13 +404,20 @@ Primitives are *value types* — they are stored inline, never heap-allocated, n
 | `str`           | Immutable UTF-8 string                 |
 | `bytes`         | Immutable byte sequence                |
 | `List[T]`       | Mutable contiguous array               |
-| `Dict[K, V]`    | Hash table; `K` must implement `Hash`  |
+| `Dict[K, V]`    | Hash table; **`K` must be `str` in v1** (see note) |
 | `Set[T]`        | Hash set                               |
 | `Tuple[...]`    | Heterogeneous fixed-size product       |
 | `BigInt`        | Arbitrary-precision integer            |
 | User classes    | Class instances                        |
 
 Reference types are heap-allocated and accessed via pointers. Two reference values are `is`-equal iff they point to the same object.
+
+> **`Dict` key restriction (v1).** The runtime dict is implemented as a
+> string-keyed hash table (`vm/src/strdict.rs`). The type checker therefore
+> rejects any `Dict[K, V]` whose key type `K` is not `str` with `E2072`.
+> Previously a non-`str` key (e.g. `Dict[i64, V]`, `Dict[Tuple[...], V]`)
+> compiled and then SEGFAULTed at subscript; the guard closes that crash.
+> Full non-`str`-key support is deferred to a later milestone.
 
 #### 5.1.3 Function types
 
@@ -1009,11 +1021,21 @@ with exactly two readable fields:
 ```python
 raise IOError("file not found")
 raise IndexError("…")
+raise KeyError("wrapped") from cause   # exception chaining (see below)
 ```
 
 The single argument MUST be a `str`-typed expression. The exception
-class name must be one of the built-in names in §7.5.1; user-defined
-exception subclasses are deferred (see §7.5.6).
+class name must be one of the built-in names in §7.5.1 (or a user-defined
+subclass of `Exception`).
+
+**Exception chaining (`raise X from Y`).** The `from` cause `Y` must be an
+exception value (a subclass of `Exception`); a non-exception cause is rejected
+at compile time (`E2050`). Because the exception object carries only the
+two fields in §7.5.2 (no dedicated `__cause__` slot yet), the cause is
+*preserved by folding it into the raised exception's `message`* as a chained
+suffix: `"<msg> [caused by <CauseType>: <cause msg>]"`. This keeps the cause
+observable via `e.message` rather than silently discarding it (the historical
+behaviour). A real `__cause__` field / traceback is deferred.
 
 #### 7.5.4 `finally` semantics
 
@@ -1030,25 +1052,42 @@ guaranteed cleanup should restructure to put cleanup after the `try` or
 use a `finally`-only construct (no `except`) that captures via the
 propagating path.
 
-#### 7.5.5 Catch-all order
+#### 7.5.5 Catch-all order, tuple filters, and `else`
 
 Multiple `except` clauses are matched top-to-bottom. The first arm
 whose filter matches the thrown `type_name` runs. Use `except
 Exception as e:` LAST to catch anything not handled by an earlier
 specific arm.
 
+**Tuple filters (`except (A, B) as e:`).** A parenthesised tuple of exception
+types catches the raised exception iff its type matches *any* listed type (or
+a subclass thereof) — exactly Python's semantics. It does NOT catch unrelated
+types: `except (ValueError, KeyError)` lets an `IndexError` propagate.
+The bound `e` has the type of the first listed exception class (every listed
+type is an `Exception` subclass, so the inherited `message`/`type_name` fields
+in §7.5.2 are always available).
+
+> Historical note: a tuple filter previously degraded silently to a bare
+> catch-everything (`except:`), swallowing exceptions the program never meant
+> to catch. This is fixed.
+
+**`else:` clause.** A `try` may carry an `else:` block. It runs iff the body
+completed with NO exception, and it runs *after* the handler frame is popped,
+so an exception raised inside `else` is NOT caught by the same `try`'s
+handlers (Python semantics). When both `else` and `finally` are present,
+`else` runs before `finally` on the success path.
+
+> Historical note: the `else` block was previously dropped at lowering (its
+> body silently never ran). This is fixed.
+
 #### 7.5.6 Out of scope for v0.1
 
 These constructs parse but are not lowered (or are deferred entirely):
 
-* `raise X from cause` — `from` clause is parsed and ignored.
-* `except (A, B) as e:` — multi-type tuple in one arm.
-* `else:` clause on `try`.
-* Bare `raise` (re-raise).
-* User-defined exception classes subclassing `Exception` (the
-  parser/resolver accepts the syntax, but the runtime's type-name
-  match doesn't recognise the user name).
-* Exception chaining (`__cause__`, `__context__`), tracebacks.
+* Bare `raise` (re-raise) outside a handler.
+* A real `__cause__` / `__context__` field and tracebacks. `raise X from Y`
+  *is* supported and preserves the cause via the `message` chain (§7.5.3),
+  but there is no separate `__cause__` slot to introspect.
 
 Functions containing a `try` or `raise` statement fall back to the
 bytecode interpreter — the Cranelift JIT does not compile them in
@@ -1073,6 +1112,15 @@ protocol Context[T]:
     fn __enter__(self) -> T
     fn __exit__(self, exc: Exception?) -> bool
 ```
+
+**Implementation status (v1).** General `__enter__`/`__exit__` dispatch is not
+yet wired through lowering. The only context manager whose cleanup is actually
+run is `io.File` (via `open(...)`), whose `__exit__` lowers to a `FileClose`
+on normal exit. Using `with` on any *other* resource is a hard compile error
+(`E2070`) — previously such a `with` silently lowered its cleanup to a no-op,
+so locks / DB handles / etc. were never released (broken RAII). Until full
+context-manager dispatch lands, use an explicit `try/finally` for non-`io.File`
+resources.
 
 ---
 
@@ -4986,6 +5034,15 @@ help: convert the string with `i32.parse(...)`
 - `E3xxx`: semantic errors (e.g., non-exhaustive match)
 - `E4xxx`: linker / module errors
 - `W0xxx`: warnings (e.g., unused variable)
+
+Selected type-error codes introduced for the v1 correctness pass (all `E2xxx`):
+
+| Code    | Meaning                                                              |
+|---------|---------------------------------------------------------------------|
+| `E2050` | `raise X from Y` / `except X` where the type is not an `Exception`   |
+| `E2070` | `with EXPR` where `EXPR` is not a supported (`io.File`) context mgr  |
+| `E2071` | unknown/unsupported decorator (no v1 decorator semantics)           |
+| `E2072` | `Dict[K, V]` with a non-`str` key type `K`                          |
 
 ### 18.3 Runtime errors
 

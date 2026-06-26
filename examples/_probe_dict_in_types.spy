@@ -3,7 +3,11 @@
 Tests:
 * Python semantics: `k in d` should test for key membership.
 * Maybe StrictPy implements `v in d` (value membership)? unlikely but test.
-* Maybe Dict[int, V] works while Dict[str, V] doesn't?
+
+NOTE: non-`str` dict keys (`Dict[i64, V]`) are now a hard compile error
+(E2072, Wave-1 Lane D) — they used to segfault at subscript. The former
+`Dict[i64, i64]` section of this probe was removed; the negative test
+`dict_i64_key_rejected` in conformance_negative.rs covers that case.
 """
 
 
@@ -24,19 +28,6 @@ fn main() -> i32:
         println("\"gamma\" in d: true  (UNEXPECTED)")
     else:
         println("\"gamma\" in d: false")
-
-    # Dict[i64, i64] — does it work with integer keys?
-    di: Dict[i64, i64] = {}
-    di[1i64] = 10i64
-    di[2i64] = 20i64
-    if 1i64 in di:
-        println("1 in di: true")
-    else:
-        println("1 in di: false")
-    if 3i64 in di:
-        println("3 in di: true  (UNEXPECTED)")
-    else:
-        println("3 in di: false")
 
     # Dict[str, str]
     ds: Dict[str, str] = {}

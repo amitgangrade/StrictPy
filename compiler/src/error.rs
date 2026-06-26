@@ -155,6 +155,25 @@ pub mod codes {
     /// type). Allocated from the M62b type band (E2060+).
     pub const TYPE_YIELD_MISMATCH: ErrorCode = "E2060";
 
+    // ── Wave-1 correctness (Lane D): silent-footgun fixes ─────────────────
+    /// `with EXPR as x:` where `EXPR` is not a supported context manager.
+    /// v1 only knows how to run cleanup (`__exit__`) for `io.File`; any other
+    /// type used to lower its cleanup to a silent no-op, so locks/DB handles/
+    /// etc. were never released. Until general `__enter__`/`__exit__` dispatch
+    /// lands, a non-`io.File` `with` resource is a hard error rather than a
+    /// silently-broken RAII.
+    pub const TYPE_UNSUPPORTED_CONTEXT_MANAGER: ErrorCode = "E2070";
+    /// An unrecognized function/method decorator. Decorators parse but v1 has
+    /// no decorator semantics wired through resolver/typecheck/IR, so an
+    /// unknown `@deco` silently did nothing (`@lru_cache`/`@retry` were no-ops).
+    /// Reject anything outside the recognized allow-list as a hard error.
+    pub const TYPE_UNKNOWN_DECORATOR: ErrorCode = "E2071";
+    /// `Dict[K, V]` with a non-`str` key type `K`. The runtime dict is
+    /// hardcoded to string keys; a non-`str` key compiled and then SEGFAULTed
+    /// at subscript. Reject the type at compile time. (Full non-`str`-key
+    /// support is deferred.)
+    pub const TYPE_DICT_NON_STR_KEY: ErrorCode = "E2072";
+
     // ── E3xxx: semantic ──────────────────────────────────────────────────
     pub const SEM_NONEXHAUSTIVE_MATCH: ErrorCode = "E3001";
     pub const SEM_UNREACHABLE: ErrorCode = "E3002";
