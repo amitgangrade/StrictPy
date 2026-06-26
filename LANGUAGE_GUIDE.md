@@ -1247,14 +1247,22 @@ threading.semaphore_acquire(handle: i64) -> None
 threading.semaphore_release(handle: i64) -> None
 ```
 
-### queue (M23 P3a-C)
+### queue (M23 P3a-C; FIFO added in stdlib expansion)
 
 ```python
 import queue
-let pq: i64 = queue.priority_queue()
-queue.pq_push(handle: i64, priority: i64, item: str) -> None
-queue.pq_pop(handle: i64) -> Tuple[i64, str]    # (priority, item)
-queue.pq_len(handle: i64) -> i64
+# Priority queue (min-heap):
+pq: i64 = queue.pq_new_i64()
+queue.pq_push_i64(pq, 1.5, 10i64)               # (handle, priority: f64, item)
+top: Tuple[f64, i64] = queue.pq_pop_min_i64(pq) # (priority, item)
+queue.pq_len(pq); queue.pq_is_empty(pq)
+
+# Plain FIFO queue (insertion order). _i64 / _str variants:
+q: i64 = queue.fifo_new_i64()
+queue.fifo_put_i64(q, 10i64)
+queue.fifo_get_i64(q)                            # 10 (oldest first)
+queue.fifo_empty(q); queue.fifo_qsize(q)
+# str variant: fifo_new_str / fifo_put_str / fifo_get_str
 ```
 
 ### sqlite3 (M23 P3a-D, extended by M35)
@@ -2242,6 +2250,88 @@ socket.async_recv(handle: i64, max_bytes: i32) -> Future[str]
 socket.async_send(handle: i64, data: str) -> Future[i32]
 ```
 
+### functools (stdlib expansion)
+
+Decorators are no-ops, so `lru_cache` ships as an explicit string-keyed
+memo object. See `examples/functools_demo.spy`.
+
+```python
+import functools
+c: i64 = functools.cache_new()
+if not functools.cache_has(c, "k"):
+    functools.cache_set_i64(c, "k", expensive())
+v: i64 = functools.cache_get_i64(c, "k")
+# also: cache_set_f64/get_f64, cache_set_str/get_str,
+#       cache_len, cache_clear, cache_hits
+```
+
+### enum (stdlib expansion)
+
+IntEnum-style registry: name <-> i64 value, both directions. See
+`examples/enum_demo.spy`.
+
+```python
+import enum
+color: i64 = enum.new()
+enum.add(color, "RED", 0i64)
+enum.value_of(color, "RED")     # 0
+enum.name_of(color, 0i64)       # "RED"
+enum.has_name(color, "RED"); enum.len(color)
+```
+
+### bytearray (stdlib expansion)
+
+Mutable byte buffer (Vec<u8> behind an i64 handle). Bytes are 0..=255;
+negative indices count from the end. See `examples/bytearray_demo.spy`.
+
+```python
+import bytearray
+b: i64 = bytearray.new()            # or bytearray.from_str("hi")
+bytearray.append(b, 65i64)
+bytearray.get(b, 0i64); bytearray.set(b, 0i64, 90i64)
+bytearray.len(b); bytearray.to_str(b); bytearray.hex(b)
+bytearray.pop(b); bytearray.clear(b)
+```
+
+### decimal (stdlib expansion)
+
+Exact fixed-point — `0.1 + 0.2 == 0.3` with no float drift. See
+`examples/decimal_fractions_demo.spy`.
+
+```python
+import decimal
+a: i64 = decimal.from_str("0.1")
+b: i64 = decimal.from_str("0.2")
+decimal.to_str(decimal.add(a, b))   # "0.3"
+# also: sub, mul, to_f64, cmp (-1/0/1).  No div in v0.3.
+```
+
+### fractions (stdlib expansion)
+
+Exact rationals in lowest terms. See
+`examples/decimal_fractions_demo.spy`.
+
+```python
+import fractions
+f: i64 = fractions.new(1i64, 3i64)
+fractions.to_str(fractions.add(f, fractions.new(1i64, 6i64)))  # "1/2"
+# also: sub, mul, div (ZeroDivisionError on 0 frac), num, den
+```
+
+### unittest (stdlib expansion)
+
+Assertion collector + runner. See `examples/unittest_demo.spy`.
+
+```python
+import unittest
+t: i64 = unittest.new()
+unittest.assert_eq_i64(t, got, want, "label")
+unittest.assert_eq_str(t, gs, ws, "label")
+unittest.assert_true(t, cond, "label")
+fails: i64 = unittest.run(t)    # prints summary, returns failure count
+unittest.ran(t); unittest.failures(t)
+```
+
 ---
 
 ## §6 — Prelude
@@ -2410,6 +2500,28 @@ s.find(needle: str) -> i64               # code-point index, -1 if not found
 s.repeat(n: i64) -> str                  # n <= 0 yields ""
 str(x)                                   # generic — works on any type
 char(i: i32) -> char                     # Unicode codepoint
+
+# Expanded set (stdlib expansion) — see examples/str_methods_extra_demo.spy:
+s.count(sub: str) -> i64                 # non-overlapping occurrences
+s.rfind(sub: str) -> i64                 # last index, -1 if absent
+s.index(sub: str) -> i64                 # like find but ValueError if absent
+s.rindex(sub: str) -> i64                # like rfind but ValueError if absent
+s.splitlines() -> List[str]              # universal newlines, terminators dropped
+s.partition(sep: str) -> Tuple[str,str,str]   # first occurrence
+s.rpartition(sep: str) -> Tuple[str,str,str]  # last occurrence
+s.zfill(width: i64) -> str               # zero-pad, sign kept in front
+s.ljust(width: i64) -> str               # pad right with spaces
+s.rjust(width: i64) -> str               # pad left with spaces
+s.center(width: i64) -> str              # pad both (extra to the right)
+s.title() -> str                         # Title Case Each Word
+s.swapcase() -> str
+s.casefold() -> str                      # aggressive lowercase for matching
+s.capitalize() -> str                    # First char up, rest down
+s.isdigit() / .isalpha() / .isalnum() -> bool
+s.isspace() / .isupper() / .islower() -> bool
+s.removeprefix(prefix: str) -> str
+s.removesuffix(suffix: str) -> str
+s.expandtabs(tabsize: i64 = 8) -> str
 ```
 
 Notes:

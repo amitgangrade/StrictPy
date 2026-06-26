@@ -2908,6 +2908,57 @@ impl Resolver {
                     ty: fn_ty(vec![i64_ty.clone()], bool_ty.clone()),
                     native_id: QUEUE_PQ_IS_EMPTY,
                 },
+                // ── LANE E: plain FIFO Queue (item 3). Same monomorphic
+                // _i64 / _str split as the priority queue above; `empty`
+                // and `qsize` are type-erased over the handle.
+                StdlibItem {
+                    name: "fifo_new_i64".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], i64_ty.clone()),
+                    native_id: 1360, // QueueFifoNewI64
+                },
+                StdlibItem {
+                    name: "fifo_put_i64".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i64_ty.clone()], unit_ty.clone()),
+                    native_id: 1361, // QueueFifoPutI64
+                },
+                StdlibItem {
+                    name: "fifo_get_i64".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i64_ty.clone()),
+                    native_id: 1362, // QueueFifoGetI64
+                },
+                StdlibItem {
+                    name: "fifo_new_str".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], i64_ty.clone()),
+                    native_id: 1363, // QueueFifoNewStr
+                },
+                StdlibItem {
+                    name: "fifo_put_str".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), str_ty.clone()], unit_ty.clone()),
+                    native_id: 1364, // QueueFifoPutStr
+                },
+                StdlibItem {
+                    name: "fifo_get_str".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], str_ty.clone()),
+                    native_id: 1365, // QueueFifoGetStr
+                },
+                StdlibItem {
+                    name: "fifo_empty".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], bool_ty.clone()),
+                    native_id: 1366, // QueueFifoEmpty
+                },
+                StdlibItem {
+                    name: "fifo_qsize".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i64_ty.clone()),
+                    native_id: 1367, // QueueFifoQsize
+                },
             ],
         };
         self.stdlib_modules.insert("queue".into(), queue_mod);
@@ -6138,6 +6189,197 @@ impl Resolver {
             items: gfx_items,
         };
         self.stdlib_modules.insert("gfx".into(), gfx_mod);
+
+        // ═══════════════════════════════════════════════════════════════
+        // === LANE E ADDITIONS (stdlib expansion) — module registrations =
+        // ═══════════════════════════════════════════════════════════════
+        // All ids are the raw `NativeFn` discriminants from the LANE E
+        // block (1340–1414) hard-coded here, matching the convention at the
+        // top of this fn.  Every item is `StdlibItemKind::Function`, so the
+        // generic BuiltinModule + Function paths in typecheck/ir handle the
+        // wiring — no ir.rs or typecheck.rs module-specific code needed.
+        //
+        // Local type/helper bindings (the ones near the top of this fn are
+        // out of scope this deep, so rebind them here).
+        let fn_ty = |params: Vec<Ty>, ret: Ty| Ty::Function {
+            params,
+            ret: Box::new(ret),
+        };
+        let i64_ty = Ty::Primitive(PrimTy::I64);
+        let f64_ty = Ty::Primitive(PrimTy::F64);
+        let str_ty = Ty::Primitive(PrimTy::Str);
+        let bool_ty = Ty::Primitive(PrimTy::Bool);
+        let unit_ty = Ty::Primitive(PrimTy::Unit);
+
+        // ── functools: string-keyed memoization cache (item 2) ──────────
+        // Decorators are no-ops in StrictPy, so `lru_cache` ships as an
+        // explicit cache object you wrap an expensive call around:
+        //   c = functools.cache_new()
+        //   if not functools.cache_has_i64(c, key): functools.cache_set_i64(c, key, compute())
+        //   result = functools.cache_get_i64(c, key)
+        let functools_mod = StdlibModule {
+            name: "functools".into(),
+            items: vec![
+                StdlibItem { name: "cache_new".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], i64_ty.clone()), native_id: 1340 },
+                StdlibItem { name: "cache_set_i64".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), str_ty.clone(), i64_ty.clone()], unit_ty.clone()), native_id: 1342 },
+                StdlibItem { name: "cache_get_i64".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), str_ty.clone()], i64_ty.clone()), native_id: 1341 },
+                StdlibItem { name: "cache_set_f64".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), str_ty.clone(), f64_ty.clone()], unit_ty.clone()), native_id: 1350 },
+                StdlibItem { name: "cache_get_f64".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), str_ty.clone()], f64_ty.clone()), native_id: 1349 },
+                StdlibItem { name: "cache_set_str".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), str_ty.clone(), str_ty.clone()], unit_ty.clone()), native_id: 1345 },
+                StdlibItem { name: "cache_get_str".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), str_ty.clone()], str_ty.clone()), native_id: 1344 },
+                StdlibItem { name: "cache_has".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), str_ty.clone()], bool_ty.clone()), native_id: 1343 },
+                StdlibItem { name: "cache_len".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i64_ty.clone()), native_id: 1346 },
+                StdlibItem { name: "cache_clear".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], unit_ty.clone()), native_id: 1347 },
+                StdlibItem { name: "cache_hits".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i64_ty.clone()), native_id: 1348 },
+            ],
+        };
+        self.stdlib_modules.insert("functools".into(), functools_mod);
+
+        // ── enum: registry-backed named constants (item 4) ──────────────
+        //   c = enum.new()
+        //   enum.add(c, "RED", 0); enum.add(c, "GREEN", 1)
+        //   v = enum.value_of(c, "GREEN")   # 1
+        //   n = enum.name_of(c, 1)          # "GREEN"
+        let enum_mod = StdlibModule {
+            name: "enum".into(),
+            items: vec![
+                StdlibItem { name: "new".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], i64_ty.clone()), native_id: 1370 },
+                StdlibItem { name: "add".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), str_ty.clone(), i64_ty.clone()], unit_ty.clone()), native_id: 1371 },
+                StdlibItem { name: "value_of".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), str_ty.clone()], i64_ty.clone()), native_id: 1372 },
+                StdlibItem { name: "name_of".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i64_ty.clone()], str_ty.clone()), native_id: 1373 },
+                StdlibItem { name: "has_name".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), str_ty.clone()], bool_ty.clone()), native_id: 1374 },
+                StdlibItem { name: "len".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i64_ty.clone()), native_id: 1375 },
+            ],
+        };
+        self.stdlib_modules.insert("enum".into(), enum_mod);
+
+        // ── bytearray: mutable byte buffer (item 6) ─────────────────────
+        //   b = bytearray.new(); bytearray.append(b, 65)
+        //   bytearray.get(b, 0)  # 65
+        //   bytearray.to_str(b)  # "A"
+        let bytearray_mod = StdlibModule {
+            name: "bytearray".into(),
+            items: vec![
+                StdlibItem { name: "new".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], i64_ty.clone()), native_id: 1380 },
+                StdlibItem { name: "from_str".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], i64_ty.clone()), native_id: 1381 },
+                StdlibItem { name: "append".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i64_ty.clone()], unit_ty.clone()), native_id: 1382 },
+                StdlibItem { name: "get".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i64_ty.clone()], i64_ty.clone()), native_id: 1383 },
+                StdlibItem { name: "set".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i64_ty.clone(), i64_ty.clone()], unit_ty.clone()), native_id: 1384 },
+                StdlibItem { name: "len".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i64_ty.clone()), native_id: 1385 },
+                StdlibItem { name: "to_str".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], str_ty.clone()), native_id: 1386 },
+                StdlibItem { name: "hex".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], str_ty.clone()), native_id: 1387 },
+                StdlibItem { name: "pop".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i64_ty.clone()), native_id: 1388 },
+                StdlibItem { name: "clear".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], unit_ty.clone()), native_id: 1389 },
+            ],
+        };
+        self.stdlib_modules.insert("bytearray".into(), bytearray_mod);
+
+        // ── unittest: assert helpers + a tiny runner (item 7) ───────────
+        //   t = unittest.new()
+        //   unittest.assert_eq_i64(t, got, want, "label")
+        //   failures = unittest.run(t)   # prints summary, returns fail count
+        let unittest_mod = StdlibModule {
+            name: "unittest".into(),
+            items: vec![
+                StdlibItem { name: "new".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], i64_ty.clone()), native_id: 1390 },
+                StdlibItem { name: "assert_true".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), bool_ty.clone(), str_ty.clone()], bool_ty.clone()), native_id: 1391 },
+                StdlibItem { name: "assert_eq_i64".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i64_ty.clone(), i64_ty.clone(), str_ty.clone()], bool_ty.clone()), native_id: 1392 },
+                StdlibItem { name: "assert_eq_f64".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), f64_ty.clone(), f64_ty.clone(), str_ty.clone()], bool_ty.clone()), native_id: 1395 },
+                StdlibItem { name: "assert_eq_str".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), str_ty.clone(), str_ty.clone(), str_ty.clone()], bool_ty.clone()), native_id: 1393 },
+                StdlibItem { name: "run".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i64_ty.clone()), native_id: 1394 },
+                StdlibItem { name: "failures".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i64_ty.clone()), native_id: 1396 },
+                StdlibItem { name: "ran".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i64_ty.clone()), native_id: 1397 },
+            ],
+        };
+        self.stdlib_modules.insert("unittest".into(), unittest_mod);
+
+        // ── decimal: exact fixed-point arithmetic (item 5) ──────────────
+        //   a = decimal.from_str("0.1"); b = decimal.from_str("0.2")
+        //   c = decimal.add(a, b)        # exact
+        //   decimal.to_str(c)            # "0.3"
+        let decimal_mod = StdlibModule {
+            name: "decimal".into(),
+            items: vec![
+                StdlibItem { name: "from_str".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], i64_ty.clone()), native_id: 1400 },
+                StdlibItem { name: "add".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i64_ty.clone()], i64_ty.clone()), native_id: 1401 },
+                StdlibItem { name: "sub".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i64_ty.clone()], i64_ty.clone()), native_id: 1402 },
+                StdlibItem { name: "mul".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i64_ty.clone()], i64_ty.clone()), native_id: 1403 },
+                StdlibItem { name: "to_str".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], str_ty.clone()), native_id: 1404 },
+                StdlibItem { name: "to_f64".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], f64_ty.clone()), native_id: 1414 },
+                StdlibItem { name: "cmp".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i64_ty.clone()], i64_ty.clone()), native_id: 1405 },
+            ],
+        };
+        self.stdlib_modules.insert("decimal".into(), decimal_mod);
+
+        // ── fractions: exact rationals in lowest terms (item 5) ─────────
+        //   f = fractions.new(1, 3); g = fractions.new(1, 6)
+        //   s = fractions.add(f, g)      # 1/2
+        //   fractions.to_str(s)          # "1/2"
+        let fractions_mod = StdlibModule {
+            name: "fractions".into(),
+            items: vec![
+                StdlibItem { name: "new".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i64_ty.clone()], i64_ty.clone()), native_id: 1406 },
+                StdlibItem { name: "add".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i64_ty.clone()], i64_ty.clone()), native_id: 1407 },
+                StdlibItem { name: "sub".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i64_ty.clone()], i64_ty.clone()), native_id: 1408 },
+                StdlibItem { name: "mul".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i64_ty.clone()], i64_ty.clone()), native_id: 1409 },
+                StdlibItem { name: "div".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone(), i64_ty.clone()], i64_ty.clone()), native_id: 1410 },
+                StdlibItem { name: "num".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i64_ty.clone()), native_id: 1411 },
+                StdlibItem { name: "den".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], i64_ty.clone()), native_id: 1412 },
+                StdlibItem { name: "to_str".into(), kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], str_ty.clone()), native_id: 1413 },
+            ],
+        };
+        self.stdlib_modules.insert("fractions".into(), fractions_mod);
+        // === END LANE E ADDITIONS — module registrations ===============
     }
 
 

@@ -2763,6 +2763,30 @@ number. Backed by `BinaryHeap<Reverse<...>>`.
 v0.2 doesn't ship: `pq_clear`, `pq_drain`, bounded queues, blocking
 push, decrease-key. v0.3.
 
+#### 9.28.1 Plain FIFO `Queue` (v0.3 — stdlib expansion)
+
+A first-in-first-out queue alongside the priority queue above. Same
+monomorphic `_i64` / `_str` split (stdlib functions aren't generic);
+`fifo_empty` / `fifo_qsize` are type-erased over the handle.
+
+```
+fn fifo_new_i64() -> i64
+fn fifo_put_i64(handle: i64, item: i64) -> None
+fn fifo_get_i64(handle: i64) -> i64
+
+fn fifo_new_str() -> i64
+fn fifo_put_str(handle: i64, item: str) -> None
+fn fifo_get_str(handle: i64) -> str
+
+fn fifo_empty(handle: i64) -> bool
+fn fifo_qsize(handle: i64) -> i64
+```
+
+Semantics: `fifo_get_*` removes and returns the oldest enqueued item;
+items come out in exactly insertion order. Raises `IndexError` on an
+empty queue. Backed by a `VecDeque` behind an i64 handle. See
+`examples/queue_fifo_demo.spy`.
+
 ### 9.29 Module `sqlite3` (v0.2 — M23 P3a-D)
 
 SQLite via the `rusqlite` crate, statically linked through the
@@ -4237,6 +4261,171 @@ an API swap.
 * `asyncio.sleep` blocks the calling OS thread (Shape A).  In Shape B
   the wall-clock duration matches but the OS thread is free to run
   other tasks.
+
+### 9.44 Expanded `str` methods (v0.3 — stdlib expansion)
+
+Beyond the core set (§8.5: `slice`, `char_at`, `split`, `strip`/
+`lstrip`/`rstrip`, `find`, `replace`, `startswith`/`endswith`/
+`contains`, `join`, `lower`/`upper`, `repeat`), the following CPython
+`str` methods are available as receiver-method calls. They dispatch
+through `NativeFn::from_name` (collision-free names) and need no
+explicit ir.rs override.
+
+```
+# search (code-point indices; *index/*rindex raise ValueError if absent)
+s.count(sub: str)  -> i64        s.rfind(sub: str)  -> i64
+s.index(sub: str)  -> i64        s.rindex(sub: str) -> i64
+
+# splitting
+s.splitlines()        -> List[str]                  # universal newlines
+s.partition(sep: str) -> Tuple[str, str, str]       # first occurrence
+s.rpartition(sep:str) -> Tuple[str, str, str]       # last occurrence
+
+# padding (width in code points; fill is ' ', or '0' for zfill)
+s.zfill(width: i64)  -> str      s.center(width: i64) -> str
+s.ljust(width: i64)  -> str      s.rjust(width: i64)  -> str
+
+# case / formatting
+s.title()      -> str    s.swapcase()   -> str
+s.casefold()   -> str    s.capitalize() -> str
+
+# predicates (empty string is false for digit/alpha/alnum/space)
+s.isdigit() -> bool   s.isalpha() -> bool   s.isalnum() -> bool
+s.isspace() -> bool   s.isupper() -> bool   s.islower() -> bool
+
+# trimming / tabs
+s.removeprefix(prefix: str) -> str    s.removesuffix(suffix: str) -> str
+s.expandtabs(tabsize: i64 = 8)       -> str
+```
+
+`partition`/`rpartition` on an absent separator return `(s, "", "")`
+and `("", "", s)` respectively. `zfill` keeps a leading `+`/`-` in
+front of the inserted zeros. `center` biases the extra pad to the
+right. See `examples/str_methods_extra_demo.spy`.
+
+### 9.45 Module `functools` (v0.3 — stdlib expansion)
+
+Function decorators are no-ops in StrictPy, so `lru_cache` ships as an
+explicit string-keyed memo object you wrap an expensive call around.
+
+```
+fn cache_new() -> i64
+fn cache_set_i64(c: i64, key: str, value: i64) -> None
+fn cache_get_i64(c: i64, key: str) -> i64       # KeyError if missing
+fn cache_set_f64(c: i64, key: str, value: f64) -> None
+fn cache_get_f64(c: i64, key: str) -> f64
+fn cache_set_str(c: i64, key: str, value: str) -> None
+fn cache_get_str(c: i64, key: str) -> str
+fn cache_has(c: i64, key: str)  -> bool
+fn cache_len(c: i64)            -> i64
+fn cache_clear(c: i64)         -> None
+fn cache_hits(c: i64)          -> i64           # hit counter (introspection)
+```
+
+Idiom: `if not functools.cache_has(c, k): functools.cache_set_i64(c, k,
+compute())` then `functools.cache_get_i64(c, k)`. See
+`examples/functools_demo.spy`.
+
+### 9.46 Module `enum` (v0.3 — stdlib expansion)
+
+A registry-backed IntEnum-style facility: the static model has no
+class-with-attributes Enum, so each enum is a namespace mapping member
+names to i64 values, looked up in either direction.
+
+```
+fn new() -> i64
+fn add(e: i64, member: str, value: i64) -> None
+fn value_of(e: i64, member: str) -> i64        # KeyError if absent
+fn name_of(e: i64, value: i64)   -> str        # ValueError if absent
+fn has_name(e: i64, member: str) -> bool
+fn len(e: i64) -> i64
+```
+
+`name_of` returns the first member registered with that value (insertion
+order). See `examples/enum_demo.spy`.
+
+### 9.47 Module `bytearray` (v0.3 — stdlib expansion)
+
+A growable, mutable byte buffer behind an i64 handle. Bytes are
+`0..=255`; out-of-range writes raise `ValueError`, out-of-range indices
+raise `IndexError`. Negative indices count from the end.
+
+```
+fn new() -> i64
+fn from_str(s: str) -> i64                      # UTF-8 bytes of s
+fn append(b: i64, byte: i64) -> None
+fn get(b: i64, idx: i64) -> i64
+fn set(b: i64, idx: i64, byte: i64) -> None
+fn len(b: i64) -> i64
+fn to_str(b: i64) -> str                        # ValueError if not UTF-8
+fn hex(b: i64) -> str                           # lowercase, 2 chars/byte
+fn pop(b: i64) -> i64                           # IndexError if empty
+fn clear(b: i64) -> None
+```
+
+See `examples/bytearray_demo.spy`.
+
+### 9.48 Module `decimal` (v0.3 — stdlib expansion)
+
+Exact fixed-point arithmetic: a value is `mantissa * 10^-scale` stored
+as an `i128` mantissa + scale behind an i64 handle. `0.1 + 0.2` is
+exactly `0.3` — no binary-float drift. Add/sub align scales; mul adds
+scales.
+
+```
+fn from_str(s: str) -> i64                      # ValueError on bad literal
+fn add(a: i64, b: i64) -> i64
+fn sub(a: i64, b: i64) -> i64
+fn mul(a: i64, b: i64) -> i64
+fn to_str(d: i64) -> str                        # exact rendering
+fn to_f64(d: i64) -> f64
+fn cmp(a: i64, b: i64) -> i64                   # -1 / 0 / 1
+```
+
+No division in v0.3 (would need rounding-mode policy). See
+`examples/decimal_fractions_demo.spy`.
+
+### 9.49 Module `fractions` (v0.3 — stdlib expansion)
+
+Exact rationals kept in lowest terms with a positive denominator,
+behind an i64 handle.
+
+```
+fn new(num: i64, den: i64) -> i64               # ZeroDivisionError if den==0
+fn add(a: i64, b: i64) -> i64
+fn sub(a: i64, b: i64) -> i64
+fn mul(a: i64, b: i64) -> i64
+fn div(a: i64, b: i64) -> i64                   # ZeroDivisionError on 0 frac
+fn num(f: i64) -> i64
+fn den(f: i64) -> i64
+fn to_str(f: i64) -> str                        # "num/den"
+```
+
+Results are automatically reduced (e.g. `2/3 * 3/4` → `1/2`). See
+`examples/decimal_fractions_demo.spy`.
+
+### 9.50 Module `unittest` (v0.3 — stdlib expansion)
+
+A minimal assertion collector + runner matching how the repo structures
+its own `.spy` checks. Make a result accumulator, record `assert_*`
+outcomes, then `run` to print a summary and get the failure count back
+(0 == all green). Each `assert_*` returns a bool (true == passed) and
+records into the accumulator.
+
+```
+fn new() -> i64
+fn assert_true(t: i64, cond: bool, label: str) -> bool
+fn assert_eq_i64(t: i64, got: i64, want: i64, label: str) -> bool
+fn assert_eq_f64(t: i64, got: f64, want: f64, label: str) -> bool   # exact
+fn assert_eq_str(t: i64, got: str, want: str, label: str) -> bool
+fn run(t: i64)      -> i64                       # prints summary; returns #fail
+fn failures(t: i64) -> i64
+fn ran(t: i64)      -> i64
+```
+
+`run` prints each failure as `FAIL: <message>` then a summary line
+`ran N checks: OK` or `ran N checks: M FAILED`. See
+`examples/unittest_demo.spy`.
 
 ---
 

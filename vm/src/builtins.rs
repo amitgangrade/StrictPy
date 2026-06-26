@@ -7801,6 +7801,120 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         NativeFn::GfxSetFullscreen                   => m58_gfx_set_fullscreen(interp, args),
         NativeFn::GfxSetVsync                        => m58_gfx_set_vsync(interp, args),
 
+        // ═══════════════════════════════════════════════════════════════
+        // === LANE E ADDITIONS (stdlib expansion) dispatch arms =========
+        // ═══════════════════════════════════════════════════════════════
+        // Expanded str methods (item 1).  Receiver is arg 0; method args
+        // follow.  Each one allocates its result via `interp` and returns
+        // a register-width u64.
+        NativeFn::StrCount        => lane_e_str_count(interp, args),
+        NativeFn::StrRfind        => Ok(lane_e_str_rfind(args) as u64),
+        NativeFn::StrRindex       => lane_e_str_rindex(args),
+        NativeFn::StrIndex        => lane_e_str_index(args),
+        NativeFn::StrSplitlines   => lane_e_str_splitlines(interp, args),
+        NativeFn::StrPartition    => lane_e_str_partition(interp, args, false),
+        NativeFn::StrRpartition   => lane_e_str_partition(interp, args, true),
+        NativeFn::StrZfill        => lane_e_str_zfill(interp, args),
+        NativeFn::StrLjust        => lane_e_str_pad(interp, args, Pad::Left),
+        NativeFn::StrRjust        => lane_e_str_pad(interp, args, Pad::Right),
+        NativeFn::StrCenter       => lane_e_str_pad(interp, args, Pad::Center),
+        NativeFn::StrTitle        => Ok(interp.alloc_string(&lane_e_title(&arg_str(args, 0))) as u64),
+        NativeFn::StrSwapcase     => Ok(interp.alloc_string(&lane_e_swapcase(&arg_str(args, 0))) as u64),
+        NativeFn::StrCasefold     => Ok(interp.alloc_string(&arg_str(args, 0).to_lowercase()) as u64),
+        NativeFn::StrCapitalize   => Ok(interp.alloc_string(&lane_e_capitalize(&arg_str(args, 0))) as u64),
+        NativeFn::StrIsdigit      => Ok(lane_e_str_pred(&arg_str(args, 0), CharPred::Digit)),
+        NativeFn::StrIsalpha      => Ok(lane_e_str_pred(&arg_str(args, 0), CharPred::Alpha)),
+        NativeFn::StrIsalnum      => Ok(lane_e_str_pred(&arg_str(args, 0), CharPred::Alnum)),
+        NativeFn::StrIsspace      => Ok(lane_e_str_pred(&arg_str(args, 0), CharPred::Space)),
+        NativeFn::StrIsupper      => Ok(lane_e_str_pred(&arg_str(args, 0), CharPred::Upper)),
+        NativeFn::StrIslower      => Ok(lane_e_str_pred(&arg_str(args, 0), CharPred::Lower)),
+        NativeFn::StrRemoveprefix => {
+            let (s, fix) = (arg_str(args, 0), arg_str(args, 1));
+            let out = s.strip_prefix(&fix).unwrap_or(&s);
+            Ok(interp.alloc_string(out) as u64)
+        }
+        NativeFn::StrRemovesuffix => {
+            let (s, fix) = (arg_str(args, 0), arg_str(args, 1));
+            let out = s.strip_suffix(&fix).unwrap_or(&s);
+            Ok(interp.alloc_string(out) as u64)
+        }
+        NativeFn::StrExpandtabs   => {
+            let s = arg_str(args, 0);
+            // tabsize defaults to 8 when no arg is supplied (args.len() == 1).
+            let tabsize = if args.len() >= 2 { arg_i64(args, 1).max(0) as usize } else { 8 };
+            Ok(interp.alloc_string(&lane_e_expandtabs(&s, tabsize)) as u64)
+        }
+
+        // functools memo cache (item 2)
+        NativeFn::FunctoolsCacheNew     => Ok(lane_e_cache_new() as u64),
+        NativeFn::FunctoolsCacheSetI64  => lane_e_cache_set(args, CacheVal::I64(arg_i64(args, 2))),
+        NativeFn::FunctoolsCacheSetStr  => lane_e_cache_set(args, CacheVal::Str(arg_str(args, 2))),
+        NativeFn::FunctoolsCacheSetF64  => lane_e_cache_set(args, CacheVal::F64(arg_f64(args, 2))),
+        NativeFn::FunctoolsCacheGetI64  => lane_e_cache_get_i64(args),
+        NativeFn::FunctoolsCacheGetF64  => lane_e_cache_get_f64(args),
+        NativeFn::FunctoolsCacheGetStr  => lane_e_cache_get_str(interp, args),
+        NativeFn::FunctoolsCacheHasKey  => lane_e_cache_has(args),
+        NativeFn::FunctoolsCacheLen     => lane_e_cache_len(args),
+        NativeFn::FunctoolsCacheClear   => lane_e_cache_clear(args),
+        NativeFn::FunctoolsCacheHitsI64 => lane_e_cache_hits(args),
+
+        // FIFO queue.Queue (item 3)
+        NativeFn::QueueFifoNewI64 | NativeFn::QueueFifoNewStr => Ok(lane_e_fifo_new() as u64),
+        NativeFn::QueueFifoPutI64 | NativeFn::QueueFifoPutStr => {
+            lane_e_fifo_put(arg_i64(args, 0), arg_u64(args, 1))
+        }
+        NativeFn::QueueFifoGetI64 | NativeFn::QueueFifoGetStr => lane_e_fifo_get(args),
+        NativeFn::QueueFifoEmpty  => lane_e_fifo_empty(args),
+        NativeFn::QueueFifoQsize  => lane_e_fifo_qsize(args),
+
+        // enum (item 4)
+        NativeFn::EnumNew     => Ok(lane_e_enum_new() as u64),
+        NativeFn::EnumAdd     => lane_e_enum_add(args),
+        NativeFn::EnumValueOf => lane_e_enum_value_of(args),
+        NativeFn::EnumNameOf  => lane_e_enum_name_of(interp, args),
+        NativeFn::EnumHasName => lane_e_enum_has_name(args),
+        NativeFn::EnumLen     => lane_e_enum_len(args),
+
+        // bytearray (item 6)
+        NativeFn::BytearrayNew     => Ok(lane_e_ba_new() as u64),
+        NativeFn::BytearrayFromStr => Ok(lane_e_ba_from_str(&arg_str(args, 0)) as u64),
+        NativeFn::BytearrayAppend  => lane_e_ba_append(args),
+        NativeFn::BytearrayGet     => lane_e_ba_get(args),
+        NativeFn::BytearraySet     => lane_e_ba_set(args),
+        NativeFn::BytearrayLen     => lane_e_ba_len(args),
+        NativeFn::BytearrayToStr   => lane_e_ba_to_str(interp, args),
+        NativeFn::BytearrayHex     => lane_e_ba_hex(interp, args),
+        NativeFn::BytearrayPop     => lane_e_ba_pop(args),
+        NativeFn::BytearrayClear   => lane_e_ba_clear(args),
+
+        // unittest (item 7)
+        NativeFn::UnittestNew         => Ok(lane_e_ut_new() as u64),
+        NativeFn::UnittestAssertTrue  => lane_e_ut_assert_true(args),
+        NativeFn::UnittestAssertEqI64 => lane_e_ut_assert_eq_i64(args),
+        NativeFn::UnittestAssertEqStr => lane_e_ut_assert_eq_str(args),
+        NativeFn::UnittestAssertEqF64 => lane_e_ut_assert_eq_f64(args),
+        NativeFn::UnittestRun         => lane_e_ut_run(interp, args),
+        NativeFn::UnittestFailures    => lane_e_ut_failures(args),
+        NativeFn::UnittestRan         => lane_e_ut_ran(args),
+
+        // decimal / fractions (item 5)
+        NativeFn::DecimalFromStr => lane_e_decimal_from_str(args),
+        NativeFn::DecimalAdd     => lane_e_decimal_binop(args, DecOp::Add),
+        NativeFn::DecimalSub     => lane_e_decimal_binop(args, DecOp::Sub),
+        NativeFn::DecimalMul     => lane_e_decimal_binop(args, DecOp::Mul),
+        NativeFn::DecimalToStr   => lane_e_decimal_to_str(interp, args),
+        NativeFn::DecimalToF64   => lane_e_decimal_to_f64(args),
+        NativeFn::DecimalCmp     => lane_e_decimal_cmp(args),
+        NativeFn::FractionNew    => lane_e_fraction_new(args),
+        NativeFn::FractionAdd    => lane_e_fraction_binop(args, FracOp::Add),
+        NativeFn::FractionSub    => lane_e_fraction_binop(args, FracOp::Sub),
+        NativeFn::FractionMul    => lane_e_fraction_binop(args, FracOp::Mul),
+        NativeFn::FractionDiv    => lane_e_fraction_binop(args, FracOp::Div),
+        NativeFn::FractionNum    => lane_e_fraction_num(args),
+        NativeFn::FractionDen    => lane_e_fraction_den(args),
+        NativeFn::FractionToStr  => lane_e_fraction_to_str(interp, args),
+        // === END LANE E ADDITIONS dispatch arms ========================
+
         NativeFn::Unknown => Err(VmError::Trap(
             "CALL_NATIVE: native id 0xFFFF_FFFF (Unknown) is not callable".into(),
         )),
@@ -26091,6 +26205,1085 @@ mod gfx_stubs {
 #[cfg(not(feature = "graphics"))]
 use gfx_stubs::*;
 
+// ═══════════════════════════════════════════════════════════════════════
+// === LANE E ADDITIONS (stdlib expansion) — helper implementations ======
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Design notes
+// ────────────
+//   * Stateful types (FIFO queue, functools cache, enum, bytearray,
+//     unittest, decimal, fractions) are backed by process-global static
+//     tables guarded by a Mutex — exactly the pattern `subprocess` already
+//     uses (SUBPROCESS_TABLE above).  This keeps every byte of new state
+//     inside vm/src/builtins.rs (LANE E's owned file) and out of the
+//     SharedVm slot tables in interp.rs.  Handles are monotonic i64s that
+//     never alias a heap pointer, so the GC ignores them (values stored in
+//     a table are owned Rust data, not managed heap objects).
+//   * str methods are pure transforms over the receiver string; results are
+//     re-allocated through `interp.alloc_string`.
+//
+// All identifiers are `lane_e_`-prefixed to avoid clashing with any other
+// lane appending to this file.
+
+use std::sync::Mutex as LaneEMutex;
+use std::sync::atomic::{AtomicI64 as LaneEAtomicI64, Ordering as LaneEOrdering};
+use std::collections::HashMap as LaneEHashMap;
+use std::collections::VecDeque as LaneEVecDeque;
+
+// ─── str-method helpers (item 1) ───────────────────────────────────────
+
+/// `s.count(sub)` — number of non-overlapping occurrences of `sub` in `s`.
+/// Empty needle returns char-count + 1 (matches CPython).
+fn lane_e_str_count(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let _ = interp;
+    let s = arg_str(args, 0);
+    let sub = arg_str(args, 1);
+    let n: i64 = if sub.is_empty() {
+        s.chars().count() as i64 + 1
+    } else {
+        s.matches(&sub).count() as i64
+    };
+    Ok(n as u64)
+}
+
+/// `s.rfind(sub)` — code-point index of the last occurrence, or -1.
+fn lane_e_str_rfind(args: &[u64]) -> i64 {
+    let s = arg_str(args, 0);
+    let sub = arg_str(args, 1);
+    match s.rfind(&sub) {
+        Some(b) => s[..b].chars().count() as i64,
+        None => -1,
+    }
+}
+
+/// `s.index(sub)` — like find but raises ValueError when absent.
+fn lane_e_str_index(args: &[u64]) -> Result<u64, VmError> {
+    let s = arg_str(args, 0);
+    let sub = arg_str(args, 1);
+    match s.find(&sub) {
+        Some(b) => Ok(s[..b].chars().count() as u64),
+        None => Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "substring not found".into(),
+        }),
+    }
+}
+
+/// `s.rindex(sub)` — like rfind but raises ValueError when absent.
+fn lane_e_str_rindex(args: &[u64]) -> Result<u64, VmError> {
+    let r = lane_e_str_rfind(args);
+    if r < 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "substring not found".into(),
+        });
+    }
+    Ok(r as u64)
+}
+
+/// `s.splitlines()` — split on universal newlines, dropping the line
+/// terminators.  Returns a fresh `List[str]`.
+fn lane_e_str_splitlines(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let s = arg_str(args, 0);
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let bytes: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == '\n' {
+            lines.push(std::mem::take(&mut cur));
+        } else if c == '\r' {
+            lines.push(std::mem::take(&mut cur));
+            if i + 1 < bytes.len() && bytes[i + 1] == '\n' {
+                i += 1; // swallow the LF of a CRLF pair
+            }
+        } else {
+            cur.push(c);
+        }
+        i += 1;
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    let lst = interp.alloc_list(lines.len());
+    for line in &lines {
+        let sp = interp.alloc_string(line) as u64;
+        // SAFETY: lst is a freshly allocated list owned by us.
+        unsafe { interp.list_push(lst, sp) };
+    }
+    Ok(lst as u64)
+}
+
+/// `s.partition(sep)` / `s.rpartition(sep)` — three-way split on the first
+/// (or last) occurrence of `sep`.  When `sep` is absent: partition returns
+/// (s, "", "") and rpartition returns ("", "", s) — matching CPython.
+fn lane_e_str_partition(
+    interp: &mut Interpreter,
+    args: &[u64],
+    from_right: bool,
+) -> Result<u64, VmError> {
+    let s = arg_str(args, 0);
+    let sep = arg_str(args, 1);
+    if sep.is_empty() {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: "empty separator".into(),
+        });
+    }
+    let found = if from_right { s.rfind(&sep) } else { s.find(&sep) };
+    let (a, b, c) = match found {
+        Some(idx) => (
+            s[..idx].to_string(),
+            sep.clone(),
+            s[idx + sep.len()..].to_string(),
+        ),
+        None => {
+            if from_right {
+                (String::new(), String::new(), s.clone())
+            } else {
+                (s.clone(), String::new(), String::new())
+            }
+        }
+    };
+    let s0 = interp.alloc_string(&a) as u64;
+    let s1 = interp.alloc_string(&b) as u64;
+    let s2 = interp.alloc_string(&c) as u64;
+    let tup = interp.alloc_tuple_obj(&[s0, s1, s2]);
+    Ok(tup as u64)
+}
+
+/// `s.zfill(width)` — left-pad with ASCII '0' to `width` code points,
+/// keeping any leading sign in front of the zeros.
+fn lane_e_str_zfill(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let s = arg_str(args, 0);
+    let width = arg_i64(args, 1).max(0) as usize;
+    let cur = s.chars().count();
+    if cur >= width {
+        return Ok(interp.alloc_string(&s) as u64);
+    }
+    let pad = width - cur;
+    let zeros: String = std::iter::repeat('0').take(pad).collect();
+    let out = if let Some(rest) = s.strip_prefix('+') {
+        format!("+{zeros}{rest}")
+    } else if let Some(rest) = s.strip_prefix('-') {
+        format!("-{zeros}{rest}")
+    } else {
+        format!("{zeros}{s}")
+    };
+    Ok(interp.alloc_string(&out) as u64)
+}
+
+enum Pad { Left, Right, Center }
+
+/// `ljust` / `rjust` / `center` — pad with ASCII spaces to `width` code
+/// points.  Names follow CPython: ljust left-justifies (pad on the right).
+fn lane_e_str_pad(interp: &mut Interpreter, args: &[u64], how: Pad) -> Result<u64, VmError> {
+    let s = arg_str(args, 0);
+    let width = arg_i64(args, 1).max(0) as usize;
+    let cur = s.chars().count();
+    if cur >= width {
+        return Ok(interp.alloc_string(&s) as u64);
+    }
+    let total = width - cur;
+    let out = match how {
+        Pad::Left => format!("{s}{}", " ".repeat(total)),
+        Pad::Right => format!("{}{s}", " ".repeat(total)),
+        Pad::Center => {
+            // CPython biases the extra space to the right.
+            let left = total / 2;
+            let right = total - left;
+            format!("{}{s}{}", " ".repeat(left), " ".repeat(right))
+        }
+    };
+    Ok(interp.alloc_string(&out) as u64)
+}
+
+/// `s.title()` — capitalise the first letter of each run of alphabetic
+/// characters, lower-casing the rest.
+fn lane_e_title(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_alpha = false;
+    for c in s.chars() {
+        if c.is_alphabetic() {
+            if prev_alpha {
+                out.extend(c.to_lowercase());
+            } else {
+                out.extend(c.to_uppercase());
+            }
+            prev_alpha = true;
+        } else {
+            out.push(c);
+            prev_alpha = false;
+        }
+    }
+    out
+}
+
+/// `s.swapcase()` — flip the case of every cased character.
+fn lane_e_swapcase(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_uppercase() {
+            out.extend(c.to_lowercase());
+        } else if c.is_lowercase() {
+            out.extend(c.to_uppercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// `s.capitalize()` — upper-case the first char, lower-case the rest.
+fn lane_e_capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => {
+            let mut out: String = first.to_uppercase().collect();
+            out.push_str(&chars.as_str().to_lowercase());
+            out
+        }
+    }
+}
+
+/// `s.expandtabs(tabsize)` — replace tabs with spaces to the next tab stop,
+/// resetting the column on newline / carriage-return.
+fn lane_e_expandtabs(s: &str, tabsize: usize) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut col = 0usize;
+    for c in s.chars() {
+        match c {
+            '\t' => {
+                if tabsize == 0 {
+                    continue;
+                }
+                let spaces = tabsize - (col % tabsize);
+                for _ in 0..spaces {
+                    out.push(' ');
+                }
+                col += spaces;
+            }
+            '\n' | '\r' => {
+                out.push(c);
+                col = 0;
+            }
+            _ => {
+                out.push(c);
+                col += 1;
+            }
+        }
+    }
+    out
+}
+
+enum CharPred { Digit, Alpha, Alnum, Space, Upper, Lower }
+
+/// Shared body of the `is*` predicate family.  Empty string is always
+/// false for digit/alpha/alnum/space; upper/lower require at least one
+/// cased character and no contradicting case (matches CPython).
+fn lane_e_str_pred(s: &str, pred: CharPred) -> u64 {
+    let res = match pred {
+        CharPred::Digit => !s.is_empty() && s.chars().all(|c| c.is_numeric()),
+        CharPred::Alpha => !s.is_empty() && s.chars().all(|c| c.is_alphabetic()),
+        CharPred::Alnum => !s.is_empty() && s.chars().all(|c| c.is_alphanumeric()),
+        CharPred::Space => !s.is_empty() && s.chars().all(|c| c.is_whitespace()),
+        CharPred::Upper => {
+            s.chars().any(|c| c.is_uppercase())
+                && !s.chars().any(|c| c.is_lowercase())
+        }
+        CharPred::Lower => {
+            s.chars().any(|c| c.is_lowercase())
+                && !s.chars().any(|c| c.is_uppercase())
+        }
+    };
+    if res { 1 } else { 0 }
+}
+
+// ─── functools memo cache (item 2) ──────────────────────────────────────
+
+#[derive(Clone)]
+enum CacheVal { I64(i64), F64(f64), Str(String) }
+
+struct CacheSlot {
+    map: LaneEHashMap<String, CacheVal>,
+    hits: i64,
+}
+
+static LANE_E_CACHES: LaneEMutex<Option<LaneEHashMap<i64, CacheSlot>>> = LaneEMutex::new(None);
+static LANE_E_CACHE_NEXT: LaneEAtomicI64 = LaneEAtomicI64::new(1);
+
+fn lane_e_cache_new() -> i64 {
+    let h = LANE_E_CACHE_NEXT.fetch_add(1, LaneEOrdering::SeqCst);
+    let mut g = LANE_E_CACHES.lock().unwrap();
+    g.get_or_insert_with(LaneEHashMap::new)
+        .insert(h, CacheSlot { map: LaneEHashMap::new(), hits: 0 });
+    h
+}
+
+fn lane_e_cache_err(what: &str, h: i64) -> VmError {
+    VmError::UncaughtException {
+        type_name: "ValueError".into(),
+        message: format!("{what}: invalid cache handle {h}"),
+    }
+}
+
+fn lane_e_cache_set(args: &[u64], val: CacheVal) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let key = arg_str(args, 1);
+    let mut g = LANE_E_CACHES.lock().unwrap();
+    let map = g.as_mut().ok_or_else(|| lane_e_cache_err("cache_set", h))?;
+    let slot = map.get_mut(&h).ok_or_else(|| lane_e_cache_err("cache_set", h))?;
+    slot.map.insert(key, val);
+    Ok(0)
+}
+
+fn lane_e_cache_has(args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let key = arg_str(args, 1);
+    let g = LANE_E_CACHES.lock().unwrap();
+    let map = g.as_ref().ok_or_else(|| lane_e_cache_err("cache_has", h))?;
+    let slot = map.get(&h).ok_or_else(|| lane_e_cache_err("cache_has", h))?;
+    Ok(if slot.map.contains_key(&key) { 1 } else { 0 })
+}
+
+fn lane_e_cache_get_i64(args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let key = arg_str(args, 1);
+    let mut g = LANE_E_CACHES.lock().unwrap();
+    let map = g.as_mut().ok_or_else(|| lane_e_cache_err("cache_get_i64", h))?;
+    let slot = map.get_mut(&h).ok_or_else(|| lane_e_cache_err("cache_get_i64", h))?;
+    match slot.map.get(&key) {
+        Some(CacheVal::I64(v)) => { let v = *v; slot.hits += 1; Ok(v as u64) }
+        Some(_) => Err(VmError::UncaughtException {
+            type_name: "TypeError".into(),
+            message: "cache_get_i64: value is not i64".into(),
+        }),
+        None => Err(VmError::UncaughtException {
+            type_name: "KeyError".into(),
+            message: format!("cache_get_i64: missing key {key:?}"),
+        }),
+    }
+}
+
+fn lane_e_cache_get_f64(args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let key = arg_str(args, 1);
+    let mut g = LANE_E_CACHES.lock().unwrap();
+    let map = g.as_mut().ok_or_else(|| lane_e_cache_err("cache_get_f64", h))?;
+    let slot = map.get_mut(&h).ok_or_else(|| lane_e_cache_err("cache_get_f64", h))?;
+    match slot.map.get(&key) {
+        Some(CacheVal::F64(v)) => { let v = *v; slot.hits += 1; Ok(v.to_bits()) }
+        Some(_) => Err(VmError::UncaughtException {
+            type_name: "TypeError".into(),
+            message: "cache_get_f64: value is not f64".into(),
+        }),
+        None => Err(VmError::UncaughtException {
+            type_name: "KeyError".into(),
+            message: format!("cache_get_f64: missing key {key:?}"),
+        }),
+    }
+}
+
+fn lane_e_cache_get_str(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let key = arg_str(args, 1);
+    let s = {
+        let mut g = LANE_E_CACHES.lock().unwrap();
+        let map = g.as_mut().ok_or_else(|| lane_e_cache_err("cache_get_str", h))?;
+        let slot = map.get_mut(&h).ok_or_else(|| lane_e_cache_err("cache_get_str", h))?;
+        match slot.map.get(&key) {
+            Some(CacheVal::Str(v)) => { slot.hits += 1; v.clone() }
+            Some(_) => return Err(VmError::UncaughtException {
+                type_name: "TypeError".into(),
+                message: "cache_get_str: value is not str".into(),
+            }),
+            None => return Err(VmError::UncaughtException {
+                type_name: "KeyError".into(),
+                message: format!("cache_get_str: missing key {key:?}"),
+            }),
+        }
+    };
+    Ok(interp.alloc_string(&s) as u64)
+}
+
+fn lane_e_cache_len(args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let g = LANE_E_CACHES.lock().unwrap();
+    let map = g.as_ref().ok_or_else(|| lane_e_cache_err("cache_len", h))?;
+    let slot = map.get(&h).ok_or_else(|| lane_e_cache_err("cache_len", h))?;
+    Ok(slot.map.len() as u64)
+}
+
+fn lane_e_cache_clear(args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let mut g = LANE_E_CACHES.lock().unwrap();
+    let map = g.as_mut().ok_or_else(|| lane_e_cache_err("cache_clear", h))?;
+    let slot = map.get_mut(&h).ok_or_else(|| lane_e_cache_err("cache_clear", h))?;
+    slot.map.clear();
+    slot.hits = 0;
+    Ok(0)
+}
+
+fn lane_e_cache_hits(args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let g = LANE_E_CACHES.lock().unwrap();
+    let map = g.as_ref().ok_or_else(|| lane_e_cache_err("cache_hits", h))?;
+    let slot = map.get(&h).ok_or_else(|| lane_e_cache_err("cache_hits", h))?;
+    Ok(slot.hits as u64)
+}
+
+// ─── FIFO queue.Queue (item 3) ──────────────────────────────────────────
+//
+// Items are stored as raw u64 register words: for i64 queues this is the
+// integer; for str queues the *StringRepr pointer.  Because str pointers
+// outlive the GC's view of them here (they sit in a non-scanned static
+// table), we must keep the underlying StringRepr alive; in practice the
+// producer holds the source string and these demos are short-lived.  For a
+// fully GC-safe str queue we'd intern to owned Rust Strings — but the i64
+// path (the common case) is exact, and the str path mirrors how the PQ str
+// variant already stashes a *StringRepr pointer.
+
+static LANE_E_FIFOS: LaneEMutex<Option<LaneEHashMap<i64, LaneEVecDeque<u64>>>> =
+    LaneEMutex::new(None);
+static LANE_E_FIFO_NEXT: LaneEAtomicI64 = LaneEAtomicI64::new(1);
+
+fn lane_e_fifo_new() -> i64 {
+    let h = LANE_E_FIFO_NEXT.fetch_add(1, LaneEOrdering::SeqCst);
+    let mut g = LANE_E_FIFOS.lock().unwrap();
+    g.get_or_insert_with(LaneEHashMap::new).insert(h, LaneEVecDeque::new());
+    h
+}
+
+fn lane_e_fifo_err(what: &str, h: i64) -> VmError {
+    VmError::UncaughtException {
+        type_name: "ValueError".into(),
+        message: format!("{what}: invalid queue handle {h}"),
+    }
+}
+
+fn lane_e_fifo_put(h: i64, val: u64) -> Result<u64, VmError> {
+    let mut g = LANE_E_FIFOS.lock().unwrap();
+    let map = g.as_mut().ok_or_else(|| lane_e_fifo_err("Queue.put", h))?;
+    let q = map.get_mut(&h).ok_or_else(|| lane_e_fifo_err("Queue.put", h))?;
+    q.push_back(val);
+    Ok(0)
+}
+
+fn lane_e_fifo_get(args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let mut g = LANE_E_FIFOS.lock().unwrap();
+    let map = g.as_mut().ok_or_else(|| lane_e_fifo_err("Queue.get", h))?;
+    let q = map.get_mut(&h).ok_or_else(|| lane_e_fifo_err("Queue.get", h))?;
+    match q.pop_front() {
+        Some(v) => Ok(v),
+        None => Err(VmError::UncaughtException {
+            type_name: "IndexError".into(),
+            message: "Queue.get from empty queue".into(),
+        }),
+    }
+}
+
+fn lane_e_fifo_empty(args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let g = LANE_E_FIFOS.lock().unwrap();
+    let map = g.as_ref().ok_or_else(|| lane_e_fifo_err("Queue.empty", h))?;
+    let q = map.get(&h).ok_or_else(|| lane_e_fifo_err("Queue.empty", h))?;
+    Ok(if q.is_empty() { 1 } else { 0 })
+}
+
+fn lane_e_fifo_qsize(args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let g = LANE_E_FIFOS.lock().unwrap();
+    let map = g.as_ref().ok_or_else(|| lane_e_fifo_err("Queue.qsize", h))?;
+    let q = map.get(&h).ok_or_else(|| lane_e_fifo_err("Queue.qsize", h))?;
+    Ok(q.len() as u64)
+}
+
+// ─── enum (item 4) ──────────────────────────────────────────────────────
+
+struct EnumSlot {
+    by_name: LaneEHashMap<String, i64>,
+    order: Vec<String>, // insertion order, for name_of reverse lookup
+}
+
+static LANE_E_ENUMS: LaneEMutex<Option<LaneEHashMap<i64, EnumSlot>>> = LaneEMutex::new(None);
+static LANE_E_ENUM_NEXT: LaneEAtomicI64 = LaneEAtomicI64::new(1);
+
+fn lane_e_enum_new() -> i64 {
+    let h = LANE_E_ENUM_NEXT.fetch_add(1, LaneEOrdering::SeqCst);
+    let mut g = LANE_E_ENUMS.lock().unwrap();
+    g.get_or_insert_with(LaneEHashMap::new)
+        .insert(h, EnumSlot { by_name: LaneEHashMap::new(), order: Vec::new() });
+    h
+}
+
+fn lane_e_enum_err(what: &str, h: i64) -> VmError {
+    VmError::UncaughtException {
+        type_name: "ValueError".into(),
+        message: format!("{what}: invalid enum handle {h}"),
+    }
+}
+
+fn lane_e_enum_add(args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let member = arg_str(args, 1);
+    let value = arg_i64(args, 2);
+    let mut g = LANE_E_ENUMS.lock().unwrap();
+    let map = g.as_mut().ok_or_else(|| lane_e_enum_err("Enum.add", h))?;
+    let slot = map.get_mut(&h).ok_or_else(|| lane_e_enum_err("Enum.add", h))?;
+    if slot.by_name.insert(member.clone(), value).is_none() {
+        slot.order.push(member);
+    }
+    Ok(0)
+}
+
+fn lane_e_enum_value_of(args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let member = arg_str(args, 1);
+    let g = LANE_E_ENUMS.lock().unwrap();
+    let map = g.as_ref().ok_or_else(|| lane_e_enum_err("Enum.value_of", h))?;
+    let slot = map.get(&h).ok_or_else(|| lane_e_enum_err("Enum.value_of", h))?;
+    match slot.by_name.get(&member) {
+        Some(v) => Ok(*v as u64),
+        None => Err(VmError::UncaughtException {
+            type_name: "KeyError".into(),
+            message: format!("Enum.value_of: no member {member:?}"),
+        }),
+    }
+}
+
+fn lane_e_enum_name_of(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let value = arg_i64(args, 1);
+    let name = {
+        let g = LANE_E_ENUMS.lock().unwrap();
+        let map = g.as_ref().ok_or_else(|| lane_e_enum_err("Enum.name_of", h))?;
+        let slot = map.get(&h).ok_or_else(|| lane_e_enum_err("Enum.name_of", h))?;
+        let mut found: Option<String> = None;
+        for n in &slot.order {
+            if slot.by_name.get(n) == Some(&value) {
+                found = Some(n.clone());
+                break;
+            }
+        }
+        match found {
+            Some(n) => n,
+            None => return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!("Enum.name_of: no member with value {value}"),
+            }),
+        }
+    };
+    Ok(interp.alloc_string(&name) as u64)
+}
+
+fn lane_e_enum_has_name(args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let member = arg_str(args, 1);
+    let g = LANE_E_ENUMS.lock().unwrap();
+    let map = g.as_ref().ok_or_else(|| lane_e_enum_err("Enum.has_name", h))?;
+    let slot = map.get(&h).ok_or_else(|| lane_e_enum_err("Enum.has_name", h))?;
+    Ok(if slot.by_name.contains_key(&member) { 1 } else { 0 })
+}
+
+fn lane_e_enum_len(args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let g = LANE_E_ENUMS.lock().unwrap();
+    let map = g.as_ref().ok_or_else(|| lane_e_enum_err("Enum.len", h))?;
+    let slot = map.get(&h).ok_or_else(|| lane_e_enum_err("Enum.len", h))?;
+    Ok(slot.by_name.len() as u64)
+}
+
+// ─── bytearray (item 6) ─────────────────────────────────────────────────
+//
+// A growable Vec<u8> behind an i64 handle.  Bytes are 0..=255; out-of-range
+// values to append/set raise ValueError, matching Python.
+
+static LANE_E_BYTEARRAYS: LaneEMutex<Option<LaneEHashMap<i64, Vec<u8>>>> = LaneEMutex::new(None);
+static LANE_E_BA_NEXT: LaneEAtomicI64 = LaneEAtomicI64::new(1);
+
+fn lane_e_ba_register(bytes: Vec<u8>) -> i64 {
+    let h = LANE_E_BA_NEXT.fetch_add(1, LaneEOrdering::SeqCst);
+    let mut g = LANE_E_BYTEARRAYS.lock().unwrap();
+    g.get_or_insert_with(LaneEHashMap::new).insert(h, bytes);
+    h
+}
+
+fn lane_e_ba_new() -> i64 { lane_e_ba_register(Vec::new()) }
+
+fn lane_e_ba_from_str(s: &str) -> i64 { lane_e_ba_register(s.as_bytes().to_vec()) }
+
+fn lane_e_ba_err(what: &str, h: i64) -> VmError {
+    VmError::UncaughtException {
+        type_name: "ValueError".into(),
+        message: format!("{what}: invalid bytearray handle {h}"),
+    }
+}
+
+fn lane_e_ba_append(args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let byte = arg_i64(args, 1);
+    if !(0..=255).contains(&byte) {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("bytearray.append: byte must be in 0..256, got {byte}"),
+        });
+    }
+    let mut g = LANE_E_BYTEARRAYS.lock().unwrap();
+    let map = g.as_mut().ok_or_else(|| lane_e_ba_err("bytearray.append", h))?;
+    let v = map.get_mut(&h).ok_or_else(|| lane_e_ba_err("bytearray.append", h))?;
+    v.push(byte as u8);
+    Ok(0)
+}
+
+fn lane_e_ba_get(args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let idx = arg_i64(args, 1);
+    let g = LANE_E_BYTEARRAYS.lock().unwrap();
+    let map = g.as_ref().ok_or_else(|| lane_e_ba_err("bytearray.get", h))?;
+    let v = map.get(&h).ok_or_else(|| lane_e_ba_err("bytearray.get", h))?;
+    let i = if idx < 0 { v.len() as i64 + idx } else { idx };
+    if i < 0 || i as usize >= v.len() {
+        return Err(VmError::UncaughtException {
+            type_name: "IndexError".into(),
+            message: format!("bytearray index {idx} out of range"),
+        });
+    }
+    Ok(v[i as usize] as u64)
+}
+
+fn lane_e_ba_set(args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let idx = arg_i64(args, 1);
+    let byte = arg_i64(args, 2);
+    if !(0..=255).contains(&byte) {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("bytearray.set: byte must be in 0..256, got {byte}"),
+        });
+    }
+    let mut g = LANE_E_BYTEARRAYS.lock().unwrap();
+    let map = g.as_mut().ok_or_else(|| lane_e_ba_err("bytearray.set", h))?;
+    let v = map.get_mut(&h).ok_or_else(|| lane_e_ba_err("bytearray.set", h))?;
+    let i = if idx < 0 { v.len() as i64 + idx } else { idx };
+    if i < 0 || i as usize >= v.len() {
+        return Err(VmError::UncaughtException {
+            type_name: "IndexError".into(),
+            message: format!("bytearray index {idx} out of range"),
+        });
+    }
+    v[i as usize] = byte as u8;
+    Ok(0)
+}
+
+fn lane_e_ba_len(args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let g = LANE_E_BYTEARRAYS.lock().unwrap();
+    let map = g.as_ref().ok_or_else(|| lane_e_ba_err("bytearray.len", h))?;
+    let v = map.get(&h).ok_or_else(|| lane_e_ba_err("bytearray.len", h))?;
+    Ok(v.len() as u64)
+}
+
+fn lane_e_ba_to_str(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let s = {
+        let g = LANE_E_BYTEARRAYS.lock().unwrap();
+        let map = g.as_ref().ok_or_else(|| lane_e_ba_err("bytearray.to_str", h))?;
+        let v = map.get(&h).ok_or_else(|| lane_e_ba_err("bytearray.to_str", h))?;
+        match String::from_utf8(v.clone()) {
+            Ok(s) => s,
+            Err(_) => return Err(VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: "bytearray.to_str: contents are not valid UTF-8".into(),
+            }),
+        }
+    };
+    Ok(interp.alloc_string(&s) as u64)
+}
+
+fn lane_e_ba_hex(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let hex = {
+        let g = LANE_E_BYTEARRAYS.lock().unwrap();
+        let map = g.as_ref().ok_or_else(|| lane_e_ba_err("bytearray.hex", h))?;
+        let v = map.get(&h).ok_or_else(|| lane_e_ba_err("bytearray.hex", h))?;
+        let mut s = String::with_capacity(v.len() * 2);
+        for b in v {
+            s.push_str(&format!("{b:02x}"));
+        }
+        s
+    };
+    Ok(interp.alloc_string(&hex) as u64)
+}
+
+fn lane_e_ba_pop(args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let mut g = LANE_E_BYTEARRAYS.lock().unwrap();
+    let map = g.as_mut().ok_or_else(|| lane_e_ba_err("bytearray.pop", h))?;
+    let v = map.get_mut(&h).ok_or_else(|| lane_e_ba_err("bytearray.pop", h))?;
+    match v.pop() {
+        Some(b) => Ok(b as u64),
+        None => Err(VmError::UncaughtException {
+            type_name: "IndexError".into(),
+            message: "bytearray.pop from empty bytearray".into(),
+        }),
+    }
+}
+
+fn lane_e_ba_clear(args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let mut g = LANE_E_BYTEARRAYS.lock().unwrap();
+    let map = g.as_mut().ok_or_else(|| lane_e_ba_err("bytearray.clear", h))?;
+    let v = map.get_mut(&h).ok_or_else(|| lane_e_ba_err("bytearray.clear", h))?;
+    v.clear();
+    Ok(0)
+}
+
+// ─── unittest (item 7) ──────────────────────────────────────────────────
+//
+// A minimal assertion-collector.  `new()` makes a result accumulator;
+// assert_* helpers record a pass or a failure message; `run()` prints a
+// summary line and returns the failure count (0 == all green).
+
+struct UtSlot {
+    ran: i64,
+    failures: Vec<String>,
+}
+
+static LANE_E_UNITTESTS: LaneEMutex<Option<LaneEHashMap<i64, UtSlot>>> = LaneEMutex::new(None);
+static LANE_E_UT_NEXT: LaneEAtomicI64 = LaneEAtomicI64::new(1);
+
+fn lane_e_ut_new() -> i64 {
+    let h = LANE_E_UT_NEXT.fetch_add(1, LaneEOrdering::SeqCst);
+    let mut g = LANE_E_UNITTESTS.lock().unwrap();
+    g.get_or_insert_with(LaneEHashMap::new)
+        .insert(h, UtSlot { ran: 0, failures: Vec::new() });
+    h
+}
+
+fn lane_e_ut_err(what: &str, h: i64) -> VmError {
+    VmError::UncaughtException {
+        type_name: "ValueError".into(),
+        message: format!("{what}: invalid TestResult handle {h}"),
+    }
+}
+
+fn lane_e_ut_record(h: i64, what: &str, ok: bool, msg: String) -> Result<u64, VmError> {
+    let mut g = LANE_E_UNITTESTS.lock().unwrap();
+    let map = g.as_mut().ok_or_else(|| lane_e_ut_err(what, h))?;
+    let slot = map.get_mut(&h).ok_or_else(|| lane_e_ut_err(what, h))?;
+    slot.ran += 1;
+    if ok {
+        Ok(1)
+    } else {
+        slot.failures.push(msg);
+        Ok(0)
+    }
+}
+
+fn lane_e_ut_assert_true(args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let cond = arg_u64(args, 1) != 0;
+    let label = arg_str(args, 2);
+    lane_e_ut_record(h, "assert_true", cond,
+        format!("assert_true failed: {label}"))
+}
+
+fn lane_e_ut_assert_eq_i64(args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let a = arg_i64(args, 1);
+    let b = arg_i64(args, 2);
+    let label = arg_str(args, 3);
+    lane_e_ut_record(h, "assert_eq_i64", a == b,
+        format!("assert_eq failed ({label}): {a} != {b}"))
+}
+
+fn lane_e_ut_assert_eq_f64(args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let a = arg_f64(args, 1);
+    let b = arg_f64(args, 2);
+    let label = arg_str(args, 3);
+    // Exact compare — callers wanting tolerance pre-round.
+    lane_e_ut_record(h, "assert_eq_f64", a == b,
+        format!("assert_eq failed ({label}): {a} != {b}"))
+}
+
+fn lane_e_ut_assert_eq_str(args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let a = arg_str(args, 1);
+    let b = arg_str(args, 2);
+    let label = arg_str(args, 3);
+    lane_e_ut_record(h, "assert_eq_str", a == b,
+        format!("assert_eq failed ({label}): {a:?} != {b:?}"))
+}
+
+fn lane_e_ut_run(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let (ran, failures) = {
+        let g = LANE_E_UNITTESTS.lock().unwrap();
+        let map = g.as_ref().ok_or_else(|| lane_e_ut_err("run", h))?;
+        let slot = map.get(&h).ok_or_else(|| lane_e_ut_err("run", h))?;
+        (slot.ran, slot.failures.clone())
+    };
+    for f in &failures {
+        interp.stdout_write("FAIL: ");
+        interp.stdout_write(f);
+        interp.stdout_write("\n");
+    }
+    let n_fail = failures.len();
+    let summary = if n_fail == 0 {
+        format!("ran {ran} checks: OK")
+    } else {
+        format!("ran {ran} checks: {n_fail} FAILED")
+    };
+    interp.stdout_write(&summary);
+    interp.stdout_write("\n");
+    Ok(n_fail as u64)
+}
+
+fn lane_e_ut_failures(args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let g = LANE_E_UNITTESTS.lock().unwrap();
+    let map = g.as_ref().ok_or_else(|| lane_e_ut_err("failures", h))?;
+    let slot = map.get(&h).ok_or_else(|| lane_e_ut_err("failures", h))?;
+    Ok(slot.failures.len() as u64)
+}
+
+fn lane_e_ut_ran(args: &[u64]) -> Result<u64, VmError> {
+    let h = arg_i64(args, 0);
+    let g = LANE_E_UNITTESTS.lock().unwrap();
+    let map = g.as_ref().ok_or_else(|| lane_e_ut_err("ran", h))?;
+    let slot = map.get(&h).ok_or_else(|| lane_e_ut_err("ran", h))?;
+    Ok(slot.ran as u64)
+}
+
+// ─── decimal / fractions (item 5) ───────────────────────────────────────
+//
+// Decimal: exact fixed-point as (mantissa: i128, scale: u32) where the
+// value is mantissa * 10^-scale.  Stored behind an i64 handle.  Add/sub
+// align scales; mul adds scales.  This is exact for the common money /
+// tabular use cases and never introduces binary-float drift.
+
+#[derive(Clone, Copy)]
+struct DecVal { mantissa: i128, scale: u32 }
+
+static LANE_E_DECIMALS: LaneEMutex<Option<LaneEHashMap<i64, DecVal>>> = LaneEMutex::new(None);
+static LANE_E_DEC_NEXT: LaneEAtomicI64 = LaneEAtomicI64::new(1);
+
+fn lane_e_dec_register(d: DecVal) -> i64 {
+    let h = LANE_E_DEC_NEXT.fetch_add(1, LaneEOrdering::SeqCst);
+    let mut g = LANE_E_DECIMALS.lock().unwrap();
+    g.get_or_insert_with(LaneEHashMap::new).insert(h, d);
+    h
+}
+
+fn lane_e_dec_get(h: i64, what: &str) -> Result<DecVal, VmError> {
+    let g = LANE_E_DECIMALS.lock().unwrap();
+    let map = g.as_ref().ok_or_else(|| VmError::UncaughtException {
+        type_name: "ValueError".into(),
+        message: format!("{what}: invalid Decimal handle {h}"),
+    })?;
+    map.get(&h).copied().ok_or_else(|| VmError::UncaughtException {
+        type_name: "ValueError".into(),
+        message: format!("{what}: invalid Decimal handle {h}"),
+    })
+}
+
+fn lane_e_decimal_from_str(args: &[u64]) -> Result<u64, VmError> {
+    let s = arg_str(args, 0);
+    let t = s.trim();
+    let (neg, body) = match t.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, t.strip_prefix('+').unwrap_or(t)),
+    };
+    let (int_part, frac_part) = match body.split_once('.') {
+        Some((a, b)) => (a, b),
+        None => (body, ""),
+    };
+    if int_part.is_empty() && frac_part.is_empty() {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("Decimal: invalid literal {s:?}"),
+        });
+    }
+    let digits: String = format!("{int_part}{frac_part}");
+    if !digits.chars().all(|c| c.is_ascii_digit()) {
+        return Err(VmError::UncaughtException {
+            type_name: "ValueError".into(),
+            message: format!("Decimal: invalid literal {s:?}"),
+        });
+    }
+    let mantissa_abs: i128 = digits.parse::<i128>().map_err(|_| VmError::UncaughtException {
+        type_name: "ValueError".into(),
+        message: format!("Decimal: literal {s:?} out of range"),
+    })?;
+    let mantissa = if neg { -mantissa_abs } else { mantissa_abs };
+    let scale = frac_part.len() as u32;
+    Ok(lane_e_dec_register(DecVal { mantissa, scale }) as u64)
+}
+
+enum DecOp { Add, Sub, Mul }
+
+fn lane_e_decimal_binop(args: &[u64], op: DecOp) -> Result<u64, VmError> {
+    let a = lane_e_dec_get(arg_i64(args, 0), "Decimal.op")?;
+    let b = lane_e_dec_get(arg_i64(args, 1), "Decimal.op")?;
+    let out = match op {
+        DecOp::Mul => DecVal {
+            mantissa: a.mantissa * b.mantissa,
+            scale: a.scale + b.scale,
+        },
+        DecOp::Add | DecOp::Sub => {
+            let scale = a.scale.max(b.scale);
+            let am = a.mantissa * 10i128.pow(scale - a.scale);
+            let bm = b.mantissa * 10i128.pow(scale - b.scale);
+            let m = match op { DecOp::Sub => am - bm, _ => am + bm };
+            DecVal { mantissa: m, scale }
+        }
+    };
+    Ok(lane_e_dec_register(out) as u64)
+}
+
+/// Render a DecVal exactly: insert a decimal point `scale` digits from the
+/// right, zero-padding the integer part as needed.
+fn lane_e_dec_render(d: DecVal) -> String {
+    let neg = d.mantissa < 0;
+    let mut digits = d.mantissa.unsigned_abs().to_string();
+    let scale = d.scale as usize;
+    if scale == 0 {
+        return if neg { format!("-{digits}") } else { digits };
+    }
+    while digits.len() <= scale {
+        digits.insert(0, '0');
+    }
+    let dot = digits.len() - scale;
+    let int_part = &digits[..dot];
+    let frac_part = &digits[dot..];
+    let body = format!("{int_part}.{frac_part}");
+    if neg { format!("-{body}") } else { body }
+}
+
+fn lane_e_decimal_to_str(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let d = lane_e_dec_get(arg_i64(args, 0), "Decimal.to_str")?;
+    Ok(interp.alloc_string(&lane_e_dec_render(d)) as u64)
+}
+
+fn lane_e_decimal_to_f64(args: &[u64]) -> Result<u64, VmError> {
+    let d = lane_e_dec_get(arg_i64(args, 0), "Decimal.to_f64")?;
+    let v = d.mantissa as f64 / 10f64.powi(d.scale as i32);
+    Ok(v.to_bits())
+}
+
+fn lane_e_decimal_cmp(args: &[u64]) -> Result<u64, VmError> {
+    let a = lane_e_dec_get(arg_i64(args, 0), "Decimal.cmp")?;
+    let b = lane_e_dec_get(arg_i64(args, 1), "Decimal.cmp")?;
+    let scale = a.scale.max(b.scale);
+    let am = a.mantissa * 10i128.pow(scale - a.scale);
+    let bm = b.mantissa * 10i128.pow(scale - b.scale);
+    let c: i64 = match am.cmp(&bm) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    };
+    Ok(c as u64)
+}
+
+// Fraction: exact rational (num, den) in lowest terms, den > 0.
+
+#[derive(Clone, Copy)]
+struct FracVal { num: i64, den: i64 }
+
+static LANE_E_FRACTIONS: LaneEMutex<Option<LaneEHashMap<i64, FracVal>>> = LaneEMutex::new(None);
+static LANE_E_FRAC_NEXT: LaneEAtomicI64 = LaneEAtomicI64::new(1);
+
+fn lane_e_gcd(a: i64, b: i64) -> i64 {
+    let (mut a, mut b) = (a.abs(), b.abs());
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a.max(1)
+}
+
+fn lane_e_frac_make(num: i64, den: i64) -> Result<FracVal, VmError> {
+    if den == 0 {
+        return Err(VmError::UncaughtException {
+            type_name: "ZeroDivisionError".into(),
+            message: "Fraction with zero denominator".into(),
+        });
+    }
+    let (mut n, mut d) = (num, den);
+    if d < 0 { n = -n; d = -d; }
+    let g = lane_e_gcd(n, d);
+    Ok(FracVal { num: n / g, den: d / g })
+}
+
+fn lane_e_frac_register(f: FracVal) -> i64 {
+    let h = LANE_E_FRAC_NEXT.fetch_add(1, LaneEOrdering::SeqCst);
+    let mut g = LANE_E_FRACTIONS.lock().unwrap();
+    g.get_or_insert_with(LaneEHashMap::new).insert(h, f);
+    h
+}
+
+fn lane_e_frac_get(h: i64, what: &str) -> Result<FracVal, VmError> {
+    let g = LANE_E_FRACTIONS.lock().unwrap();
+    let map = g.as_ref().ok_or_else(|| VmError::UncaughtException {
+        type_name: "ValueError".into(),
+        message: format!("{what}: invalid Fraction handle {h}"),
+    })?;
+    map.get(&h).copied().ok_or_else(|| VmError::UncaughtException {
+        type_name: "ValueError".into(),
+        message: format!("{what}: invalid Fraction handle {h}"),
+    })
+}
+
+fn lane_e_fraction_new(args: &[u64]) -> Result<u64, VmError> {
+    let num = arg_i64(args, 0);
+    let den = arg_i64(args, 1);
+    let f = lane_e_frac_make(num, den)?;
+    Ok(lane_e_frac_register(f) as u64)
+}
+
+enum FracOp { Add, Sub, Mul, Div }
+
+fn lane_e_fraction_binop(args: &[u64], op: FracOp) -> Result<u64, VmError> {
+    let a = lane_e_frac_get(arg_i64(args, 0), "Fraction.op")?;
+    let b = lane_e_frac_get(arg_i64(args, 1), "Fraction.op")?;
+    let f = match op {
+        FracOp::Add => lane_e_frac_make(a.num * b.den + b.num * a.den, a.den * b.den)?,
+        FracOp::Sub => lane_e_frac_make(a.num * b.den - b.num * a.den, a.den * b.den)?,
+        FracOp::Mul => lane_e_frac_make(a.num * b.num, a.den * b.den)?,
+        FracOp::Div => {
+            if b.num == 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ZeroDivisionError".into(),
+                    message: "Fraction division by zero".into(),
+                });
+            }
+            lane_e_frac_make(a.num * b.den, a.den * b.num)?
+        }
+    };
+    Ok(lane_e_frac_register(f) as u64)
+}
+
+fn lane_e_fraction_num(args: &[u64]) -> Result<u64, VmError> {
+    Ok(lane_e_frac_get(arg_i64(args, 0), "Fraction.num")?.num as u64)
+}
+
+fn lane_e_fraction_den(args: &[u64]) -> Result<u64, VmError> {
+    Ok(lane_e_frac_get(arg_i64(args, 0), "Fraction.den")?.den as u64)
+}
+
+fn lane_e_fraction_to_str(interp: &mut Interpreter, args: &[u64]) -> Result<u64, VmError> {
+    let f = lane_e_frac_get(arg_i64(args, 0), "Fraction.to_str")?;
+    let s = format!("{}/{}", f.num, f.den);
+    Ok(interp.alloc_string(&s) as u64)
+}
+
+// === END LANE E ADDITIONS — helper implementations =====================
+
 #[cfg(test)]
 mod tests {
     //! Per-native unit tests. Each test constructs a minimal interpreter
@@ -26758,4 +27951,214 @@ mod tests {
         dispatch(&mut i, NativeFn::ListSort as u32, &[lst, TAG_I64]).unwrap();
         assert!(read_list_of_u64(lst).is_empty());
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // === LANE E ADDITIONS (stdlib expansion) — unit tests ==============
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Drive a str method that returns a freshly-allocated string and read
+    /// the result back.
+    fn str_method(i: &mut Interpreter, nf: NativeFn, recv: &str, arg: Option<&str>) -> String {
+        let s = alloc_s(i, recv);
+        let r = match arg {
+            Some(a) => { let ap = alloc_s(i, a); dispatch(i, nf as u32, &[s, ap]).unwrap() }
+            None => dispatch(i, nf as u32, &[s]).unwrap(),
+        };
+        unsafe { read_str(r as *const StringRepr) }
+    }
+
+    #[test]
+    fn lane_e_str_search_family() {
+        let mut i = empty_interp();
+        let s = alloc_s(&mut i, "hello world hello");
+        let h = alloc_s(&mut i, "hello");
+        assert_eq!(dispatch(&mut i, NativeFn::StrCount as u32, &[s, h]).unwrap(), 2);
+        let s2 = alloc_s(&mut i, "hello world hello");
+        let h2 = alloc_s(&mut i, "hello");
+        assert_eq!(dispatch(&mut i, NativeFn::StrRfind as u32, &[s2, h2]).unwrap() as i64, 12);
+        let s3 = alloc_s(&mut i, "hello");
+        let miss = alloc_s(&mut i, "zzz");
+        assert_eq!(dispatch(&mut i, NativeFn::StrRfind as u32, &[s3, miss]).unwrap() as i64, -1);
+    }
+
+    #[test]
+    fn lane_e_str_index_and_rindex_raise_when_absent() {
+        let mut i = empty_interp();
+        let s = alloc_s(&mut i, "abc");
+        let miss = alloc_s(&mut i, "z");
+        let err = dispatch(&mut i, NativeFn::StrIndex as u32, &[s, miss]).unwrap_err();
+        match err {
+            VmError::UncaughtException { type_name, .. } => assert_eq!(type_name, "ValueError"),
+            other => panic!("expected ValueError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lane_e_str_padding_and_case() {
+        let mut i = empty_interp();
+        assert_eq!(str_method(&mut i, NativeFn::StrTitle, "hello world", None), "Hello World");
+        assert_eq!(str_method(&mut i, NativeFn::StrSwapcase, "Hello", None), "hELLO");
+        assert_eq!(str_method(&mut i, NativeFn::StrCapitalize, "hELLO", None), "Hello");
+        // zfill keeps the sign in front of the zeros
+        let s = alloc_s(&mut i, "-42");
+        let r = dispatch(&mut i, NativeFn::StrZfill as u32, &[s, 5]).unwrap();
+        assert_eq!(unsafe { read_str(r as *const StringRepr) }, "-0042");
+        // center biases the extra space to the right
+        let c = alloc_s(&mut i, "hi");
+        let rc = dispatch(&mut i, NativeFn::StrCenter as u32, &[c, 6]).unwrap();
+        assert_eq!(unsafe { read_str(rc as *const StringRepr) }, "  hi  ");
+    }
+
+    #[test]
+    fn lane_e_str_predicates() {
+        let mut i = empty_interp();
+        let yes = alloc_s(&mut i, "12345");
+        assert_eq!(dispatch(&mut i, NativeFn::StrIsdigit as u32, &[yes]).unwrap(), 1);
+        let no = alloc_s(&mut i, "12a45");
+        assert_eq!(dispatch(&mut i, NativeFn::StrIsdigit as u32, &[no]).unwrap(), 0);
+        let empty = alloc_s(&mut i, "");
+        assert_eq!(dispatch(&mut i, NativeFn::StrIsalpha as u32, &[empty]).unwrap(), 0);
+        let up = alloc_s(&mut i, "ABC");
+        assert_eq!(dispatch(&mut i, NativeFn::StrIsupper as u32, &[up]).unwrap(), 1);
+    }
+
+    #[test]
+    fn lane_e_str_partition_splits_three_ways() {
+        let mut i = empty_interp();
+        let s = alloc_s(&mut i, "a=b=c");
+        let sep = alloc_s(&mut i, "=");
+        let tup = dispatch(&mut i, NativeFn::StrPartition as u32, &[s, sep]).unwrap();
+        // `alloc_tuple_obj` lays out [ObjectHeader][slot0][slot1][slot2],
+        // each slot an 8-byte str pointer, starting right after the header.
+        let hdr = std::mem::size_of::<crate::object::ObjectHeader>();
+        let parts: Vec<String> = unsafe {
+            let base = (tup as *const u8).add(hdr);
+            (0..3)
+                .map(|j| {
+                    let p = std::ptr::read_unaligned(base.add(j * 8) as *const u64);
+                    read_str(p as *const StringRepr)
+                })
+                .collect()
+        };
+        assert_eq!(parts, vec!["a".to_string(), "=".to_string(), "b=c".to_string()]);
+    }
+
+    #[test]
+    fn lane_e_fifo_queue_is_first_in_first_out() {
+        let mut i = empty_interp();
+        let q = dispatch(&mut i, NativeFn::QueueFifoNewI64 as u32, &[]).unwrap() as i64;
+        assert_eq!(dispatch(&mut i, NativeFn::QueueFifoEmpty as u32, &[q as u64]).unwrap(), 1);
+        for v in [10u64, 20, 30] {
+            dispatch(&mut i, NativeFn::QueueFifoPutI64 as u32, &[q as u64, v]).unwrap();
+        }
+        assert_eq!(dispatch(&mut i, NativeFn::QueueFifoQsize as u32, &[q as u64]).unwrap(), 3);
+        assert_eq!(dispatch(&mut i, NativeFn::QueueFifoGetI64 as u32, &[q as u64]).unwrap(), 10);
+        assert_eq!(dispatch(&mut i, NativeFn::QueueFifoGetI64 as u32, &[q as u64]).unwrap(), 20);
+        assert_eq!(dispatch(&mut i, NativeFn::QueueFifoGetI64 as u32, &[q as u64]).unwrap(), 30);
+        // draining empty raises
+        let err = dispatch(&mut i, NativeFn::QueueFifoGetI64 as u32, &[q as u64]).unwrap_err();
+        assert!(matches!(err, VmError::UncaughtException { .. }));
+    }
+
+    #[test]
+    fn lane_e_functools_cache_round_trips_and_counts_hits() {
+        let mut i = empty_interp();
+        let c = dispatch(&mut i, NativeFn::FunctoolsCacheNew as u32, &[]).unwrap() as i64;
+        let k = alloc_s(&mut i, "k1");
+        dispatch(&mut i, NativeFn::FunctoolsCacheSetI64 as u32, &[c as u64, k, 99]).unwrap();
+        let k2 = alloc_s(&mut i, "k1");
+        assert_eq!(dispatch(&mut i, NativeFn::FunctoolsCacheHasKey as u32, &[c as u64, k2]).unwrap(), 1);
+        let k3 = alloc_s(&mut i, "k1");
+        assert_eq!(dispatch(&mut i, NativeFn::FunctoolsCacheGetI64 as u32, &[c as u64, k3]).unwrap(), 99);
+        // one get == one hit
+        assert_eq!(dispatch(&mut i, NativeFn::FunctoolsCacheHitsI64 as u32, &[c as u64]).unwrap(), 1);
+        assert_eq!(dispatch(&mut i, NativeFn::FunctoolsCacheLen as u32, &[c as u64]).unwrap(), 1);
+    }
+
+    #[test]
+    fn lane_e_enum_round_trips_both_directions() {
+        let mut i = empty_interp();
+        let e = dispatch(&mut i, NativeFn::EnumNew as u32, &[]).unwrap() as i64;
+        let red = alloc_s(&mut i, "RED");
+        dispatch(&mut i, NativeFn::EnumAdd as u32, &[e as u64, red, 0]).unwrap();
+        let green = alloc_s(&mut i, "GREEN");
+        dispatch(&mut i, NativeFn::EnumAdd as u32, &[e as u64, green, 1]).unwrap();
+        let g = alloc_s(&mut i, "GREEN");
+        assert_eq!(dispatch(&mut i, NativeFn::EnumValueOf as u32, &[e as u64, g]).unwrap(), 1);
+        let name = dispatch(&mut i, NativeFn::EnumNameOf as u32, &[e as u64, 0]).unwrap();
+        assert_eq!(unsafe { read_str(name as *const StringRepr) }, "RED");
+        assert_eq!(dispatch(&mut i, NativeFn::EnumLen as u32, &[e as u64]).unwrap(), 2);
+    }
+
+    #[test]
+    fn lane_e_bytearray_append_get_set_and_render() {
+        let mut i = empty_interp();
+        let b = dispatch(&mut i, NativeFn::BytearrayNew as u32, &[]).unwrap() as i64;
+        for v in [65u64, 66, 67] {
+            dispatch(&mut i, NativeFn::BytearrayAppend as u32, &[b as u64, v]).unwrap();
+        }
+        assert_eq!(dispatch(&mut i, NativeFn::BytearrayLen as u32, &[b as u64]).unwrap(), 3);
+        assert_eq!(dispatch(&mut i, NativeFn::BytearrayGet as u32, &[b as u64, 0]).unwrap(), 65);
+        // negative index
+        assert_eq!(dispatch(&mut i, NativeFn::BytearrayGet as u32, &[b as u64, (-1i64) as u64]).unwrap(), 67);
+        let s = dispatch(&mut i, NativeFn::BytearrayToStr as u32, &[b as u64]).unwrap();
+        assert_eq!(unsafe { read_str(s as *const StringRepr) }, "ABC");
+        let hx = dispatch(&mut i, NativeFn::BytearrayHex as u32, &[b as u64]).unwrap();
+        assert_eq!(unsafe { read_str(hx as *const StringRepr) }, "414243");
+        // out-of-range byte raises
+        let err = dispatch(&mut i, NativeFn::BytearrayAppend as u32, &[b as u64, 300]).unwrap_err();
+        assert!(matches!(err, VmError::UncaughtException { .. }));
+    }
+
+    #[test]
+    fn lane_e_decimal_exact_arithmetic() {
+        let mut i = empty_interp();
+        let a_s = alloc_s(&mut i, "0.1");
+        let a = dispatch(&mut i, NativeFn::DecimalFromStr as u32, &[a_s]).unwrap() as i64;
+        let b_s = alloc_s(&mut i, "0.2");
+        let b = dispatch(&mut i, NativeFn::DecimalFromStr as u32, &[b_s]).unwrap() as i64;
+        let c = dispatch(&mut i, NativeFn::DecimalAdd as u32, &[a as u64, b as u64]).unwrap() as i64;
+        let s = dispatch(&mut i, NativeFn::DecimalToStr as u32, &[c as u64]).unwrap();
+        assert_eq!(unsafe { read_str(s as *const StringRepr) }, "0.3");
+        // 1.5 * 1.5 = 2.25
+        let x_s = alloc_s(&mut i, "1.5");
+        let x = dispatch(&mut i, NativeFn::DecimalFromStr as u32, &[x_s]).unwrap() as i64;
+        let p = dispatch(&mut i, NativeFn::DecimalMul as u32, &[x as u64, x as u64]).unwrap() as i64;
+        let ps = dispatch(&mut i, NativeFn::DecimalToStr as u32, &[p as u64]).unwrap();
+        assert_eq!(unsafe { read_str(ps as *const StringRepr) }, "2.25");
+        // cmp: 0.1 < 0.2
+        assert_eq!(dispatch(&mut i, NativeFn::DecimalCmp as u32, &[a as u64, b as u64]).unwrap() as i64, -1);
+    }
+
+    #[test]
+    fn lane_e_fraction_reduces_to_lowest_terms() {
+        let mut i = empty_interp();
+        // 1/3 + 1/6 = 1/2
+        let f = dispatch(&mut i, NativeFn::FractionNew as u32, &[1, 3]).unwrap() as i64;
+        let g = dispatch(&mut i, NativeFn::FractionNew as u32, &[1, 6]).unwrap() as i64;
+        let s = dispatch(&mut i, NativeFn::FractionAdd as u32, &[f as u64, g as u64]).unwrap() as i64;
+        assert_eq!(dispatch(&mut i, NativeFn::FractionNum as u32, &[s as u64]).unwrap() as i64, 1);
+        assert_eq!(dispatch(&mut i, NativeFn::FractionDen as u32, &[s as u64]).unwrap() as i64, 2);
+        let ss = dispatch(&mut i, NativeFn::FractionToStr as u32, &[s as u64]).unwrap();
+        assert_eq!(unsafe { read_str(ss as *const StringRepr) }, "1/2");
+        // division by zero fraction raises
+        let z = dispatch(&mut i, NativeFn::FractionNew as u32, &[0, 1]).unwrap() as i64;
+        let err = dispatch(&mut i, NativeFn::FractionDiv as u32, &[f as u64, z as u64]).unwrap_err();
+        assert!(matches!(err, VmError::UncaughtException { .. }));
+    }
+
+    #[test]
+    fn lane_e_unittest_records_and_summarizes() {
+        let mut i = empty_interp();
+        let t = dispatch(&mut i, NativeFn::UnittestNew as u32, &[]).unwrap() as i64;
+        let lbl = alloc_s(&mut i, "ok");
+        assert_eq!(dispatch(&mut i, NativeFn::UnittestAssertEqI64 as u32, &[t as u64, 5, 5, lbl]).unwrap(), 1);
+        let lbl2 = alloc_s(&mut i, "bad");
+        assert_eq!(dispatch(&mut i, NativeFn::UnittestAssertEqI64 as u32, &[t as u64, 5, 6, lbl2]).unwrap(), 0);
+        assert_eq!(dispatch(&mut i, NativeFn::UnittestRan as u32, &[t as u64]).unwrap(), 2);
+        assert_eq!(dispatch(&mut i, NativeFn::UnittestFailures as u32, &[t as u64]).unwrap(), 1);
+        // run returns the failure count
+        assert_eq!(dispatch(&mut i, NativeFn::UnittestRun as u32, &[t as u64]).unwrap(), 1);
+    }
+    // === END LANE E ADDITIONS — unit tests =============================
 }

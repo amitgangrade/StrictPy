@@ -1,0 +1,48 @@
+"""queue_fifo_demo.spy — LANE E plain FIFO `queue.Queue` (spec §9.28).
+
+The priority queue drains by priority; a FIFO queue drains in insertion
+order.  This demo enqueues numbered jobs and a few named tasks, then
+drains both, checking first-in-first-out ordering.
+
+Tests:
+  * compiler/tests/queue_fifo_demo_runs.rs — subprocess assertion.
+"""
+
+import queue
+
+fn main() -> i32:
+    # ── numeric FIFO ──────────────────────────────────────────────
+    q: i64 = queue.fifo_new_i64()
+    println("empty0=" + str(queue.fifo_empty(q)))     # true
+
+    i: i64 = 0i64
+    while i < 5i64:
+        queue.fifo_put_i64(q, i * 10i64)
+        i = i + 1i64
+
+    println("qsize=" + str(queue.fifo_qsize(q)))      # 5
+    println("empty1=" + str(queue.fifo_empty(q)))     # false
+
+    # Drain — FIFO order: 0, 10, 20, 30, 40.
+    out: List[i64] = []
+    while not queue.fifo_empty(q):
+        out.append(queue.fifo_get_i64(q))
+
+    ok: bool = true
+    k: i64 = 0i64
+    while k < len(out):
+        if out[k] != k * 10i64:
+            ok = false
+        k = k + 1i64
+    println("fifo-ordered=" + str(ok))                # true
+    println("drained=" + str(len(out)))               # 5
+
+    # ── string FIFO task queue ────────────────────────────────────
+    tasks: i64 = queue.fifo_new_str()
+    queue.fifo_put_str(tasks, "first")
+    queue.fifo_put_str(tasks, "second")
+    queue.fifo_put_str(tasks, "third")
+    while not queue.fifo_empty(tasks):
+        println("task: " + queue.fifo_get_str(tasks))
+
+    return 0

@@ -1,0 +1,65 @@
+"""str_methods_extra_demo.spy — LANE E expanded `str` methods (spec §9.x).
+
+Exercises the ~24 string methods added in the stdlib-expansion lane:
+search (count / rfind / index / rindex), splitting (splitlines /
+partition / rpartition), padding (zfill / ljust / rjust / center),
+case transforms (title / swapcase / casefold / capitalize), the `is*`
+predicate family, and prefix/suffix/tab helpers.
+
+Tests:
+  * compiler/tests/str_methods_extra_demo_runs.rs — subprocess assertion.
+"""
+
+fn main() -> i32:
+    s: str = "hello world hello"
+
+    # ── search family ─────────────────────────────────────────────
+    println("count=" + str(s.count("hello")))        # 2
+    println("rfind=" + str(s.rfind("hello")))         # 12
+    println("index=" + str(s.index("world")))         # 6
+    println("rindex=" + str(s.rindex("l")))           # 15
+
+    # ── splitlines ────────────────────────────────────────────────
+    text: str = "a\nb\nc"
+    lines: List[str] = text.splitlines()
+    println("lines=" + str(len(lines)))               # 3
+    println("line0=" + lines[0])
+    println("line2=" + lines[2])
+
+    # ── partition / rpartition ────────────────────────────────────
+    p: Tuple[str, str, str] = "a=b=c".partition("=")
+    println("part0=" + p.0)                           # a
+    println("part1=" + p.1)                           # =
+    println("part2=" + p.2)                           # b=c
+    rp: Tuple[str, str, str] = "a=b=c".rpartition("=")
+    println("rpart0=" + rp.0)                         # a=b
+    println("rpart2=" + rp.2)                         # c
+
+    # ── padding ───────────────────────────────────────────────────
+    println("zfill=" + "42".zfill(5))                 # 00042
+    println("zfill_neg=" + "-42".zfill(5))            # -0042
+    println("ljust=[" + "hi".ljust(5) + "]")          # [hi   ]
+    println("rjust=[" + "hi".rjust(5) + "]")          # [   hi]
+    println("center=[" + "hi".center(6) + "]")        # [  hi  ]
+
+    # ── case transforms ───────────────────────────────────────────
+    println("title=" + "hello world".title())         # Hello World
+    println("swapcase=" + "Hello".swapcase())         # hELLO
+    println("casefold=" + "HELLO".casefold())         # hello
+    println("capitalize=" + "hELLO".capitalize())     # Hello
+
+    # ── predicate family ──────────────────────────────────────────
+    println("isdigit=" + str("12345".isdigit()))      # true
+    println("isdigit_no=" + str("12a45".isdigit()))   # false
+    println("isalpha=" + str("abcXYZ".isalpha()))     # true
+    println("isalnum=" + str("abc123".isalnum()))     # true
+    println("isspace=" + str("   ".isspace()))        # true
+    println("isupper=" + str("ABC".isupper()))        # true
+    println("islower=" + str("abc".islower()))        # true
+
+    # ── prefix / suffix / tabs ────────────────────────────────────
+    println("removeprefix=" + "test_foo".removeprefix("test_"))   # foo
+    println("removesuffix=" + "foo.spy".removesuffix(".spy"))     # foo
+    println("expandtabs=[" + "a\tb".expandtabs(4) + "]")          # [a   b]
+
+    return 0
