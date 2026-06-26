@@ -123,19 +123,9 @@ fn check_rejected(case: &NegativeCase) -> Result<(), String> {
 
 const CASES: &[NegativeCase] = &[
     // ── §5.3 numeric coercion ───────────────────────────────────────────
-    NegativeCase {
-        name: "i32_plus_i64_rejected",
-        source: "\
-fn f() -> i64:
-    a: i32 = 1
-    b: i64 = 2
-    c: i64 = a + b
-    return c
-",
-        expected_category: ErrorCategory::Type,
-        spec_section: "§5.3",
-        description: "i32 + i64 requires explicit conversion",
-    },
+    // (Wave-1 Lane A) `i32 + i64` is now ACCEPTED — implicit lossless widening
+    // (i32→i64) was added; see numeric_coercion_runs.rs for the positive cases.
+    // The former `i32_plus_i64_rejected` negative case was removed accordingly.
     NegativeCase {
         name: "float_assigned_to_int_rejected",
         source: "\

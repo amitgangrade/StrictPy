@@ -667,7 +667,7 @@ fn status_phrase(code: i32) -> str:
 
 fn day_of_week_name(epoch: i64) -> str:
     # 1970-01-01 was a Thursday; (epoch / 86400 + 4) mod 7 = 0 => Sun.
-    days: i64 = epoch / 86400i64
+    days: i64 = epoch // 86400i64
     dow: i32 = i32((days + 4i64) % 7i64)
     if dow < 0i32:
         dow = dow + 7i32
@@ -1090,7 +1090,7 @@ fn hex_string(n: i32) -> str:
     while v > 0i32:
         d: i32 = v % 16i32
         out = hex_digit(d) + out
-        v = v / 16i32
+        v = v // 16i32
     return out
 
 
@@ -1625,7 +1625,7 @@ fn json_escape(s: str) -> str:
             out = out + "\\t"
         elif c < 32i32:
             # Control byte — write as \u00XX.
-            hi: i32 = c / 16i32
+            hi: i32 = c // 16i32
             lo: i32 = c % 16i32
             out = out + "\\u00" + hex_digit(hi) + hex_digit(lo)
         else:

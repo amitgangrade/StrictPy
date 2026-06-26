@@ -38,14 +38,14 @@ fn identity_over_primitives() {
     // The `i64`-typed local-then-pass form is intentional: inside a generic
     // call the typechecker uses `synth_expr` on argument exprs (the
     // expected param type is the unresolved `Ty::Var(0)` until we've solved
-    // for T), so a bare int literal defaults to i32. The named local pins
-    // T = i64.
+    // for T), so a bare int literal defaults to i64. `7i32` explicitly pins
+    // T = i32; the `big` i64 local pins T = i64.
     let src = "\
 fn id[T](x: T) -> T:
     return x
 
 fn main() -> i32:
-    a: i32 = id(7)
+    a: i32 = id(7i32)
     println(str(a))
     big: i64 = 900000000000
     b: i64 = id(big)
@@ -125,7 +125,7 @@ fn outer[U](v: U) -> U:
     return id(v)
 
 fn main() -> i32:
-    a: i32 = outer(7)
+    a: i32 = outer(7i32)
     println(str(a))
     b: str = outer(\"hello\")
     println(b)
@@ -167,7 +167,7 @@ fn double[T](x: T) -> T:
     return x + x
 
 fn main() -> i32:
-    a: i32 = double(21)
+    a: i32 = double(21i32)
     println(str(a))
     b: str = double(\"ab\")
     println(b)
