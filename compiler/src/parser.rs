@@ -765,44 +765,31 @@ impl Parser {
                     }
                 }
             }
-            // `IDENT , IDENT (, IDENT)* = EXPR` → unannotated tuple destructure.
-            // Per spec §5.X, types are inferred from the RHS tuple.
+            // `IDENT , IDENT (, IDENT)* = EXPR`         → tuple destructure.
+            // `[IDENT ,]* * IDENT [, IDENT]* = EXPR`    → star-unpack (Lane B).
+            // The leading token is `IDENT , ...` (tuple/star) or `* ...`
+            // (star-unpack starting with the star). Types are inferred from
+            // the RHS.
             TokenKind::Ident(_)
                 if matches!(self.peek_at(1), TokenKind::Comma)
-                    && matches!(self.peek_at(2), TokenKind::Ident(_)) =>
+                    && matches!(self.peek_at(2), TokenKind::Ident(_) | TokenKind::Star) =>
             {
-                // Walk forward to confirm this is `IDENT (, IDENT)+ =`. If we
-                // ever fail to see `IDENT` after a comma we fall through to
-                // the generic expr parser (which would treat `a, b` as an
-                // expression — currently a tuple literal). We re-check the
-                // assignment by snapshotting the position.
-                let snap = self.pos;
-                let first = self.expect_ident()?;
-                let mut names = vec![first];
-                let mut ok = true;
-                while self.eat(&TokenKind::Comma) {
-                    if let TokenKind::Ident(_) = self.peek_kind() {
-                        names.push(self.expect_ident()?);
-                    } else {
-                        ok = false;
-                        break;
+                match self.try_parse_destructure(start)? {
+                    Some(s) => s,
+                    None => {
+                        let expr = self.parse_expr()?;
+                        self.parse_assign_or_expr_tail(expr, start)?
                     }
                 }
-                if ok && matches!(self.peek_kind(), TokenKind::Assign) {
-                    self.bump(); // '='
-                    let init = self.parse_expr()?;
-                    let tys = vec![None; names.len()];
-                    Stmt::LetDestructure {
-                        names,
-                        tys,
-                        init,
-                        span: merge_spans(start, self.prev_span()),
+            }
+            // Star-unpack that begins with the star: `*rest, b = xs`.
+            TokenKind::Star if matches!(self.peek_at(1), TokenKind::Ident(_)) => {
+                match self.try_parse_destructure(start)? {
+                    Some(s) => s,
+                    None => {
+                        let expr = self.parse_expr()?;
+                        self.parse_assign_or_expr_tail(expr, start)?
                     }
-                } else {
-                    // Roll back and fall through.
-                    self.pos = snap;
-                    let expr = self.parse_expr()?;
-                    self.parse_assign_or_expr_tail(expr, start)?
                 }
             }
             _ => {
@@ -813,6 +800,72 @@ impl Parser {
         };
         self.expect_newline()?;
         Ok(stmt)
+    }
+
+    /// Lane B: try to parse an unannotated destructuring assignment target
+    /// list — a comma-separated run of `IDENT` with at most one `*IDENT`
+    /// star target — followed by `=`. Returns `Some(stmt)` on success, or
+    /// `None` (after restoring the cursor) if the lookahead doesn't actually
+    /// form a destructure (so the caller can fall back to expression parsing,
+    /// preserving the existing `a, b` tuple-literal behaviour).
+    ///
+    /// Produces `Stmt::LetDestructure` when there is no star, or
+    /// `Stmt::LetStarDestructure` when exactly one `*name` is present. Two
+    /// star targets are a hard error (matches Python).
+    fn try_parse_destructure(&mut self, start: Span) -> Result<Option<Stmt>, CompileError> {
+        let snap = self.pos;
+        let mut names: Vec<String> = Vec::new();
+        let mut star_idx: Option<usize> = None;
+        let mut ok = true;
+
+        loop {
+            if self.eat(&TokenKind::Star) {
+                if star_idx.is_some() {
+                    return Err(self.err(
+                        "a destructuring assignment may have at most one `*` target".to_string(),
+                    ));
+                }
+                star_idx = Some(names.len());
+            }
+            if let TokenKind::Ident(_) = self.peek_kind() {
+                names.push(self.expect_ident()?);
+            } else {
+                ok = false;
+                break;
+            }
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+            // Trailing comma before `=` (e.g. `a, b, = xs`) is not supported.
+            if matches!(self.peek_kind(), TokenKind::Assign) {
+                ok = false;
+                break;
+            }
+        }
+
+        // A genuine destructure has either 2+ targets or at least one star
+        // (so `*rest = xs` is allowed, but a bare `a = xs` is a normal assign).
+        let is_destructure = names.len() >= 2 || star_idx.is_some();
+        if !ok || !matches!(self.peek_kind(), TokenKind::Assign) || !is_destructure {
+            self.pos = snap;
+            return Ok(None);
+        }
+        self.bump(); // '='
+        let init = self.parse_expr()?;
+        let span = merge_spans(start, self.prev_span());
+
+        match star_idx {
+            None => {
+                let tys = vec![None; names.len()];
+                Ok(Some(Stmt::LetDestructure { names, tys, init, span }))
+            }
+            Some(si) => {
+                let after = names.split_off(si + 1);
+                let star = names.pop().expect("star name present");
+                let before = names;
+                Ok(Some(Stmt::LetStarDestructure { before, star, after, init, span }))
+            }
+        }
     }
 
     fn parse_assign_or_expr_tail(
@@ -1510,20 +1563,7 @@ impl Parser {
                 }
                 TokenKind::LBracket => {
                     self.bump();
-                    let mut indices = vec![self.parse_expr()?];
-                    while self.eat(&TokenKind::Comma) {
-                        if matches!(self.peek_kind(), TokenKind::RBracket) {
-                            break;
-                        }
-                        indices.push(self.parse_expr()?);
-                    }
-                    self.expect(&TokenKind::RBracket, "']'")?;
-                    let span = merge_spans(start, self.prev_span());
-                    expr = Expr::Index {
-                        obj: Box::new(expr),
-                        indices,
-                        span,
-                    };
+                    expr = self.parse_subscript_tail(expr, start)?;
                 }
                 TokenKind::QuestionQuestion => {
                     self.bump();
@@ -1539,6 +1579,94 @@ impl Parser {
             }
         }
         Ok(expr)
+    }
+
+    /// Lane B: parse the contents of a `[...]` subscript (the opening `[` has
+    /// already been consumed) and produce either an `Expr::Index` (plain
+    /// subscript / generic-type instantiation) or an `Expr::Slice`.
+    ///
+    /// A slice is signalled by a top-level `:` inside the brackets. The full
+    /// grammar handled here:
+    ///
+    /// ```text
+    /// subscript ::= expr ( "," expr )*                       (Index)
+    ///             | [expr] ":" [expr] ( ":" [expr] )?        (Slice)
+    /// ```
+    ///
+    /// Every slice bound is optional: `xs[:]`, `xs[1:]`, `xs[:n]`, `xs[a:b]`,
+    /// `xs[a:b:c]`, `xs[::-1]`, `xs[::2]` are all accepted.
+    fn parse_subscript_tail(&mut self, obj: Expr, start: Span) -> Result<Expr, CompileError> {
+        // Case 1: leading `:` — a slice with no `lo` (e.g. `[:n]`, `[::-1]`).
+        if matches!(self.peek_kind(), TokenKind::Colon) {
+            return self.parse_slice_after_lo(obj, start, None);
+        }
+
+        // Otherwise parse the first expression. It's either the sole/first
+        // index, or the `lo` of a slice (decided by whether a `:` follows).
+        let first = self.parse_expr()?;
+        if matches!(self.peek_kind(), TokenKind::Colon) {
+            return self.parse_slice_after_lo(obj, start, Some(first));
+        }
+
+        // Plain index (possibly multi-dim `a[i, j]` for future tuple/array
+        // shapes — preserved from the original grammar).
+        let mut indices = vec![first];
+        while self.eat(&TokenKind::Comma) {
+            if matches!(self.peek_kind(), TokenKind::RBracket) {
+                break;
+            }
+            indices.push(self.parse_expr()?);
+        }
+        self.expect(&TokenKind::RBracket, "']'")?;
+        let span = merge_spans(start, self.prev_span());
+        Ok(Expr::Index {
+            obj: Box::new(obj),
+            indices,
+            span,
+        })
+    }
+
+    /// Parse the remainder of a slice once the optional `lo` bound has been
+    /// consumed and the cursor is sitting on the first `:`. Handles the
+    /// optional `hi` and optional `:step`.
+    fn parse_slice_after_lo(
+        &mut self,
+        obj: Expr,
+        start: Span,
+        lo: Option<Expr>,
+    ) -> Result<Expr, CompileError> {
+        self.expect(&TokenKind::Colon, "':'")?;
+
+        // `hi` is present unless the next token ends the slice segment.
+        let hi = if matches!(
+            self.peek_kind(),
+            TokenKind::Colon | TokenKind::RBracket
+        ) {
+            None
+        } else {
+            Some(self.parse_expr()?)
+        };
+
+        // Optional `: step`.
+        let step = if self.eat(&TokenKind::Colon) {
+            if matches!(self.peek_kind(), TokenKind::RBracket) {
+                None
+            } else {
+                Some(self.parse_expr()?)
+            }
+        } else {
+            None
+        };
+
+        self.expect(&TokenKind::RBracket, "']'")?;
+        let span = merge_spans(start, self.prev_span());
+        Ok(Expr::Slice {
+            obj: Box::new(obj),
+            lo: lo.map(Box::new),
+            hi: hi.map(Box::new),
+            step: step.map(Box::new),
+            span,
+        })
     }
 
     fn parse_arg_list(&mut self) -> Result<Vec<Arg>, CompileError> {
@@ -1613,8 +1741,112 @@ impl Parser {
             TokenKind::LBracket => self.parse_list_literal(start),
             TokenKind::LBrace => self.parse_dict_or_set_literal(start),
             TokenKind::KwFn => self.parse_lambda(start),
+            TokenKind::FStrStart => self.parse_fstring(start),
             other => Err(self.err(format!("expected expression, found {:?}", other))),
         }
+    }
+
+    /// Lane B: parse an f-string literal and lower it to string concatenation.
+    ///
+    /// The lexer produces the token sequence
+    ///   `FStrStart (FStrChunk | (FStrExprStart EXPR FStrExprEnd))* FStrEnd`
+    /// where each literal run is an `FStrChunk` and each `{...}` interpolation
+    /// is a bracketed expression. We desugar entirely at parse time into the
+    /// existing surface forms — no new AST node, no IR/typecheck changes:
+    ///
+    ///   * a literal chunk `"text"`      → `Expr::Literal(Str("text"))`
+    ///   * an interpolation `{e}`        → `str(e)` (a call to the `str`
+    ///                                      builtin, which dispatches per the
+    ///                                      static type of `e` in the IR)
+    ///   * the whole thing               → the pieces joined left-to-right
+    ///                                      with `BinOp::Add` (str `+` is
+    ///                                      already string concatenation)
+    ///
+    /// An f-string with no interpolations collapses to a single string
+    /// literal. An empty f-string (`f""`) yields the empty-string literal.
+    ///
+    /// Format specs (`f"{x:.2f}"`) are NOT supported: the lexer tokenizes the
+    /// post-colon spec as ordinary tokens (`:` then `.2f` as a float + ident),
+    /// so they cannot be reconstructed here without lexer support. Encountering
+    /// a `:` inside an interpolation is therefore a parse error with a clear
+    /// message rather than silently mis-parsing.
+    fn parse_fstring(&mut self, start: Span) -> Result<Expr, CompileError> {
+        self.expect(&TokenKind::FStrStart, "f-string start")?;
+        // Collected pieces, each already a `str`-typed expression.
+        let mut pieces: Vec<Expr> = Vec::new();
+
+        loop {
+            match self.peek_kind().clone() {
+                TokenKind::FStrChunk(text) => {
+                    self.bump();
+                    let span = self.prev_span();
+                    pieces.push(Expr::Literal {
+                        lit: Literal::Str(text),
+                        span,
+                    });
+                }
+                TokenKind::FStrExprStart => {
+                    self.bump();
+                    let expr_start = self.cur_span();
+                    let inner = self.parse_expr()?;
+                    // Reject format specs explicitly (see doc comment).
+                    if matches!(self.peek_kind(), TokenKind::Colon) {
+                        return Err(self.err(
+                            "f-string format specifiers (`{x:...}`) are not supported yet; \
+                             format the value with explicit code instead"
+                                .to_string(),
+                        ));
+                    }
+                    self.expect(&TokenKind::FStrExprEnd, "'}' to close interpolation")?;
+                    let call_span = merge_spans(expr_start, self.prev_span());
+                    // Wrap in `str(inner)`. The IR `str(...)` lowering picks a
+                    // type-specialised native from `inner`'s static type, so a
+                    // `str` argument is an identity copy and primitives format
+                    // correctly.
+                    pieces.push(Expr::Call {
+                        callee: Box::new(Expr::Ident {
+                            name: "str".to_string(),
+                            span: call_span,
+                        }),
+                        args: vec![Arg {
+                            name: None,
+                            value: inner,
+                            span: call_span,
+                        }],
+                        span: call_span,
+                    });
+                }
+                TokenKind::FStrEnd => {
+                    self.bump();
+                    break;
+                }
+                other => {
+                    return Err(self.err(format!(
+                        "malformed f-string: expected chunk, interpolation, or end, found {:?}",
+                        other
+                    )));
+                }
+            }
+        }
+
+        let span = merge_spans(start, self.prev_span());
+        // Fold the pieces into a left-associated `+` chain. An empty f-string
+        // yields `""`; a single piece is returned as-is (already str-typed).
+        let mut iter = pieces.into_iter();
+        let first = iter.next().unwrap_or(Expr::Literal {
+            lit: Literal::Str(String::new()),
+            span,
+        });
+        let mut acc = first;
+        for piece in iter {
+            acc = Expr::Binary {
+                op: BinOp::Add,
+                lhs: Box::new(acc),
+                rhs: Box::new(piece),
+                span,
+            };
+        }
+        Ok(acc)
     }
 
     fn parse_literal(&mut self) -> Result<Literal, CompileError> {
@@ -2348,6 +2580,156 @@ mod tests {
             },
             _ => panic!(),
         }
+    }
+
+    /// Lex a full source string into tokens (Lane B helper for testing the
+    /// f-string / slice / star-unpack grammar through the real lexer).
+    fn lex_str(src: &str) -> Vec<Token> {
+        let mut lex = crate::lexer::Lexer::new(src);
+        let mut out = Vec::new();
+        loop {
+            let t = lex.next_token().expect("lex error");
+            let done = matches!(t.kind, TokenKind::Eof);
+            out.push(t);
+            if done { break; }
+        }
+        out
+    }
+
+    /// Parse a whole `.spy`-style source string, returning its module.
+    fn parse_src(src: &str) -> Result<Module, CompileError> {
+        Parser::new(lex_str(src)).parse_module()
+    }
+
+    /// Pull the first statement out of `fn main()`'s body.
+    fn first_stmt(src: &str) -> Stmt {
+        let m = parse_src(src).expect("parse");
+        match m.decls.into_iter().next().expect("a decl") {
+            TopDecl::Func(f) => f.body.stmts.into_iter().next().expect("a stmt"),
+            _ => panic!("expected a function"),
+        }
+    }
+
+    fn return_expr_of(src: &str) -> Expr {
+        match first_stmt(src) {
+            Stmt::Return { value: Some(e), .. } => e,
+            other => panic!("expected return-expr, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_fstring_basic_lowers_to_concat() {
+        // f"a {x} b" → "a " + str(x) + " b"  (left-assoc Add chain).
+        let e = return_expr_of("fn main() -> i32:\n    return f\"a {x} b\"\n");
+        // Outermost: Add(_, " b")
+        let (lhs, _) = match &e {
+            Expr::Binary { op: BinOp::Add, lhs, rhs, .. } => (lhs.as_ref(), rhs.as_ref()),
+            other => panic!("expected Add, got {other:?}"),
+        };
+        // lhs: Add("a ", str(x))
+        match lhs {
+            Expr::Binary { op: BinOp::Add, rhs, .. } => match rhs.as_ref() {
+                Expr::Call { callee, args, .. } => {
+                    assert!(matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "str"));
+                    assert_eq!(args.len(), 1);
+                }
+                other => panic!("expected str(...) call, got {other:?}"),
+            },
+            other => panic!("expected nested Add, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_fstring_no_interpolation_is_literal() {
+        let e = return_expr_of("fn main() -> i32:\n    return f\"plain\"\n");
+        match e {
+            Expr::Literal { lit: Literal::Str(s), .. } => assert_eq!(s, "plain"),
+            other => panic!("expected str literal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_fstring_format_spec_is_error() {
+        let err = parse_src("fn main() -> i32:\n    return f\"{x:.2f}\"\n");
+        assert!(err.is_err(), "format specs should be rejected");
+    }
+
+    #[test]
+    fn test_slice_full_and_partial() {
+        // s[:]  → Slice{lo:None, hi:None, step:None}
+        match return_expr_of("fn main() -> i32:\n    return s[:]\n") {
+            Expr::Slice { lo, hi, step, .. } => {
+                assert!(lo.is_none() && hi.is_none() && step.is_none());
+            }
+            other => panic!("expected Slice, got {other:?}"),
+        }
+        // s[1:4] → lo, hi present, no step
+        match return_expr_of("fn main() -> i32:\n    return s[1:4]\n") {
+            Expr::Slice { lo, hi, step, .. } => {
+                assert!(lo.is_some() && hi.is_some() && step.is_none());
+            }
+            other => panic!("expected Slice, got {other:?}"),
+        }
+        // s[::-1] → step present, lo/hi absent
+        match return_expr_of("fn main() -> i32:\n    return s[::-1]\n") {
+            Expr::Slice { lo, hi, step, .. } => {
+                assert!(lo.is_none() && hi.is_none() && step.is_some());
+            }
+            other => panic!("expected Slice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_plain_subscript_is_still_index() {
+        match return_expr_of("fn main() -> i32:\n    return xs[3]\n") {
+            Expr::Index { indices, .. } => assert_eq!(indices.len(), 1),
+            other => panic!("expected Index, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_star_unpack_positions() {
+        // star at end
+        match first_stmt("fn main() -> i32:\n    a, *rest = xs\n") {
+            Stmt::LetStarDestructure { before, star, after, .. } => {
+                assert_eq!(before, vec!["a".to_string()]);
+                assert_eq!(star, "rest");
+                assert!(after.is_empty());
+            }
+            other => panic!("expected LetStarDestructure, got {other:?}"),
+        }
+        // star at front
+        match first_stmt("fn main() -> i32:\n    *init, last = xs\n") {
+            Stmt::LetStarDestructure { before, star, after, .. } => {
+                assert!(before.is_empty());
+                assert_eq!(star, "init");
+                assert_eq!(after, vec!["last".to_string()]);
+            }
+            other => panic!("expected LetStarDestructure, got {other:?}"),
+        }
+        // star in middle
+        match first_stmt("fn main() -> i32:\n    head, *mid, tail = xs\n") {
+            Stmt::LetStarDestructure { before, star, after, .. } => {
+                assert_eq!(before, vec!["head".to_string()]);
+                assert_eq!(star, "mid");
+                assert_eq!(after, vec!["tail".to_string()]);
+            }
+            other => panic!("expected LetStarDestructure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_plain_tuple_destructure_still_works() {
+        match first_stmt("fn main() -> i32:\n    a, b = pair\n") {
+            Stmt::LetDestructure { names, .. } => assert_eq!(names.len(), 2),
+            other => panic!("expected LetDestructure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_double_star_unpack_is_error() {
+        let err = parse_src("fn main() -> i32:\n    *a, *b = xs\n");
+        assert!(err.is_err(), "two star targets should be rejected");
     }
 
     #[test]

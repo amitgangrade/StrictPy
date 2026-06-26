@@ -1459,6 +1459,12 @@ fn expr_mentions(e: &Expr, name: &str) -> bool {
                 || value.as_ref().is_some_and(|v| expr_mentions(v, name))
                 || cond.as_ref().is_some_and(|c| expr_mentions(c, name))
         }
+        Expr::Slice { obj, lo, hi, step, .. } => {
+            expr_mentions(obj, name)
+                || lo.as_ref().is_some_and(|e| expr_mentions(e, name))
+                || hi.as_ref().is_some_and(|e| expr_mentions(e, name))
+                || step.as_ref().is_some_and(|e| expr_mentions(e, name))
+        }
     }
 }
 
@@ -1551,6 +1557,14 @@ fn disqualify_inplace_uses(
             Stmt::LetDestructure { names, init, .. } => {
                 disq_expr(init, cand, disq);
                 for n in names {
+                    if cand.contains(n) {
+                        disq.insert(n.clone());
+                    }
+                }
+            }
+            Stmt::LetStarDestructure { before, star, after, init, .. } => {
+                disq_expr(init, cand, disq);
+                for n in before.iter().chain(std::iter::once(star)).chain(after.iter()) {
                     if cand.contains(n) {
                         disq.insert(n.clone());
                     }
@@ -1970,6 +1984,137 @@ fn lower_stmt(fb: &mut FuncBuilder, ctx: &mut LowerCtx, s: &Stmt) -> Option<()> 
                     },
                 );
                 let slot = fb.alloc_slot(n, elem_ty);
+                fb.emit_write_local(slot, v);
+            }
+            Some(())
+        }
+        Stmt::LetStarDestructure { before, star, after, init, .. } => {
+            // Lane B: `before, *star, after = xs` where `xs: List[T]`.
+            //
+            //   list = <init>            (a List[T])
+            //   len  = ArrayLen(list)
+            //   before[i] = list[i]                          for i in 0..B
+            //   after[j]  = list[len - A + j]                 for j in 0..A
+            //   star = list[B : len - A]                      (fresh List[T])
+            //
+            // The star list is built with ArrayNew + a copy loop. Fixed
+            // elements use direct ArrayGet (which bounds-checks, so a too-short
+            // list traps with IndexError on the first missing element).
+            let list = lower_expr(fb, ctx, init);
+            let list_ty = find_value_ty(fb, list)
+                .or_else(|| Some(ctx.expr_ty(expr_span(init))))
+                .unwrap_or(Ty::Primitive(PrimTy::Unit));
+            let elem_ty = match &list_ty {
+                Ty::Generic { base: TypeCtor::List, args } if args.len() == 1 => args[0].clone(),
+                _ => Ty::Primitive(PrimTy::Unit),
+            };
+            let i64_ty = Ty::Primitive(PrimTy::I64);
+            let b = before.len() as i64;
+            let a = after.len() as i64;
+
+            let len = fb.push_value(
+                i64_ty.clone(),
+                ValueKind::Op { op: IROp::ArrayLen, args: vec![list] },
+            );
+
+            // before[i] = list[i]
+            for (i, n) in before.iter().enumerate() {
+                let idx = fb.push_value(
+                    i64_ty.clone(),
+                    ValueKind::Const(IRConst::I64(i as i64)),
+                );
+                let v = fb.push_value(
+                    elem_ty.clone(),
+                    ValueKind::Op { op: IROp::ArrayGet, args: vec![list, idx] },
+                );
+                let slot = fb.alloc_slot(n, elem_ty.clone());
+                fb.emit_write_local(slot, v);
+            }
+
+            // star = list[B : len - A]  — fresh list, copy loop.
+            let star_ty = Ty::Generic { base: TypeCtor::List, args: vec![elem_ty.clone()] };
+            let star_list = fb.push_value(
+                star_ty.clone(),
+                ValueKind::Op { op: IROp::ArrayNew, args: vec![] },
+            );
+            let star_slot = fb.alloc_slot(star, star_ty.clone());
+            fb.emit_write_local(star_slot, star_list);
+
+            // stop = len - A
+            let a_const = fb.push_value(i64_ty.clone(), ValueKind::Const(IRConst::I64(a)));
+            let stop = fb.push_value(
+                i64_ty.clone(),
+                ValueKind::Op { op: IROp::ISub, args: vec![len, a_const] },
+            );
+            let stop_slot = {
+                let nm = format!("__star_stop_{}", fb.slot_ty.len());
+                let s = fb.alloc_slot(&nm, i64_ty.clone());
+                fb.emit_write_local(s, stop);
+                s
+            };
+            // i = B
+            let i_slot = {
+                let nm = format!("__star_i_{}", fb.slot_ty.len());
+                let s = fb.alloc_slot(&nm, i64_ty.clone());
+                let b_const = fb.push_value(i64_ty.clone(), ValueKind::Const(IRConst::I64(b)));
+                fb.emit_write_local(s, b_const);
+                s
+            };
+
+            let header = fb.new_block();
+            let body_b = fb.new_block();
+            let exit = fb.new_block();
+            fb.terminate(Terminator::Branch { target: header });
+
+            // header: while i < stop
+            fb.switch_to(header);
+            let i_cur = fb.emit_read_local(i_slot);
+            let stop_cur = fb.emit_read_local(stop_slot);
+            let test = fb.push_value(
+                Ty::Primitive(PrimTy::Bool),
+                ValueKind::Op { op: IROp::ILt, args: vec![i_cur, stop_cur] },
+            );
+            fb.terminate(Terminator::CondBranch { cond: test, t: body_b, f: exit });
+
+            // body: star.push(list[i]); i += 1
+            fb.switch_to(body_b);
+            let i_now = fb.emit_read_local(i_slot);
+            let elt = fb.push_value(
+                elem_ty.clone(),
+                ValueKind::Op { op: IROp::ArrayGet, args: vec![list, i_now] },
+            );
+            let star_v = fb.emit_read_local(star_slot);
+            fb.push_value(
+                Ty::Primitive(PrimTy::Unit),
+                ValueKind::Op { op: IROp::ListPush, args: vec![star_v, elt] },
+            );
+            let i_again = fb.emit_read_local(i_slot);
+            let one = fb.push_value(i64_ty.clone(), ValueKind::Const(IRConst::I64(1)));
+            let next_i = fb.push_value(
+                i64_ty.clone(),
+                ValueKind::Op { op: IROp::IAdd, args: vec![i_again, one] },
+            );
+            fb.emit_write_local(i_slot, next_i);
+            fb.terminate(Terminator::Branch { target: header });
+
+            // exit: after[j] = list[len - A + j]
+            fb.switch_to(exit);
+            for (j, n) in after.iter().enumerate() {
+                // idx = len - A + j  = stop + j
+                let stop_v = fb.emit_read_local(stop_slot);
+                let j_const = fb.push_value(
+                    i64_ty.clone(),
+                    ValueKind::Const(IRConst::I64(j as i64)),
+                );
+                let idx = fb.push_value(
+                    i64_ty.clone(),
+                    ValueKind::Op { op: IROp::IAdd, args: vec![stop_v, j_const] },
+                );
+                let v = fb.push_value(
+                    elem_ty.clone(),
+                    ValueKind::Op { op: IROp::ArrayGet, args: vec![list, idx] },
+                );
+                let slot = fb.alloc_slot(n, elem_ty.clone());
                 fb.emit_write_local(slot, v);
             }
             Some(())
@@ -3215,6 +3360,61 @@ fn exception_filter_ty(ctx: &LowerCtx, ty: &ast::Type) -> Ty {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+//  Negative-index normalization (Lane B)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Normalize a (possibly negative) list index so that `-1` maps to the last
+/// element, `-2` to the second-to-last, etc. — matching Python semantics.
+///
+/// Emits `idx < 0 ? idx + len(arr) : idx` using `ArrayLen` + `Select`, so the
+/// adjusted index is computed entirely in IR. This works on BOTH the
+/// interpreter and the JIT (`Op::ArrayGet`/`Op::ArraySet` skip bounds checks
+/// and never adjusted for negatives), without touching `vm/src/jit.rs`.
+///
+/// `idx` is an already-lowered SSA value; `arr` is the already-lowered list
+/// pointer value. Non-negative indices flow through unchanged. Out-of-range
+/// indices (after adjustment) still trap in the VM's bounds check exactly as
+/// before. Strings are handled in the `StrCharAt` native instead (see
+/// `vm/src/builtins.rs`) because string indexing never reaches the JIT.
+fn normalize_neg_list_index(fb: &mut FuncBuilder, arr: ValueId, idx: ValueId) -> ValueId {
+    let i64ty = Ty::Primitive(PrimTy::I64);
+    // Pre-seed a slot with the non-negative-path value (`idx` unchanged).
+    // `IROp::Select` CANNOT be used here: its codegen unconditionally moves
+    // the `then` operand (see codegen.rs), which would corrupt non-negative
+    // indices into `idx + len`. We use a real `CondBranch` + slot merge — the
+    // same pattern `NullCoalesce` uses.
+    let nm = format!("__idx_norm_{}", fb.slot_ty.len());
+    let slot = fb.alloc_slot(&nm, i64ty.clone());
+    fb.emit_write_local(slot, idx);
+
+    let zero = fb.push_value(i64ty.clone(), ValueKind::Const(IRConst::I64(0)));
+    let is_neg = fb.push_value(
+        Ty::Primitive(PrimTy::Bool),
+        ValueKind::Op { op: IROp::ILt, args: vec![idx, zero] },
+    );
+
+    let neg_b = fb.new_block();
+    let merge = fb.new_block();
+    fb.terminate(Terminator::CondBranch { cond: is_neg, t: neg_b, f: merge });
+
+    // Negative branch: idx += len.
+    fb.switch_to(neg_b);
+    let len = fb.push_value(
+        i64ty.clone(),
+        ValueKind::Op { op: IROp::ArrayLen, args: vec![arr] },
+    );
+    let idx_plus = fb.push_value(
+        i64ty.clone(),
+        ValueKind::Op { op: IROp::IAdd, args: vec![idx, len] },
+    );
+    fb.emit_write_local(slot, idx_plus);
+    fb.terminate(Terminator::Branch { target: merge });
+
+    fb.switch_to(merge);
+    fb.emit_read_local(slot)
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 //  Lvalues
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -3263,10 +3463,14 @@ fn lower_lvalue_load(fb: &mut FuncBuilder, ctx: &mut LowerCtx, lv: &Lvalue) -> V
                         args: vec![arr, idx],
                     },
                 ),
-                _ => fb.push_value(
-                    ty,
-                    ValueKind::Op { op: IROp::ArrayGet, args: vec![arr, idx] },
-                ),
+                _ => {
+                    // Lane B: support `xs[-1]` (read for aug-assign) too.
+                    let idx = normalize_neg_list_index(fb, arr, idx);
+                    fb.push_value(
+                        ty,
+                        ValueKind::Op { op: IROp::ArrayGet, args: vec![arr, idx] },
+                    )
+                }
             }
         }
     }
@@ -3315,6 +3519,8 @@ fn lower_lvalue_store(fb: &mut FuncBuilder, ctx: &mut LowerCtx, lv: &Lvalue, v: 
                     );
                 }
                 _ => {
+                    // Lane B: support `xs[-1] = v` by normalizing negatives.
+                    let idx = normalize_neg_list_index(fb, arr, idx);
                     fb.push_value(
                         Ty::Primitive(PrimTy::Unit),
                         ValueKind::Op { op: IROp::ArraySet, args: vec![arr, idx, v] },
@@ -3366,6 +3572,7 @@ fn expr_span(e: &Expr) -> Span {
         | Expr::Ternary { span, .. }
         | Expr::Lambda { span, .. }
         | Expr::Cast { span, .. }
+        | Expr::Slice { span, .. }
         | Expr::Comprehension { span, .. } => *span,
     }
 }
@@ -3525,6 +3732,7 @@ fn lower_expr(fb: &mut FuncBuilder, ctx: &mut LowerCtx, e: &Expr) -> ValueId {
             set
         }
         Expr::Comprehension { .. } => lower_comprehension(fb, ctx, e),
+        Expr::Slice { .. } => lower_slice(fb, ctx, e),
         Expr::Unary { op, operand, span } => {
             let v = lower_expr(fb, ctx, operand);
             let ty = ctx.expr_ty(*span);
@@ -3668,10 +3876,14 @@ fn lower_expr(fb: &mut FuncBuilder, ctx: &mut LowerCtx, e: &Expr) -> ValueId {
                         args: vec![arr, idx],
                     },
                 ),
-                _ => fb.push_value(
-                    ty,
-                    ValueKind::Op { op: IROp::ArrayGet, args: vec![arr, idx] },
-                ),
+                _ => {
+                    // Lane B: support `xs[-1]` etc. by normalizing negatives.
+                    let idx = normalize_neg_list_index(fb, arr, idx);
+                    fb.push_value(
+                        ty,
+                        ValueKind::Op { op: IROp::ArrayGet, args: vec![arr, idx] },
+                    )
+                }
             }
         }
         Expr::NullCoalesce { lhs, rhs, span } => {
@@ -3920,6 +4132,12 @@ fn collect_free_vars(
             collect_free_vars(body, &inner_bound, seen, captures);
             if let Some(v) = value { collect_free_vars(v, &inner_bound, seen, captures); }
             if let Some(c) = cond { collect_free_vars(c, &inner_bound, seen, captures); }
+        }
+        Expr::Slice { obj, lo, hi, step, .. } => {
+            collect_free_vars(obj, bound, seen, captures);
+            if let Some(e) = lo { collect_free_vars(e, bound, seen, captures); }
+            if let Some(e) = hi { collect_free_vars(e, bound, seen, captures); }
+            if let Some(e) = step { collect_free_vars(e, bound, seen, captures); }
         }
     }
 }
@@ -5179,6 +5397,296 @@ fn lower_comprehension(fb: &mut FuncBuilder, ctx: &mut LowerCtx, e: &Expr) -> Va
     // exit: read back the populated collection.
     fb.switch_to(exit);
     fb.emit_read_local(coll_slot)
+}
+
+/// Lane B: lower a slice expression `obj[lo:hi:step]` for `str` and
+/// `List[T]` receivers, with full Python semantics:
+///   * any bound may be omitted (`[:]`, `[1:]`, `[:n]`, `[::2]`, `[::-1]`);
+///   * negative bounds count from the end;
+///   * `step` may be negative (reverse) but must be non-zero at runtime
+///     (a zero step raises ValueError).
+///
+/// The normalized (start, stop) bounds are computed at runtime in IR with
+/// `slice.indices(len)`-equivalent clamping (the defaults and clamp limits
+/// depend on the sign of `step`), then a single loop materialises the result:
+///   * `List[T]` → `ArrayNew` + `ListPush(obj[i])`;
+///   * `str`     → empty string + `StrAppendChar(char_at(obj, i))`.
+///
+/// Everything is built from existing IR ops / natives — no new opcode or
+/// native is introduced, so the slice works identically on the interpreter
+/// and the JIT.
+fn lower_slice(fb: &mut FuncBuilder, ctx: &mut LowerCtx, e: &Expr) -> ValueId {
+    let (obj, lo, hi, step, span) = match e {
+        Expr::Slice { obj, lo, hi, step, span } =>
+            (obj.as_ref(), lo.as_deref(), hi.as_deref(), step.as_deref(), *span),
+        _ => unreachable!("lower_slice on non-slice"),
+    };
+
+    let i64_ty = Ty::Primitive(PrimTy::I64);
+    let bool_ty = Ty::Primitive(PrimTy::Bool);
+    let result_ty = ctx.expr_ty(span);
+    let recv_ty = ctx.expr_ty(expr_span(obj));
+    let is_str = matches!(recv_ty, Ty::Primitive(PrimTy::Str));
+    let elem_ty = match &result_ty {
+        Ty::Generic { base: TypeCtor::List, args } if args.len() == 1 => args[0].clone(),
+        _ => Ty::Primitive(PrimTy::Unit),
+    };
+
+    // Materialise the receiver once.
+    let src = lower_expr(fb, ctx, obj);
+
+    // len = len(obj)  — Len reads `length` (code-point count for str,
+    // element count for List), which is exactly what we want here.
+    let len = fb.push_value(
+        i64_ty.clone(),
+        ValueKind::Op {
+            op: if is_str {
+                IROp::NativeCall { native_id: NativeFn::Len as u32 }
+            } else {
+                IROp::ArrayLen
+            },
+            args: vec![src],
+        },
+    );
+
+    // Small IR helpers.
+    let kconst = |fb: &mut FuncBuilder, v: i64| {
+        fb.push_value(Ty::Primitive(PrimTy::I64), ValueKind::Const(IRConst::I64(v)))
+    };
+
+    // NOTE: `IROp::Select` is a codegen placeholder that unconditionally
+    // moves its `then` operand (see codegen.rs), so it CANNOT be used for any
+    // value that actually depends on the condition. We instead realise every
+    // conditional as a real `CondBranch` + slot merge via `emit_select`
+    // (the same pattern `NullCoalesce` uses). `then`/`else` are pre-computed
+    // pure-arithmetic values, so eager evaluation of both is side-effect-free.
+    let emit_select =
+        |fb: &mut FuncBuilder, cond: ValueId, then_v: ValueId, else_v: ValueId| -> ValueId {
+            let nm = format!("__slice_sel_{}", fb.slot_ty.len());
+            let slot = fb.alloc_slot(&nm, Ty::Primitive(PrimTy::I64));
+            fb.emit_write_local(slot, else_v);
+            let t_b = fb.new_block();
+            let merge = fb.new_block();
+            fb.terminate(Terminator::CondBranch { cond, t: t_b, f: merge });
+            fb.switch_to(t_b);
+            fb.emit_write_local(slot, then_v);
+            fb.terminate(Terminator::Branch { target: merge });
+            fb.switch_to(merge);
+            fb.emit_read_local(slot)
+        };
+
+    // step (default 1).
+    let step_v = match step {
+        Some(e) => lower_expr(fb, ctx, e),
+        None => kconst(fb, 1),
+    };
+    let zero = kconst(fb, 0);
+    let one = kconst(fb, 1);
+    let neg_one = kconst(fb, -1);
+
+    // step_is_neg = step < 0
+    let step_is_neg = fb.push_value(
+        bool_ty.clone(),
+        ValueKind::Op { op: IROp::ILt, args: vec![step_v, zero] },
+    );
+
+    // adjust(x) = x < 0 ? x + len : x  — fold a negative bound from the end.
+    let adjust = |fb: &mut FuncBuilder,
+                  emit_select: &dyn Fn(&mut FuncBuilder, ValueId, ValueId, ValueId) -> ValueId,
+                  x: ValueId,
+                  len: ValueId|
+     -> ValueId {
+        let x_plus = fb.push_value(
+            Ty::Primitive(PrimTy::I64),
+            ValueKind::Op { op: IROp::IAdd, args: vec![x, len] },
+        );
+        let z = fb.push_value(
+            Ty::Primitive(PrimTy::I64),
+            ValueKind::Const(IRConst::I64(0)),
+        );
+        let neg = fb.push_value(
+            Ty::Primitive(PrimTy::Bool),
+            ValueKind::Op { op: IROp::ILt, args: vec![x, z] },
+        );
+        emit_select(fb, neg, x_plus, x)
+    };
+
+    // clamp(x, clo, chi) = max(clo, min(x, chi)).
+    let clamp = |fb: &mut FuncBuilder,
+                 emit_select: &dyn Fn(&mut FuncBuilder, ValueId, ValueId, ValueId) -> ValueId,
+                 x: ValueId,
+                 clo: ValueId,
+                 chi: ValueId|
+     -> ValueId {
+        // m = x > chi ? chi : x
+        let gt = fb.push_value(
+            Ty::Primitive(PrimTy::Bool),
+            ValueKind::Op { op: IROp::IGt, args: vec![x, chi] },
+        );
+        let m = emit_select(fb, gt, chi, x);
+        // r = m < clo ? clo : m
+        let lt = fb.push_value(
+            Ty::Primitive(PrimTy::Bool),
+            ValueKind::Op { op: IROp::ILt, args: vec![m, clo] },
+        );
+        emit_select(fb, lt, clo, m)
+    };
+
+    // len - 1 (used for backward-step default/clamp).
+    let len_minus_1 = fb.push_value(
+        i64_ty.clone(),
+        ValueKind::Op { op: IROp::ISub, args: vec![len, one] },
+    );
+
+    // ── start ──────────────────────────────────────────────────────────
+    // Present: adjust then clamp; clamp range depends on step sign:
+    //   step>0 → [0, len];   step<0 → [-1, len-1].
+    // Absent:  step>0 → 0;   step<0 → len-1.
+    let start = match lo {
+        Some(e) => {
+            let raw = lower_expr(fb, ctx, e);
+            let adj = adjust(fb, &emit_select, raw, len);
+            let fwd = clamp(fb, &emit_select, adj, zero, len);
+            let bwd = clamp(fb, &emit_select, adj, neg_one, len_minus_1);
+            emit_select(fb, step_is_neg, bwd, fwd)
+        }
+        None => emit_select(fb, step_is_neg, len_minus_1, zero),
+    };
+
+    // ── stop ───────────────────────────────────────────────────────────
+    // Present: same clamping as start.
+    // Absent:  step>0 → len;   step<0 → -1.
+    let stop = match hi {
+        Some(e) => {
+            let raw = lower_expr(fb, ctx, e);
+            let adj = adjust(fb, &emit_select, raw, len);
+            let fwd = clamp(fb, &emit_select, adj, zero, len);
+            let bwd = clamp(fb, &emit_select, adj, neg_one, len_minus_1);
+            emit_select(fb, step_is_neg, bwd, fwd)
+        }
+        None => emit_select(fb, step_is_neg, neg_one, len),
+    };
+
+    // ── result collection ──────────────────────────────────────────────
+    let result_slot = {
+        let n = format!("__slice_r_{}", fb.slot_ty.len());
+        let s = fb.alloc_slot(&n, result_ty.clone());
+        let init = if is_str {
+            // empty string constant — the accumulator the loop appends to.
+            fb.push_value(
+                Ty::Primitive(PrimTy::Str),
+                ValueKind::Const(IRConst::Str(String::new())),
+            )
+        } else {
+            fb.push_value(
+                result_ty.clone(),
+                ValueKind::Op { op: IROp::ArrayNew, args: vec![] },
+            )
+        };
+        fb.emit_write_local(s, init);
+        s
+    };
+
+    // i = start
+    let i_slot = {
+        let n = format!("__slice_i_{}", fb.slot_ty.len());
+        let s = fb.alloc_slot(&n, i64_ty.clone());
+        fb.emit_write_local(s, start);
+        s
+    };
+    let stop_slot = {
+        let n = format!("__slice_stop_{}", fb.slot_ty.len());
+        let s = fb.alloc_slot(&n, i64_ty.clone());
+        fb.emit_write_local(s, stop);
+        s
+    };
+    let step_slot = {
+        let n = format!("__slice_step_{}", fb.slot_ty.len());
+        let s = fb.alloc_slot(&n, i64_ty.clone());
+        fb.emit_write_local(s, step_v);
+        s
+    };
+
+    let header = fb.new_block();
+    let header_fwd = fb.new_block();
+    let header_bwd = fb.new_block();
+    let body_b = fb.new_block();
+    let exit = fb.new_block();
+    fb.terminate(Terminator::Branch { target: header });
+
+    // header: branch on the sign of step into the forward / backward test.
+    // We can't use `IROp::Select` for the loop condition (it ignores its
+    // condition — see the note at `emit_select`), so split into real blocks.
+    fb.switch_to(header);
+    let step_cur = fb.emit_read_local(step_slot);
+    let zero_h = fb.push_value(i64_ty.clone(), ValueKind::Const(IRConst::I64(0)));
+    let neg_h = fb.push_value(
+        bool_ty.clone(),
+        ValueKind::Op { op: IROp::ILt, args: vec![step_cur, zero_h] },
+    );
+    fb.terminate(Terminator::CondBranch { cond: neg_h, t: header_bwd, f: header_fwd });
+
+    // forward: continue while i < stop.
+    fb.switch_to(header_fwd);
+    let i_fwd = fb.emit_read_local(i_slot);
+    let stop_fwd = fb.emit_read_local(stop_slot);
+    let lt_test = fb.push_value(
+        bool_ty.clone(),
+        ValueKind::Op { op: IROp::ILt, args: vec![i_fwd, stop_fwd] },
+    );
+    fb.terminate(Terminator::CondBranch { cond: lt_test, t: body_b, f: exit });
+
+    // backward: continue while i > stop.
+    fb.switch_to(header_bwd);
+    let i_bwd = fb.emit_read_local(i_slot);
+    let stop_bwd = fb.emit_read_local(stop_slot);
+    let gt_test = fb.push_value(
+        bool_ty.clone(),
+        ValueKind::Op { op: IROp::IGt, args: vec![i_bwd, stop_bwd] },
+    );
+    fb.terminate(Terminator::CondBranch { cond: gt_test, t: body_b, f: exit });
+
+    // body: append obj[i]; i += step
+    fb.switch_to(body_b);
+    let i_now = fb.emit_read_local(i_slot);
+    let coll_v = fb.emit_read_local(result_slot);
+    if is_str {
+        let ch = fb.push_value(
+            Ty::Primitive(PrimTy::Char),
+            ValueKind::Op {
+                op: IROp::NativeCall { native_id: NativeFn::StrCharAt as u32 },
+                args: vec![src, i_now],
+            },
+        );
+        let appended = fb.push_value(
+            Ty::Primitive(PrimTy::Str),
+            ValueKind::Op {
+                op: IROp::NativeCall { native_id: NativeFn::StrAppendChar as u32 },
+                args: vec![coll_v, ch],
+            },
+        );
+        fb.emit_write_local(result_slot, appended);
+    } else {
+        let elt = fb.push_value(
+            elem_ty.clone(),
+            ValueKind::Op { op: IROp::ArrayGet, args: vec![src, i_now] },
+        );
+        fb.push_value(
+            Ty::Primitive(PrimTy::Unit),
+            ValueKind::Op { op: IROp::ListPush, args: vec![coll_v, elt] },
+        );
+    }
+    let i_again = fb.emit_read_local(i_slot);
+    let step_again = fb.emit_read_local(step_slot);
+    let next_i = fb.push_value(
+        i64_ty.clone(),
+        ValueKind::Op { op: IROp::IAdd, args: vec![i_again, step_again] },
+    );
+    fb.emit_write_local(i_slot, next_i);
+    fb.terminate(Terminator::Branch { target: header });
+
+    fb.switch_to(exit);
+    fb.emit_read_local(result_slot)
 }
 
 fn lower_short_circuit(

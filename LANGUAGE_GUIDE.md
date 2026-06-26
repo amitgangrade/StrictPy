@@ -68,7 +68,7 @@ StrictPy is **Python-syntax with mandatory static typing**. The compiler rejects
 - `Any` type, `eval()`, `exec()`, `__dict__` access, monkey-patching, metaclasses, decorators that synthesise runtime types
 - Variadic functions (`fn f(*args)`), `**kwargs`, and keyword-only args
 - Multiple inheritance
-- f-strings inside an f-string (nested), `f"...{expr:format_spec}"` format specifiers — basic `f"text {expr}"` works
+- f-strings inside an f-string (nested) and `f"...{expr:format_spec}"` format specifiers are NOT supported — but basic interpolation `f"text {a} {b}"` works (desugars to `str()` + concatenation)
 - `with` doesn't route IOError through an enclosing `try ... except` — wrap explicitly
 - `async`/`await` keywords (use the `asyncio` library functions instead — see §9)
 - NumPy / pandas import (StrictPy isn't CPython; see THESIS.md §7)
@@ -2978,7 +2978,27 @@ sum([1, 2, 3])
 
 ### 11.7 String concat is `+`, not f-string format-specs
 
-`f"hello {name}"` works. `f"{x:>10}"` does NOT. Build formatted strings with explicit code.
+`f"hello {name}"` works (it desugars to `"hello " + str(name)`). Format
+specifiers like `f"{x:>10}"` or `f"{x:.2f}"` do NOT — build padded/rounded
+output with explicit code.
+
+### 11.7a Sequence syntax: slicing, negative indexing, star-unpacking
+
+These Python-style sequence forms are supported on `str` and `List[T]`:
+
+```python
+s[1:4]        # slice (str → str, List[T] → List[T])
+s[::-1]       # reverse via negative step
+s[-3:]        # negative bounds count from the end
+xs[-1]        # negative index → last element (read, write, and aug-assign)
+a, *rest = xs # iterable star-unpacking (star may be front/middle/end)
+```
+
+Slicing follows Python's `slice.indices` semantics: every bound is optional,
+negative bounds and a negative step (reverse) work, and out-of-range bounds
+clamp (they do not raise). A negative index past the start/end raises
+`IndexError`. Star-unpack requires a `List[T]` on the right; the starred name
+binds a fresh `List[T]` of the middle elements.
 
 ### 11.8 `with` doesn't route IOError through enclosing `try ... except`
 

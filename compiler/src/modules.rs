@@ -683,6 +683,13 @@ impl Renamer {
                     self.bind(n);
                 }
             }
+            // Lane B: star-unpack.
+            Stmt::LetStarDestructure { before, star, after, init, .. } => {
+                self.rewrite_expr(init);
+                for n in before.iter() { self.bind(n); }
+                self.bind(star);
+                for n in after.iter() { self.bind(n); }
+            }
             Stmt::Assign { target, value, .. } => {
                 self.rewrite_expr(value);
                 self.rewrite_lvalue(target);
@@ -910,6 +917,13 @@ impl Renamer {
                 for i in indices {
                     self.rewrite_expr(i);
                 }
+            }
+            // Lane B: slice — rewrite the receiver and each present bound.
+            Expr::Slice { obj, lo, hi, step, .. } => {
+                self.rewrite_expr(obj);
+                if let Some(e) = lo { self.rewrite_expr(e); }
+                if let Some(e) = hi { self.rewrite_expr(e); }
+                if let Some(e) = step { self.rewrite_expr(e); }
             }
             Expr::NullCoalesce { lhs, rhs, .. } => {
                 self.rewrite_expr(lhs);

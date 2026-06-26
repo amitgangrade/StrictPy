@@ -169,6 +169,20 @@ pub enum Stmt {
     /// Per-name `Option<Type>` lets each binding optionally annotate.
     /// Added in M14 (tuples). See spec §5.X.
     LetDestructure { names: Vec<String>, tys: Vec<Option<Type>>, init: Expr, span: Span },
+    /// Lane B: iterable star-unpacking `a, *rest, b = xs` where `xs: List[T]`.
+    /// `before` are the names bound to leading elements, `star` is the name
+    /// bound to a fresh `List[T]` of the middle elements, and `after` are the
+    /// names bound to trailing elements. Each of the fixed names gets type
+    /// `T`; `star` gets `List[T]`. `star_ty` is the optional annotation on the
+    /// star binding. At runtime the list must have at least
+    /// `before.len() + after.len()` elements (else ValueError).
+    LetStarDestructure {
+        before: Vec<String>,
+        star: String,
+        after: Vec<String>,
+        init: Expr,
+        span: Span,
+    },
     Assign { target: Lvalue, value: Expr, span: Span },
     AugAssign { target: Lvalue, op: BinOp, value: Expr, span: Span },
     Return { value: Option<Expr>, span: Span },
@@ -321,6 +335,19 @@ pub enum Expr {
         body: Box<Expr>,
         value: Option<Box<Expr>>,
         cond: Option<Box<Expr>>,
+        span: Span,
+    },
+
+    /// Lane B: a slice expression `obj[lo:hi:step]`. Each of `lo`/`hi`/`step`
+    /// is optional (`obj[:]`, `obj[::-1]`, `obj[1:]`, `obj[:n]`, `obj[a:b:c]`).
+    /// Distinct from `Index` so it never collides with the generic-type
+    /// instantiation form (`List[i32]`), which `Index` also encodes.
+    /// Supported on `str` and `List[T]`; result type matches the receiver.
+    Slice {
+        obj: Box<Expr>,
+        lo: Option<Box<Expr>>,
+        hi: Option<Box<Expr>>,
+        step: Option<Box<Expr>>,
         span: Span,
     },
 }

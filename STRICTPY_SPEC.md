@@ -201,10 +201,15 @@ none
 """triple"""        // multi-line
 r"raw\nstring"      // raw, no escapes
 b"bytes"            // bytes literal
-f"value: {x}"       // f-string (formatted)
+f"value: {x}"       // f-string — basic interpolation only (no format specs)
 ```
 
 Escape sequences: `\n \r \t \\ \' \" \0 \xHH \uHHHH \U{HEX}`.
+
+An f-string desugars to string concatenation: each `{expr}` interpolation
+becomes `str(expr)` and the literal chunks are joined with `+`. Format
+specifiers (`f"{x:.2f}"`) and nested f-strings are NOT supported in v0.3 —
+a `:` inside an interpolation is a compile error.
 
 #### Char literal
 ```
@@ -278,11 +283,17 @@ proto_member    ::= "fn" identifier "(" "self" [ "," params ] ")" "->" type NEWL
 block           ::= NEWLINE INDENT { stmt } DEDENT
 
 stmt            ::= simple_stmt | compound_stmt
-simple_stmt     ::= ( let_stmt | assign_stmt | return_stmt | expr_stmt
-                    | break_stmt | continue_stmt | pass_stmt | raise_stmt
-                    | assert_stmt | del_stmt ) NEWLINE
+simple_stmt     ::= ( let_stmt | destructure_stmt | assign_stmt | return_stmt
+                    | expr_stmt | break_stmt | continue_stmt | pass_stmt
+                    | raise_stmt | assert_stmt | del_stmt ) NEWLINE
 
 let_stmt        ::= identifier ":" type "=" expr
+// Tuple destructure binds names to a tuple RHS; star-unpack binds names to a
+// List[T] RHS, with the starred name capturing a fresh List[T] of the middle
+// elements. At most one "*" target is allowed.
+destructure_stmt ::= target { "," target } "=" expr           // ≥2 targets, or
+                   | { target "," } "*" identifier { "," target } "=" expr
+target          ::= identifier [ ":" type ]
 assign_stmt     ::= lhs aug_op expr
                   | lhs "=" expr
 lhs             ::= identifier | attr_ref | subscript
@@ -332,14 +343,18 @@ addition        ::= multiplication { ("+" | "-") multiplication }
 multiplication  ::= unary { ("*" | "/" | "//" | "%") unary }
 unary           ::= ("+" | "-" | "~") unary | power
 power           ::= postfix [ "**" unary ]
-postfix         ::= primary { call | attr_ref | subscript | null_coalesce }
+postfix         ::= primary { call | attr_ref | subscript | slice | null_coalesce }
 call            ::= "(" [ arg_list ] ")"
 attr_ref        ::= "." identifier
 subscript       ::= "[" expr { "," expr } "]"
+// Slice (str and List[T]): each bound optional; negative bounds count from
+// the end; negative step reverses. `seq[a:b:c]`, `seq[::-1]`, `seq[:n]`, ...
+slice           ::= "[" [ expr ] ":" [ expr ] [ ":" [ expr ] ] "]"
 null_coalesce   ::= "??" unary
 
 primary         ::= literal | identifier | "(" expr ")" | tuple_literal
                   | list_literal | dict_literal | set_literal | lambda_expr
+                  | f_string
 literal         ::= INT | FLOAT | STRING | CHAR | "true" | "false" | "none"
 tuple_literal   ::= "(" [ expr { "," expr } [","] ] ")"     // singleton: (x,)
 list_literal    ::= "[" [ expr { "," expr } ] "]"

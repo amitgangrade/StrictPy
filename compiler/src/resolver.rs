@@ -7576,6 +7576,19 @@ impl Resolver {
                     self.make_symbol(scope, n, SymbolKind::Local, *span, ty);
                 }
             }
+            // Lane B: star-unpack `before, *star, after = xs`. Each fixed name
+            // and the star name becomes its own local; element types are
+            // filled in by the typechecker from the RHS `List[T]`.
+            Stmt::LetStarDestructure { before, star, after, init, span } => {
+                self.resolve_expr(init, scope)?;
+                for n in before.iter().chain(std::iter::once(star)).chain(after.iter()) {
+                    if self.table.lookup_local(scope, n).is_some() {
+                        return Err(Self::err_at(*span, codes::RESOLVE_DUPLICATE_LET,
+                            format!("duplicate `let` of `{}`", n)));
+                    }
+                    self.make_symbol(scope, n, SymbolKind::Local, *span, None);
+                }
+            }
             Stmt::Assign { target, value, .. } => {
                 self.resolve_lvalue_for_assign(target, scope)?;
                 self.resolve_expr(value, scope)?;
@@ -7845,6 +7858,14 @@ impl Resolver {
             Expr::Index { obj, indices, .. } => {
                 self.resolve_expr(obj, scope)?;
                 for i in indices { self.resolve_expr(i, scope)?; }
+                Ok(())
+            }
+            // Lane B: slice — resolve the receiver and each present bound.
+            Expr::Slice { obj, lo, hi, step, .. } => {
+                self.resolve_expr(obj, scope)?;
+                if let Some(e) = lo { self.resolve_expr(e, scope)?; }
+                if let Some(e) = hi { self.resolve_expr(e, scope)?; }
+                if let Some(e) = step { self.resolve_expr(e, scope)?; }
                 Ok(())
             }
             Expr::NullCoalesce { lhs, rhs, .. } => {

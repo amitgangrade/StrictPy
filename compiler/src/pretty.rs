@@ -404,6 +404,25 @@ impl PrettyPrinter {
                 self.print_expr(init);
                 self.newline();
             }
+            // Lane B: star-unpack `before, *star, after = init`.
+            Stmt::LetStarDestructure { before, star, after, init, .. } => {
+                let mut first = true;
+                for n in before.iter() {
+                    if !first { self.write(", "); }
+                    self.write(n);
+                    first = false;
+                }
+                if !first { self.write(", "); }
+                self.write("*");
+                self.write(star);
+                for n in after.iter() {
+                    self.write(", ");
+                    self.write(n);
+                }
+                self.write(" = ");
+                self.print_expr(init);
+                self.newline();
+            }
             Stmt::Assign { target, value, .. } => {
                 self.print_lvalue(target);
                 self.write(" = ");
@@ -767,6 +786,20 @@ impl PrettyPrinter {
                         self.write(", ");
                     }
                     self.print_expr(x);
+                }
+                self.write("]");
+            }
+            // Lane B: slice `obj[lo:hi:step]` — print each present bound; the
+            // `step` colon is only emitted when a step is present.
+            Expr::Slice { obj, lo, hi, step, .. } => {
+                self.print_expr_atom(obj);
+                self.write("[");
+                if let Some(e) = lo { self.print_expr(e); }
+                self.write(":");
+                if let Some(e) = hi { self.print_expr(e); }
+                if let Some(e) = step {
+                    self.write(":");
+                    self.print_expr(e);
                 }
                 self.write("]");
             }
@@ -1163,6 +1196,7 @@ fn needs_atom_parens(e: &Expr) -> bool {
             | Expr::MethodCall { .. }
             | Expr::Attr { .. }
             | Expr::Index { .. }
+            | Expr::Slice { .. }
             | Expr::Comprehension { .. }
     )
 }
