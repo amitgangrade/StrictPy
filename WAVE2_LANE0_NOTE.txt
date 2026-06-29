@@ -1,0 +1,123 @@
+WAVE 2 — LANE 0 (Scaffold): dunder dispatch helpers
+====================================================
+
+Two reusable, additive helpers. No behavior change to any existing program.
+Both are #[allow(dead_code)] until a feature lane calls them.
+
+----------------------------------------------------------------------
+HELPER 1 — IR lowering dispatch target
+----------------------------------------------------------------------
+File: compiler/src/ir.rs  (definition at line 7262)
+
+    #[allow(dead_code)]
+    fn class_dunder_dispatch(
+        class_layouts: &HashMap<ClassId, ClassLayout>,
+        fn_id_by_name: &HashMap<String, FuncId>,
+        cid: ClassId,
+        dunder: &str,
+    ) -> Option<IROp>
+
+Dispatch-target type: `IROp` (the same enum lower_method_call builds).
+  - Some(IROp::DirectCall { fn_id: FuncId })       -> emit a direct call
+  - Some(IROp::VirtualCall { vtable_slot: u32 })   -> emit a virtual call
+  - None                                           -> class lacks the dunder
+                                                      (or is a native class)
+
+How a feature lane uses it:
+    if let Some(op) = class_dunder_dispatch(ctx.class_layouts, ctx.fn_id_by_name, cid, "__add__") {
+        // evaluate operands into `args: Vec<ValueId>` (receiver first),
+        let v = fb.push_value(ret_ty, ValueKind::Op { op, args });
+    }
+  Pass `ctx.class_layouts` and `ctx.fn_id_by_name` from LowerCtx. `cid` is the
+  receiver's ClassId; for a `Ty::Class(cid)` receiver, unwrap that. `ret_ty`
+  should come from the dunder's declared return type (see lookup_dunder).
+
+Semantics (faithful mirror of lower_method_call ir.rs ~6957-6996):
+  - Returns None for `is_native` classes (handle-backed stdlib classes have no
+    real vtable).
+  - vtable_slot = index of the dunder in the class's VIRTUAL method list, i.e.
+    `layout.methods` with `__init__` filtered out — identical slot numbering to
+    codegen / resolver.
+  - Devirtualises to DirectCall ONLY when the receiver class is neither `open`
+    nor `sealed` (the ir.rs:6978 rule) AND the dunder is defined directly under
+    that class's own name (`"Class.__dunder__"` present in fn_id_by_name). An
+    inherited-but-not-overridden dunder on a final class therefore falls through
+    to VirtualCall, exactly like a normal inherited method. (The Pass-2 vtable
+    builder, ir.rs ~556-577, fills that slot by walking the base chain, so the
+    VirtualCall resolves correctly at runtime.)
+  - Inheritance is already flattened: the resolver copies inherited methods into
+    `layout.methods` (resolver.rs ~7532-7568), so a plain name lookup resolves
+    inherited dunders.
+
+----------------------------------------------------------------------
+HELPER 2 — typecheck signature lookup
+----------------------------------------------------------------------
+File: compiler/src/typecheck.rs  (definition at line 3127)
+
+    #[allow(dead_code)]
+    fn lookup_dunder<'a>(
+        classes: &'a HashMap<ClassId, ClassLayout>,
+        cid: ClassId,
+        dunder: &str,
+    ) -> Option<&'a MethodSig>
+
+Signature type: `crate::types::MethodSig`
+    pub struct MethodSig {
+        pub name: String,
+        pub params: Vec<Ty>,   // operands AFTER `self` (self is stripped)
+        pub ret: Ty,           // declared return type
+    }
+(There is NO `FuncSig` type for methods; MethodSig is the method-signature type.
+ Newly added to the typecheck.rs `use crate::types::{...}` import.)
+
+How a feature lane uses it:
+    if let Some(sig) = lookup_dunder(ctx.classes, cid, "__add__") {
+        // check the operand expr against sig.params[0] (apply the receiver's
+        // generic substitution first, like the method-call checker's recv_subst),
+        // and adopt sig.ret as the expression's result type.
+    }
+  Pass `ctx.classes` from the type-check `Ctx`.
+
+Semantics:
+  - Returns Some(&MethodSig) if the class defines OR inherits the dunder; None
+    otherwise. Walks the `base` chain (belt-and-braces; layout.methods is already
+    flattened) — mirrors normal method lookup (typecheck.rs ~2732-2763).
+  - `sig.params` excludes the implicit `self` (resolver.rs::build_method_sig).
+  - GENERIC NOTE: for a generic receiver class, the returned types may contain
+    the class's `Ty::Var` type parameters. A feature lane must apply the
+    receiver's type-argument substitution (cf. `recv_subst` in
+    check_method_call) before comparing against concrete operand types.
+
+----------------------------------------------------------------------
+NAMING / RETURN-TYPE DECISIONS
+----------------------------------------------------------------------
+- Return type for helper 1 is `Option<IROp>` (NOT a new `DispatchTarget` type).
+  The prompt asked for "the SAME dispatch-target type lower_method_call
+  produces" — that function produces an `IROp` (DirectCall/VirtualCall variants),
+  and no `DispatchTarget` enum exists in the codebase. Returning `IROp` lets a
+  lane drop the result straight into `ValueKind::Op { op, args }`. No new type
+  was introduced (keeps scope minimal, nothing added to shared/).
+- Both helpers are free functions taking the underlying maps directly
+  (`&HashMap<ClassId, ClassLayout>`, `&HashMap<String, FuncId>`) rather than a
+  borrowed `LowerCtx`/`Ctx`. This avoids borrow-checker friction at call sites
+  and makes them trivially unit-testable. Lanes pass `ctx.class_layouts` /
+  `ctx.fn_id_by_name` (ir) and `ctx.classes` (typecheck).
+- Helper 1 returns None for `is_native` classes; user classes are never native,
+  so feature lanes targeting user-defined operator overloads are unaffected.
+
+----------------------------------------------------------------------
+TESTS (all green)
+----------------------------------------------------------------------
+compiler/src/ir.rs   (3 tests in mod tests):
+  - class_dunder_dispatch_final_class_is_direct
+  - class_dunder_dispatch_open_class_is_virtual
+  - class_dunder_dispatch_inherited_resolves   (inherited -> VirtualCall;
+                                                final override -> DirectCall)
+compiler/src/typecheck.rs (2 tests in mod tests):
+  - lookup_dunder_returns_signature
+  - lookup_dunder_resolves_inherited
+
+Verification:
+  cargo build --workspace                                  -> green
+  cargo build -p strictpy-vm --no-default-features         -> green
+  cargo test --workspace --config 'env.RUST_MIN_STACK="16777216"'  -> green (0 failed)

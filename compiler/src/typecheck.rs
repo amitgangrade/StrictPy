@@ -22,8 +22,8 @@ use crate::error::{codes, CompileError, ErrorCode};
 use crate::ir::{eval_const_expr, IRConst};
 use crate::resolver::{FunctionSig, ResolvedModule, SymbolId, SymbolKind};
 use crate::types::{
-    is_subtype, is_subtype_trivial, ty_eq, BoundKind, ClassId, ClassLayout, PrimTy, ProtoId,
-    ProtocolInfo, Ty, TypeContext, TypeCtor, TypeVarId,
+    is_subtype, is_subtype_trivial, ty_eq, BoundKind, ClassId, ClassLayout, MethodSig, PrimTy,
+    ProtoId, ProtocolInfo, Ty, TypeContext, TypeCtor, TypeVarId,
 };
 
 #[derive(Debug, Clone)]
@@ -3095,6 +3095,51 @@ fn ast_free_fn_params<'a>(r: &'a ResolvedModule, name: &str) -> Option<&'a [ast:
     None
 }
 
+/// WAVE-2 LANE-0 (scaffold): resolve a dunder method's *signature* on a user
+/// class, walking the inheritance chain.
+///
+/// Reusable foundation for the operator-overloading / protocol lanes: given a
+/// class id and a dunder name (`"__add__"`, `"__str__"`, `"__getitem__"`,
+/// `"__iter__"`, `"__next__"`, `"__eq__"`, `"__lt__"`, …), it returns the
+/// declared [`MethodSig`] so a feature lane can type-check operands against
+/// the dunder's declared `params` (the parameters *after* `self`) and adopt
+/// its declared `ret` type.
+///
+/// Contract:
+/// - Returns `Some(&MethodSig)` when the class defines **or inherits** the
+///   dunder; `None` otherwise.
+/// - Resolution mirrors normal method lookup (typecheck.rs ~2732-2763): the
+///   resolver already flattens inherited methods into `layout.methods`
+///   (resolver.rs ~7532-7568), so a name lookup on the class resolves
+///   inherited dunders; as belt-and-braces we still walk the `base` chain so
+///   the helper is correct even for layouts that haven't been flattened.
+/// - The returned signature's `params` exclude the implicit `self` (that is
+///   how [`MethodSig`] is built — see resolver.rs::build_method_sig).
+///
+/// Note: for a *generic* receiver class, the returned types may contain the
+/// class's `Ty::Var` type parameters; a feature lane should apply the
+/// receiver's type-argument substitution (as the method-call checker does via
+/// `recv_subst`) before comparing against concrete operand types.
+///
+/// `classes` is the same map carried by the type-check `Ctx`; pass
+/// `ctx.classes`.
+#[allow(dead_code)]
+fn lookup_dunder<'a>(
+    classes: &'a HashMap<ClassId, ClassLayout>,
+    cid: ClassId,
+    dunder: &str,
+) -> Option<&'a MethodSig> {
+    let mut cur = Some(cid);
+    while let Some(c) = cur {
+        let layout = classes.get(&c)?;
+        if let Some(m) = layout.methods.iter().find(|m| m.name == dunder) {
+            return Some(m);
+        }
+        cur = layout.base;
+    }
+    None
+}
+
 /// AST parameters (minus `self`) of a class's `__init__`, by class name.
 fn ast_ctor_params<'a>(r: &'a ResolvedModule, class_name: &str) -> Option<&'a [ast::Param]> {
     for d in &r.module.decls {
@@ -3578,6 +3623,67 @@ mod tests {
         let m = parse(src);
         let resolved = Resolver::new().resolve(m)?;
         TypeChecker::new().check(resolved)
+    }
+
+    /// Resolve `src` and return the `class_layouts` map plus a
+    /// `class-name -> ClassId` index, for exercising `lookup_dunder`.
+    fn resolve_layouts(
+        src: &str,
+    ) -> (HashMap<ClassId, ClassLayout>, HashMap<String, ClassId>) {
+        let m = parse(src);
+        let resolved = Resolver::new().resolve(m).expect("resolve");
+        let layouts = resolved.class_layouts.clone();
+        let names: HashMap<String, ClassId> =
+            layouts.iter().map(|(c, l)| (l.name.clone(), *c)).collect();
+        (layouts, names)
+    }
+
+    // ── WAVE-2 LANE-0: lookup_dunder scaffold ────────────────────────────
+
+    #[test]
+    fn lookup_dunder_returns_signature() {
+        let src = "\
+final class Adder:
+    n: i64
+    fn __init__(self, n: i64) -> None:
+        self.n = n
+    fn __add__(self, other: i64) -> i64:
+        return self.n + other
+
+fn main() -> i32:
+    return 0
+";
+        let (layouts, names) = resolve_layouts(src);
+        let cid = names["Adder"];
+        let sig = lookup_dunder(&layouts, cid, "__add__").expect("Adder defines __add__");
+        // `self` is stripped; one declared operand of type i64, returns i64.
+        assert_eq!(sig.params.len(), 1, "__add__ has one operand after self");
+        assert!(ty_eq(&sig.params[0], &Ty::Primitive(PrimTy::I64)));
+        assert!(ty_eq(&sig.ret, &Ty::Primitive(PrimTy::I64)));
+        // Undefined dunder yields None.
+        assert!(lookup_dunder(&layouts, cid, "__str__").is_none());
+    }
+
+    #[test]
+    fn lookup_dunder_resolves_inherited() {
+        let src = "\
+open class Base:
+    open fn __eq__(self, other: i64) -> bool:
+        return False
+
+final class Derived(Base):
+    fn extra(self) -> i64:
+        return 1
+
+fn main() -> i32:
+    return 0
+";
+        let (layouts, names) = resolve_layouts(src);
+        let derived = names["Derived"];
+        let sig = lookup_dunder(&layouts, derived, "__eq__")
+            .expect("Derived inherits __eq__ from Base");
+        assert_eq!(sig.params.len(), 1);
+        assert!(ty_eq(&sig.ret, &Ty::Primitive(PrimTy::Bool)));
     }
 
     #[test]

@@ -7222,6 +7222,75 @@ fn lower_method_call(
     )
 }
 
+/// WAVE-2 LANE-0 (scaffold): resolve a dunder method on a user class to the
+/// call dispatch target a feature lane should emit.
+///
+/// This is the reusable foundation for operator-overloading / protocol lanes
+/// (`__str__`, `__add__`, `__getitem__`, `__iter__`, `__next__`, `__eq__`,
+/// `__lt__`, …). It mirrors the user-class method-resolution path inside
+/// [`lower_method_call`] (ir.rs ~6957-6996) **exactly**, so the dispatch
+/// target it returns is bit-for-bit what a hand-written `recv.__dunder__(...)`
+/// method call would lower to.
+///
+/// Contract:
+/// - Returns [`IROp::DirectCall`] `{ fn_id }` when the receiver class is
+///   neither `open` nor `sealed` (the devirtualisation rule at ir.rs:6978)
+///   **and** the dunder is defined directly under that class's own name
+///   (`"Class.__dunder__"` is present in `fn_id_by_name`). This is the same
+///   "only devirtualise when the static type forbids overriding subclasses"
+///   condition the normal method path uses — an inherited-but-not-overridden
+///   dunder on a final class therefore falls through to a `VirtualCall`,
+///   identically to a normal inherited method (see the vtable-fill walk in
+///   Pass 2, ir.rs ~556-577).
+/// - Returns [`IROp::VirtualCall`] `{ vtable_slot }` otherwise, where
+///   `vtable_slot` is the index of the dunder in the class's *virtual* method
+///   list — i.e. `methods` with `__init__` filtered out — matching the slot
+///   numbering codegen/resolver use.
+/// - Returns `None` when the class does not define **or inherit** the dunder.
+///   (Inherited dunders are already flattened into `layout.methods` by the
+///   resolver — see resolver.rs ~7532-7568 — so a plain name lookup resolves
+///   the parent chain.)
+/// - Returns `None` for built-in / native runtime classes (`is_native`),
+///   whose methods dispatch through `NativeFn`, not a vtable.
+///
+/// A feature lane evaluates the operands, then drops the returned `IROp`
+/// straight into `fb.push_value(ret_ty, ValueKind::Op { op, args })`.
+///
+/// `fn_id_by_name` and `class_layouts` are the same maps carried by
+/// [`LowerCtx`]; pass `ctx.fn_id_by_name` and `ctx.class_layouts`.
+#[allow(dead_code)]
+fn class_dunder_dispatch(
+    class_layouts: &HashMap<ClassId, ClassLayout>,
+    fn_id_by_name: &HashMap<String, FuncId>,
+    cid: ClassId,
+    dunder: &str,
+) -> Option<IROp> {
+    let layout = class_layouts.get(&cid)?;
+    // Built-in handle-backed classes have no real vtable; never dispatch a
+    // dunder through one (mirrors the `!layout.is_native` guard upstream).
+    if layout.is_native {
+        return None;
+    }
+    // Slot = index in the *virtual* method list (`__init__` excluded), exactly
+    // as `lower_method_call` and the codegen vtable builder compute it.
+    let slot = layout
+        .methods
+        .iter()
+        .filter(|m| m.name != "__init__")
+        .position(|m| m.name == dunder)?;
+    // Devirtualise to a DirectCall only when the static receiver type forbids
+    // overriding subclasses (neither `open` nor `sealed`) and the dunder is
+    // defined directly under this class's name. Otherwise dispatch virtually
+    // so a subclass override is honoured.
+    if !layout.is_open && !layout.is_sealed {
+        let key = format!("{}.{}", layout.name, dunder);
+        if let Some(fid) = fn_id_by_name.get(&key).copied() {
+            return Some(IROp::DirectCall { fn_id: fid });
+        }
+    }
+    Some(IROp::VirtualCall { vtable_slot: slot as u32 })
+}
+
 /// Map a `List[T]` (or any container type) to the TypeTag byte the
 /// sort/sorted natives use to pick a comparator. Unknown types map to
 /// TypeTag::Ref so the VM at least sorts something — but the VM will
@@ -8076,6 +8145,156 @@ fn main() -> i32:
             }
         }
         assert!(saw_virtual, "Branch.sum must emit a VirtualCall for self.left.sum()");
+    }
+
+    // ── WAVE-2 LANE-0: class_dunder_dispatch scaffold ────────────────────
+
+    /// Build the two maps `class_dunder_dispatch` needs from source: the
+    /// resolver's `class_layouts` and a `Class.method -> FuncId` map
+    /// reconstructed from the lowered IR (function names are `"Class.method"`,
+    /// matching the `fn_id_by_name` keying used during lowering).
+    fn dunder_dispatch_fixture(
+        src: &str,
+    ) -> (
+        HashMap<ClassId, ClassLayout>,
+        HashMap<String, FuncId>,
+        HashMap<String, ClassId>,
+    ) {
+        let mut lx = lexer::Lexer::new(src);
+        let mut toks = Vec::new();
+        loop {
+            let t = lx.next_token().unwrap();
+            let eof = matches!(t.kind, lexer::TokenKind::Eof);
+            toks.push(t);
+            if eof { break; }
+        }
+        let module = parser::Parser::new(toks).parse_module().unwrap();
+        let resolved = resolver::Resolver::new().resolve(module).unwrap();
+        let class_layouts = resolved.class_layouts.clone();
+        let name_to_cid: HashMap<String, ClassId> = class_layouts
+            .iter()
+            .map(|(cid, l)| (l.name.clone(), *cid))
+            .collect();
+        let typed = typecheck::TypeChecker::new().check(resolved).unwrap();
+        let ir = lower(typed);
+        let fn_id_by_name: HashMap<String, FuncId> = ir
+            .functions
+            .iter()
+            .map(|f| (f.name.clone(), f.id))
+            .collect();
+        (class_layouts, fn_id_by_name, name_to_cid)
+    }
+
+    #[test]
+    fn class_dunder_dispatch_final_class_is_direct() {
+        let src = "\
+final class Point:
+    x: i64
+    fn __init__(self, x: i64) -> None:
+        self.x = x
+    fn __str__(self) -> str:
+        return \"pt\"
+
+fn main() -> i32:
+    return 0
+";
+        let (layouts, fns, cids) = dunder_dispatch_fixture(src);
+        let cid = cids["Point"];
+        let target = class_dunder_dispatch(&layouts, &fns, cid, "__str__")
+            .expect("Point defines __str__");
+        match target {
+            IROp::DirectCall { fn_id } => {
+                assert_eq!(fn_id, fns["Point.__str__"], "must direct-call Point.__str__");
+            }
+            other => panic!("final class must devirtualise to DirectCall, got {other:?}"),
+        }
+        // A class without the dunder yields None.
+        assert!(
+            class_dunder_dispatch(&layouts, &fns, cid, "__add__").is_none(),
+            "Point does not define __add__"
+        );
+    }
+
+    #[test]
+    fn class_dunder_dispatch_open_class_is_virtual() {
+        let src = "\
+open class Animal:
+    open fn __str__(self) -> str:
+        return \"animal\"
+
+fn main() -> i32:
+    return 0
+";
+        let (layouts, fns, cids) = dunder_dispatch_fixture(src);
+        let cid = cids["Animal"];
+        let target = class_dunder_dispatch(&layouts, &fns, cid, "__str__")
+            .expect("Animal defines __str__");
+        // Open class: must dispatch virtually so subclass overrides win.
+        // __str__ is the only virtual method, so slot 0.
+        assert!(
+            matches!(target, IROp::VirtualCall { vtable_slot: 0 }),
+            "open class must dispatch __str__ via VirtualCall slot 0, got {target:?}"
+        );
+    }
+
+    #[test]
+    fn class_dunder_dispatch_inherited_resolves() {
+        // Subclass `Dog` inherits `__str__` from open base `Animal` without
+        // overriding it. `class_dunder_dispatch` must still resolve the dunder
+        // (it lives in `Dog`'s flattened `methods`) and — because `Dog` is
+        // final but does not define `Dog.__str__` itself — fall through to a
+        // VirtualCall, exactly as an inherited normal method would.
+        let src = "\
+open class Animal:
+    open fn __str__(self) -> str:
+        return \"animal\"
+
+final class Dog(Animal):
+    fn bark(self) -> str:
+        return \"woof\"
+
+fn main() -> i32:
+    return 0
+";
+        let (layouts, fns, cids) = dunder_dispatch_fixture(src);
+        let dog = cids["Dog"];
+        let target = class_dunder_dispatch(&layouts, &fns, dog, "__str__")
+            .expect("Dog inherits __str__ from Animal");
+        match target {
+            IROp::VirtualCall { vtable_slot } => {
+                // Slot must match __str__'s index in Dog's virtual method list.
+                let expected = layouts[&dog]
+                    .methods
+                    .iter()
+                    .filter(|m| m.name != "__init__")
+                    .position(|m| m.name == "__str__")
+                    .unwrap() as u32;
+                assert_eq!(vtable_slot, expected, "inherited dunder slot mismatch");
+            }
+            other => panic!("inherited (non-overridden) dunder must be VirtualCall, got {other:?}"),
+        }
+        // The override case: a final subclass that *does* define the dunder
+        // directly devirtualises to a DirectCall on its own impl.
+        let src2 = "\
+open class Animal:
+    open fn __str__(self) -> str:
+        return \"animal\"
+
+final class Cat(Animal):
+    fn __str__(self) -> str:
+        return \"meow\"
+
+fn main() -> i32:
+    return 0
+";
+        let (layouts2, fns2, cids2) = dunder_dispatch_fixture(src2);
+        let cat = cids2["Cat"];
+        let target2 = class_dunder_dispatch(&layouts2, &fns2, cat, "__str__")
+            .expect("Cat overrides __str__");
+        assert!(
+            matches!(target2, IROp::DirectCall { fn_id } if fn_id == fns2["Cat.__str__"]),
+            "final subclass overriding a dunder must DirectCall its own impl, got {target2:?}"
+        );
     }
 
     /// producer.spy is the M6 acceptance program for threads + channels.
