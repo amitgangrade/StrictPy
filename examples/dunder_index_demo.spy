@@ -1,0 +1,118 @@
+"""dunder_index_demo — Wave 2 / Lane C: `__getitem__` / `__setitem__`.
+
+Subscripting a user-defined class routes through the index dunders:
+
+  - `obj[k]`      reads via `__getitem__(self, k)` and yields its return type.
+  - `obj[k] = v`  writes via `__setitem__(self, k, v)`.
+
+Both the key and (for stores) the value are type-checked against the dunder's
+declared parameters, so `vec["x"]` on an `i64`-keyed container is a clean
+compile-time error rather than a runtime trap.
+
+This demo wraps a `List[i64]` behind a `Grid`-style class to show that the
+backing storage and the subscript interface can have entirely different shapes.
+A second class `Counter` keys on `str` to confirm the key type follows the
+declared parameter, not a fixed integer assumption.
+"""
+
+final class IntVec:
+    data: List[i64]
+
+    fn __init__(self, seed: i64) -> None:
+        # Pin the element type with one seed value.
+        self.data = [seed]
+
+    fn append(self, x: i64) -> None:
+        self.data.append(x)
+
+    fn __getitem__(self, i: i64) -> i64:
+        return self.data[i]
+
+    fn __setitem__(self, i: i64, v: i64) -> None:
+        self.data[i] = v
+
+
+final class Box[T]:
+    items: List[T]
+
+    fn __init__(self, seed: T) -> None:
+        self.items = [seed]
+
+    fn add(self, x: T) -> None:
+        self.items.append(x)
+
+    fn __getitem__(self, i: i64) -> T:
+        return self.items[i]
+
+    fn __setitem__(self, i: i64, v: T) -> None:
+        self.items[i] = v
+
+
+final class Counter:
+    keys: List[str]
+    vals: List[i64]
+
+    fn __init__(self) -> None:
+        self.keys = []
+        self.vals = []
+
+    fn __getitem__(self, key: str) -> i64:
+        i: i64 = 0
+        n: i64 = i64(len(self.keys))
+        while i < n:
+            if self.keys[i] == key:
+                return self.vals[i]
+            i = i + 1
+        return 0
+
+    fn __setitem__(self, key: str, amount: i64) -> None:
+        i: i64 = 0
+        n: i64 = i64(len(self.keys))
+        while i < n:
+            if self.keys[i] == key:
+                self.vals[i] = amount
+                return
+            i = i + 1
+        self.keys.append(key)
+        self.vals.append(amount)
+
+
+fn main() -> i32:
+    # ── IntVec: i64-keyed read + write through the dunders.
+    v: IntVec = IntVec(10)
+    v.append(20)
+    v.append(30)
+
+    # Read dispatches to __getitem__.
+    println("v[0]=" + str(v[0]))
+    println("v[1]=" + str(v[1]))
+    println("v[2]=" + str(v[2]))
+
+    # Write dispatches to __setitem__, then read back the new value.
+    v[1] = 99
+    println("after v[1]=99: " + str(v[1]))
+
+    # Aug-assign reads via __getitem__ then writes via __setitem__.
+    v[2] = v[2] + 5
+    println("v[2]+5=" + str(v[2]))
+
+    # ── Box[str]: a generic container — `__getitem__`/`__setitem__` are
+    # monomorphised per instantiation, so `T` resolves to `str` here.
+    bx: Box[str] = Box("alpha")
+    bx.add("beta")
+    println("bx[0]=" + bx[0])
+    bx[1] = "GAMMA"
+    println("bx[1]=" + bx[1])
+
+    # ── Counter: str-keyed read + write — the key type follows the
+    # declared `str` parameter, not a hard-coded integer.
+    c: Counter = Counter()
+    c["apples"] = 3
+    c["pears"] = 7
+    c["apples"] = c["apples"] + 1
+    println("apples=" + str(c["apples"]))
+    println("pears=" + str(c["pears"]))
+    println("missing=" + str(c["bananas"]))
+
+    println("OK: dunder-index")
+    return 0
