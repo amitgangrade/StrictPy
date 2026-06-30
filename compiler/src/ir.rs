@@ -3463,6 +3463,18 @@ fn lower_lvalue_load(fb: &mut FuncBuilder, ctx: &mut LowerCtx, lv: &Lvalue) -> V
                         args: vec![arr, idx],
                     },
                 ),
+                // Wave 2 / Lane C: aug-assign read `obj[k] += ..` on a user class
+                // routes the load through `__getitem__(self, k)` (plain or
+                // generic class receiver).
+                _ if class_index_dunder_op(
+                    ctx.class_layouts, ctx.fn_id_by_name, ctx.class_inst_method_fn,
+                    &recv_ty, "__getitem__").is_some() =>
+                {
+                    let op = class_index_dunder_op(
+                        ctx.class_layouts, ctx.fn_id_by_name, ctx.class_inst_method_fn,
+                        &recv_ty, "__getitem__").expect("guard above proved Some");
+                    fb.push_value(ty, ValueKind::Op { op, args: vec![arr, idx] })
+                }
                 _ => {
                     // Lane B: support `xs[-1]` (read for aug-assign) too.
                     let idx = normalize_neg_list_index(fb, arr, idx);
@@ -3516,6 +3528,21 @@ fn lower_lvalue_store(fb: &mut FuncBuilder, ctx: &mut LowerCtx, lv: &Lvalue, v: 
                             op: IROp::NativeCall { native_id: NativeFn::DictSet as u32 },
                             args: vec![arr, idx, v],
                         },
+                    );
+                }
+                // Wave 2 / Lane C: `obj[k] = v` on a user class dispatches to
+                // `__setitem__(self, k, v)`. The typechecker has already verified
+                // both the key and value types. Covers plain and generic classes.
+                _ if class_index_dunder_op(
+                    ctx.class_layouts, ctx.fn_id_by_name, ctx.class_inst_method_fn,
+                    &recv_ty, "__setitem__").is_some() =>
+                {
+                    let op = class_index_dunder_op(
+                        ctx.class_layouts, ctx.fn_id_by_name, ctx.class_inst_method_fn,
+                        &recv_ty, "__setitem__").expect("guard above proved Some");
+                    fb.push_value(
+                        Ty::Primitive(PrimTy::Unit),
+                        ValueKind::Op { op, args: vec![arr, idx, v] },
                     );
                 }
                 _ => {
@@ -3876,6 +3903,19 @@ fn lower_expr(fb: &mut FuncBuilder, ctx: &mut LowerCtx, e: &Expr) -> ValueId {
                         args: vec![arr, idx],
                     },
                 ),
+                // Wave 2 / Lane C: `obj[k]` on a user class dispatches to
+                // `__getitem__(self, k)`. The typechecker has already verified
+                // the key type and set `ty` to the dunder's return type. Covers
+                // both plain (`Foo`) and generic (`Foo[T]`) class receivers.
+                _ if class_index_dunder_op(
+                    ctx.class_layouts, ctx.fn_id_by_name, ctx.class_inst_method_fn,
+                    &recv_ty, "__getitem__").is_some() =>
+                {
+                    let op = class_index_dunder_op(
+                        ctx.class_layouts, ctx.fn_id_by_name, ctx.class_inst_method_fn,
+                        &recv_ty, "__getitem__").expect("guard above proved Some");
+                    fb.push_value(ty, ValueKind::Op { op, args: vec![arr, idx] })
+                }
                 _ => {
                     // Lane B: support `xs[-1]` etc. by normalizing negatives.
                     let idx = normalize_neg_list_index(fb, arr, idx);
@@ -7289,6 +7329,44 @@ fn class_dunder_dispatch(
         }
     }
     Some(IROp::VirtualCall { vtable_slot: slot as u32 })
+}
+
+/// Wave 2 / Lane C: resolve the dispatch op for an index dunder
+/// (`__getitem__` / `__setitem__`) on a user-class receiver, covering both
+/// plain and parameterised generic classes.
+///
+///  - Plain class (`Ty::Class(cid)`): delegate to `class_dunder_dispatch`,
+///    which emits a `DirectCall` (final class, own method) or `VirtualCall`.
+///  - Generic instance (`Ty::Generic { Class(cid), targs }`): mirror the M31
+///    method-call path (ir.rs ~6817) — each fully-applied instantiation has its
+///    own monomorphised method body, looked up in `class_inst_method_fn` by
+///    `(cid, mangle_args_key(targs), dunder)`, and dispatched via `DirectCall`.
+///
+/// Returns `None` for any non-class receiver, a class lacking the dunder, or a
+/// generic instance whose type args aren't fully resolved yet.
+fn class_index_dunder_op(
+    class_layouts: &HashMap<ClassId, ClassLayout>,
+    fn_id_by_name: &HashMap<String, FuncId>,
+    class_inst_method_fn: &HashMap<(ClassId, String, String), FuncId>,
+    recv_ty: &Ty,
+    dunder: &str,
+) -> Option<IROp> {
+    match recv_ty {
+        Ty::Class(cid) => {
+            class_dunder_dispatch(class_layouts, fn_id_by_name, *cid, dunder)
+        }
+        Ty::Generic { base: TypeCtor::Class(cid), args: targs } => {
+            if targs.iter().any(has_unbound_var) {
+                return None;
+            }
+            let key = mangle_args_key(targs);
+            class_inst_method_fn
+                .get(&(*cid, key, dunder.to_string()))
+                .copied()
+                .map(|fid| IROp::DirectCall { fn_id: fid })
+        }
+        _ => None,
+    }
 }
 
 /// Map a `List[T]` (or any container type) to the TypeTag byte the

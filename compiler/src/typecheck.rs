@@ -833,6 +833,20 @@ impl TypeChecker {
             }
             Lvalue::Index { obj, indices, span } => {
                 let obj_ty = self.synth_expr(obj, env, ctx, r)?;
+                // Wave 2 / Lane C: subscript-store on a user class dispatches to
+                // `__setitem__(self, key, value)`. Check the key against the
+                // dunder's first declared parameter, and return its *value*
+                // parameter type so the surrounding assignment checks the RHS
+                // against it. Falls through to `index_type` for built-in
+                // containers and for classes lacking `__setitem__`. A
+                // parameterised receiver is `Ty::Generic { Class(cid), .. }`.
+                if let Some(cid) = class_cid_of(&obj_ty) {
+                    if let Some(res) =
+                        self.class_index_set_type(cid, &obj_ty, indices, *span, env, ctx, r)
+                    {
+                        return res;
+                    }
+                }
                 for i in indices { let _ = self.synth_expr(i, env, ctx, r)?; }
                 self.index_type(&obj_ty, *span)
             }
@@ -1344,6 +1358,19 @@ impl TypeChecker {
                             return Ok(Ty::Tuple(tyargs));
                         }
                         return Ok(Ty::Generic { base: base.clone(), args: tyargs });
+                    }
+                }
+                // Wave 2 / Lane C: subscript-read on a user class dispatches to
+                // `__getitem__(self, key)`. Check the key against the dunder's
+                // declared parameter and adopt its return type. Falls through to
+                // the built-in `index_type` for List/Dict/str/tuple receivers and
+                // for classes that don't define `__getitem__`. A parameterised
+                // receiver (`Box[str]`) is `Ty::Generic { Class(cid), .. }`.
+                if let Some(cid) = class_cid_of(&obj_ty) {
+                    if let Some(res) =
+                        self.class_index_get_type(cid, &obj_ty, indices, *span, env, ctx, r)
+                    {
+                        return res;
                     }
                 }
                 for i in indices { let _ = self.synth_expr(i, env, ctx, r)?; }
@@ -2846,11 +2873,124 @@ impl TypeChecker {
                 format!("type {} is not indexable", obj_ty.display()))),
         }
     }
+
+    /// Wave 2 / Lane C: type-check `obj[k]` (read) where `obj` is a user class.
+    ///
+    /// Returns `None` when the class does not define `__getitem__`, so the
+    /// caller falls back to the built-in `index_type` error path (a class with
+    /// no `__getitem__` is genuinely not subscriptable). Returns `Some(Ok(ret))`
+    /// when the key checks out, where `ret` is the dunder's declared return
+    /// type; `Some(Err(..))` for a bad arity or key-type mismatch.
+    ///
+    /// `obj_ty` is the (possibly parameterised) receiver type — its type
+    /// arguments are substituted into the dunder's signature so a generic
+    /// container's key/return types specialise correctly.
+    fn class_index_get_type(
+        &mut self,
+        cid: ClassId,
+        obj_ty: &Ty,
+        indices: &[Expr],
+        span: Span,
+        env: &Env,
+        ctx: &Ctx,
+        r: &ResolvedModule,
+    ) -> Option<Result<Ty, CompileError>> {
+        let sig = lookup_dunder(ctx.classes, cid, "__getitem__")?;
+        Some(self.check_index_dunder(
+            obj_ty, "__getitem__", sig, indices, span, env, ctx, r,
+        ))
+    }
+
+    /// Wave 2 / Lane C: type-check `obj[k] = v` (store target) where `obj` is a
+    /// user class. Checks the key against `__setitem__`'s first parameter and
+    /// returns the *value* parameter type, so the enclosing assignment checks
+    /// the RHS against it. `None` when the class lacks `__setitem__`.
+    fn class_index_set_type(
+        &mut self,
+        cid: ClassId,
+        obj_ty: &Ty,
+        indices: &[Expr],
+        span: Span,
+        env: &Env,
+        ctx: &Ctx,
+        r: &ResolvedModule,
+    ) -> Option<Result<Ty, CompileError>> {
+        let sig = lookup_dunder(ctx.classes, cid, "__setitem__")?;
+        Some(self.check_index_dunder(
+            obj_ty, "__setitem__", sig, indices, span, env, ctx, r,
+        ))
+    }
+
+    /// Shared key-checking core for `__getitem__` / `__setitem__`.
+    ///
+    /// `__getitem__(self, key)` has one parameter (the key) and the result of a
+    /// subscript-read is its return type. `__setitem__(self, key, value)` has
+    /// two parameters; the subscript-store target's "type" (used to check the
+    /// assignment RHS) is the *value* parameter. Both forms check the single
+    /// index expression against the key parameter.
+    #[allow(clippy::too_many_arguments)]
+    fn check_index_dunder(
+        &mut self,
+        obj_ty: &Ty,
+        dunder: &str,
+        sig: &MethodSig,
+        indices: &[Expr],
+        span: Span,
+        env: &Env,
+        ctx: &Ctx,
+        r: &ResolvedModule,
+    ) -> Result<Ty, CompileError> {
+        // Exactly one subscript index is supported (`obj[k]`); multi-index
+        // subscripts (`obj[a, b]`) aren't part of the dunder protocol here.
+        if indices.len() != 1 {
+            return Err(type_err(span, codes::TYPE_ARITY,
+                format!("`{}` takes exactly one key: `obj[k]`, got {} indices",
+                        dunder, indices.len())));
+        }
+        let expected_params = if dunder == "__setitem__" { 2 } else { 1 };
+        if sig.params.len() != expected_params {
+            return Err(type_err(span, codes::TYPE_ARITY,
+                format!("`{}` on {} must take {} parameter(s) after self, found {}",
+                        dunder, obj_ty.display(), expected_params, sig.params.len())));
+        }
+        // Specialise the dunder's signature against the receiver's type args
+        // (mirrors `recv_subst` in `synth_method_call`).
+        let recv_subst: HashMap<u32, Ty> = match obj_ty {
+            Ty::Generic { base: TypeCtor::Class(c), args } => {
+                ctx.classes.get(c).map(|cl| {
+                    cl.generic_tvars.iter().zip(args.iter())
+                        .map(|(tv, arg)| (tv.0, arg.clone()))
+                        .collect()
+                }).unwrap_or_default()
+            }
+            _ => HashMap::new(),
+        };
+        let key_ty = subst_ty(&sig.params[0], &recv_subst);
+        let _ = self.check_expr(&indices[0], &key_ty, env, ctx, r)?;
+        // Read → return type; store → value (second) parameter type.
+        let result = if dunder == "__setitem__" {
+            subst_ty(&sig.params[1], &recv_subst)
+        } else {
+            subst_ty(&sig.ret, &recv_subst)
+        };
+        Ok(result)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
 //  Helpers
 // ─────────────────────────────────────────────────────────────────────────
+
+/// The `ClassId` of a (possibly parameterised) user class receiver, or `None`
+/// for any other type. Mirrors the `cid` extraction in `synth_method_call` so
+/// the index dunders fire for both `Foo` and `Foo[T]` receivers.
+fn class_cid_of(ty: &Ty) -> Option<ClassId> {
+    match ty {
+        Ty::Class(c) => Some(*c),
+        Ty::Generic { base: TypeCtor::Class(c), .. } => Some(*c),
+        _ => None,
+    }
+}
 
 /// Set elements must canonicalise by value — the dict-backed set runtime
 /// keys on the integer value / float bit pattern / string content (see
@@ -3684,6 +3824,140 @@ fn main() -> i32:
             .expect("Derived inherits __eq__ from Base");
         assert_eq!(sig.params.len(), 1);
         assert!(ty_eq(&sig.ret, &Ty::Primitive(PrimTy::Bool)));
+    }
+
+    // ── WAVE-2 LANE-C: __getitem__ / __setitem__ index dunders ───────────
+
+    /// A class with `__getitem__`/`__setitem__` type-checks subscript read and
+    /// write, with the result type of a read taken from the dunder's return.
+    #[test]
+    fn dunder_index_read_write_typechecks() {
+        let src = "\
+final class Vec:
+    data: List[i64]
+    fn __init__(self, seed: i64) -> None:
+        self.data = [seed]
+    fn __getitem__(self, i: i64) -> i64:
+        return self.data[i]
+    fn __setitem__(self, i: i64, v: i64) -> None:
+        self.data[i] = v
+
+fn main() -> i32:
+    v: Vec = Vec(10)
+    x: i64 = v[0]
+    v[0] = 99
+    return 0
+";
+        check_src(src).expect("class subscript read+write must type-check");
+    }
+
+    /// The key expression is checked against the dunder's declared key
+    /// parameter — a `str` key on an `i64`-keyed `__getitem__` is a Type error.
+    #[test]
+    fn dunder_index_wrong_key_rejected() {
+        let src = "\
+final class Vec:
+    data: List[i64]
+    fn __init__(self, seed: i64) -> None:
+        self.data = [seed]
+    fn __getitem__(self, i: i64) -> i64:
+        return self.data[i]
+
+fn main() -> i32:
+    v: Vec = Vec(10)
+    bad: i64 = v[\"x\"]
+    return 0
+";
+        let err = check_src(src).expect_err("str key on i64 __getitem__ must fail");
+        assert!(matches!(err, CompileError::Type { .. }),
+            "expected Type error, got {err:?}");
+    }
+
+    /// The stored value is checked against `__setitem__`'s value parameter.
+    #[test]
+    fn dunder_index_wrong_value_rejected() {
+        let src = "\
+final class Vec:
+    data: List[i64]
+    fn __init__(self, seed: i64) -> None:
+        self.data = [seed]
+    fn __setitem__(self, i: i64, v: i64) -> None:
+        self.data[i] = v
+
+fn main() -> i32:
+    v: Vec = Vec(10)
+    v[0] = \"nope\"
+    return 0
+";
+        let err = check_src(src).expect_err("str value into i64 __setitem__ must fail");
+        assert!(matches!(err, CompileError::Type { .. }),
+            "expected Type error, got {err:?}");
+    }
+
+    /// A class with no `__getitem__` is still genuinely not subscriptable —
+    /// the fall-through to `index_type` produces a Type error.
+    #[test]
+    fn class_without_getitem_not_indexable() {
+        let src = "\
+final class Plain:
+    n: i64
+    fn __init__(self, n: i64) -> None:
+        self.n = n
+
+fn main() -> i32:
+    p: Plain = Plain(1)
+    x: i64 = p[0]
+    return 0
+";
+        let err = check_src(src).expect_err("class without __getitem__ is not indexable");
+        assert!(matches!(err, CompileError::Type { .. }),
+            "expected Type error, got {err:?}");
+    }
+
+    /// A generic container's key/return types specialise to the receiver's
+    /// type argument (`Box[str]` keys/returns `str`), so the right key type is
+    /// enforced per instantiation.
+    #[test]
+    fn dunder_index_generic_class_specialises() {
+        let src = "\
+final class Box[T]:
+    items: List[T]
+    fn __init__(self, seed: T) -> None:
+        self.items = [seed]
+    fn __getitem__(self, i: i64) -> T:
+        return self.items[i]
+    fn __setitem__(self, i: i64, v: T) -> None:
+        self.items[i] = v
+
+fn main() -> i32:
+    b: Box[str] = Box(\"hi\")
+    s: str = b[0]
+    b[0] = \"bye\"
+    return 0
+";
+        check_src(src).expect("generic class subscript must specialise T to str");
+    }
+
+    /// The same generic container rejects a value of the wrong specialised
+    /// type — storing an `i64` into a `Box[str]` is a Type error.
+    #[test]
+    fn dunder_index_generic_wrong_value_rejected() {
+        let src = "\
+final class Box[T]:
+    items: List[T]
+    fn __init__(self, seed: T) -> None:
+        self.items = [seed]
+    fn __setitem__(self, i: i64, v: T) -> None:
+        self.items[i] = v
+
+fn main() -> i32:
+    b: Box[str] = Box(\"hi\")
+    b[0] = 5
+    return 0
+";
+        let err = check_src(src).expect_err("i64 into Box[str] __setitem__ must fail");
+        assert!(matches!(err, CompileError::Type { .. }),
+            "expected Type error, got {err:?}");
     }
 
     #[test]

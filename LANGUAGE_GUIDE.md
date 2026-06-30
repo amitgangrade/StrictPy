@@ -481,6 +481,43 @@ let p: Pair[str, i32] = Pair("count", 99i32)
 - `class Box[T: Comparable]:` (bounded generics) — supported since M63b; built-in bounds are `Comparable` / `Equatable` / `Printable`, satisfied only by primitive / `str` / `char` types (see §10.3).
 - Explicit type-arg syntax `Box[i64](v)` — v0.4. Use constructor-site inference.
 
+#### 3.9.1 Subscripting your own classes — `__getitem__` / `__setitem__`
+
+Define `__getitem__` and/or `__setitem__` to make `obj[k]` and `obj[k] = v`
+work on a user class. The subscript routes to the dunder; the key (and, for
+stores, the value) is type-checked against its declared parameters, and a
+read's type is `__getitem__`'s return type.
+
+```python
+final class IntVec:
+    data: List[i64]
+
+    fn __init__(self, seed: i64) -> None:
+        self.data = [seed]
+
+    fn __getitem__(self, i: i64) -> i64:        # obj[k] read
+        return self.data[i]
+
+    fn __setitem__(self, i: i64, v: i64) -> None:  # obj[k] = v write
+        self.data[i] = v
+
+fn main() -> i32:
+    v: IntVec = IntVec(10)
+    x: i64 = v[0]        # __getitem__(0)            -> 10
+    v[0] = 99            # __setitem__(0, 99)
+    v[0] = v[0] + 1      # aug-assign: get then set  -> 100
+    println(str(v[0]))
+    return 0
+```
+
+Notes:
+- Exactly one index per subscript (`obj[k]`); `obj[a, b]` is not supported.
+- A wrong key or value type is a clean **compile-time** error. `v["x"]` on the
+  `i64`-keyed `IntVec` above fails to type-check rather than trapping at runtime.
+- A class with neither dunder is simply not subscriptable.
+- Generic containers specialise: a `Box[str]` with `fn __getitem__(self, i: i64)
+  -> T` keys with `i64` and returns `str` for that instantiation.
+
 ### 3.10 Exception handling
 
 ```python

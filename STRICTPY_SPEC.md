@@ -983,6 +983,52 @@ IEEE 754. NaN, Inf permitted. Comparisons follow IEEE rules (NaN != NaN).
 - `bytes(s)` returns the underlying byte buffer.
 - Concatenation produces a new string.
 
+#### 7.4.1 Subscripting user classes — `__getitem__` / `__setitem__` (v0.3 — wave 2)
+
+For the built-in containers (`List[T]`, `Dict[K, V]`, `str`, `bytes`, tuples)
+`obj[k]` and `obj[k] = v` keep their fixed runtime meaning. For a **user-defined
+class** the subscript operators dispatch to index dunders:
+
+| Expression      | Dispatches to                | Result type            |
+|-----------------|------------------------------|------------------------|
+| `obj[k]`        | `obj.__getitem__(k)`         | the dunder's return    |
+| `obj[k] = v`    | `obj.__setitem__(k, v)`      | `None` (statement)     |
+
+```python
+final class IntVec:
+    data: List[i64]
+    fn __init__(self, seed: i64) -> None:
+        self.data = [seed]
+    fn __getitem__(self, i: i64) -> i64:
+        return self.data[i]
+    fn __setitem__(self, i: i64, v: i64) -> None:
+        self.data[i] = v
+
+fn main() -> i32:
+    v: IntVec = IntVec(10)
+    x: i64 = v[0]      # -> v.__getitem__(0), typed i64
+    v[0] = 99          # -> v.__setitem__(0, 99)
+    v[0] = v[0] + 1    # aug-assign: __getitem__ load, then __setitem__ store
+    return 0
+```
+
+Static rules:
+
+- Exactly **one** index is supported per subscript (`obj[k]`); multi-index
+  subscripts (`obj[a, b]`) are not part of the protocol.
+- The key expression `k` is type-checked against the dunder's declared key
+  parameter; the stored value `v` is checked against `__setitem__`'s value
+  (second) parameter. A mismatch is a compile-time type error, never a runtime
+  trap — e.g. a `str` key on an `i64`-keyed `__getitem__` is rejected.
+- A subscript-read `obj[k]` has the static type declared by `__getitem__`'s
+  return annotation.
+- A class that defines neither dunder is **not subscriptable** (the same error
+  as indexing any other non-container type).
+- Dispatch follows ordinary method rules: it honours inheritance and is
+  devirtualised to a direct call on a `final` class. For a generic container
+  (`Box[T]`) the dunder's key/return types specialise to the receiver's type
+  argument per instantiation (`Box[str]` keys with `i64`, returns `str`).
+
 ### 7.5 Exceptions
 
 Raised via `raise`. Caught via `try`/`except`.
