@@ -1758,6 +1758,39 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             }
             Ok(acc as u64)
         }
+        // wave-2 Lane F: integer `**`.  The IR lowering of `base ** exp` on
+        // integer operands routes here (previously the `IMul` placeholder, so
+        // `2 ** 10` computed `2 * 10`).  Exponentiation by squaring; overflow
+        // wraps in release, matching `IMul` / factorial.  A negative exponent
+        // is a clean `ValueError` (Python returns a float there; until a
+        // float/BigInt result path exists, `int ** -k` fails loudly rather
+        // than silently truncating to 0).
+        NativeFn::IntPow => {
+            let base = arg_i64(args, 0);
+            let exp = arg_i64(args, 1);
+            if exp < 0 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "integer ** with negative exponent ({exp}) is not supported \
+                         (would be a float result; BigInt/float pow not yet implemented)"
+                    ),
+                });
+            }
+            let mut result: i64 = 1;
+            let mut b = base;
+            let mut e = exp as u64;
+            while e > 0 {
+                if e & 1 == 1 {
+                    result = result.wrapping_mul(b);
+                }
+                e >>= 1;
+                if e > 0 {
+                    b = b.wrapping_mul(b);
+                }
+            }
+            Ok(result as u64)
+        }
         NativeFn::MathIsNan => Ok(if arg_f64(args, 0).is_nan() { 1 } else { 0 }),
         NativeFn::MathIsInf => Ok(if arg_f64(args, 0).is_infinite() { 1 } else { 0 }),
         // f64 constants — module-attribute reads dispatch as zero-arg
@@ -27363,6 +27396,43 @@ mod tests {
         let c = dispatch(&mut i, NativeFn::MathCeil as u32, &[3.2f64.to_bits()]).unwrap();
         assert_eq!(f64::from_bits(f), 3.0);
         assert_eq!(f64::from_bits(c), 4.0);
+    }
+
+    // ── Wave-2 Lane F: integer `**` (IntPow native) ─────────────────────
+
+    fn int_pow(i: &mut Interpreter, base: i64, exp: i64) -> i64 {
+        dispatch(i, NativeFn::IntPow as u32, &[base as u64, exp as u64]).unwrap() as i64
+    }
+
+    #[test]
+    fn int_pow_basic_powers() {
+        let mut i = empty_interp();
+        assert_eq!(int_pow(&mut i, 2, 10), 1024);
+        assert_eq!(int_pow(&mut i, 3, 19), 1162261467);
+        assert_eq!(int_pow(&mut i, 10, 0), 1); // x ** 0 == 1
+        assert_eq!(int_pow(&mut i, 0, 0), 1); // 0 ** 0 == 1 (Python)
+        assert_eq!(int_pow(&mut i, 0, 5), 0); // 0 ** n == 0 for n > 0
+        assert_eq!(int_pow(&mut i, 1, 1_000_000), 1); // 1 ** anything == 1
+        assert_eq!(int_pow(&mut i, 7, 1), 7); // x ** 1 == x
+    }
+
+    #[test]
+    fn int_pow_negative_base() {
+        let mut i = empty_interp();
+        assert_eq!(int_pow(&mut i, -2, 3), -8); // odd exponent keeps sign
+        assert_eq!(int_pow(&mut i, -2, 4), 16); // even exponent is positive
+    }
+
+    #[test]
+    fn int_pow_negative_exponent_is_value_error() {
+        let mut i = empty_interp();
+        let err = dispatch(&mut i, NativeFn::IntPow as u32, &[2u64, (-1i64) as u64]);
+        match err {
+            Err(VmError::UncaughtException { type_name, .. }) => {
+                assert_eq!(type_name, "ValueError");
+            }
+            other => panic!("expected ValueError for negative exponent, got {other:?}"),
+        }
     }
 
     // ── Numeric conversions ────────────────────────────────────────────

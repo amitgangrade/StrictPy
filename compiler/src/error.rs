@@ -174,6 +174,14 @@ pub mod codes {
     /// support is deferred.)
     pub const TYPE_DICT_NON_STR_KEY: ErrorCode = "E2072";
 
+    // ── Wave-2 correctness (Lane F): numeric literal range ────────────────
+    /// An integer literal whose value does not fit the (resolved) integer type
+    /// it is materialised at — most importantly a bare literal outside the i64
+    /// range, which previously truncated silently (`9223372036854775808`
+    /// wrapped to `i64::MIN`). BigInt is not yet implemented, so an
+    /// out-of-range literal is a clean compile error instead of a silent wrap.
+    pub const TYPE_INT_LITERAL_OUT_OF_RANGE: ErrorCode = "E2073";
+
     // ── E3xxx: semantic ──────────────────────────────────────────────────
     pub const SEM_NONEXHAUSTIVE_MATCH: ErrorCode = "E3001";
     pub const SEM_UNREACHABLE: ErrorCode = "E3002";

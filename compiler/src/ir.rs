@@ -4624,7 +4624,55 @@ fn emit_binop(
         AstBinOp::Mul => if is_float { IROp::FMul } else { IROp::IMul },
         AstBinOp::Div | AstBinOp::FloorDiv => if is_float { IROp::FDiv } else { IROp::IDiv },
         AstBinOp::Rem => IROp::IRem,
-        AstBinOp::Pow => IROp::IMul, // placeholder
+        AstBinOp::Pow => {
+            // wave-2 Lane F: real exponentiation. Previously this lowered to
+            // the `IMul` placeholder, so `2 ** 10` computed `2 * 10 == 20`.
+            // Float base -> `MathPow` (`f64::powf`); integer base -> the
+            // `IntPow` native (exponentiation by squaring). Both operands are
+            // already coerced to the common numeric type by
+            // `lower_binop_coerced`, so `is_float` correctly distinguishes the
+            // two cases. Routing through `NativeCall` keeps the lowering
+            // JIT-eligible (the JIT trampolines CallNative back into the
+            // native dispatcher).
+            if is_float {
+                // `MathPow` operates on raw f64 bit patterns. f32 operands
+                // must therefore be widened to f64 before the call and the
+                // f64 result truncated back to f32 afterwards (the native
+                // doesn't know the operand width).
+                let is_f32 = matches!(operand_ty, Ty::Primitive(PrimTy::F32));
+                let (lc, rc) = if is_f32 {
+                    (
+                        coerce_numeric(fb, l, PrimTy::F32, PrimTy::F64),
+                        coerce_numeric(fb, r, PrimTy::F32, PrimTy::F64),
+                    )
+                } else {
+                    (l, r)
+                };
+                let res = fb.push_value(
+                    Ty::Primitive(PrimTy::F64),
+                    ValueKind::Op {
+                        op: IROp::NativeCall { native_id: NativeFn::MathPow as u32 },
+                        args: vec![lc, rc],
+                    },
+                );
+                if is_f32 {
+                    return fb.push_value(
+                        ty,
+                        ValueKind::Op { op: IROp::FTrunc, args: vec![res] },
+                    );
+                }
+                // f64 base: the native already returns an f64 result whose
+                // type matches `ty`; hand it back directly.
+                return res;
+            }
+            return fb.push_value(
+                ty,
+                ValueKind::Op {
+                    op: IROp::NativeCall { native_id: NativeFn::IntPow as u32 },
+                    args: vec![l, r],
+                },
+            );
+        }
         AstBinOp::BitAnd => IROp::IAnd,
         AstBinOp::BitOr => IROp::IOr,
         AstBinOp::BitXor => IROp::IXor,
@@ -8934,6 +8982,70 @@ fn main() -> i32:
         let saw_idiv = main.blocks.iter().any(|b| b.values.iter().any(|v|
             matches!(&v.kind, ValueKind::Op { op: IROp::IDiv, .. })));
         assert!(saw_idiv, "`//` on integers must lower to IDiv");
+    }
+
+    // ── Wave-2 Lane F: integer `**` (Pow) ───────────────────────────────
+
+    /// Helper: collect every NativeCall id emitted in `main`.
+    fn native_ids_in_main(m: &IRModule) -> Vec<u32> {
+        let main = m.functions.iter().find(|f| f.name == "main").unwrap();
+        let mut ids = vec![];
+        for b in &main.blocks {
+            for v in &b.values {
+                if let ValueKind::Op { op: IROp::NativeCall { native_id }, .. } = &v.kind {
+                    ids.push(*native_id);
+                }
+            }
+        }
+        ids
+    }
+
+    /// `2 ** 10` must lower to the `IntPow` native — NOT the old `IMul`
+    /// placeholder (which computed `2 * 10 == 20`). Uses i64 variables so
+    /// constant-folding doesn't elide the op.
+    #[test]
+    fn integer_pow_lowers_to_intpow_native() {
+        let src = "\
+fn main() -> i32:
+    base: i64 = 2
+    exp: i64 = 10
+    p: i64 = base ** exp
+    return 0
+";
+        let m = lower_src(src);
+        let ids = native_ids_in_main(&m);
+        assert!(
+            ids.contains(&(NativeFn::IntPow as u32)),
+            "integer `**` must emit the IntPow native; native ids seen: {ids:?}"
+        );
+        // The old placeholder lowered to IMul; make sure no stray IMul slipped
+        // in for the `**` (the program has no other multiply).
+        let main = m.functions.iter().find(|f| f.name == "main").unwrap();
+        let saw_imul = main.blocks.iter().any(|b| b.values.iter().any(|v|
+            matches!(&v.kind, ValueKind::Op { op: IROp::IMul, .. })));
+        assert!(!saw_imul, "integer `**` must not lower to the IMul placeholder");
+    }
+
+    /// A float base routes to `MathPow` (f64::powf), not the integer native.
+    #[test]
+    fn float_pow_lowers_to_mathpow_native() {
+        let src = "\
+fn main() -> i32:
+    base: f64 = 2.0
+    exp: f64 = 10.0
+    p: f64 = base ** exp
+    return 0
+";
+        let m = lower_src(src);
+        let ids = native_ids_in_main(&m);
+        assert!(
+            ids.contains(&(NativeFn::MathPow as u32)),
+            "float `**` must emit the MathPow native; native ids seen: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&(NativeFn::IntPow as u32)),
+            "float `**` must not emit IntPow; native ids seen: {ids:?}"
+        );
     }
 
     // ── Wave-1 Lane D: try/except/else + except-tuple + raise-from ──────

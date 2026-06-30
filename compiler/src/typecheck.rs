@@ -920,6 +920,27 @@ impl TypeChecker {
         }
     }
 
+    /// Resolve the type an integer-literal operand would take under an
+    /// `expected` type, WITHOUT applying the out-of-range check. Used by the
+    /// unary-minus path so a negated literal can be range-checked against its
+    /// signed value (see `check_expr`'s `Unary { Neg, .. }` arm). Mirrors the
+    /// suffix/expected/default-i64 resolution in `check_expr`'s int-literal arm.
+    fn synth_int_literal_ty_no_range(&self, operand: &Expr, expected: &Ty) -> Ty {
+        if let Expr::Literal { lit: Literal::Int { suffix, .. }, .. } = operand {
+            if let Some(s) = suffix {
+                return Ty::Primitive(int_suffix_to_prim(*s));
+            }
+            if let Ty::Primitive(p) = expected {
+                if p.is_numeric() { return Ty::Primitive(*p); }
+            } else if let Ty::Nullable(inner) = expected {
+                if let Ty::Primitive(p) = inner.as_ref() {
+                    if p.is_numeric() { return Ty::Primitive(*p); }
+                }
+            }
+        }
+        Ty::Primitive(PrimTy::I64)
+    }
+
     fn check_expr(&mut self, e: &Expr, expected: &Ty, env: &Env, ctx: &Ctx, r: &ResolvedModule)
         -> Result<Ty, CompileError>
     {
@@ -955,6 +976,13 @@ impl TypeChecker {
                 Literal::Bool(_) => Ty::Primitive(PrimTy::Bool),
                 Literal::None => Ty::Primitive(PrimTy::Null),
             };
+            // Wave-2 Lane F: a too-large integer literal used to truncate
+            // silently to its resolved integer width at IR materialisation;
+            // make it a clean compile error here, while the full-precision
+            // value is still in hand.
+            if let (Literal::Int { value, .. }, Ty::Primitive(p)) = (lit, &lit_ty) {
+                check_int_literal_in_range(*value, *p, *span)?;
+            }
             self.expr_types.insert((span.start, span.end), lit_ty.clone());
             if !is_subtype(&lit_ty, expected, &ctx.ty_ctx()) {
                 return Err(type_err(*span, codes::TYPE_MISMATCH,
@@ -970,11 +998,30 @@ impl TypeChecker {
         // the branch above, the inner literal defaults to i32, and the negation
         // is rejected against an i64 context. Restricted to literal operands so
         // `-someVar` keeps its operand's real type.
-        if let Expr::Unary { op: UnaryOp::Neg | UnaryOp::Pos, operand, span } = e {
+        if let Expr::Unary { op: uop @ (UnaryOp::Neg | UnaryOp::Pos), operand, span } = e {
             if matches!(
                 operand.as_ref(),
                 Expr::Literal { lit: Literal::Int { .. } | Literal::Float { .. }, .. }
             ) {
+                // Wave-2 Lane F: range-check a *negated* integer literal against
+                // the negated value, so `-9223372036854775808` (== i64::MIN) and
+                // `-128i8` are accepted even though the bare magnitude
+                // (9223372036854775808 / 128) is out of range. We resolve the
+                // operand's width without triggering the per-literal range check
+                // (which only knows the positive magnitude), then validate the
+                // signed value here.
+                if let Expr::Literal { lit: Literal::Int { value, .. }, span: inner_span } =
+                    operand.as_ref()
+                {
+                    let inner_ty = self.synth_int_literal_ty_no_range(operand, expected);
+                    if let Ty::Primitive(p) = &inner_ty {
+                        let signed = if matches!(uop, UnaryOp::Neg) { -*value } else { *value };
+                        check_int_literal_in_range(signed, *p, *span)?;
+                        self.expr_types.insert((inner_span.start, inner_span.end), inner_ty.clone());
+                        self.expr_types.insert((span.start, span.end), inner_ty.clone());
+                        return Ok(inner_ty);
+                    }
+                }
                 let inner = self.check_expr(operand, expected, env, ctx, r)?;
                 self.expr_types.insert((span.start, span.end), inner.clone());
                 return Ok(inner);
@@ -1144,24 +1191,32 @@ impl TypeChecker {
         -> Result<Ty, CompileError>
     {
         match e {
-            Expr::Literal { lit, .. } => Ok(match lit {
-                Literal::Int { suffix, .. } => {
-                    // Lane A: bare (unsuffixed) integer literals default to i64
-                    // (spec §3 "0 // i64 by default"). Previously i32.
-                    if let Some(s) = suffix { Ty::Primitive(int_suffix_to_prim(*s)) }
-                    else { Ty::Primitive(PrimTy::I64) }
+            Expr::Literal { lit, span } => {
+                let lit_ty = match lit {
+                    Literal::Int { suffix, .. } => {
+                        // Lane A: bare (unsuffixed) integer literals default to i64
+                        // (spec §3 "0 // i64 by default"). Previously i32.
+                        if let Some(s) = suffix { Ty::Primitive(int_suffix_to_prim(*s)) }
+                        else { Ty::Primitive(PrimTy::I64) }
+                    }
+                    Literal::Float { suffix, .. } => {
+                        if let Some(crate::lexer::FloatSuffix::F32) = suffix {
+                            Ty::Primitive(PrimTy::F32)
+                        } else { Ty::Primitive(PrimTy::F64) }
+                    }
+                    Literal::Str(_) => Ty::Primitive(PrimTy::Str),
+                    Literal::Bytes(_) => Ty::Primitive(PrimTy::Bytes),
+                    Literal::Char(_) => Ty::Primitive(PrimTy::Char),
+                    Literal::Bool(_) => Ty::Primitive(PrimTy::Bool),
+                    Literal::None => Ty::Primitive(PrimTy::Null),
+                };
+                // Wave-2 Lane F: reject a bare integer literal that overflows
+                // its default i64 width (was silently truncated at lowering).
+                if let (Literal::Int { value, .. }, Ty::Primitive(p)) = (lit, &lit_ty) {
+                    check_int_literal_in_range(*value, *p, *span)?;
                 }
-                Literal::Float { suffix, .. } => {
-                    if let Some(crate::lexer::FloatSuffix::F32) = suffix {
-                        Ty::Primitive(PrimTy::F32)
-                    } else { Ty::Primitive(PrimTy::F64) }
-                }
-                Literal::Str(_) => Ty::Primitive(PrimTy::Str),
-                Literal::Bytes(_) => Ty::Primitive(PrimTy::Bytes),
-                Literal::Char(_) => Ty::Primitive(PrimTy::Char),
-                Literal::Bool(_) => Ty::Primitive(PrimTy::Bool),
-                Literal::None => Ty::Primitive(PrimTy::Null),
-            }),
+                Ok(lit_ty)
+            }
             Expr::Ident { name, span } => {
                 let key = (span.start, span.end);
                 if let Some(sid) = r.ident_to_symbol.get(&key) {
@@ -1230,6 +1285,26 @@ impl TypeChecker {
                     kk, vty.unwrap_or(Ty::Never)] })
             }
             Expr::Unary { op, operand, span } => {
+                // Wave-2 Lane F: a negated bare int literal (`-9223372036854775808`)
+                // is range-checked against its *signed* value so i64::MIN and the
+                // other type minima are accepted. Synthesis has no expected width,
+                // so the operand defaults to i64. Handle this before the generic
+                // recursion, which would otherwise reject the positive magnitude.
+                if matches!(op, UnaryOp::Neg) {
+                    if let Expr::Literal { lit: Literal::Int { value, suffix }, span: inner_span } =
+                        operand.as_ref()
+                    {
+                        let p = match suffix {
+                            Some(s) => int_suffix_to_prim(*s),
+                            None => PrimTy::I64,
+                        };
+                        check_int_literal_in_range(-*value, p, *span)?;
+                        self.expr_types.insert((inner_span.start, inner_span.end), Ty::Primitive(p));
+                        let key = (span.start, span.end);
+                        self.expr_types.insert(key, Ty::Primitive(p));
+                        return Ok(Ty::Primitive(p));
+                    }
+                }
                 let t = self.synth_expr(operand, env, ctx, r)?;
                 match op {
                     UnaryOp::Not => {
@@ -3406,6 +3481,47 @@ fn int_suffix_to_prim(s: crate::lexer::IntSuffix) -> PrimTy {
     }
 }
 
+/// Wave-2 Lane F: reject an integer literal whose value (kept at full `i128`
+/// precision by the lexer) does not fit the integer type it resolves to.
+///
+/// The headline case is a bare literal outside the i64 range: it used to be
+/// truncated silently to `i64` at IR materialisation (`9223372036854775808`
+/// wrapped to `i64::MIN`). BigInt is not yet implemented, so this is a clean
+/// `E2073` compile error rather than a silent wrap. Suffixed / typed-context
+/// literals are also bounds-checked against their own width (so `256u8`
+/// reports out-of-range here instead of wrapping at lowering). `BigInt` (which
+/// has no fixed width) and non-integer resolved types are passed through.
+fn check_int_literal_in_range(
+    value: i128,
+    prim: PrimTy,
+    span: Span,
+) -> Result<(), CompileError> {
+    let (lo, hi): (i128, i128) = match prim {
+        PrimTy::I8 => (i8::MIN as i128, i8::MAX as i128),
+        PrimTy::I16 => (i16::MIN as i128, i16::MAX as i128),
+        PrimTy::I32 => (i32::MIN as i128, i32::MAX as i128),
+        PrimTy::I64 => (i64::MIN as i128, i64::MAX as i128),
+        PrimTy::U8 => (u8::MIN as i128, u8::MAX as i128),
+        PrimTy::U16 => (u16::MIN as i128, u16::MAX as i128),
+        PrimTy::U32 => (u32::MIN as i128, u32::MAX as i128),
+        PrimTy::U64 => (u64::MIN as i128, u64::MAX as i128),
+        // BigInt is arbitrary-precision (no fixed bounds); anything else isn't
+        // an integer type and is handled elsewhere.
+        _ => return Ok(()),
+    };
+    if value < lo || value > hi {
+        return Err(type_err(
+            span,
+            codes::TYPE_INT_LITERAL_OUT_OF_RANGE,
+            format!(
+                "integer literal {value} out of range for {prim:?}; \
+                 BigInt not yet supported"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// M15: built-in exception-class names recognised in `raise` and `except`.
 /// The catch-all `"Exception"` matches any thrown type at runtime; the others
 /// match by exact `type_name` string. Must mirror the resolver's prelude
@@ -4098,6 +4214,59 @@ fn main() -> i32:
     #[test]
     fn test_check_int_literal_against_i64() {
         let _ = check_src("fn main() -> i32:\n    x: i64 = 0\n    return 0\n").unwrap();
+    }
+
+    // ── Wave-2 Lane F: integer-literal range checking ───────────────────
+
+    #[test]
+    fn int_literal_at_i64_max_is_accepted() {
+        // i64::MAX exactly — must compile.
+        check_src("fn main() -> i32:\n    x: i64 = 9223372036854775807\n    return 0\n")
+            .expect("i64::MAX literal must be accepted");
+    }
+
+    #[test]
+    fn int_literal_above_i64_max_is_rejected() {
+        // i64::MAX + 1 — used to truncate silently to i64::MIN.
+        let err = check_src("fn main() -> i32:\n    x: i64 = 9223372036854775808\n    return 0\n")
+            .expect_err("i64::MAX + 1 literal must be a compile error");
+        let msg = format!("{err}");
+        assert!(msg.contains("E2073"), "want E2073, got: {msg}");
+        assert!(msg.contains("out of range"), "want 'out of range', got: {msg}");
+        assert!(msg.contains("BigInt"), "want BigInt mention, got: {msg}");
+    }
+
+    #[test]
+    fn negated_i64_min_literal_is_accepted() {
+        // -9223372036854775808 == i64::MIN. The bare magnitude is out of range
+        // but the negated value is exactly representable.
+        check_src("fn main() -> i32:\n    x: i64 = -9223372036854775808\n    return 0\n")
+            .expect("i64::MIN literal must be accepted");
+    }
+
+    #[test]
+    fn out_of_range_suffixed_literal_is_rejected() {
+        // 256u8 overflows u8 — caught here instead of wrapping at lowering.
+        let err = check_src("fn main() -> i32:\n    x: u8 = 256u8\n    return 0\n")
+            .expect_err("256u8 must be a compile error");
+        assert!(format!("{err}").contains("E2073"), "want E2073: {err}");
+    }
+
+    #[test]
+    fn helper_range_check_boundaries() {
+        let sp = Span::DUMMY;
+        // i64 boundaries.
+        assert!(check_int_literal_in_range(i64::MAX as i128, PrimTy::I64, sp).is_ok());
+        assert!(check_int_literal_in_range(i64::MIN as i128, PrimTy::I64, sp).is_ok());
+        assert!(check_int_literal_in_range(i64::MAX as i128 + 1, PrimTy::I64, sp).is_err());
+        assert!(check_int_literal_in_range(i64::MIN as i128 - 1, PrimTy::I64, sp).is_err());
+        // u64 upper bound.
+        assert!(check_int_literal_in_range(u64::MAX as i128, PrimTy::U64, sp).is_ok());
+        assert!(check_int_literal_in_range(u64::MAX as i128 + 1, PrimTy::U64, sp).is_err());
+        // Negative into an unsigned type is rejected.
+        assert!(check_int_literal_in_range(-1, PrimTy::U32, sp).is_err());
+        // BigInt is unbounded — anything passes.
+        assert!(check_int_literal_in_range(i128::MAX, PrimTy::BigInt, sp).is_ok());
     }
 
     #[test]

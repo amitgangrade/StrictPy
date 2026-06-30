@@ -169,7 +169,12 @@ infer the type parameter from the *synthesised* argument type, so a bare
 literal there infers `i64` — annotate the literal (`id(0i32)`) when a
 narrower instantiation is wanted.
 
-If the literal value exceeds the chosen type's range, it is a compile error.
+If the literal value exceeds the chosen type's range, it is a compile error
+(`E2073`, message "integer literal … out of range for …; BigInt not yet
+supported"). This includes a bare literal outside the i64 range — there is no
+silent wrap to `BigInt` (which is not yet implemented). A negated literal is
+range-checked against its signed value, so `-9223372036854775808` (== `i64`'s
+minimum) is accepted even though the bare magnitude is one past `i64::MAX`.
 
 #### Float literals
 ```
@@ -970,6 +975,15 @@ Strict left-to-right for arguments. Short-circuit for `and`, `or`, `??`.
   (legacy alias `DivisionByZeroError`). Float `/0.0` yields `inf`/`nan`
   per IEEE 754 (no trap).
 - `%` follows the sign of the divisor (Python semantics).
+- `**` is exponentiation. For integer operands it is computed by
+  exponentiation-by-squaring at the (widened) integer operand type, keeping
+  that integer type (`2 ** 10 == 1024`, an `i64`); overflow wraps in release
+  like the other integer ops. A **negative integer exponent** raises
+  `ValueError` (in Python it would produce a float; until a float/`BigInt`
+  result path exists, `int ** -k` fails loudly rather than truncating to 0).
+  A float base routes to floating-point `pow` and yields `f64` (`2.0 ** 10.0
+  == 1024.0`); an `f32` base is widened to `f64` for the call and the result
+  truncated back to `f32`.
 
 ### 7.3 Float arithmetic
 
@@ -5293,6 +5307,7 @@ Selected type-error codes introduced for the v1 correctness pass (all `E2xxx`):
 | `E2070` | `with EXPR` where `EXPR` is not a supported (`io.File`) context mgr  |
 | `E2071` | unknown/unsupported decorator (no v1 decorator semantics)           |
 | `E2072` | `Dict[K, V]` with a non-`str` key type `K`                          |
+| `E2073` | integer literal out of range for its type (`BigInt` not yet supported) |
 
 ### 18.3 Runtime errors
 
