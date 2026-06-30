@@ -2447,6 +2447,119 @@ fn lower_stmt(fb: &mut FuncBuilder, ctx: &mut LowerCtx, s: &Stmt) -> Option<()> 
                 return Some(());
             }
 
+            // Wave-2 Lane D: `for x: T in obj:` over a user class implementing
+            // the iterator protocol (`__iter__` / `__next__`). Desugar into:
+            //
+            //     __it = obj.__iter__()        # iterator object
+            //     loop header:
+            //         __v: T? = __it.__next__()
+            //         if __v is none: break    # DONE-SLOT convention (§9.1):
+            //                                  #   __next__ -> T?; `none` = done
+            //         x: T = __v               # bind the unwrapped element
+            //         <body>
+            //         goto header
+            //     exit:
+            //
+            // TERMINATION: we reuse the proven none-sentinel `(done, value)`
+            // machinery (the same `RefEq(v, none)` test that NullCoalesce and
+            // `is not none` use), NOT a StopIteration exception. `__next__`
+            // signals "done" by returning `none`; any non-none value is the
+            // next element. This mirrors the generator for-loop's done-slot
+            // above (which writes a dedicated bool), realised here without a
+            // new VM opcode because the iterator method already returns a
+            // nullable.
+            if let Ty::Class(cid) = &iter_ty {
+                if let Some(iter_op) = class_dunder_dispatch(
+                    ctx.class_layouts,
+                    ctx.fn_id_by_name,
+                    *cid,
+                    "__iter__",
+                ) {
+                    // Resolve `__iter__`'s declared return type → the iterator
+                    // object's class. Walk the base chain (methods are already
+                    // flattened, but be defensive).
+                    let iter_ret_ty = method_ret_ty(ctx.class_layouts, *cid, "__iter__");
+                    if let Some(Ty::Class(it_cid)) = iter_ret_ty.clone() {
+                        if let Some(next_op) = class_dunder_dispatch(
+                            ctx.class_layouts,
+                            ctx.fn_id_by_name,
+                            it_cid,
+                            "__next__",
+                        ) {
+                            // `__next__` returns `T?`; the loop var binds at `T`.
+                            let next_ret_ty = method_ret_ty(ctx.class_layouts, it_cid, "__next__")
+                                .unwrap_or(Ty::Primitive(PrimTy::Unit));
+                            let elem_ty = match &next_ret_ty {
+                                Ty::Nullable(inner) => (**inner).clone(),
+                                other => other.clone(),
+                            };
+
+                            // __it = obj.__iter__()  (receiver first; no args)
+                            let obj_v = lower_expr(fb, ctx, iter);
+                            let it_v = fb.push_value(
+                                iter_ret_ty.clone().unwrap_or_else(|| Ty::Class(it_cid)),
+                                ValueKind::Op { op: iter_op, args: vec![obj_v] },
+                            );
+                            let it_slot = {
+                                let n = format!("__for_it_{}", fb.slot_ty.len());
+                                let s = fb.alloc_slot(
+                                    &n,
+                                    iter_ret_ty.unwrap_or_else(|| Ty::Class(it_cid)),
+                                );
+                                fb.emit_write_local(s, it_v);
+                                s
+                            };
+                            // Temp slot for the nullable `__next__()` result.
+                            let vopt_slot = {
+                                let n = format!("__for_vopt_{}", fb.slot_ty.len());
+                                fb.alloc_slot(&n, next_ret_ty.clone())
+                            };
+                            // User-visible loop variable (unwrapped element).
+                            let var_slot = fb.alloc_slot(var, elem_ty.clone());
+
+                            let header = fb.new_block();
+                            let body_b = fb.new_block();
+                            let exit = fb.new_block();
+                            fb.terminate(Terminator::Branch { target: header });
+
+                            // header: __v = __it.__next__(); if __v is none -> exit
+                            fb.switch_to(header);
+                            let it_cur = fb.emit_read_local(it_slot);
+                            let v_opt = fb.push_value(
+                                next_ret_ty.clone(),
+                                ValueKind::Op { op: next_op.clone(), args: vec![it_cur] },
+                            );
+                            fb.emit_write_local(vopt_slot, v_opt);
+                            let none_val = fb.push_value(
+                                Ty::Primitive(PrimTy::Null),
+                                ValueKind::Const(IRConst::None),
+                            );
+                            let is_done = fb.push_value(
+                                Ty::Primitive(PrimTy::Bool),
+                                ValueKind::Op { op: IROp::RefEq, args: vec![v_opt, none_val] },
+                            );
+                            fb.terminate(Terminator::CondBranch {
+                                cond: is_done,
+                                t: exit,
+                                f: body_b,
+                            });
+
+                            // body: x = __v (unwrapped); <body>; loop back.
+                            fb.switch_to(body_b);
+                            let elt = fb.emit_read_local(vopt_slot);
+                            fb.emit_write_local(var_slot, elt);
+                            fb.loop_stack.push((header, exit));
+                            lower_block(fb, ctx, body);
+                            fb.loop_stack.pop();
+                            fb.terminate(Terminator::Branch { target: header });
+
+                            fb.switch_to(exit);
+                            return Some(());
+                        }
+                    }
+                }
+            }
+
             let is_list = matches!(
                 &iter_ty,
                 Ty::Generic { base: TypeCtor::List, .. }
@@ -2454,7 +2567,7 @@ fn lower_stmt(fb: &mut FuncBuilder, ctx: &mut LowerCtx, s: &Stmt) -> Option<()> 
             if !is_list {
                 // Fallback path — preserves the prior placeholder so we
                 // don't crash on `for i in range(...)` or other non-List
-                // iterables. TODO(M10): full __iter__/__next__ protocol.
+                // iterables that lack the iterator protocol.
                 let _ = lower_expr(fb, ctx, iter);
                 let placeholder_ty = Ty::Primitive(PrimTy::Unit);
                 let v = fb.push_value(placeholder_ty.clone(), ValueKind::Const(IRConst::None));
@@ -7516,6 +7629,27 @@ fn class_index_dunder_op(
     }
 }
 
+/// Declared return type of method `name` on class `cid`, walking the base
+/// chain (methods are flattened by the resolver, but be defensive). Returns
+/// `None` if no such method exists. Used by the Wave-2 Lane D class-iterator
+/// for-loop lowering to resolve `__iter__`'s iterator class and `__next__`'s
+/// element type.
+fn method_ret_ty(
+    class_layouts: &HashMap<ClassId, ClassLayout>,
+    cid: ClassId,
+    name: &str,
+) -> Option<Ty> {
+    let mut cur = Some(cid);
+    while let Some(c) = cur {
+        let layout = class_layouts.get(&c)?;
+        if let Some(m) = layout.methods.iter().find(|m| m.name == name) {
+            return Some(m.ret.clone());
+        }
+        cur = layout.base;
+    }
+    None
+}
+
 /// Map a `List[T]` (or any container type) to the TypeTag byte the
 /// sort/sorted natives use to pick a comparator. Unknown types map to
 /// TypeTag::Ref so the VM at least sorts something — but the VM will
@@ -8520,6 +8654,118 @@ fn main() -> i32:
             matches!(target2, IROp::DirectCall { fn_id } if fn_id == fns2["Cat.__str__"]),
             "final subclass overriding a dunder must DirectCall its own impl, got {target2:?}"
         );
+    }
+
+    // ── WAVE-2 LANE-D: class for-loop via __iter__ / __next__ ────────────
+
+    /// `for x: T in obj:` over a user class must lower to a real loop that
+    /// drives the iterator protocol — NOT the old run-once placeholder. The
+    /// lowered `main` must (a) contain a back-edge (a block that branches to
+    /// an earlier-defined block = the loop header) and (b) test the
+    /// `__next__()` result against `none` via a `RefEq` op (the done-slot
+    /// sentinel convention). The placeholder produced neither.
+    #[test]
+    fn class_for_loop_lowers_to_iterator_protocol_loop() {
+        let src = "\
+final class CountIter:
+    cur: i64
+    stop: i64
+    fn __init__(self, stop: i64) -> None:
+        self.cur = 0
+        self.stop = stop
+    fn __next__(self) -> i64?:
+        if self.cur >= self.stop:
+            return none
+        v: i64 = self.cur
+        self.cur = self.cur + 1
+        return v
+
+final class Counter:
+    stop: i64
+    fn __init__(self, stop: i64) -> None:
+        self.stop = stop
+    fn __iter__(self) -> CountIter:
+        return CountIter(self.stop)
+
+fn main() -> i32:
+    total: i64 = 0
+    for x: i64 in Counter(5):
+        total = total + x
+    return 0
+";
+        let m = lower_src(src);
+        let main = m.functions.iter().find(|f| f.name == "main").expect("main");
+
+        // (a) Back-edge: some block terminates with a Branch/CondBranch whose
+        // target id is <= its own id (a loop, not straight-line code).
+        let mut has_back_edge = false;
+        for (idx, b) in main.blocks.iter().enumerate() {
+            let targets: Vec<usize> = match &b.terminator {
+                Terminator::Branch { target } => vec![target.0 as usize],
+                Terminator::CondBranch { t, f, .. } => vec![t.0 as usize, f.0 as usize],
+                _ => vec![],
+            };
+            if targets.iter().any(|&t| t <= idx) {
+                has_back_edge = true;
+            }
+        }
+        assert!(has_back_edge, "class for-loop must lower to a real loop (back-edge)");
+
+        // (b) The done-slot convention: a RefEq comparing __next__'s result
+        // against `none` must appear (this is what stops the loop).
+        let saw_refeq = main
+            .blocks
+            .iter()
+            .flat_map(|b| b.values.iter())
+            .any(|v| matches!(&v.kind, ValueKind::Op { op: IROp::RefEq, .. }));
+        assert!(saw_refeq, "class for-loop must test __next__() against none via RefEq");
+
+        // It must NOT be the run-once placeholder: the loop body's `total +=`
+        // means main has more than a trivial straight-line shape. Sanity: at
+        // least 3 blocks (entry + header + body + exit-ish).
+        assert!(
+            main.blocks.len() >= 3,
+            "expected a multi-block loop, got {} blocks",
+            main.blocks.len()
+        );
+    }
+
+    /// A self-iterator (`__iter__` returns `self`) must also drive the loop:
+    /// the iterator class id resolves to the same class, and `__next__` is
+    /// found on it.
+    #[test]
+    fn class_for_loop_self_iterator_resolves_next() {
+        let src = "\
+final class Squares:
+    n: i64
+    limit: i64
+    fn __init__(self, limit: i64) -> None:
+        self.n = 0
+        self.limit = limit
+    fn __iter__(self) -> Squares:
+        return self
+    fn __next__(self) -> i64?:
+        if self.n >= self.limit:
+            return none
+        v: i64 = self.n * self.n
+        self.n = self.n + 1
+        return v
+
+fn main() -> i32:
+    s: i64 = 0
+    for x: i64 in Squares(4):
+        s = s + x
+    return 0
+";
+        let m = lower_src(src);
+        let main = m.functions.iter().find(|f| f.name == "main").expect("main");
+        // Must emit the done-slot RefEq for the self-iterator case too.
+        let saw_refeq = main
+            .blocks
+            .iter()
+            .flat_map(|b| b.values.iter())
+            .any(|v| matches!(&v.kind, ValueKind::Op { op: IROp::RefEq, .. }));
+        assert!(saw_refeq, "self-iterator for-loop must test __next__() against none");
     }
 
     /// producer.spy is the M6 acceptance program for threads + channels.
