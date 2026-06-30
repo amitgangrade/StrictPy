@@ -2593,6 +2593,17 @@ pub enum NativeFn {
     DecimalToF64     = 1414,
     // === END LANE E ADDITIONS ==========================================
 
+    // ── 1415: integer `**` (wave-2 Lane F) ──────────────────────────────
+    /// `IntPow(base: i64, exp: i64) -> i64` — integer exponentiation by
+    /// squaring. Compiler-internal: the IR lowering of the `**` operator on
+    /// integer operands emits this (the previous lowering used the `IMul`
+    /// placeholder, so `2 ** 10` computed `2 * 10 == 20`). There is
+    /// deliberately no `from_name` entry — `**` is the only caller. A
+    /// negative exponent raises `ValueError` (Python returns a float there;
+    /// until a float/BigInt path lands, an integer `base ** -k` is a clean
+    /// runtime error). Overflow wraps in release, mirroring `IMul`/factorial.
+    IntPow           = 1415,
+
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
     /// encounters. The VM treats this as a runtime error.
@@ -3477,6 +3488,7 @@ impl NativeFn {
             1412 => Some(Self::FractionDen),
             1413 => Some(Self::FractionToStr),
             1414 => Some(Self::DecimalToF64),
+            1415 => Some(Self::IntPow),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

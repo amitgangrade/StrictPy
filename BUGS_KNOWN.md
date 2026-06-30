@@ -47,31 +47,40 @@ Tests: `compiler/tests/numeric_coercion_runs.rs`, unit tests in
 
 **Deferred (not in this pass):** `BigInt`, integer `**` (`Pow`), and floored
 float `//` — see "BigInt and remaining numeric work" immediately below.
+*(Wave-2 Lane F since closed integer `**` and the silent `>i64`
+literal-truncation footgun; `BigInt` and floored float `//` remain open.)*
 
 ---
 
-## 0b. BigInt and remaining numeric work *(Deferred — wave1 Lane A)*
+## 0b. BigInt and remaining numeric work *(Partially fixed — wave2 Lane F)*
 
-`BigInt` resolves as a type name but is **non-functional**:
+`BigInt` resolves as a type name but is **still non-functional**:
 
 - `Opcode::I32ToBigInt` traps (`vm/src/interp.rs` — "not implemented (M5)").
 - There are no BigInt opcodes, no heap representation, no construction path,
-  no `+`/`-`/`*`/comparison/`str()`, and no integer `Pow`.
+  no `+`/`-`/`*`/comparison/`str()`.
 
 This was left out of the wave-1 Lane A pass because a correct
 arbitrary-precision path needs a heap object repr in `vm/src/object.rs`, new
-opcodes (which live in `shared/src/opcode.rs`, outside the Lane A ownership
-set this wave), and JIT support in `vm/src/jit.rs` to stay consistent with
-the interpreter. The interim safety improvement that *did* land: fixed-width
-signed overflow is no longer silent in debug builds (it raises
-`OverflowError` — see §0), so a program that would have silently corrupted a
-value now fails loudly during testing.
+opcodes (which live in `shared/src/opcode.rs`), and JIT support in
+`vm/src/jit.rs` to stay consistent with the interpreter. The interim safety
+improvement that *did* land: fixed-width signed overflow is no longer silent
+in debug builds (it raises `OverflowError` — see §0), so a program that would
+have silently corrupted a value now fails loudly during testing.
 
-Also still open:
+### Fixed in Wave-2 (Lane F)
 
-- **Integer `**` (`Pow`)** lowers to the `IMul` placeholder
-  (`compiler/src/ir.rs::emit_binop`), so `2 ** 10` computes `2 * 10`. Needs a
-  real `IPow`/native helper (and a BigInt result for large exponents).
+| # | Was | Fix location | Regression test |
+|---|-----|--------------|-----------------|
+| F1 | **Integer `**` (`Pow`) miscompiled.** It lowered to the `IMul` placeholder (`compiler/src/ir.rs::emit_binop`), so `2 ** 10` computed `2 * 10 == 20`. | `compiler/src/ir.rs::emit_binop` Pow arm now routes integer bases to the new `NativeFn::IntPow` (exponentiation by squaring, `shared/src/native.rs` + `vm/src/builtins.rs`) and float bases to `MathPow` (`f64::powf`, widening/truncating `f32`). Routed through `NativeCall` so both the interpreter and the JIT (CallNative trampoline) stay correct. A negative integer exponent raises a catchable `ValueError`. | `vm/tests/m64_int_pow_runs.rs` (10 tests, JIT+interp: `2 ** 10 == 1024`, larger powers, i32/i64 pow, exponent-0, float pow, negative-exp ValueError, plus the out-of-range-literal negative case); `compiler/src/ir.rs::tests::{integer_pow_lowers_to_intpow_native, float_pow_lowers_to_mathpow_native}`; `vm/src/builtins.rs::tests::{int_pow_basic_powers, int_pow_negative_base, int_pow_negative_exponent_is_value_error}`; `examples/int_pow_demo.spy`. |
+| F2 | **Silent `>i64` integer-literal truncation.** A literal exceeding the i64 range was materialised as `*value as i64`, wrapping silently (`9223372036854775808` → `i64::MIN`). | `compiler/src/typecheck.rs::check_int_literal_in_range` (new `E2073`) validates every integer literal against its resolved width at both the `check_expr` and `synth_expr_inner` literal sites, while the lexer's full `i128` value is in hand. A negated literal is checked against its signed value so `-9223372036854775808` (== `i64::MIN`) is still accepted. | `compiler/src/typecheck.rs::tests::{int_literal_at_i64_max_is_accepted, int_literal_above_i64_max_is_rejected, negated_i64_min_literal_is_accepted, out_of_range_suffixed_literal_is_rejected, helper_range_check_boundaries}`; `vm/tests/m64_int_pow_runs.rs::{int_literal_above_i64_max_is_compile_error, i64_min_literal_is_accepted}`. |
+
+Spec updates: §3 (integer-literal out-of-range = `E2073`), §7.2 (`**`
+semantics), §18.2 (`E2073`).
+
+Still open:
+
+- **Full `BigInt`** — arbitrary-precision integers (heap repr, opcodes, JIT).
 - **Float `//`** lowers to plain `FDiv` with no floor (spec §7.2 wants it
   floored).
 

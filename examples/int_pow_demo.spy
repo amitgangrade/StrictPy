@@ -1,0 +1,39 @@
+"""int_pow_demo.spy — wave-2 Lane F: integer `**` (exponentiation).
+
+Before this fix, integer `**` lowered to the `IMul` placeholder, so
+`2 ** 10` computed `2 * 10 == 20` instead of `1024`. This demo exercises
+the corrected lowering:
+
+  1. `2 ** 10 == 1024` (the headline regression).
+  2. A larger power that still fits i64.
+  3. `**` on an `i32` operand keeps the operand type.
+  4. `0 ** 0 == 1` and `x ** 0 == 1` (exponent 0 edge cases).
+  5. A float base routes to floating-point pow (`2.0 ** 10.0 == 1024.0`).
+"""
+
+fn main() -> i32:
+    # 1. Headline: 2 ** 10 == 1024 (was 20 under the IMul placeholder).
+    p: i64 = 2 ** 10
+    println("2 ** 10 = " + str(p))                 # 1024
+
+    # 2. A larger power: 3 ** 19 == 1162261467 (fits i64).
+    big: i64 = 3 ** 19
+    println("3 ** 19 = " + str(big))               # 1162261467
+
+    # 3. `**` on i32 operands keeps i32. 7 ** 4 == 2401.
+    base32: i32 = 7i32
+    exp32: i32 = 4i32
+    r32: i32 = base32 ** exp32
+    println("7 ** 4 = " + str(r32))                # 2401
+
+    # 4. Exponent-zero edge cases.
+    z: i64 = 5 ** 0
+    println("5 ** 0 = " + str(z))                  # 1
+    zz: i64 = 0 ** 0
+    println("0 ** 0 = " + str(zz))                 # 1
+
+    # 5. Float base routes to f64 pow.
+    fp: f64 = 2.0 ** 10.0
+    println("2.0 ** 10.0 = " + str(fp))            # 1024.0
+
+    return 0
