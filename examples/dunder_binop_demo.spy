@@ -1,0 +1,86 @@
+"""Operator overloading via dunder methods — WAVE-2 LANE-B.
+
+A user-defined class can define `__add__`, `__sub__`, `__mul__`,
+`__truediv__`, `__floordiv__`, `__mod__`, `__pow__` and the comparison
+dunders `__eq__`, `__ne__`, `__lt__`, `__le__`, `__gt__`, `__ge__`. The
+compiler routes the corresponding binary operator on instances of that class
+to the dunder method.
+
+Rules (see STRICTPY_SPEC.md §7.x):
+  * `a + b` on a class operand calls `a.__add__(b)`; the result type is the
+    dunder's declared return type. Same shape for the other arithmetic ops.
+  * `a == b` -> `a.__eq__(b)`; `a != b` -> `a.__ne__(b)`, and if the class
+    defines only `__eq__`, `!=` is automatically `not a.__eq__(b)`.
+  * Ordering (`<`, `<=`, `>`, `>=`) each require their own dunder; there is
+    no synthesis of `>` from `<`.
+  * `is` / `is not` stay pointer-identity — they never call `__eq__`.
+  * A class operand lacking the needed dunder is a compile-time type error.
+"""
+
+final class Vec2:
+    x: i64
+    y: i64
+
+    fn __init__(self, x: i64, y: i64) -> None:
+        self.x = x
+        self.y = y
+
+    fn __add__(self, other: Vec2) -> Vec2:
+        return Vec2(self.x + other.x, self.y + other.y)
+
+    fn __sub__(self, other: Vec2) -> Vec2:
+        return Vec2(self.x - other.x, self.y - other.y)
+
+    # Scalar multiply.
+    fn __mul__(self, k: i64) -> Vec2:
+        return Vec2(self.x * k, self.y * k)
+
+    fn mag2(self) -> i64:
+        return self.x * self.x + self.y * self.y
+
+    # Equality compares components; `!=` is synthesised as `not __eq__`
+    # because this class defines no `__ne__`.
+    fn __eq__(self, other: Vec2) -> bool:
+        return self.x == other.x and self.y == other.y
+
+    # Ordering by squared magnitude.
+    fn __lt__(self, other: Vec2) -> bool:
+        return self.mag2() < other.mag2()
+
+
+fn main() -> i32:
+    a: Vec2 = Vec2(1, 2)
+    b: Vec2 = Vec2(3, 4)
+
+    sum: Vec2 = a + b          # __add__  -> (4, 6)
+    println(str(sum.x))
+    println(str(sum.y))
+
+    diff: Vec2 = b - a         # __sub__  -> (2, 2)
+    println(str(diff.x))
+    println(str(diff.y))
+
+    scaled: Vec2 = a * 3       # __mul__  -> (3, 6)
+    println(str(scaled.x))
+    println(str(scaled.y))
+
+    # __eq__ and the synthesised __ne__.
+    if a == Vec2(1, 2):
+        println("eq")
+    if a != b:
+        println("ne")
+
+    # Ordering by magnitude: a.mag2()=5 < b.mag2()=25.
+    if a < b:
+        println("lt")
+
+    # `is` stays pointer-identity: a fresh Vec2(1, 2) is a different object,
+    # so `a is Vec2(1, 2)` is false even though `a == Vec2(1, 2)` is true.
+    if a is a:
+        println("same")
+    if a is Vec2(1, 2):
+        println("UNEXPECTED")
+    else:
+        println("distinct")
+
+    return 0

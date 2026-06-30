@@ -3783,6 +3783,25 @@ fn lower_expr(fb: &mut FuncBuilder, ctx: &mut LowerCtx, e: &Expr) -> ValueId {
             let rty = ctx.expr_ty(expr_span(rhs));
             let l = lower_expr(fb, ctx, lhs);
             let r = lower_expr(fb, ctx, rhs);
+            // WAVE-2 LANE-B: when the left operand is a user-defined class,
+            // dispatch the operator to its dunder method (`__add__`, `__eq__`,
+            // ...). This runs BEFORE the Lane-A numeric coercion path, so it
+            // never perturbs mixed-numeric semantics (`1 + 2.0`, `i32 + i64`,
+            // `/`-as-float) — those operands are primitives, not classes.
+            // `is`/`is not` are not `Expr::Binary` dunder targets here
+            // (binop_dunder_ir returns None) and stay pointer-identity.
+            let cid = match &lty {
+                Ty::Class(c) => Some(*c),
+                Ty::Generic { base: TypeCtor::Class(c), .. } => Some(*c),
+                _ => None,
+            };
+            if let Some(cid) = cid {
+                if let Some(v) =
+                    lower_class_binop_dunder(fb, ctx, *op, cid, l, r, ty.clone())
+                {
+                    return v;
+                }
+            }
             // Lane A: numeric operand widening + Python-3 `/`-is-float. The
             // helper only rewrites the all-numeric case; everything else
             // (str/tuple/container ops) falls through to emit_binop unchanged.
@@ -4430,6 +4449,70 @@ fn numeric_common_ty_ir(a: PrimTy, b: PrimTy) -> Option<PrimTy> {
     if b == I64 && signed_small(a) { return Some(I64); }
     if matches!(a, I8 | I16) && b == I32 { return Some(I32); }
     if matches!(b, I8 | I16) && a == I32 { return Some(I32); }
+    None
+}
+
+/// WAVE-2 LANE-B: the dunder method name a binary operator dispatches to when
+/// its left operand is a user-defined class. Mirrors `typecheck::binop_dunder`
+/// (kept in sync). `None` for operators that never route to a dunder.
+fn binop_dunder_ir(op: AstBinOp) -> Option<&'static str> {
+    Some(match op {
+        AstBinOp::Add => "__add__",
+        AstBinOp::Sub => "__sub__",
+        AstBinOp::Mul => "__mul__",
+        AstBinOp::Div => "__truediv__",
+        AstBinOp::FloorDiv => "__floordiv__",
+        AstBinOp::Rem => "__mod__",
+        AstBinOp::Pow => "__pow__",
+        AstBinOp::Eq => "__eq__",
+        AstBinOp::Ne => "__ne__",
+        AstBinOp::Lt => "__lt__",
+        AstBinOp::Le => "__le__",
+        AstBinOp::Gt => "__gt__",
+        AstBinOp::Ge => "__ge__",
+        _ => return None,
+    })
+}
+
+/// WAVE-2 LANE-B: lower a binary operator whose left operand is a user class to
+/// its dunder call. `l`/`r` are the already-lowered operands (`l` is the
+/// receiver/self, `r` the rhs). Returns `None` when the class doesn't supply
+/// the needed dunder, in which case the caller falls back to the numeric path
+/// (the typechecker has already accepted such programs only when they are
+/// well-typed — e.g. `__ne__` synthesised from `__eq__`, handled here).
+///
+/// `result_ty` is the binop node's type from the typechecker (the dunder's
+/// declared return type, already substituted).
+fn lower_class_binop_dunder(
+    fb: &mut FuncBuilder,
+    ctx: &LowerCtx,
+    op: AstBinOp,
+    cid: ClassId,
+    l: ValueId,
+    r: ValueId,
+    result_ty: Ty,
+) -> Option<ValueId> {
+    let dunder = binop_dunder_ir(op)?;
+    if let Some(dop) = class_dunder_dispatch(ctx.class_layouts, ctx.fn_id_by_name, cid, dunder) {
+        // Args: receiver (self) first, then the rhs — exactly the order a
+        // method call `l.__dunder__(r)` lowers to.
+        return Some(fb.push_value(result_ty, ValueKind::Op { op: dop, args: vec![l, r] }));
+    }
+    // `!=` with no `__ne__`: synthesise `not (l == r)` via `__eq__`.
+    if matches!(op, AstBinOp::Ne) {
+        if let Some(eqop) =
+            class_dunder_dispatch(ctx.class_layouts, ctx.fn_id_by_name, cid, "__eq__")
+        {
+            let eq = fb.push_value(
+                Ty::Primitive(PrimTy::Bool),
+                ValueKind::Op { op: eqop, args: vec![l, r] },
+            );
+            return Some(fb.push_value(
+                result_ty,
+                ValueKind::Op { op: IROp::BoolNot, args: vec![eq] },
+            ));
+        }
+    }
     None
 }
 
@@ -8545,5 +8628,106 @@ fn main() -> i32:
         // It must NOT have degraded to a bare `Exception` catch-all.
         assert!(!filters.iter().any(|s| s == "Exception"),
             "tuple-except must not degrade to a catch-all; got {filters:?}");
+    }
+
+    // ── WAVE-2 LANE-B: binop dunder lowering ─────────────────────────────
+
+    /// `binop_dunder_ir` mirrors the typecheck mapping and leaves identity /
+    /// membership / boolean / bitwise operators unmapped.
+    #[test]
+    fn binop_dunder_ir_mapping() {
+        assert_eq!(binop_dunder_ir(AstBinOp::Add), Some("__add__"));
+        assert_eq!(binop_dunder_ir(AstBinOp::Div), Some("__truediv__"));
+        assert_eq!(binop_dunder_ir(AstBinOp::Lt), Some("__lt__"));
+        assert_eq!(binop_dunder_ir(AstBinOp::Ne), Some("__ne__"));
+        assert_eq!(binop_dunder_ir(AstBinOp::Is), None);
+        assert_eq!(binop_dunder_ir(AstBinOp::In), None);
+        assert_eq!(binop_dunder_ir(AstBinOp::BitOr), None);
+    }
+
+    /// Does the lowered `main` contain a Direct/Virtual call op?  (Used to
+    /// prove a class operator dispatched to a dunder method rather than to a
+    /// numeric/pointer op.)
+    fn main_has_call(ir: &IRModule) -> bool {
+        let main = ir.functions.iter().find(|f| f.name == "main").unwrap();
+        main.blocks.iter().flat_map(|b| &b.values).any(|v| matches!(
+            &v.kind,
+            ValueKind::Op { op: IROp::DirectCall { .. } | IROp::VirtualCall { .. }, .. }
+        ))
+    }
+
+    /// `a + b` on a class lowers to a method-call op (Direct/Virtual), NOT an
+    /// `IAdd` on the two object handles.
+    #[test]
+    fn class_add_lowers_to_dunder_call_not_iadd() {
+        let src = "\
+final class V:
+    n: i64
+    fn __init__(self, n: i64) -> None:
+        self.n = n
+    fn __add__(self, other: V) -> V:
+        return V(self.n + other.n)
+
+fn main() -> i32:
+    a: V = V(1)
+    b: V = V(2)
+    c: V = a + b
+    return 0
+";
+        let ir = lower_src(src);
+        assert!(main_has_call(&ir), "class `+` must lower to a dunder call:\n{}",
+            dump_function(ir.functions.iter().find(|f| f.name == "main").unwrap()));
+        // And it must NOT have emitted an IAdd in main (that would be a raw
+        // pointer/int add on the two V handles — the bug we're preventing).
+        let main = ir.functions.iter().find(|f| f.name == "main").unwrap();
+        let has_iadd = main.blocks.iter().flat_map(|b| &b.values).any(|v|
+            matches!(&v.kind, ValueKind::Op { op: IROp::IAdd, .. }));
+        assert!(!has_iadd, "class `+` must not lower to IAdd on object handles");
+    }
+
+    /// `a != b` when the class defines only `__eq__` lowers to `__eq__` call
+    /// followed by `BoolNot` (the synthesised `not __eq__`).
+    #[test]
+    fn class_ne_without_dunder_lowers_eq_then_boolnot() {
+        let src = "\
+final class W:
+    n: i64
+    fn __init__(self, n: i64) -> None:
+        self.n = n
+    fn __eq__(self, other: W) -> bool:
+        return self.n == other.n
+
+fn main() -> i32:
+    a: W = W(1)
+    b: W = W(2)
+    r: bool = a != b
+    return 0
+";
+        let ir = lower_src(src);
+        assert!(main_has_call(&ir), "`!=` must call __eq__");
+        let main = ir.functions.iter().find(|f| f.name == "main").unwrap();
+        let has_boolnot = main.blocks.iter().flat_map(|b| &b.values).any(|v|
+            matches!(&v.kind, ValueKind::Op { op: IROp::BoolNot, .. }));
+        assert!(has_boolnot, "synthesised `!=` must emit BoolNot over __eq__:\n{}",
+            dump_function(main));
+    }
+
+    /// REGRESSION: primitive `+` is untouched — `i64 + i64` still lowers to
+    /// `IAdd`, never to a call.
+    #[test]
+    fn primitive_add_still_lowers_to_iadd() {
+        let src = "\
+fn main() -> i32:
+    a: i64 = 1
+    b: i64 = 2
+    c: i64 = a + b
+    return 0
+";
+        let ir = lower_src(src);
+        let main = ir.functions.iter().find(|f| f.name == "main").unwrap();
+        let has_iadd = main.blocks.iter().flat_map(|b| &b.values).any(|v|
+            matches!(&v.kind, ValueKind::Op { op: IROp::IAdd, .. }));
+        assert!(has_iadd, "i64 + i64 must still lower to IAdd:\n{}", dump_function(main));
+        assert!(!main_has_call(&ir), "primitive `+` must not emit a method call");
     }
 }
