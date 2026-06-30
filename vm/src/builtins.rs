@@ -78,8 +78,12 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             Ok(p as u64)
         }
         NativeFn::StrFromAny => {
-            // M3 lowers every `str(x)` call to this native regardless of
-            // argument type. We can't recover the static type, so guess:
+            // Typed default for `str(x)` when the IR lowerer could not pick a
+            // type-specialised native. The compiler now dispatches primitives,
+            // tuples, AND user classes (Wave-2 Lane A: classes go through
+            // `__str__`/`__repr__`/default field repr in `str_of_value`, NOT
+            // here), so this fallback only ever sees opaque/unknown values. We
+            // can't recover the static type, so guess:
             //
             // 1. If the argument looks like a valid string pointer on our
             //    heap, pass it through.
