@@ -4775,6 +4775,15 @@ fn str_of_value(fb: &mut FuncBuilder, ctx: &mut LowerCtx, v: ValueId, ty: &Ty) -
             },
         ),
         Ty::Tuple(inner) => lower_str_of_tuple(fb, ctx, v, inner),
+        // Wave-2 Lane A: a user-defined class stringifies through its
+        // `__str__` (falling back to `__repr__`), or — if it defines
+        // neither — a default `ClassName(f1=<v1>, ...)` field repr. The
+        // old `StrFromAny` path read the instance *pointer* as either a
+        // string or an i64, printing garbage. See `lower_str_of_class`.
+        Ty::Class(cid) => lower_str_of_class(fb, ctx, v, *cid),
+        Ty::Generic { base: TypeCtor::Class(cid), .. } => {
+            lower_str_of_class(fb, ctx, v, *cid)
+        }
         _ => fb.push_value(
             str_ty,
             ValueKind::Op {
@@ -4783,6 +4792,108 @@ fn str_of_value(fb: &mut FuncBuilder, ctx: &mut LowerCtx, v: ValueId, ty: &Ty) -
             },
         ),
     }
+}
+
+/// Wave-2 Lane A: stringify a user-class instance `v` of class `cid`.
+///
+/// Resolution order (Python-conformant):
+///   1. `__str__` if the class defines or inherits it.
+///   2. else `__repr__` if defined or inherited.
+///   3. else a synthesised default repr `ClassName(field1=<v1>, field2=<v2>, …)`
+///      built entirely at IR time from the class's declared fields, recursing
+///      through `str_of_value` per field so nested classes / tuples format too.
+///
+/// The dunder calls reuse the Lane-0 `class_dunder_dispatch` scaffold, so they
+/// honour the exact same direct-vs-virtual devirtualisation rule as a written
+/// `obj.__str__()` method call (final/non-open → DirectCall, open/sealed or
+/// inherited → VirtualCall). `__str__`/`__repr__` take only `self`, so the
+/// call args are `[v]`.
+fn lower_str_of_class(
+    fb: &mut FuncBuilder,
+    ctx: &mut LowerCtx,
+    v: ValueId,
+    cid: ClassId,
+) -> ValueId {
+    let str_ty = Ty::Primitive(PrimTy::Str);
+    // 1./2. __str__, then __repr__.
+    for dunder in ["__str__", "__repr__"] {
+        if let Some(op) =
+            class_dunder_dispatch(ctx.class_layouts, ctx.fn_id_by_name, cid, dunder)
+        {
+            return fb.push_value(
+                str_ty,
+                ValueKind::Op { op, args: vec![v] },
+            );
+        }
+    }
+    // 3. Default field repr: `ClassName(f1=<v1>, f2=<v2>, …)`.
+    lower_default_class_repr(fb, ctx, v, cid)
+}
+
+/// Build the default `ClassName(field=value, …)` repr for a class instance that
+/// defines neither `__str__` nor `__repr__`. Each field is loaded at its layout
+/// offset and stringified through `str_of_value` (so the per-type dispatch — and
+/// nested class/tuple handling — is reused). A field-less class renders as
+/// `ClassName()`. If the layout is somehow unavailable, falls back to the bare
+/// class-less marker `<object>` rather than reading a wild pointer.
+fn lower_default_class_repr(
+    fb: &mut FuncBuilder,
+    ctx: &mut LowerCtx,
+    v: ValueId,
+    cid: ClassId,
+) -> ValueId {
+    let str_ty = Ty::Primitive(PrimTy::Str);
+    let layout = match ctx.class_layouts.get(&cid) {
+        Some(l) => l.clone(),
+        None => {
+            return fb.push_value(
+                str_ty,
+                ValueKind::Const(IRConst::Str("<object>".into())),
+            );
+        }
+    };
+    // Open with `ClassName(`.
+    let mut acc = fb.push_value(
+        str_ty.clone(),
+        ValueKind::Const(IRConst::Str(format!("{}(", layout.name))),
+    );
+    for (i, f) in layout.fields.iter().enumerate() {
+        // `, ` separator between fields, then `name=`.
+        let prefix = if i == 0 {
+            format!("{}=", f.name)
+        } else {
+            format!(", {}=", f.name)
+        };
+        let pv = fb.push_value(str_ty.clone(), ValueKind::Const(IRConst::Str(prefix)));
+        acc = fb.push_value(
+            str_ty.clone(),
+            ValueKind::Op {
+                op: IROp::NativeCall { native_id: NativeFn::StrConcat as u32 },
+                args: vec![acc, pv],
+            },
+        );
+        // Load the field at its declared offset and stringify by static type.
+        let fv = fb.push_value(
+            f.ty.clone(),
+            ValueKind::Op { op: IROp::Load { offset: f.offset }, args: vec![v] },
+        );
+        let fs = str_of_value(fb, ctx, fv, &f.ty);
+        acc = fb.push_value(
+            str_ty.clone(),
+            ValueKind::Op {
+                op: IROp::NativeCall { native_id: NativeFn::StrConcat as u32 },
+                args: vec![acc, fs],
+            },
+        );
+    }
+    let close = fb.push_value(str_ty.clone(), ValueKind::Const(IRConst::Str(")".into())));
+    fb.push_value(
+        str_ty,
+        ValueKind::Op {
+            op: IROp::NativeCall { native_id: NativeFn::StrConcat as u32 },
+            args: vec![acc, close],
+        },
+    )
 }
 
 /// M14 tuples: lower `t == u` / `t != u` for `Ty::Tuple` operands.
@@ -6113,6 +6224,29 @@ fn lower_call(
         arg_vs.push(lower_expr(fb, ctx, &a.value));
     }
 
+    // Wave-2 Lane A: `print(obj)` / `println(obj)` take the *raw* argument and
+    // the VM's `arg_str` reads it as a string pointer. For a user-class
+    // instance that pointer is an ObjectHeader, not a StringRepr, so the old
+    // path printed garbage. Pre-stringify any class-typed argument through
+    // `str_of_value` (→ `__str__`/`__repr__`/default repr) before the native
+    // print sees it. Guarded on `print`/`println` NOT being shadowed by a
+    // user function (mirrors the HOF-builtin guard above).
+    if let Expr::Ident { name, .. } = callee {
+        if (name == "print" || name == "println")
+            && ctx.fn_id_by_name.get(name).is_none()
+        {
+            for (i, a) in args.iter().enumerate() {
+                let aty = ctx.expr_ty(expr_span(&a.value));
+                if matches!(
+                    aty,
+                    Ty::Class(_) | Ty::Generic { base: TypeCtor::Class(_), .. }
+                ) {
+                    arg_vs[i] = str_of_value(fb, ctx, arg_vs[i], &aty);
+                }
+            }
+        }
+    }
+
     // M62b: a call to a generator function (declared `-> Iterator[T]`) does
     // NOT run the body — it allocates a generator object. Detect this by the
     // callee's resolved return type and emit `MakeGen` instead of the usual
@@ -6533,6 +6667,19 @@ fn lower_call(
                         if let Some(Ty::Tuple(elem_tys)) = arg_ty.clone() {
                             let tup = arg_vs[0];
                             return lower_str_of_tuple(fb, ctx, tup, &elem_tys);
+                        }
+                        // Wave-2 Lane A: `str(obj)` on a user class instance
+                        // dispatches `__str__`/`__repr__` (or a default field
+                        // repr) instead of falling through to `StrFromAny`,
+                        // which reinterpreted the instance pointer as a string
+                        // or i64 and printed garbage.
+                        match arg_ty.clone() {
+                            Some(Ty::Class(cid))
+                            | Some(Ty::Generic { base: TypeCtor::Class(cid), .. }) => {
+                                let obj = arg_vs[0];
+                                return lower_str_of_class(fb, ctx, obj, cid);
+                            }
+                            _ => {}
                         }
                     }
                     let nid = if name == "str" {
@@ -8545,5 +8692,148 @@ fn main() -> i32:
         // It must NOT have degraded to a bare `Exception` catch-all.
         assert!(!filters.iter().any(|s| s == "Exception"),
             "tuple-except must not degrade to a catch-all; got {filters:?}");
+    }
+
+    // ── WAVE-2 LANE-A: str()/print() on a user class ─────────────────────
+
+    /// Collect every `Const(Str(_))` literal emitted in `fn_name`'s body.
+    fn str_consts_of(ir: &IRModule, fn_name: &str) -> Vec<String> {
+        let f = ir.functions.iter().find(|f| f.name == fn_name).unwrap();
+        f.blocks
+            .iter()
+            .flat_map(|b| &b.values)
+            .filter_map(|v| match &v.kind {
+                ValueKind::Const(IRConst::Str(s)) => Some(s.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `main` must NOT lower any `str(obj)`/`print(obj)` on a class through
+    /// `StrFromAny` (native id) — that's the garbage path we replaced.
+    fn main_has_str_from_any(ir: &IRModule) -> bool {
+        let f = ir.functions.iter().find(|f| f.name == "main").unwrap();
+        f.blocks.iter().flat_map(|b| &b.values).any(|v| matches!(
+            &v.kind,
+            ValueKind::Op { op: IROp::NativeCall { native_id }, .. }
+                if *native_id == NativeFn::StrFromAny as u32
+        ))
+    }
+
+    /// `str(p)` on a final class with `__str__` devirtualises to a
+    /// DirectCall on `Point.__str__`, never StrFromAny.
+    #[test]
+    fn str_of_class_with_dunder_str_direct_calls_it() {
+        let src = "\
+final class Point:
+    x: i64
+    fn __init__(self, x: i64) -> None:
+        self.x = x
+    fn __str__(self) -> str:
+        return \"pt\"
+
+fn main() -> i32:
+    p: Point = Point(1)
+    s: str = str(p)
+    println(p)
+    return 0
+";
+        let ir = lower_src(src);
+        let str_fid = ir.functions.iter().find(|f| f.name == "Point.__str__").unwrap().id;
+        let main = ir.functions.iter().find(|f| f.name == "main").unwrap();
+        let direct_calls: Vec<_> = main
+            .blocks
+            .iter()
+            .flat_map(|b| &b.values)
+            .filter_map(|v| match &v.kind {
+                ValueKind::Op { op: IROp::DirectCall { fn_id }, .. } => Some(*fn_id),
+                _ => None,
+            })
+            .collect();
+        // Both `str(p)` and `println(p)` must route through Point.__str__.
+        let n = direct_calls.iter().filter(|f| **f == str_fid).count();
+        assert!(n >= 2, "str(p) AND println(p) must DirectCall Point.__str__ (saw {n})");
+        assert!(!main_has_str_from_any(&ir), "must not fall through to StrFromAny");
+    }
+
+    /// `__repr__` is the fallback when `__str__` is absent.
+    #[test]
+    fn str_of_class_falls_back_to_dunder_repr() {
+        let src = "\
+final class Money:
+    cents: i64
+    fn __init__(self, cents: i64) -> None:
+        self.cents = cents
+    fn __repr__(self) -> str:
+        return \"m\"
+
+fn main() -> i32:
+    m: Money = Money(1)
+    s: str = str(m)
+    return 0
+";
+        let ir = lower_src(src);
+        let repr_fid = ir.functions.iter().find(|f| f.name == "Money.__repr__").unwrap().id;
+        let main = ir.functions.iter().find(|f| f.name == "main").unwrap();
+        let calls_repr = main.blocks.iter().flat_map(|b| &b.values).any(|v| matches!(
+            &v.kind,
+            ValueKind::Op { op: IROp::DirectCall { fn_id }, .. } if *fn_id == repr_fid
+        ));
+        assert!(calls_repr, "str(m) must DirectCall Money.__repr__");
+        assert!(!main_has_str_from_any(&ir), "must not fall through to StrFromAny");
+    }
+
+    /// A class with neither dunder gets a default `ClassName(field=value, …)`
+    /// repr: the literal pieces `Color(`, `r=`, `, g=`, `, b=`, `)` must all
+    /// be emitted, and no StrFromAny.
+    #[test]
+    fn str_of_class_without_dunder_builds_default_repr() {
+        let src = "\
+final class Color:
+    r: i64
+    g: i64
+    b: i64
+    fn __init__(self, r: i64, g: i64, b: i64) -> None:
+        self.r = r
+        self.g = g
+        self.b = b
+
+fn main() -> i32:
+    c: Color = Color(1, 2, 3)
+    s: str = str(c)
+    return 0
+";
+        let ir = lower_src(src);
+        let consts = str_consts_of(&ir, "main");
+        for want in ["Color(", "r=", ", g=", ", b=", ")"] {
+            assert!(
+                consts.iter().any(|s| s == want),
+                "default repr missing literal {want:?}; got {consts:?}"
+            );
+        }
+        assert!(!main_has_str_from_any(&ir), "default repr must not use StrFromAny");
+    }
+
+    /// `print(obj)` on a class with no dunder also gets the default repr —
+    /// the print path pre-stringifies the class arg rather than handing the
+    /// raw pointer to the native print (which would read it as a string).
+    #[test]
+    fn print_of_class_without_dunder_builds_default_repr() {
+        let src = "\
+final class Tag:
+    name: str
+    fn __init__(self, name: str) -> None:
+        self.name = name
+
+fn main() -> i32:
+    t: Tag = Tag(\"x\")
+    println(t)
+    return 0
+";
+        let ir = lower_src(src);
+        let consts = str_consts_of(&ir, "main");
+        assert!(consts.iter().any(|s| s == "Tag("), "print default repr missing 'Tag('; got {consts:?}");
+        assert!(consts.iter().any(|s| s == "name="), "print default repr missing 'name='; got {consts:?}");
+        assert!(!main_has_str_from_any(&ir), "print default repr must not use StrFromAny");
     }
 }

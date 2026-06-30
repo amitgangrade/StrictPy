@@ -1,0 +1,67 @@
+"""dunder_str_demo — `str(obj)` / `print(obj)` call a user class's `__str__`.
+
+Wave-2 Lane A closes the "StrFromAny garbage for class" deferral: before
+this, `str(obj)` / `print(obj)` on a user-class instance reinterpreted the
+instance *pointer* as a string or i64 and printed garbage. Now:
+
+  1. A class with `__str__` prints what `__str__` returns.
+  2. A class with only `__repr__` falls back to `__repr__`.
+  3. A class with neither gets a default `ClassName(field=value, ...)` repr,
+     built from the declared fields (recursing through `str()` per field).
+"""
+
+
+# 1. `__str__` is preferred.
+final class Point:
+    x: i64
+    y: i64
+
+    fn __init__(self, x: i64, y: i64) -> None:
+        self.x = x
+        self.y = y
+
+    fn __str__(self) -> str:
+        return "Point(" + str(self.x) + ", " + str(self.y) + ")"
+
+
+# 2. Only `__repr__` defined → `str()` / `print()` fall back to it.
+final class Money:
+    cents: i64
+
+    fn __init__(self, cents: i64) -> None:
+        self.cents = cents
+
+    fn __repr__(self) -> str:
+        return "Money<" + str(self.cents) + "c>"
+
+
+# 3. Neither dunder → synthesised default field repr.
+final class Color:
+    r: i64
+    g: i64
+    b: i64
+
+    fn __init__(self, r: i64, g: i64, b: i64) -> None:
+        self.r = r
+        self.g = g
+        self.b = b
+
+
+fn main() -> i32:
+    p: Point = Point(3, 4)
+    # print(obj) uses __str__
+    print("p = ")
+    println(p)
+    # str(obj) uses __str__
+    s: str = str(p)
+    println("str(p) = " + s)
+
+    m: Money = Money(1099)
+    println(m)                       # falls back to __repr__
+    println("str(m) = " + str(m))
+
+    c: Color = Color(255, 128, 0)
+    println(c)                       # default Color(r=255, g=128, b=0)
+    println("str(c) = " + str(c))
+
+    return 0
