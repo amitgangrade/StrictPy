@@ -516,9 +516,63 @@ impl TypeChecker {
                 if let Some(eb) = else_block { self.check_block(eb, ret, env, ctx, r)?; }
             }
             Stmt::For { var, var_ty, iter, body, else_block, span } => {
-                let _iter_ty = self.check_or_synth(iter, None, env, ctx, r)?;
+                let iter_ty = self.check_or_synth(iter, None, env, ctx, r)?;
                 let key = ast_type_span(var_ty);
                 let vty = r.ast_type_to_ty.get(&key).cloned().unwrap_or(Ty::Never);
+
+                // Wave-2 Lane D: `for x: T in obj:` over a user class must
+                // implement the iterator protocol (`__iter__` returning an
+                // iterator class whose `__next__(self) -> T?` yields the
+                // elements). Validate the protocol and that the declared loop
+                // var type `T` matches `__next__`'s value type (the nullable's
+                // inner type — `none` is the done sentinel, never bound to the
+                // loop var). Built-in handle-backed classes and the generic
+                // container/iterator/range forms keep their existing handling.
+                if let Ty::Class(cid) = &iter_ty {
+                    let is_native = ctx.classes.get(cid)
+                        .map(|l| l.is_native)
+                        .unwrap_or(false);
+                    if !is_native {
+                        // `__iter__` must exist and return a user class.
+                        let iter_ret = lookup_dunder(ctx.classes, *cid, "__iter__")
+                            .map(|m| m.ret.clone());
+                        let it_cid = match &iter_ret {
+                            Some(Ty::Class(it)) => Some(*it),
+                            _ => None,
+                        };
+                        match it_cid {
+                            None => {
+                                return Err(type_err(*span, codes::TYPE_MISMATCH,
+                                    format!("`for` over `{}` requires an `__iter__(self) -> <IteratorClass>` \
+                                             method whose return type is a user class implementing \
+                                             `__next__`", iter_ty.display())));
+                            }
+                            Some(it) => {
+                                let next_sig = lookup_dunder(ctx.classes, it, "__next__");
+                                match next_sig {
+                                    None => {
+                                        return Err(type_err(*span, codes::TYPE_MISMATCH,
+                                            format!("the iterator returned by `{}.__iter__` does not \
+                                                     implement `__next__(self) -> T?`", iter_ty.display())));
+                                    }
+                                    Some(sig) => {
+                                        // Element type = `__next__`'s value type
+                                        // (unwrap the `T?` nullable; `none` = done).
+                                        let elem_ty = match &sig.ret {
+                                            Ty::Nullable(inner) => (**inner).clone(),
+                                            other => other.clone(),
+                                        };
+                                        if !is_subtype(&elem_ty, &vty, &ctx.ty_ctx()) {
+                                            return Err(type_err(*span, codes::TYPE_MISMATCH,
+                                                format!("loop variable `{}` declared `{}` but `__next__` \
+                                                         yields `{}`", var, vty.display(), elem_ty.display())));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 let _ = span;
                 let mut env2 = env.clone();
                 if let Some(sym) = r.symbols.symbols.iter()
@@ -3684,6 +3738,82 @@ fn main() -> i32:
             .expect("Derived inherits __eq__ from Base");
         assert_eq!(sig.params.len(), 1);
         assert!(ty_eq(&sig.ret, &Ty::Primitive(PrimTy::Bool)));
+    }
+
+    // ── WAVE-2 LANE-D: class for-loop iterator-protocol type checking ────
+
+    /// `for x: T in obj:` over a user class with a valid `__iter__`/`__next__`
+    /// protocol type-checks, and the loop var binds at `__next__`'s value
+    /// type (the unwrapped nullable).
+    #[test]
+    fn class_for_loop_protocol_typechecks() {
+        let src = "\
+final class It:
+    n: i64
+    fn __init__(self) -> None:
+        self.n = 0
+    fn __iter__(self) -> It:
+        return self
+    fn __next__(self) -> i64?:
+        if self.n >= 3:
+            return none
+        v: i64 = self.n
+        self.n = self.n + 1
+        return v
+
+fn main() -> i32:
+    total: i64 = 0
+    for x: i64 in It():
+        total = total + x
+    return 0
+";
+        check_src(src).expect("valid iterator-protocol for-loop must type-check");
+    }
+
+    /// A user class without `__iter__` is not iterable — `for` over it is a
+    /// compile error, not a silent run-once.
+    #[test]
+    fn class_for_loop_without_iter_rejected() {
+        let src = "\
+final class NotIterable:
+    x: i64
+    fn __init__(self, x: i64) -> None:
+        self.x = x
+
+fn main() -> i32:
+    for v: i64 in NotIterable(3):
+        return v
+    return 0
+";
+        let r = check_src(src);
+        assert!(r.is_err(), "class lacking __iter__ must be rejected as non-iterable");
+    }
+
+    /// The loop-var annotation must match `__next__`'s value type. Iterating
+    /// an `i64?`-yielding iterator with `for v: str` is a compile error.
+    #[test]
+    fn class_for_loop_var_type_mismatch_rejected() {
+        let src = "\
+final class It:
+    n: i64
+    fn __init__(self) -> None:
+        self.n = 0
+    fn __iter__(self) -> It:
+        return self
+    fn __next__(self) -> i64?:
+        if self.n >= 2:
+            return none
+        v: i64 = self.n
+        self.n = self.n + 1
+        return v
+
+fn main() -> i32:
+    for v: str in It():
+        return 0
+    return 0
+";
+        let r = check_src(src);
+        assert!(r.is_err(), "loop var type must match __next__'s element type");
     }
 
     #[test]

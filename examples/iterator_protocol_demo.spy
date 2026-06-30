@@ -1,0 +1,121 @@
+"""Wave-2 Lane D demo: the user-class iterator protocol (`__iter__` / `__next__`).
+
+`for x: T in obj:` works when `obj` is a user class that implements the
+iterator protocol:
+
+    obj.__iter__()  ->  an iterator object
+    iterator.__next__()  ->  T?   # the next element, or `none` when exhausted
+
+TERMINATION CONVENTION (spec §9.1): `__next__` returns a *nullable* `T?`. A
+non-none value is the next element; `none` is the "done" sentinel that stops
+the loop. This is the done-slot `(done, value)` lowering realised via the
+proven none-sentinel machinery — no `StopIteration` exception, no infinite-loop
+or silent-truncation hazard. The `none` is never bound to the loop variable.
+
+Two shapes are exercised:
+
+  - A container (`IntRange`) whose `__iter__` returns a *separate* iterator
+    object (`IntRangeIter`) holding the cursor. This is the canonical Python
+    shape: the container is re-iterable.
+  - An iterator that is its own iterable (`Squares.__iter__` returns `self`).
+
+All output is deterministic so the Rust acceptance test can assert on it.
+"""
+
+
+# ── Separate-iterator shape ──────────────────────────────────────────────
+# The iterator object holds the mutable cursor; the container is immutable
+# and can be iterated more than once (each `__iter__` makes a fresh cursor).
+
+final class IntRangeIter:
+    cur: i64
+    stop: i64
+
+    fn __init__(self, start: i64, stop: i64) -> None:
+        self.cur = start
+        self.stop = stop
+
+    fn __next__(self) -> i64?:
+        if self.cur >= self.stop:
+            return none
+        v: i64 = self.cur
+        self.cur = self.cur + 1
+        return v
+
+
+final class IntRange:
+    start: i64
+    stop: i64
+
+    fn __init__(self, start: i64, stop: i64) -> None:
+        self.start = start
+        self.stop = stop
+
+    fn __iter__(self) -> IntRangeIter:
+        return IntRangeIter(self.start, self.stop)
+
+
+# ── Self-iterator shape ──────────────────────────────────────────────────
+# `__iter__` returns `self`; the same object is both iterable and iterator.
+
+final class Squares:
+    n: i64
+    limit: i64
+
+    fn __init__(self, limit: i64) -> None:
+        self.n = 0
+        self.limit = limit
+
+    fn __iter__(self) -> Squares:
+        return self
+
+    fn __next__(self) -> i64?:
+        if self.n >= self.limit:
+            return none
+        v: i64 = self.n * self.n
+        self.n = self.n + 1
+        return v
+
+
+fn main() -> i32:
+    # ── visit ALL elements, not once: sum 0..5 == 0+1+2+3+4 == 10 ────────
+    total: i64 = 0
+    count: i64 = 0
+    for x: i64 in IntRange(0, 5):
+        total = total + x
+        count = count + 1
+    println("range sum=" + str(total))
+    println("range count=" + str(count))
+
+    # ── re-iterating the same container yields a fresh full pass ─────────
+    again: i64 = 0
+    for y: i64 in IntRange(0, 5):
+        again = again + 1
+    println("range reiter count=" + str(again))
+
+    # ── empty range: zero iterations, loop body never runs ──────────────
+    empty: i64 = 0
+    for e: i64 in IntRange(3, 3):
+        empty = empty + 1
+    println("empty count=" + str(empty))
+
+    # ── self-iterator: squares of 0..4 == 0,1,4,9,16 (sum 30) ───────────
+    sq_sum: i64 = 0
+    sq_count: i64 = 0
+    for s: i64 in Squares(5):
+        sq_sum = sq_sum + s
+        sq_count = sq_count + 1
+    println("squares sum=" + str(sq_sum))
+    println("squares count=" + str(sq_count))
+
+    # ── collect iterator elements into a list, proving order/completeness ─
+    collected: List[i64] = []
+    for c: i64 in IntRange(10, 14):
+        collected.append(c)
+    print("collected:")
+    for v: i64 in collected:
+        print(" " + str(v))
+    println("")
+    println("collected count=" + str(collected.len()))
+
+    return 0
