@@ -3923,6 +3923,25 @@ fn lower_expr(fb: &mut FuncBuilder, ctx: &mut LowerCtx, e: &Expr) -> ValueId {
             let rty = ctx.expr_ty(expr_span(rhs));
             let l = lower_expr(fb, ctx, lhs);
             let r = lower_expr(fb, ctx, rhs);
+            // WAVE-2 LANE-B: when the left operand is a user-defined class,
+            // dispatch the operator to its dunder method (`__add__`, `__eq__`,
+            // ...). This runs BEFORE the Lane-A numeric coercion path, so it
+            // never perturbs mixed-numeric semantics (`1 + 2.0`, `i32 + i64`,
+            // `/`-as-float) — those operands are primitives, not classes.
+            // `is`/`is not` are not `Expr::Binary` dunder targets here
+            // (binop_dunder_ir returns None) and stay pointer-identity.
+            let cid = match &lty {
+                Ty::Class(c) => Some(*c),
+                Ty::Generic { base: TypeCtor::Class(c), .. } => Some(*c),
+                _ => None,
+            };
+            if let Some(cid) = cid {
+                if let Some(v) =
+                    lower_class_binop_dunder(fb, ctx, *op, cid, l, r, ty.clone())
+                {
+                    return v;
+                }
+            }
             // Lane A: numeric operand widening + Python-3 `/`-is-float. The
             // helper only rewrites the all-numeric case; everything else
             // (str/tuple/container ops) falls through to emit_binop unchanged.
@@ -4583,6 +4602,70 @@ fn numeric_common_ty_ir(a: PrimTy, b: PrimTy) -> Option<PrimTy> {
     if b == I64 && signed_small(a) { return Some(I64); }
     if matches!(a, I8 | I16) && b == I32 { return Some(I32); }
     if matches!(b, I8 | I16) && a == I32 { return Some(I32); }
+    None
+}
+
+/// WAVE-2 LANE-B: the dunder method name a binary operator dispatches to when
+/// its left operand is a user-defined class. Mirrors `typecheck::binop_dunder`
+/// (kept in sync). `None` for operators that never route to a dunder.
+fn binop_dunder_ir(op: AstBinOp) -> Option<&'static str> {
+    Some(match op {
+        AstBinOp::Add => "__add__",
+        AstBinOp::Sub => "__sub__",
+        AstBinOp::Mul => "__mul__",
+        AstBinOp::Div => "__truediv__",
+        AstBinOp::FloorDiv => "__floordiv__",
+        AstBinOp::Rem => "__mod__",
+        AstBinOp::Pow => "__pow__",
+        AstBinOp::Eq => "__eq__",
+        AstBinOp::Ne => "__ne__",
+        AstBinOp::Lt => "__lt__",
+        AstBinOp::Le => "__le__",
+        AstBinOp::Gt => "__gt__",
+        AstBinOp::Ge => "__ge__",
+        _ => return None,
+    })
+}
+
+/// WAVE-2 LANE-B: lower a binary operator whose left operand is a user class to
+/// its dunder call. `l`/`r` are the already-lowered operands (`l` is the
+/// receiver/self, `r` the rhs). Returns `None` when the class doesn't supply
+/// the needed dunder, in which case the caller falls back to the numeric path
+/// (the typechecker has already accepted such programs only when they are
+/// well-typed — e.g. `__ne__` synthesised from `__eq__`, handled here).
+///
+/// `result_ty` is the binop node's type from the typechecker (the dunder's
+/// declared return type, already substituted).
+fn lower_class_binop_dunder(
+    fb: &mut FuncBuilder,
+    ctx: &LowerCtx,
+    op: AstBinOp,
+    cid: ClassId,
+    l: ValueId,
+    r: ValueId,
+    result_ty: Ty,
+) -> Option<ValueId> {
+    let dunder = binop_dunder_ir(op)?;
+    if let Some(dop) = class_dunder_dispatch(ctx.class_layouts, ctx.fn_id_by_name, cid, dunder) {
+        // Args: receiver (self) first, then the rhs — exactly the order a
+        // method call `l.__dunder__(r)` lowers to.
+        return Some(fb.push_value(result_ty, ValueKind::Op { op: dop, args: vec![l, r] }));
+    }
+    // `!=` with no `__ne__`: synthesise `not (l == r)` via `__eq__`.
+    if matches!(op, AstBinOp::Ne) {
+        if let Some(eqop) =
+            class_dunder_dispatch(ctx.class_layouts, ctx.fn_id_by_name, cid, "__eq__")
+        {
+            let eq = fb.push_value(
+                Ty::Primitive(PrimTy::Bool),
+                ValueKind::Op { op: eqop, args: vec![l, r] },
+            );
+            return Some(fb.push_value(
+                result_ty,
+                ValueKind::Op { op: IROp::BoolNot, args: vec![eq] },
+            ));
+        }
+    }
     None
 }
 

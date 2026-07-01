@@ -1683,6 +1683,60 @@ impl TypeChecker {
         }
     }
 
+    /// WAVE-2 LANE-B: type-check a binary operator whose left operand is a
+    /// user-defined class `cid`, routing it to the operator's dunder method.
+    ///
+    /// On success the result type is the dunder's declared return type (with the
+    /// receiver's generic substitution applied), and the rhs has been checked
+    /// against the dunder's single declared operand type. Returns a clean
+    /// `E2001` if the class (and its bases) define no such dunder.
+    ///
+    /// `__ne__` falls back to `__eq__` when the class defines only `__eq__`; the
+    /// result is still `bool` (the IR lowers it as `not __eq__`). Ordering
+    /// operators require their own dunder — there is no `>`-from-`<` synthesis.
+    fn check_class_binop_dunder(
+        &mut self, op: BinOp, cid: ClassId, lt: &Ty, rhs: &Expr, span: Span,
+        env: &Env, ctx: &Ctx, r: &ResolvedModule,
+    ) -> Result<Ty, CompileError> {
+        let dunder = binop_dunder(op).expect("caller guarantees an operator dunder");
+        // Build the receiver's tv -> concrete substitution so generic dunder
+        // param/return types specialise (mirrors check_method_call's recv_subst).
+        let recv_subst: HashMap<u32, Ty> = match lt {
+            Ty::Generic { base: TypeCtor::Class(c), args } => {
+                if let Some(cl) = ctx.classes.get(c) {
+                    cl.generic_tvars.iter().zip(args.iter())
+                        .map(|(tv, a)| (tv.0, a.clone())).collect()
+                } else { HashMap::new() }
+            }
+            _ => HashMap::new(),
+        };
+        // `!=` may borrow `__eq__` when `__ne__` is absent (default `not __eq__`).
+        let sig = lookup_dunder(ctx.classes, cid, dunder)
+            .or_else(|| if matches!(op, BinOp::Ne) {
+                lookup_dunder(ctx.classes, cid, "__eq__")
+            } else { None });
+        let sig = match sig {
+            Some(s) => s,
+            None => {
+                let cname = ctx.classes.get(&cid).map(|c| c.name.as_str()).unwrap_or("<class>");
+                return Err(type_err(span, codes::TYPE_BINOP_MISMATCH,
+                    format!("type `{}` has no `{}` for operator `{:?}`", cname, dunder, op)));
+            }
+        };
+        let ret_ty = subst_ty(&sig.ret, &recv_subst);
+        // Check the rhs against the dunder's single declared operand type.
+        // A binary dunder takes exactly one operand after `self`; if the user
+        // declared something else, fall back to synthesising the rhs (the
+        // resolver/arity machinery reports the malformed signature elsewhere).
+        if let Some(param) = sig.params.first() {
+            let expected = subst_ty(param, &recv_subst);
+            let _ = self.check_expr(rhs, &expected, env, ctx, r)?;
+        } else {
+            let _ = self.synth_expr(rhs, env, ctx, r)?;
+        }
+        Ok(ret_ty)
+    }
+
     fn check_binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr, span: Span,
                     env: &Env, ctx: &Ctx, r: &ResolvedModule) -> Result<Ty, CompileError>
     {
@@ -1707,6 +1761,13 @@ impl TypeChecker {
             }
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 let lt = self.synth_expr(lhs, env, ctx, r)?;
+                // WAVE-2 LANE-B: a user-class left operand routes the comparison
+                // to its dunder (`__eq__`/`__lt__`/...). Identity (`is`/`is not`)
+                // is a separate match arm and stays pointer-identity. This runs
+                // BEFORE the numeric/structural comparison paths below.
+                if let Ty::Class(cid) | Ty::Generic { base: TypeCtor::Class(cid), .. } = &lt {
+                    return self.check_class_binop_dunder(op, *cid, &lt, rhs, span, env, ctx, r);
+                }
                 let rt = self.check_or_synth(rhs, Some(&lt), env, ctx, r)?;
                 // M63b: comparison inside a generic body is only legal when the
                 // type parameter carries the matching bound. Ordering
@@ -1771,6 +1832,17 @@ impl TypeChecker {
             | BinOp::Rem | BinOp::Pow | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
             | BinOp::Shl | BinOp::Shr => {
                 let lt = self.synth_expr(lhs, env, ctx, r)?;
+                // WAVE-2 LANE-B: a user-class left operand routes arithmetic to
+                // its dunder (`__add__`/`__sub__`/...). This runs BEFORE the
+                // numeric coercion/widening and error paths below, so mixed
+                // numeric semantics (`1 + 2.0`, `i32 + i64`, `/`-as-float) are
+                // untouched. Bitwise/shift have no Lane-B dunder (binop_dunder
+                // returns None), so they fall through to the numeric error.
+                if let Ty::Class(cid) | Ty::Generic { base: TypeCtor::Class(cid), .. } = &lt {
+                    if binop_dunder(op).is_some() {
+                        return self.check_class_binop_dunder(op, *cid, &lt, rhs, span, env, ctx, r);
+                    }
+                }
                 // M17: inside a generic body, operand types may be unresolved
                 // `Ty::Var`. Defer the operand-shape check to the per-
                 // instantiation IR lowering — at the typecheck level we
@@ -3407,6 +3479,36 @@ fn lookup_dunder<'a>(
         cur = layout.base;
     }
     None
+}
+
+/// WAVE-2 LANE-B: the dunder method name a binary operator dispatches to when
+/// its left operand is a user-defined class, or `None` for operators that
+/// never route through a dunder (`and`/`or`/`is`/`is not`/`in`/`not in`).
+///
+/// Identity (`is`/`is not`) deliberately stays pointer-identity and is *not*
+/// listed here. `!=` maps to `__ne__`; when a class defines `__eq__` but not
+/// `__ne__`, the caller synthesises `not __eq__` (see `check_binary` /
+/// `emit_binop`). Ordering operators each require their *own* dunder — there
+/// is no synthesis of `>`/`>=` from `<`/`==` (documented in STRICTPY_SPEC).
+fn binop_dunder(op: BinOp) -> Option<&'static str> {
+    Some(match op {
+        BinOp::Add => "__add__",
+        BinOp::Sub => "__sub__",
+        BinOp::Mul => "__mul__",
+        BinOp::Div => "__truediv__",
+        BinOp::FloorDiv => "__floordiv__",
+        BinOp::Rem => "__mod__",
+        BinOp::Pow => "__pow__",
+        BinOp::Eq => "__eq__",
+        BinOp::Ne => "__ne__",
+        BinOp::Lt => "__lt__",
+        BinOp::Le => "__le__",
+        BinOp::Gt => "__gt__",
+        BinOp::Ge => "__ge__",
+        // Bitwise/shift dunders are out of scope for Lane B; identity,
+        // membership and boolean operators never route to a dunder.
+        _ => return None,
+    })
 }
 
 /// AST parameters (minus `self`) of a class's `__init__`, by class name.
