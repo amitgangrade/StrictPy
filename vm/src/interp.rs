@@ -445,10 +445,14 @@ pub struct SharedVm {
     /// at 1 (handle 0 is reserved).
     pub next_cursor_id: std::sync::atomic::AtomicI64,
     // === WAVE3 LANE A: requests slot tables (M65) ====================
-    // Lane A adds its Session/Response slot-table fields here
-    // (Mutex<HashMap<i64, Slot>> + AtomicI64 next-id, slot 0 reserved —
-    // copy the sqlite_cursors convention above). Init in BOTH
-    // constructors below (matching marker regions).
+    // Handle-backed `requests.Session` / `Response` state. Same idiom as
+    // `sqlite_cursors`: HashMap keyed by a monotonic i64 handle, next-id
+    // starts at 1 (handle 0 reserved = "no slot"). The heap-side class
+    // objects carry only the i64 handle. Spec §9.51.
+    pub req_sessions: std::sync::Mutex<HashMap<i64, crate::builtins::requests::ReqSessionSlot>>,
+    pub next_req_session_id: std::sync::atomic::AtomicI64,
+    pub req_responses: std::sync::Mutex<HashMap<i64, crate::builtins::requests::ReqResponseSlot>>,
+    pub next_req_response_id: std::sync::atomic::AtomicI64,
     // === END WAVE3 LANE A ============================================
     // === WAVE3 LANE B: ndarray slot table (M66) ======================
     // Lane B adds its NDArray slot-table field here (same convention).
@@ -625,6 +629,10 @@ impl SharedVm {
             sqlite_cursors: std::sync::Mutex::new(HashMap::new()),
             next_cursor_id: std::sync::atomic::AtomicI64::new(1),
             // === WAVE3 LANE A: requests slot-table init (M65) ========
+            req_sessions: std::sync::Mutex::new(HashMap::new()),
+            next_req_session_id: std::sync::atomic::AtomicI64::new(1),
+            req_responses: std::sync::Mutex::new(HashMap::new()),
+            next_req_response_id: std::sync::atomic::AtomicI64::new(1),
             // === END WAVE3 LANE A ====================================
             // === WAVE3 LANE B: ndarray slot-table init (M66) =========
             // === END WAVE3 LANE B ====================================
@@ -716,6 +724,10 @@ impl SharedVm {
             sqlite_cursors: std::sync::Mutex::new(HashMap::new()),
             next_cursor_id: std::sync::atomic::AtomicI64::new(1),
             // === WAVE3 LANE A: requests slot-table init (M65, JIT ctor) ==
+            req_sessions: std::sync::Mutex::new(HashMap::new()),
+            next_req_session_id: std::sync::atomic::AtomicI64::new(1),
+            req_responses: std::sync::Mutex::new(HashMap::new()),
+            next_req_response_id: std::sync::atomic::AtomicI64::new(1),
             // === END WAVE3 LANE A ========================================
             // === WAVE3 LANE B: ndarray slot-table init (M66, JIT ctor) ===
             // === END WAVE3 LANE B ========================================

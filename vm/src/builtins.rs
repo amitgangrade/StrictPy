@@ -16,6 +16,10 @@ use crate::error::VmError;
 use crate::interp::{read_str, Interpreter};
 use crate::object::{ChannelRepr, DictRepr, FileRepr, StringRepr, ThreadRepr};
 
+// M65 (wave-3 Lane A): `requests` module engine (slot structs + ureq
+// transport helpers). Single `mod` wiring line per the wave-3 plan.
+pub mod requests;
+
 
 /// Hook called from `Interpreter::new` (or by tests). M4 has nothing to
 /// register up front because dispatch is static — left here so the lib.rs
@@ -2856,42 +2860,279 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             Ok(p as u64)
         }
         // === WAVE3 LANE A: requests (M65, ids 1500-1539) ================
-        // Scaffold trap arms — Lane A replaces everything inside this
-        // marker region with real handlers (contract: spec §9.51).
-        NativeFn::ReqRespStatus
-        | NativeFn::ReqRespOk
-        | NativeFn::ReqRespText
-        | NativeFn::ReqRespJson
-        | NativeFn::ReqRespHeader
-        | NativeFn::ReqRespHeaders
-        | NativeFn::ReqRespUrl
-        | NativeFn::ReqRespRaiseForStatus
-        | NativeFn::ReqSessionSetHeader
-        | NativeFn::ReqSessionSetTimeoutMs
-        | NativeFn::ReqSessionSetMaxRedirects
-        | NativeFn::ReqSessionGet
-        | NativeFn::ReqSessionGetWith
-        | NativeFn::ReqSessionPost
-        | NativeFn::ReqSessionPostJson
-        | NativeFn::ReqSessionPostForm
-        | NativeFn::ReqSessionPut
-        | NativeFn::ReqSessionDelete
-        | NativeFn::ReqSessionHead
-        | NativeFn::ReqSessionDownload
-        | NativeFn::ReqSessionClose
-        | NativeFn::ReqGet
-        | NativeFn::ReqGetWith
-        | NativeFn::ReqPost
-        | NativeFn::ReqPostJson
-        | NativeFn::ReqPostForm
-        | NativeFn::ReqPut
-        | NativeFn::ReqDelete
-        | NativeFn::ReqHead
-        | NativeFn::ReqDownload
-        | NativeFn::ReqSessionNew => {
-            Err(VmError::Trap(
-                "M65 requests: not yet implemented (wave-3 Lane A scaffold)".into(),
-            ))
+        // Handle-backed Response / Session over the `ureq` engine.  The
+        // engine (slot structs + transport) lives in `mod requests`; the
+        // arms here own the VM-object plumbing.  Contract: spec §9.51.
+
+        // ── Response methods (receiver = args[0]) ──
+        NativeFn::ReqRespStatus => {
+            let h = m65_recv_handle(args);
+            m65_with_response(interp, h, "status", |slot| Ok(slot.status as u64))
+        }
+        NativeFn::ReqRespOk => {
+            let h = m65_recv_handle(args);
+            m65_with_response(interp, h, "ok", |slot| {
+                Ok((slot.status >= 200 && slot.status < 400) as u64)
+            })
+        }
+        NativeFn::ReqRespUrl => {
+            let h = m65_recv_handle(args);
+            let url = m65_with_response(interp, h, "url", |slot| Ok(slot.url.clone()))?;
+            Ok(interp.alloc_string(&url) as u64)
+        }
+        NativeFn::ReqRespText => {
+            let h = m65_recv_handle(args);
+            // str-as-byte-buffer (§9.40): each body byte → one codepoint.
+            let packed =
+                m65_with_response(interp, h, "text", |slot| Ok(bytes_to_packed_str(&slot.body)))?;
+            Ok(interp.alloc_string(&packed) as u64)
+        }
+        NativeFn::ReqRespHeader => {
+            let h = m65_recv_handle(args);
+            let name = arg_str(args, 1);
+            let v = m65_with_response(interp, h, "header", |slot| Ok(slot.header(&name)))?;
+            Ok(interp.alloc_string(&v) as u64)
+        }
+        NativeFn::ReqRespHeaders => {
+            let h = m65_recv_handle(args);
+            let pairs =
+                m65_with_response(interp, h, "headers", |slot| Ok(slot.headers.clone()))?;
+            m65_build_str_dict(interp, pairs)
+        }
+        NativeFn::ReqRespJson => {
+            let h = m65_recv_handle(args);
+            let body = m65_with_response(interp, h, "json", |slot| Ok(slot.body.clone()))?;
+            let text = String::from_utf8_lossy(&body);
+            let v: serde_json::Value =
+                serde_json::from_str(&text).map_err(|e| VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("Response.json: {e}"),
+                })?;
+            Ok(m34_build_from_serde(interp, &v) as u64)
+        }
+        NativeFn::ReqRespRaiseForStatus => {
+            let h = m65_recv_handle(args);
+            let (status, url) =
+                m65_with_response(interp, h, "raise_for_status", |slot| {
+                    Ok((slot.status, slot.url.clone()))
+                })?;
+            if (400..600).contains(&status) {
+                return Err(VmError::UncaughtException {
+                    type_name: "IOError".into(),
+                    message: format!("{} Error for url: {}", status, url),
+                });
+            }
+            Ok(0)
+        }
+
+        // ── Session config setters ──
+        NativeFn::ReqSessionSetHeader => {
+            let h = m65_recv_handle(args);
+            let name = arg_str(args, 1);
+            let value = arg_str(args, 2);
+            m65_with_session_mut(interp, h, "set_header", |slot| {
+                let lower = name.to_ascii_lowercase();
+                slot.default_headers
+                    .retain(|(k, _)| k.to_ascii_lowercase() != lower);
+                slot.default_headers.push((name.clone(), value.clone()));
+                Ok(())
+            })?;
+            Ok(0)
+        }
+        NativeFn::ReqSessionSetTimeoutMs => {
+            let h = m65_recv_handle(args);
+            let ms = arg_i64(args, 1);
+            m65_with_session_mut(interp, h, "set_timeout_ms", |slot| {
+                slot.timeout_ms = ms;
+                slot.rebuild_agent();
+                Ok(())
+            })?;
+            Ok(0)
+        }
+        NativeFn::ReqSessionSetMaxRedirects => {
+            let h = m65_recv_handle(args);
+            let n = arg_i64(args, 1);
+            m65_with_session_mut(interp, h, "set_max_redirects", |slot| {
+                slot.max_redirects = n;
+                slot.rebuild_agent();
+                Ok(())
+            })?;
+            Ok(0)
+        }
+
+        // ── Session requests ──
+        NativeFn::ReqSessionGet => {
+            let h = m65_recv_handle(args);
+            let url = arg_str(args, 1);
+            let (agent, hdrs) = m65_session_agent(interp, h, "get")?;
+            let resp = requests::execute(&agent, "GET", &url, &hdrs, &[], None, "get")?;
+            m65_store_response(interp, resp)
+        }
+        NativeFn::ReqSessionGetWith => {
+            let h = m65_recv_handle(args);
+            let url = arg_str(args, 1);
+            let params = m65_read_str_dict(interp, args, 2)?;
+            let per_req = m65_read_str_dict(interp, args, 3)?;
+            let (agent, hdrs) = m65_session_agent(interp, h, "get_with")?;
+            let full = requests::merge_query(&url, &params);
+            let resp = requests::execute(&agent, "GET", &full, &hdrs, &per_req, None, "get_with")?;
+            m65_store_response(interp, resp)
+        }
+        NativeFn::ReqSessionPost => {
+            let h = m65_recv_handle(args);
+            let url = arg_str(args, 1);
+            let body = arg_str(args, 2);
+            let ct = arg_str(args, 3);
+            let (agent, hdrs) = m65_session_agent(interp, h, "post")?;
+            let per = m65_ct_header(&ct);
+            let resp = requests::execute(&agent, "POST", &url, &hdrs, &per, Some(body.as_bytes()), "post")?;
+            m65_store_response(interp, resp)
+        }
+        NativeFn::ReqSessionPostJson => {
+            let h = m65_recv_handle(args);
+            let url = arg_str(args, 1);
+            let body = m65_json_body(interp, args, 1 + 1);
+            let (agent, hdrs) = m65_session_agent(interp, h, "post_json")?;
+            let per = m65_ct_header("application/json");
+            let resp = requests::execute(&agent, "POST", &url, &hdrs, &per, Some(body.as_bytes()), "post_json")?;
+            m65_store_response(interp, resp)
+        }
+        NativeFn::ReqSessionPostForm => {
+            let h = m65_recv_handle(args);
+            let url = arg_str(args, 1);
+            let form = m65_read_str_dict(interp, args, 2)?;
+            let body = requests::urlencode_pairs(&form);
+            let (agent, hdrs) = m65_session_agent(interp, h, "post_form")?;
+            let per = m65_ct_header("application/x-www-form-urlencoded");
+            let resp = requests::execute(&agent, "POST", &url, &hdrs, &per, Some(body.as_bytes()), "post_form")?;
+            m65_store_response(interp, resp)
+        }
+        NativeFn::ReqSessionPut => {
+            let h = m65_recv_handle(args);
+            let url = arg_str(args, 1);
+            let body = arg_str(args, 2);
+            let ct = arg_str(args, 3);
+            let (agent, hdrs) = m65_session_agent(interp, h, "put")?;
+            let per = m65_ct_header(&ct);
+            let resp = requests::execute(&agent, "PUT", &url, &hdrs, &per, Some(body.as_bytes()), "put")?;
+            m65_store_response(interp, resp)
+        }
+        NativeFn::ReqSessionDelete => {
+            let h = m65_recv_handle(args);
+            let url = arg_str(args, 1);
+            let (agent, hdrs) = m65_session_agent(interp, h, "delete")?;
+            let resp = requests::execute(&agent, "DELETE", &url, &hdrs, &[], None, "delete")?;
+            m65_store_response(interp, resp)
+        }
+        NativeFn::ReqSessionHead => {
+            let h = m65_recv_handle(args);
+            let url = arg_str(args, 1);
+            let (agent, hdrs) = m65_session_agent(interp, h, "head")?;
+            let resp = requests::execute(&agent, "HEAD", &url, &hdrs, &[], None, "head")?;
+            m65_store_response(interp, resp)
+        }
+        NativeFn::ReqSessionDownload => {
+            let h = m65_recv_handle(args);
+            let url = arg_str(args, 1);
+            let path = arg_str(args, 2);
+            let (agent, hdrs) = m65_session_agent(interp, h, "download")?;
+            let n = requests::download(&agent, &url, &hdrs, &path, "download")?;
+            Ok(n as u64)
+        }
+        NativeFn::ReqSessionClose => {
+            let h = m65_recv_handle(args);
+            let removed = interp.shared.req_sessions.lock().unwrap().remove(&h).is_some();
+            if !removed {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: "Session.close: session already closed or invalid".into(),
+                });
+            }
+            Ok(0)
+        }
+        NativeFn::ReqSessionNew => {
+            let handle = interp
+                .shared
+                .next_req_session_id
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            interp
+                .shared
+                .req_sessions
+                .lock()
+                .unwrap()
+                .insert(handle, requests::ReqSessionSlot::new());
+            Ok(m65_alloc_session(interp, handle))
+        }
+
+        // ── One-shot module functions (fresh default agent, no cookies) ──
+        NativeFn::ReqGet => {
+            let url = arg_str(args, 0);
+            let agent = requests::build_agent(30_000, 10);
+            let resp = requests::execute(&agent, "GET", &url, &[], &[], None, "get")?;
+            m65_store_response(interp, resp)
+        }
+        NativeFn::ReqGetWith => {
+            let url = arg_str(args, 0);
+            let params = m65_read_str_dict(interp, args, 1)?;
+            let per_req = m65_read_str_dict(interp, args, 2)?;
+            let agent = requests::build_agent(30_000, 10);
+            let full = requests::merge_query(&url, &params);
+            let resp = requests::execute(&agent, "GET", &full, &[], &per_req, None, "get_with")?;
+            m65_store_response(interp, resp)
+        }
+        NativeFn::ReqPost => {
+            let url = arg_str(args, 0);
+            let body = arg_str(args, 1);
+            let ct = arg_str(args, 2);
+            let agent = requests::build_agent(30_000, 10);
+            let per = m65_ct_header(&ct);
+            let resp = requests::execute(&agent, "POST", &url, &[], &per, Some(body.as_bytes()), "post")?;
+            m65_store_response(interp, resp)
+        }
+        NativeFn::ReqPostJson => {
+            let url = arg_str(args, 0);
+            let body = m65_json_body(interp, args, 1);
+            let agent = requests::build_agent(30_000, 10);
+            let per = m65_ct_header("application/json");
+            let resp = requests::execute(&agent, "POST", &url, &[], &per, Some(body.as_bytes()), "post_json")?;
+            m65_store_response(interp, resp)
+        }
+        NativeFn::ReqPostForm => {
+            let url = arg_str(args, 0);
+            let form = m65_read_str_dict(interp, args, 1)?;
+            let body = requests::urlencode_pairs(&form);
+            let agent = requests::build_agent(30_000, 10);
+            let per = m65_ct_header("application/x-www-form-urlencoded");
+            let resp = requests::execute(&agent, "POST", &url, &[], &per, Some(body.as_bytes()), "post_form")?;
+            m65_store_response(interp, resp)
+        }
+        NativeFn::ReqPut => {
+            let url = arg_str(args, 0);
+            let body = arg_str(args, 1);
+            let ct = arg_str(args, 2);
+            let agent = requests::build_agent(30_000, 10);
+            let per = m65_ct_header(&ct);
+            let resp = requests::execute(&agent, "PUT", &url, &[], &per, Some(body.as_bytes()), "put")?;
+            m65_store_response(interp, resp)
+        }
+        NativeFn::ReqDelete => {
+            let url = arg_str(args, 0);
+            let agent = requests::build_agent(30_000, 10);
+            let resp = requests::execute(&agent, "DELETE", &url, &[], &[], None, "delete")?;
+            m65_store_response(interp, resp)
+        }
+        NativeFn::ReqHead => {
+            let url = arg_str(args, 0);
+            let agent = requests::build_agent(30_000, 10);
+            let resp = requests::execute(&agent, "HEAD", &url, &[], &[], None, "head")?;
+            m65_store_response(interp, resp)
+        }
+        NativeFn::ReqDownload => {
+            let url = arg_str(args, 0);
+            let path = arg_str(args, 1);
+            let agent = requests::build_agent(30_000, 10);
+            let n = requests::download(&agent, &url, &[], &path, "download")?;
+            Ok(n as u64)
         }
         // === END WAVE3 LANE A ===========================================
 
@@ -12274,6 +12515,166 @@ fn m34_alloc_class_obj(
         .lock()
         .unwrap()
         .alloc(total, ty_ptr, crate::object::GcKind::Class)
+}
+
+// ── M65 (wave-3 Lane A): `requests` VM-object helpers ─────────────────
+//
+// Lane-private glue between the NativeFn arms and `mod requests`.  All
+// prefixed `m65_`.  The Response / Session heap objects carry a single
+// i64 handle at payload offset 0 (the sqlite Cursor / re.Pattern shape);
+// the real state lives in `SharedVm.req_responses / req_sessions`.
+
+/// Read the i64 handle out of the receiver object (args[0]).
+fn m65_recv_handle(args: &[u64]) -> i64 {
+    let p = arg_u64(args, 0) as *const u8;
+    if p.is_null() {
+        return 0;
+    }
+    // SAFETY: receiver is a Response/Session instance; layout = HDR +
+    // i64 handle at offset 0 (mirrors `p4b_alloc_cursor`).
+    unsafe { std::ptr::read_unaligned(p.add(HDR) as *const i64) }
+}
+
+/// Allocate a `Response` heap object wrapping `handle`.
+fn m65_alloc_response(interp: &mut Interpreter, handle: i64) -> u64 {
+    let p = m34_alloc_class_obj(interp, "Response", 8);
+    unsafe {
+        std::ptr::write_unaligned(p.add(HDR) as *mut i64, handle);
+    }
+    p as u64
+}
+
+/// Allocate a `Session` heap object wrapping `handle`.
+fn m65_alloc_session(interp: &mut Interpreter, handle: i64) -> u64 {
+    let p = m34_alloc_class_obj(interp, "Session", 8);
+    unsafe {
+        std::ptr::write_unaligned(p.add(HDR) as *mut i64, handle);
+    }
+    p as u64
+}
+
+/// Insert a freshly-built response slot and return the `Response` object.
+fn m65_store_response(
+    interp: &mut Interpreter,
+    slot: requests::ReqResponseSlot,
+) -> Result<u64, VmError> {
+    let handle = interp
+        .shared
+        .next_req_response_id
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    interp.shared.req_responses.lock().unwrap().insert(handle, slot);
+    Ok(m65_alloc_response(interp, handle))
+}
+
+/// Run `f` against the response slot for `handle`, mapping a missing slot
+/// to a `ValueError`.
+fn m65_with_response<R>(
+    interp: &Interpreter,
+    handle: i64,
+    who: &str,
+    f: impl FnOnce(&requests::ReqResponseSlot) -> Result<R, VmError>,
+) -> Result<R, VmError> {
+    let tbl = interp.shared.req_responses.lock().unwrap();
+    let slot = tbl.get(&handle).ok_or_else(|| VmError::UncaughtException {
+        type_name: "ValueError".into(),
+        message: format!("Response.{}: invalid or released response", who),
+    })?;
+    f(slot)
+}
+
+/// Run `f` against the (mutable) session slot for `handle`.
+fn m65_with_session_mut(
+    interp: &Interpreter,
+    handle: i64,
+    who: &str,
+    f: impl FnOnce(&mut requests::ReqSessionSlot) -> Result<(), VmError>,
+) -> Result<(), VmError> {
+    let mut tbl = interp.shared.req_sessions.lock().unwrap();
+    let slot = tbl.get_mut(&handle).ok_or_else(|| VmError::UncaughtException {
+        type_name: "ValueError".into(),
+        message: format!("Session.{}: session closed or invalid", who),
+    })?;
+    f(slot)
+}
+
+/// Snapshot a session's agent (cheap Arc clone) + default headers so the
+/// network round-trip runs without holding the slot-table lock.
+fn m65_session_agent(
+    interp: &Interpreter,
+    handle: i64,
+    who: &str,
+) -> Result<(ureq::Agent, Vec<(String, String)>), VmError> {
+    let tbl = interp.shared.req_sessions.lock().unwrap();
+    let slot = tbl.get(&handle).ok_or_else(|| VmError::UncaughtException {
+        type_name: "ValueError".into(),
+        message: format!("Session.{}: session closed or invalid", who),
+    })?;
+    Ok((slot.agent.clone(), slot.default_headers.clone()))
+}
+
+/// Read a `Dict[str, str]` argument into ordered key/value pairs.
+fn m65_read_str_dict(
+    interp: &Interpreter,
+    args: &[u64],
+    i: usize,
+) -> Result<Vec<(String, String)>, VmError> {
+    let dp = arg_u64(args, i) as *const DictRepr;
+    if dp.is_null() {
+        return Ok(Vec::new());
+    }
+    // SAFETY: dp is a heap DictRepr pointer.
+    let handle = unsafe { (*dp).handle } as usize;
+    let raw: Vec<(String, u64)> = with_dict_slot(interp, handle, |slot| {
+        slot.data.iter().map(|(k, v)| (k.clone(), *v)).collect()
+    })?;
+    let mut out: Vec<(String, String)> = Vec::with_capacity(raw.len());
+    for (k, vptr) in raw {
+        // SAFETY: str-valued dict slots hold StringRepr pointers.
+        let v = unsafe { read_str(vptr as *const StringRepr) };
+        out.push((k, v));
+    }
+    Ok(out)
+}
+
+/// Build a `Dict[str, str]` heap object from `pairs` (keys as-is).
+fn m65_build_str_dict(
+    interp: &mut Interpreter,
+    pairs: Vec<(String, String)>,
+) -> Result<u64, VmError> {
+    // Allocate all value strings first (needs `&mut interp`), then insert
+    // under the dict-table borrow.
+    let mut kvs: Vec<(String, u64)> = Vec::with_capacity(pairs.len());
+    for (k, v) in pairs {
+        let vp = interp.alloc_string(&v) as u64;
+        kvs.push((k, vp));
+    }
+    let dp = interp.alloc_dict(0);
+    // SAFETY: freshly allocated DictRepr.
+    let handle = unsafe { (*dp).handle } as usize;
+    with_dict_slot_mut(interp, handle, |slot| {
+        for (k, vp) in kvs {
+            slot.data.insert(k, vp);
+        }
+    })?;
+    Ok(dp as u64)
+}
+
+/// Build the per-request Content-Type header list (empty when blank).
+fn m65_ct_header(ct: &str) -> Vec<(String, String)> {
+    if ct.is_empty() {
+        Vec::new()
+    } else {
+        vec![("Content-Type".into(), ct.to_string())]
+    }
+}
+
+/// Serialise a `JsonValue` argument (at index `i`) to a compact JSON
+/// string via the §9.31 encoder.
+fn m65_json_body(interp: &Interpreter, args: &[u64], i: usize) -> String {
+    let root = arg_u64(args, i) as *const u8;
+    let mut buf = String::new();
+    m34_stringify_into(interp, root, &mut buf, false, 0, 0);
+    buf
 }
 
 fn m34_alloc_jnull(interp: &mut Interpreter) -> *mut u8 {
