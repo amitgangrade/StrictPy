@@ -2604,6 +2604,221 @@ pub enum NativeFn {
     /// runtime error). Overflow wraps in release, mirroring `IMul`/factorial.
     IntPow           = 1415,
 
+    // === WAVE3 LANE A: `requests` module (M65, ids 1500-1599) ==========
+    // Frozen contract: STRICTPY_SPEC.md §9.51. Handle-backed Response /
+    // Session classes + one-shot module functions. Do not renumber.
+    /// `Response.status() -> i64`
+    ReqRespStatus          = 1500,
+    /// `Response.ok() -> bool` — `200 <= status < 400`.
+    ReqRespOk              = 1501,
+    /// `Response.text() -> str` — body via str-as-byte-buffer.
+    ReqRespText            = 1502,
+    /// `Response.json() -> JsonValue` — raises ValueError on bad JSON.
+    ReqRespJson            = 1503,
+    /// `Response.header(name) -> str` — "" if absent, case-insensitive.
+    ReqRespHeader          = 1504,
+    /// `Response.headers() -> Dict[str, str]` — keys lowercased.
+    ReqRespHeaders         = 1505,
+    /// `Response.url() -> str` — final URL after redirects.
+    ReqRespUrl             = 1506,
+    /// `Response.raise_for_status() -> None` — IOError on 4xx/5xx.
+    ReqRespRaiseForStatus  = 1507,
+    /// `Session.set_header(name, value) -> None`
+    ReqSessionSetHeader    = 1511,
+    /// `Session.set_timeout_ms(ms) -> None` — default 30000.
+    ReqSessionSetTimeoutMs = 1512,
+    /// `Session.set_max_redirects(n) -> None` — default 10, 0 = no follow.
+    ReqSessionSetMaxRedirects = 1513,
+    /// `Session.get(url) -> Response`
+    ReqSessionGet          = 1514,
+    /// `Session.get_with(url, params, headers) -> Response`
+    ReqSessionGetWith      = 1515,
+    /// `Session.post(url, body, content_type) -> Response`
+    ReqSessionPost         = 1516,
+    /// `Session.post_json(url, body: JsonValue) -> Response`
+    ReqSessionPostJson     = 1517,
+    /// `Session.post_form(url, form: Dict[str,str]) -> Response`
+    ReqSessionPostForm     = 1518,
+    /// `Session.put(url, body, content_type) -> Response`
+    ReqSessionPut          = 1519,
+    /// `Session.delete(url) -> Response`
+    ReqSessionDelete       = 1520,
+    /// `Session.head(url) -> Response`
+    ReqSessionHead         = 1521,
+    /// `Session.download(url, path) -> i64` — bytes written.
+    ReqSessionDownload     = 1522,
+    /// `Session.close() -> None` — frees slot; reuse raises ValueError.
+    ReqSessionClose        = 1523,
+    /// `requests.get(url) -> Response`
+    ReqGet                 = 1530,
+    /// `requests.get_with(url, params, headers) -> Response`
+    ReqGetWith             = 1531,
+    /// `requests.post(url, body, content_type) -> Response`
+    ReqPost                = 1532,
+    /// `requests.post_json(url, body) -> Response`
+    ReqPostJson            = 1533,
+    /// `requests.post_form(url, form) -> Response`
+    ReqPostForm            = 1534,
+    /// `requests.put(url, body, content_type) -> Response`
+    ReqPut                 = 1535,
+    /// `requests.delete(url) -> Response`
+    ReqDelete              = 1536,
+    /// `requests.head(url) -> Response`
+    ReqHead                = 1537,
+    /// `requests.download(url, path) -> i64`
+    ReqDownload            = 1538,
+    /// `requests.session() -> Session`
+    ReqSessionNew          = 1539,
+    // === END WAVE3 LANE A ==============================================
+
+    // === WAVE3 LANE B: `ndarray` module (M66, ids 1600-1699) ==========
+    // Frozen contract: STRICTPY_SPEC.md §9.52. Handle-backed NDArray
+    // (f64, 1-D/2-D, copies-not-views). Do not renumber.
+    /// `ndarray.array(data: List[f64]) -> NDArray`
+    NdArray1     = 1600,
+    /// `ndarray.array2(data: List[List[f64]]) -> NDArray` — ValueError if ragged.
+    NdArray2     = 1601,
+    /// `ndarray.zeros(shape: List[i64]) -> NDArray`
+    NdZeros      = 1602,
+    /// `ndarray.ones(shape: List[i64]) -> NDArray`
+    NdOnes       = 1603,
+    /// `ndarray.full(shape: List[i64], value: f64) -> NDArray`
+    NdFull       = 1604,
+    /// `ndarray.arange(start, stop, step) -> NDArray`
+    NdArange     = 1605,
+    /// `ndarray.linspace(start, stop, num) -> NDArray`
+    NdLinspace   = 1606,
+    /// `ndarray.eye(n) -> NDArray`
+    NdEye        = 1607,
+    /// `ndarray.where_mask(mask, a, b) -> NDArray`
+    NdWhereMask  = 1608,
+    /// `NDArray.shape() -> List[i64]`
+    NdShape      = 1610,
+    /// `NDArray.size() -> i64`
+    NdSize       = 1611,
+    /// `NDArray.ndim() -> i64`
+    NdNdim       = 1612,
+    /// `NDArray.reshape(shape) -> NDArray` — ValueError on size mismatch.
+    NdReshape    = 1613,
+    /// `NDArray.transpose() -> NDArray`
+    NdTranspose  = 1614,
+    /// `NDArray.flatten() -> NDArray`
+    NdFlatten    = 1615,
+    /// `NDArray.add(other) -> NDArray` — elementwise, broadcast per §9.52.
+    NdAdd        = 1616,
+    /// `NDArray.sub(other) -> NDArray`
+    NdSub        = 1617,
+    /// `NDArray.mul(other) -> NDArray` — Hadamard, never matrix product.
+    NdMul        = 1618,
+    /// `NDArray.div(other) -> NDArray` — IEEE 754, no raise on /0.
+    NdDiv        = 1619,
+    /// `NDArray.adds(s: f64) -> NDArray`
+    NdAddS       = 1620,
+    /// `NDArray.subs(s: f64) -> NDArray`
+    NdSubS       = 1621,
+    /// `NDArray.muls(s: f64) -> NDArray`
+    NdMulS       = 1622,
+    /// `NDArray.divs(s: f64) -> NDArray`
+    NdDivS       = 1623,
+    /// `NDArray.neg() -> NDArray`
+    NdNeg        = 1624,
+    /// `NDArray.abs() -> NDArray`
+    NdAbs        = 1625,
+    /// `NDArray.sqrt() -> NDArray`
+    NdSqrt       = 1626,
+    /// `NDArray.exp() -> NDArray`
+    NdExp        = 1627,
+    /// `NDArray.log() -> NDArray` — natural log.
+    NdLog        = 1628,
+    /// `NDArray.powf(p: f64) -> NDArray`
+    NdPowf       = 1629,
+    /// `NDArray.sum() -> f64`
+    NdSum        = 1630,
+    /// `NDArray.mean() -> f64` — ValueError if empty.
+    NdMean       = 1631,
+    /// `NDArray.min() -> f64` — ValueError if empty.
+    NdMin        = 1632,
+    /// `NDArray.max() -> f64` — ValueError if empty.
+    NdMax        = 1633,
+    /// `NDArray.std() -> f64` — population (ddof=0).
+    NdStd        = 1634,
+    /// `NDArray.argmin() -> i64` — flat index.
+    NdArgmin     = 1635,
+    /// `NDArray.argmax() -> i64`
+    NdArgmax     = 1636,
+    /// `NDArray.sum_axis(axis) -> NDArray` — 2-D only.
+    NdSumAxis    = 1637,
+    /// `NDArray.mean_axis(axis) -> NDArray` — 2-D only.
+    NdMeanAxis   = 1638,
+    /// `NDArray.matmul(other) -> NDArray` — (m,k)×(k,n).
+    NdMatmul     = 1639,
+    /// `NDArray.dot(other) -> f64` — 1-D · 1-D.
+    NdDot        = 1640,
+    /// `NDArray.get(i) -> f64` — 1-D, IndexError on OOB.
+    NdGet        = 1641,
+    /// `NDArray.get2(i, j) -> f64` — 2-D.
+    NdGet2       = 1642,
+    /// `NDArray.set(i, v) -> None` — in-place, 1-D.
+    NdSet        = 1643,
+    /// `NDArray.set2(i, j, v) -> None` — in-place, 2-D.
+    NdSet2       = 1644,
+    /// `NDArray.row(i) -> NDArray` — copy.
+    NdRow        = 1645,
+    /// `NDArray.col(j) -> NDArray` — copy.
+    NdCol        = 1646,
+    /// `NDArray.slice(lo, hi) -> NDArray` — [lo, hi); rows if 2-D.
+    NdSlice      = 1647,
+    /// `NDArray.gt(s) -> NDArray` — 0.0/1.0 mask.
+    NdGt         = 1648,
+    /// `NDArray.lt(s) -> NDArray`
+    NdLt         = 1649,
+    /// `NDArray.ge(s) -> NDArray`
+    NdGe         = 1650,
+    /// `NDArray.le(s) -> NDArray`
+    NdLe         = 1651,
+    /// `NDArray.eq_mask(s) -> NDArray` — exact ==.
+    NdEqMask     = 1652,
+    /// `NDArray.clip(lo, hi) -> NDArray`
+    NdClip       = 1653,
+    /// `NDArray.to_list() -> List[f64]` — row-major flat.
+    NdToList     = 1654,
+    /// `NDArray.show() -> str` — numpy-ish repr.
+    NdShow       = 1655,
+    /// `NDArray.copy() -> NDArray`
+    NdCopy       = 1656,
+    /// `NDArray.free() -> None` — releases slot; reuse raises ValueError.
+    NdFree       = 1657,
+    // === END WAVE3 LANE B ==============================================
+
+    // === WAVE3 LANE C: `crypto` module (M67, ids 1700-1799) ===========
+    // Frozen contract: STRICTPY_SPEC.md §9.53. Flat functions, bytes ride
+    // str-as-byte-buffer. Digests/HMAC stay in hashlib. Do not renumber.
+    /// `crypto.random_bytes(n) -> str` — OS CSPRNG; ValueError if n<=0 or >1MiB.
+    CryptoRandomBytes     = 1700,
+    /// `crypto.aes_gcm_encrypt(key32, nonce12, plaintext, aad) -> str` — tag appended.
+    CryptoAesGcmEncrypt   = 1701,
+    /// `crypto.aes_gcm_decrypt(key32, nonce12, ciphertext, aad) -> str` — ValueError on auth fail.
+    CryptoAesGcmDecrypt   = 1702,
+    /// `crypto.pbkdf2_sha256(password, salt, iterations, dklen) -> str`
+    CryptoPbkdf2Sha256    = 1703,
+    /// `crypto.hkdf_sha256(ikm, salt, info, dklen) -> str`
+    CryptoHkdfSha256      = 1704,
+    /// `crypto.ed25519_keygen() -> Tuple[str, str]` — (sk32, pk32).
+    CryptoEd25519Keygen   = 1705,
+    /// `crypto.ed25519_public_key(sk) -> str`
+    CryptoEd25519PublicKey = 1706,
+    /// `crypto.ed25519_sign(sk, msg) -> str` — 64-byte sig.
+    CryptoEd25519Sign     = 1707,
+    /// `crypto.ed25519_verify(pk, msg, sig) -> bool`
+    CryptoEd25519Verify   = 1708,
+    /// `crypto.constant_time_eq(a, b) -> bool`
+    CryptoConstantTimeEq  = 1709,
+    /// `crypto.jwt_encode(claims: JsonValue, key, alg) -> str` — HS256 | EdDSA.
+    CryptoJwtEncode       = 1710,
+    /// `crypto.jwt_decode(token, key, alg) -> JsonValue` — ValueError on bad sig/expiry.
+    CryptoJwtDecode       = 1711,
+    // === END WAVE3 LANE C ==============================================
+
     // ── 120+: misc ──────────────────────────────────────────────────────
     /// Fallback for any unrecognised prelude/stdlib symbol the M3 lowerer
     /// encounters. The VM treats this as a runtime error.
@@ -3489,6 +3704,109 @@ impl NativeFn {
             1413 => Some(Self::FractionToStr),
             1414 => Some(Self::DecimalToF64),
             1415 => Some(Self::IntPow),
+            // === WAVE3 LANE A: requests (M65) ===
+            1500 => Some(Self::ReqRespStatus),
+            1501 => Some(Self::ReqRespOk),
+            1502 => Some(Self::ReqRespText),
+            1503 => Some(Self::ReqRespJson),
+            1504 => Some(Self::ReqRespHeader),
+            1505 => Some(Self::ReqRespHeaders),
+            1506 => Some(Self::ReqRespUrl),
+            1507 => Some(Self::ReqRespRaiseForStatus),
+            1511 => Some(Self::ReqSessionSetHeader),
+            1512 => Some(Self::ReqSessionSetTimeoutMs),
+            1513 => Some(Self::ReqSessionSetMaxRedirects),
+            1514 => Some(Self::ReqSessionGet),
+            1515 => Some(Self::ReqSessionGetWith),
+            1516 => Some(Self::ReqSessionPost),
+            1517 => Some(Self::ReqSessionPostJson),
+            1518 => Some(Self::ReqSessionPostForm),
+            1519 => Some(Self::ReqSessionPut),
+            1520 => Some(Self::ReqSessionDelete),
+            1521 => Some(Self::ReqSessionHead),
+            1522 => Some(Self::ReqSessionDownload),
+            1523 => Some(Self::ReqSessionClose),
+            1530 => Some(Self::ReqGet),
+            1531 => Some(Self::ReqGetWith),
+            1532 => Some(Self::ReqPost),
+            1533 => Some(Self::ReqPostJson),
+            1534 => Some(Self::ReqPostForm),
+            1535 => Some(Self::ReqPut),
+            1536 => Some(Self::ReqDelete),
+            1537 => Some(Self::ReqHead),
+            1538 => Some(Self::ReqDownload),
+            1539 => Some(Self::ReqSessionNew),
+            // === WAVE3 LANE B: ndarray (M66) ===
+            1600 => Some(Self::NdArray1),
+            1601 => Some(Self::NdArray2),
+            1602 => Some(Self::NdZeros),
+            1603 => Some(Self::NdOnes),
+            1604 => Some(Self::NdFull),
+            1605 => Some(Self::NdArange),
+            1606 => Some(Self::NdLinspace),
+            1607 => Some(Self::NdEye),
+            1608 => Some(Self::NdWhereMask),
+            1610 => Some(Self::NdShape),
+            1611 => Some(Self::NdSize),
+            1612 => Some(Self::NdNdim),
+            1613 => Some(Self::NdReshape),
+            1614 => Some(Self::NdTranspose),
+            1615 => Some(Self::NdFlatten),
+            1616 => Some(Self::NdAdd),
+            1617 => Some(Self::NdSub),
+            1618 => Some(Self::NdMul),
+            1619 => Some(Self::NdDiv),
+            1620 => Some(Self::NdAddS),
+            1621 => Some(Self::NdSubS),
+            1622 => Some(Self::NdMulS),
+            1623 => Some(Self::NdDivS),
+            1624 => Some(Self::NdNeg),
+            1625 => Some(Self::NdAbs),
+            1626 => Some(Self::NdSqrt),
+            1627 => Some(Self::NdExp),
+            1628 => Some(Self::NdLog),
+            1629 => Some(Self::NdPowf),
+            1630 => Some(Self::NdSum),
+            1631 => Some(Self::NdMean),
+            1632 => Some(Self::NdMin),
+            1633 => Some(Self::NdMax),
+            1634 => Some(Self::NdStd),
+            1635 => Some(Self::NdArgmin),
+            1636 => Some(Self::NdArgmax),
+            1637 => Some(Self::NdSumAxis),
+            1638 => Some(Self::NdMeanAxis),
+            1639 => Some(Self::NdMatmul),
+            1640 => Some(Self::NdDot),
+            1641 => Some(Self::NdGet),
+            1642 => Some(Self::NdGet2),
+            1643 => Some(Self::NdSet),
+            1644 => Some(Self::NdSet2),
+            1645 => Some(Self::NdRow),
+            1646 => Some(Self::NdCol),
+            1647 => Some(Self::NdSlice),
+            1648 => Some(Self::NdGt),
+            1649 => Some(Self::NdLt),
+            1650 => Some(Self::NdGe),
+            1651 => Some(Self::NdLe),
+            1652 => Some(Self::NdEqMask),
+            1653 => Some(Self::NdClip),
+            1654 => Some(Self::NdToList),
+            1655 => Some(Self::NdShow),
+            1656 => Some(Self::NdCopy),
+            1657 => Some(Self::NdFree),
+            // === WAVE3 LANE C: crypto (M67) ===
+            1700 => Some(Self::CryptoRandomBytes),
+            1701 => Some(Self::CryptoAesGcmEncrypt),
+            1702 => Some(Self::CryptoAesGcmDecrypt),
+            1703 => Some(Self::CryptoPbkdf2Sha256),
+            1704 => Some(Self::CryptoHkdfSha256),
+            1705 => Some(Self::CryptoEd25519Keygen),
+            1706 => Some(Self::CryptoEd25519PublicKey),
+            1707 => Some(Self::CryptoEd25519Sign),
+            1708 => Some(Self::CryptoEd25519Verify),
+            1709 => Some(Self::CryptoConstantTimeEq),
+            1710 => Some(Self::CryptoJwtEncode),
+            1711 => Some(Self::CryptoJwtDecode),
             0xFFFF_FFFF => Some(Self::Unknown),
             _ => None,
         }

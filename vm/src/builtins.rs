@@ -2855,6 +2855,133 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
             let p = interp.alloc_string(&hex);
             Ok(p as u64)
         }
+        // === WAVE3 LANE A: requests (M65, ids 1500-1539) ================
+        // Scaffold trap arms — Lane A replaces everything inside this
+        // marker region with real handlers (contract: spec §9.51).
+        NativeFn::ReqRespStatus
+        | NativeFn::ReqRespOk
+        | NativeFn::ReqRespText
+        | NativeFn::ReqRespJson
+        | NativeFn::ReqRespHeader
+        | NativeFn::ReqRespHeaders
+        | NativeFn::ReqRespUrl
+        | NativeFn::ReqRespRaiseForStatus
+        | NativeFn::ReqSessionSetHeader
+        | NativeFn::ReqSessionSetTimeoutMs
+        | NativeFn::ReqSessionSetMaxRedirects
+        | NativeFn::ReqSessionGet
+        | NativeFn::ReqSessionGetWith
+        | NativeFn::ReqSessionPost
+        | NativeFn::ReqSessionPostJson
+        | NativeFn::ReqSessionPostForm
+        | NativeFn::ReqSessionPut
+        | NativeFn::ReqSessionDelete
+        | NativeFn::ReqSessionHead
+        | NativeFn::ReqSessionDownload
+        | NativeFn::ReqSessionClose
+        | NativeFn::ReqGet
+        | NativeFn::ReqGetWith
+        | NativeFn::ReqPost
+        | NativeFn::ReqPostJson
+        | NativeFn::ReqPostForm
+        | NativeFn::ReqPut
+        | NativeFn::ReqDelete
+        | NativeFn::ReqHead
+        | NativeFn::ReqDownload
+        | NativeFn::ReqSessionNew => {
+            Err(VmError::Trap(
+                "M65 requests: not yet implemented (wave-3 Lane A scaffold)".into(),
+            ))
+        }
+        // === END WAVE3 LANE A ===========================================
+
+        // === WAVE3 LANE B: ndarray (M66, ids 1600-1657) =================
+        // Scaffold trap arms — Lane B replaces everything inside this
+        // marker region with real handlers (contract: spec §9.52).
+        NativeFn::NdArray1
+        | NativeFn::NdArray2
+        | NativeFn::NdZeros
+        | NativeFn::NdOnes
+        | NativeFn::NdFull
+        | NativeFn::NdArange
+        | NativeFn::NdLinspace
+        | NativeFn::NdEye
+        | NativeFn::NdWhereMask
+        | NativeFn::NdShape
+        | NativeFn::NdSize
+        | NativeFn::NdNdim
+        | NativeFn::NdReshape
+        | NativeFn::NdTranspose
+        | NativeFn::NdFlatten
+        | NativeFn::NdAdd
+        | NativeFn::NdSub
+        | NativeFn::NdMul
+        | NativeFn::NdDiv
+        | NativeFn::NdAddS
+        | NativeFn::NdSubS
+        | NativeFn::NdMulS
+        | NativeFn::NdDivS
+        | NativeFn::NdNeg
+        | NativeFn::NdAbs
+        | NativeFn::NdSqrt
+        | NativeFn::NdExp
+        | NativeFn::NdLog
+        | NativeFn::NdPowf
+        | NativeFn::NdSum
+        | NativeFn::NdMean
+        | NativeFn::NdMin
+        | NativeFn::NdMax
+        | NativeFn::NdStd
+        | NativeFn::NdArgmin
+        | NativeFn::NdArgmax
+        | NativeFn::NdSumAxis
+        | NativeFn::NdMeanAxis
+        | NativeFn::NdMatmul
+        | NativeFn::NdDot
+        | NativeFn::NdGet
+        | NativeFn::NdGet2
+        | NativeFn::NdSet
+        | NativeFn::NdSet2
+        | NativeFn::NdRow
+        | NativeFn::NdCol
+        | NativeFn::NdSlice
+        | NativeFn::NdGt
+        | NativeFn::NdLt
+        | NativeFn::NdGe
+        | NativeFn::NdLe
+        | NativeFn::NdEqMask
+        | NativeFn::NdClip
+        | NativeFn::NdToList
+        | NativeFn::NdShow
+        | NativeFn::NdCopy
+        | NativeFn::NdFree => {
+            Err(VmError::Trap(
+                "M66 ndarray: not yet implemented (wave-3 Lane B scaffold)".into(),
+            ))
+        }
+        // === END WAVE3 LANE B ===========================================
+
+        // === WAVE3 LANE C: crypto (M67, ids 1700-1711) ==================
+        // Scaffold trap arms — Lane C replaces everything inside this
+        // marker region with real handlers (contract: spec §9.53).
+        NativeFn::CryptoRandomBytes
+        | NativeFn::CryptoAesGcmEncrypt
+        | NativeFn::CryptoAesGcmDecrypt
+        | NativeFn::CryptoPbkdf2Sha256
+        | NativeFn::CryptoHkdfSha256
+        | NativeFn::CryptoEd25519Keygen
+        | NativeFn::CryptoEd25519PublicKey
+        | NativeFn::CryptoEd25519Sign
+        | NativeFn::CryptoEd25519Verify
+        | NativeFn::CryptoConstantTimeEq
+        | NativeFn::CryptoJwtEncode
+        | NativeFn::CryptoJwtDecode => {
+            Err(VmError::Trap(
+                "M67 crypto: not yet implemented (wave-3 Lane C scaffold)".into(),
+            ))
+        }
+        // === END WAVE3 LANE C ===========================================
+
         NativeFn::HashlibHmacSha256 => {
             use hmac::{Hmac, Mac};
             use sha2::Sha256;

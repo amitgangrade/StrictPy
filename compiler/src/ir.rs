@@ -7373,6 +7373,35 @@ fn lower_method_call(
                     },
                 );
             }
+            // M65 (wave-3 Lane A): `requests` Response / Session method
+            // dispatch. Both classes are `is_native: true` handle-backed,
+            // and method names (`get`, `head`, `close`, `text`, `json`)
+            // collide with str/Dict/io.File methods, so intercept here.
+            if let Some(nid) = m65_requests_class_method_native_id_by_name(
+                layout.name.as_str(), method,
+            ) {
+                return fb.push_value(
+                    ret_ty,
+                    ValueKind::Op {
+                        op: IROp::NativeCall { native_id: nid },
+                        args: arg_vs,
+                    },
+                );
+            }
+            // M66 (wave-3 Lane B): `ndarray` NDArray method dispatch.
+            // Same shape; names like `get`, `min`, `max`, `sum`, `copy`
+            // collide with existing prelude methods.
+            if let Some(nid) = m66_ndarray_class_method_native_id_by_name(
+                layout.name.as_str(), method,
+            ) {
+                return fb.push_value(
+                    ret_ty,
+                    ValueKind::Op {
+                        op: IROp::NativeCall { native_id: nid },
+                        args: arg_vs,
+                    },
+                );
+            }
         }
     }
 
@@ -7952,6 +7981,102 @@ fn m34_json_class_method_native_id_by_name(
         ("Hasher",  "update")    => NativeFn::HasherUpdate    as u32,
         ("Hasher",  "hexdigest") => NativeFn::HasherHexdigest as u32,
         ("Hasher",  "algorithm") => NativeFn::HasherAlgorithm as u32,
+        _ => return None,
+    })
+}
+
+/// M65 (wave-3 Lane A): dispatch a `requests` Response / Session method
+/// by class name + method name. Frozen contract: STRICTPY_SPEC.md §9.51.
+/// Returns `None` for any other (class, method) pair so the caller falls
+/// through to the regular dispatch.
+fn m65_requests_class_method_native_id_by_name(
+    class_name: &str,
+    method: &str,
+) -> Option<u32> {
+    Some(match (class_name, method) {
+        ("Response", "status")            => NativeFn::ReqRespStatus         as u32,
+        ("Response", "ok")                => NativeFn::ReqRespOk             as u32,
+        ("Response", "text")              => NativeFn::ReqRespText           as u32,
+        ("Response", "json")              => NativeFn::ReqRespJson           as u32,
+        ("Response", "header")            => NativeFn::ReqRespHeader         as u32,
+        ("Response", "headers")           => NativeFn::ReqRespHeaders        as u32,
+        ("Response", "url")               => NativeFn::ReqRespUrl            as u32,
+        ("Response", "raise_for_status")  => NativeFn::ReqRespRaiseForStatus as u32,
+        ("Session",  "set_header")        => NativeFn::ReqSessionSetHeader   as u32,
+        ("Session",  "set_timeout_ms")    => NativeFn::ReqSessionSetTimeoutMs as u32,
+        ("Session",  "set_max_redirects") => NativeFn::ReqSessionSetMaxRedirects as u32,
+        ("Session",  "get")               => NativeFn::ReqSessionGet         as u32,
+        ("Session",  "get_with")          => NativeFn::ReqSessionGetWith     as u32,
+        ("Session",  "post")              => NativeFn::ReqSessionPost        as u32,
+        ("Session",  "post_json")         => NativeFn::ReqSessionPostJson    as u32,
+        ("Session",  "post_form")         => NativeFn::ReqSessionPostForm    as u32,
+        ("Session",  "put")               => NativeFn::ReqSessionPut         as u32,
+        ("Session",  "delete")            => NativeFn::ReqSessionDelete      as u32,
+        ("Session",  "head")              => NativeFn::ReqSessionHead        as u32,
+        ("Session",  "download")          => NativeFn::ReqSessionDownload    as u32,
+        ("Session",  "close")             => NativeFn::ReqSessionClose       as u32,
+        _ => return None,
+    })
+}
+
+/// M66 (wave-3 Lane B): dispatch an `ndarray` NDArray method by class
+/// name + method name. Frozen contract: STRICTPY_SPEC.md §9.52.
+fn m66_ndarray_class_method_native_id_by_name(
+    class_name: &str,
+    method: &str,
+) -> Option<u32> {
+    if class_name != "NDArray" {
+        return None;
+    }
+    Some(match method {
+        "shape"     => NativeFn::NdShape     as u32,
+        "size"      => NativeFn::NdSize      as u32,
+        "ndim"      => NativeFn::NdNdim      as u32,
+        "reshape"   => NativeFn::NdReshape   as u32,
+        "transpose" => NativeFn::NdTranspose as u32,
+        "flatten"   => NativeFn::NdFlatten   as u32,
+        "add"       => NativeFn::NdAdd       as u32,
+        "sub"       => NativeFn::NdSub       as u32,
+        "mul"       => NativeFn::NdMul       as u32,
+        "div"       => NativeFn::NdDiv       as u32,
+        "adds"      => NativeFn::NdAddS      as u32,
+        "subs"      => NativeFn::NdSubS      as u32,
+        "muls"      => NativeFn::NdMulS      as u32,
+        "divs"      => NativeFn::NdDivS      as u32,
+        "neg"       => NativeFn::NdNeg       as u32,
+        "abs"       => NativeFn::NdAbs       as u32,
+        "sqrt"      => NativeFn::NdSqrt      as u32,
+        "exp"       => NativeFn::NdExp       as u32,
+        "log"       => NativeFn::NdLog       as u32,
+        "powf"      => NativeFn::NdPowf      as u32,
+        "sum"       => NativeFn::NdSum       as u32,
+        "mean"      => NativeFn::NdMean      as u32,
+        "min"       => NativeFn::NdMin       as u32,
+        "max"       => NativeFn::NdMax       as u32,
+        "std"       => NativeFn::NdStd       as u32,
+        "argmin"    => NativeFn::NdArgmin    as u32,
+        "argmax"    => NativeFn::NdArgmax    as u32,
+        "sum_axis"  => NativeFn::NdSumAxis   as u32,
+        "mean_axis" => NativeFn::NdMeanAxis  as u32,
+        "matmul"    => NativeFn::NdMatmul    as u32,
+        "dot"       => NativeFn::NdDot       as u32,
+        "get"       => NativeFn::NdGet       as u32,
+        "get2"      => NativeFn::NdGet2      as u32,
+        "set"       => NativeFn::NdSet       as u32,
+        "set2"      => NativeFn::NdSet2      as u32,
+        "row"       => NativeFn::NdRow       as u32,
+        "col"       => NativeFn::NdCol       as u32,
+        "slice"     => NativeFn::NdSlice     as u32,
+        "gt"        => NativeFn::NdGt        as u32,
+        "lt"        => NativeFn::NdLt        as u32,
+        "ge"        => NativeFn::NdGe        as u32,
+        "le"        => NativeFn::NdLe        as u32,
+        "eq_mask"   => NativeFn::NdEqMask    as u32,
+        "clip"      => NativeFn::NdClip      as u32,
+        "to_list"   => NativeFn::NdToList    as u32,
+        "show"      => NativeFn::NdShow      as u32,
+        "copy"      => NativeFn::NdCopy      as u32,
+        "free"      => NativeFn::NdFree      as u32,
         _ => return None,
     })
 }

@@ -4489,6 +4489,265 @@ fn ran(t: i64)      -> i64
 
 ---
 
+### 9.51 Module `requests` (v0.3 — M65, wave-3 Lane A)
+
+A requests-shaped ergonomic HTTP layer over the same `ureq` engine that
+powers `http_client` (§9.42). Where §9.42 returns raw
+`Tuple[i32, str]` pairs and opens a fresh socket per call, `requests`
+returns a `Response` object and offers a `Session` with connection
+pooling (a persistent `ureq::Agent`), a cookie jar (ureq `cookies`
+feature), default headers, and configurable timeouts/redirects.
+
+Both classes are handle-backed natives (`is_native: true`, zero
+declared fields — the Hasher / io.File pattern): the VM owns the real
+state in `SharedVm` slot tables (`req_sessions`, `req_responses`);
+user code sees only the class values. Neither class has a callable
+constructor — `Response` values come from request calls, `Session`
+values from `requests.session()`.
+
+NativeFn ids: **1500–1599** (Lane A block). Assignments are frozen:
+
+```
+# Module functions (one-shot; fresh default session per call)
+fn get(url: str) -> Response                                      # 1530
+fn get_with(url: str, params: Dict[str, str],
+            headers: Dict[str, str]) -> Response                  # 1531
+fn post(url: str, body: str, content_type: str) -> Response       # 1532
+fn post_json(url: str, body: JsonValue) -> Response               # 1533
+fn post_form(url: str, form: Dict[str, str]) -> Response          # 1534
+fn put(url: str, body: str, content_type: str) -> Response        # 1535
+fn delete(url: str) -> Response                                   # 1536
+fn head(url: str) -> Response                                     # 1537
+fn download(url: str, path: str) -> i64      # bytes written      # 1538
+fn session() -> Session                                           # 1539
+
+final class Response:                        # handle-backed, no ctor
+    fn status() -> i64                                            # 1500
+    fn ok() -> bool                          # 200 <= status < 400 # 1501
+    fn text() -> str                                              # 1502
+    fn json() -> JsonValue                   # raises ValueError   # 1503
+    fn header(name: str) -> str              # "" if absent; name
+                                             # matched case-insensitively
+                                                                   # 1504
+    fn headers() -> Dict[str, str]           # keys lowercased     # 1505
+    fn url() -> str                          # final URL after redirects
+                                                                   # 1506
+    fn raise_for_status() -> None            # IOError on 4xx/5xx  # 1507
+
+final class Session:                         # handle-backed, no ctor
+    fn set_header(name: str, value: str) -> None                  # 1511
+    fn set_timeout_ms(ms: i64) -> None       # connect+read; default 30000
+                                                                   # 1512
+    fn set_max_redirects(n: i64) -> None     # default 10; 0 = no follow
+                                                                   # 1513
+    fn get(url: str) -> Response                                  # 1514
+    fn get_with(url: str, params: Dict[str, str],
+                headers: Dict[str, str]) -> Response              # 1515
+    fn post(url: str, body: str, content_type: str) -> Response   # 1516
+    fn post_json(url: str, body: JsonValue) -> Response           # 1517
+    fn post_form(url: str, form: Dict[str, str]) -> Response      # 1518
+    fn put(url: str, body: str, content_type: str) -> Response    # 1519
+    fn delete(url: str) -> Response                               # 1520
+    fn head(url: str) -> Response                                 # 1521
+    fn download(url: str, path: str) -> i64                       # 1522
+    fn close() -> None                       # frees the slot; further
+                                             # use raises ValueError
+                                                                   # 1523
+```
+
+Semantics:
+
+* Network-level failures (DNS, connect, TLS, timeout) raise `IOError`
+  with the transport message; HTTP error *statuses* do NOT raise —
+  they come back as a normal `Response` (match Python requests).
+  `raise_for_status()` opts in to raising.
+* `post_json` serialises via the §9.31 `json` encoder and sends
+  `Content-Type: application/json`. `post_form` urlencodes via the
+  §9.42 helper and sends `application/x-www-form-urlencoded`.
+* `get_with` merges `params` into the query string (urlencoded,
+  appended with `?`/`&` as needed); `headers` apply to this request
+  only, layered over session defaults.
+* Response bodies are read fully into the slot at request time
+  (10 MiB cap, raising `IOError` beyond it — same cap ureq defaults
+  to for `into_string`); `text()` is a cheap re-read of the slot.
+  Bodies ride the str-as-byte-buffer convention (§9.40) so binary
+  downloads are exact; `download` streams to disk instead and has no
+  cap.
+* Cookies set by responses are stored per-Session and replayed on
+  subsequent requests to matching origins (ureq cookie store).
+  One-shot module functions see no cookies.
+* TLS trust = the statically embedded Mozilla root bundle
+  (`webpki-roots`, §9.41) — certifi parity out of the box.
+
+### 9.52 Module `ndarray` (v0.3 — M66, wave-3 Lane B)
+
+A numpy-shaped numeric array. v1 scope: **f64 only, 1-D and 2-D
+only, copies not views** — every op allocates a fresh array; there is
+no aliasing. `NDArray` is a handle-backed native class (the
+`tabular` DataFrame pattern): the buffer lives in a `SharedVm`
+slot table (`ndarrays`), entries are `{ shape: Vec<i64>, data:
+Vec<f64> }` with row-major layout. No new GC heap object type is
+introduced in v1.
+
+NativeFn ids: **1600–1699** (Lane B block). Assignments are frozen:
+
+```
+# Constructors (module functions)
+fn array(data: List[f64]) -> NDArray                              # 1600
+fn array2(data: List[List[f64]]) -> NDArray  # ValueError if ragged
+                                                                   # 1601
+fn zeros(shape: List[i64]) -> NDArray        # len 1 or 2          # 1602
+fn ones(shape: List[i64]) -> NDArray                              # 1603
+fn full(shape: List[i64], value: f64) -> NDArray                  # 1604
+fn arange(start: f64, stop: f64, step: f64) -> NDArray            # 1605
+fn linspace(start: f64, stop: f64, num: i64) -> NDArray           # 1606
+fn eye(n: i64) -> NDArray                                         # 1607
+fn where_mask(mask: NDArray, a: NDArray, b: NDArray) -> NDArray   # 1608
+
+final class NDArray:                         # handle-backed, no ctor
+    # introspection
+    fn shape() -> List[i64]                                       # 1610
+    fn size() -> i64                                              # 1611
+    fn ndim() -> i64                                              # 1612
+    fn reshape(shape: List[i64]) -> NDArray  # ValueError on size mismatch
+                                                                   # 1613
+    fn transpose() -> NDArray                # 1-D: identity copy  # 1614
+    fn flatten() -> NDArray                                       # 1615
+    # elementwise array ⊕ array (broadcasting: see semantics)
+    fn add(other: NDArray) -> NDArray                             # 1616
+    fn sub(other: NDArray) -> NDArray                             # 1617
+    fn mul(other: NDArray) -> NDArray                             # 1618
+    fn div(other: NDArray) -> NDArray                             # 1619
+    # elementwise array ⊕ scalar
+    fn adds(s: f64) -> NDArray                                    # 1620
+    fn subs(s: f64) -> NDArray                                    # 1621
+    fn muls(s: f64) -> NDArray                                    # 1622
+    fn divs(s: f64) -> NDArray                                    # 1623
+    fn neg() -> NDArray                                           # 1624
+    # elementwise unary
+    fn abs() -> NDArray                                           # 1625
+    fn sqrt() -> NDArray                                          # 1626
+    fn exp() -> NDArray                                           # 1627
+    fn log() -> NDArray                      # natural log         # 1628
+    fn powf(p: f64) -> NDArray                                    # 1629
+    # reductions (whole-array)
+    fn sum() -> f64                                               # 1630
+    fn mean() -> f64                         # ValueError if empty # 1631
+    fn min() -> f64                          # ValueError if empty # 1632
+    fn max() -> f64                          # ValueError if empty # 1633
+    fn std() -> f64                          # population (ddof=0) # 1634
+    fn argmin() -> i64                       # flat index          # 1635
+    fn argmax() -> i64                                            # 1636
+    # reductions (per-axis, 2-D only; axis 0 = down cols, 1 = across rows)
+    fn sum_axis(axis: i64) -> NDArray                             # 1637
+    fn mean_axis(axis: i64) -> NDArray                            # 1638
+    # linalg
+    fn matmul(other: NDArray) -> NDArray     # 2-D × 2-D           # 1639
+    fn dot(other: NDArray) -> f64            # 1-D · 1-D           # 1640
+    # element access (bounds-checked, IndexError on violation)
+    fn get(i: i64) -> f64                    # 1-D                 # 1641
+    fn get2(i: i64, j: i64) -> f64           # 2-D                 # 1642
+    fn set(i: i64, v: f64) -> None           # in-place, 1-D       # 1643
+    fn set2(i: i64, j: i64, v: f64) -> None  # in-place, 2-D       # 1644
+    fn row(i: i64) -> NDArray                # 2-D → 1-D copy      # 1645
+    fn col(j: i64) -> NDArray                # 2-D → 1-D copy      # 1646
+    fn slice(lo: i64, hi: i64) -> NDArray    # 1-D: [lo, hi);
+                                             # 2-D: row range      # 1647
+    # comparisons → 0.0 / 1.0 mask array (same shape)
+    fn gt(s: f64) -> NDArray                                      # 1648
+    fn lt(s: f64) -> NDArray                                      # 1649
+    fn ge(s: f64) -> NDArray                                      # 1650
+    fn le(s: f64) -> NDArray                                      # 1651
+    fn eq_mask(s: f64) -> NDArray            # exact ==            # 1652
+    fn clip(lo: f64, hi: f64) -> NDArray                          # 1653
+    # export / debug
+    fn to_list() -> List[f64]                # row-major flat      # 1654
+    fn show() -> str                         # numpy-ish repr      # 1655
+    fn copy() -> NDArray                                          # 1656
+    fn free() -> None                        # release the slot; further
+                                             # use raises ValueError
+                                                                   # 1657
+```
+
+Semantics:
+
+* **Broadcasting** (binary array ops): shapes must be equal, OR one
+  operand is 1-D of length `cols` against a 2-D `(rows, cols)` (row
+  broadcast), OR one operand is `(rows, 1)` against `(rows, cols)`
+  (column broadcast). Anything else raises `ValueError` naming both
+  shapes. Scalar broadcast uses the dedicated `*s` methods.
+* `matmul` requires `(m, k) × (k, n)`; `dot` requires equal-length
+  1-D. Plain `mul` is elementwise (Hadamard), never matrix product —
+  exactly numpy's `*` vs `@` split.
+* Division by zero follows IEEE 754 (`inf` / `nan`), no raise.
+* Handles are manually freed (`free()`) or live for the program;
+  the interpreter GC does not scan slot tables in v1 (same policy as
+  `tabular`). `where_mask` treats mask entries `!= 0.0` as true.
+* `show()` formats like numpy: 1-D `[1.0, 2.0]`, 2-D one row per
+  line, truncated with `...` past 6 rows/cols per edge.
+
+### 9.53 Module `crypto` (v0.3 — M67, wave-3 Lane C)
+
+Symmetric AEAD, key derivation, Ed25519 signatures, and JWT — the
+pyjwt/cryptography 80% case. Pure-Rust RustCrypto crates (`aes-gcm`,
+`pbkdf2`, `hkdf`, `ed25519-dalek`, `getrandom`), same family as the
+§9.20 `hashlib` deps. Flat module functions only — no classes, no
+handles. All byte parameters/returns ride the str-as-byte-buffer
+convention (§9.40); use `base64` (§9.19) / `hashlib` hex helpers for
+armoring. Digests + HMAC-SHA256 stay in `hashlib` — `crypto` does
+not duplicate them.
+
+NativeFn ids: **1700–1799** (Lane C block). Assignments are frozen:
+
+```
+fn random_bytes(n: i64) -> str               # OS CSPRNG            # 1700
+# AES-256-GCM. key: 32 bytes, nonce: 12 bytes (ValueError otherwise).
+# Ciphertext carries the 16-byte GCM tag appended (RustCrypto layout).
+fn aes_gcm_encrypt(key: str, nonce: str,
+                   plaintext: str, aad: str) -> str                # 1701
+fn aes_gcm_decrypt(key: str, nonce: str,
+                   ciphertext: str, aad: str) -> str
+                                             # ValueError on auth fail
+                                                                    # 1702
+fn pbkdf2_sha256(password: str, salt: str,
+                 iterations: i64, dklen: i64) -> str               # 1703
+fn hkdf_sha256(ikm: str, salt: str,
+               info: str, dklen: i64) -> str                       # 1704
+# Ed25519. Raw byte keys: sk 32, pk 32, sig 64.
+fn ed25519_keygen() -> Tuple[str, str]       # (sk, pk)             # 1705
+fn ed25519_public_key(sk: str) -> str                              # 1706
+fn ed25519_sign(sk: str, msg: str) -> str                          # 1707
+fn ed25519_verify(pk: str, msg: str, sig: str) -> bool             # 1708
+fn constant_time_eq(a: str, b: str) -> bool                        # 1709
+# JWT (RFC 7519). alg ∈ {"HS256", "EdDSA"}; ValueError otherwise.
+fn jwt_encode(claims: JsonValue, key: str, alg: str) -> str        # 1710
+# Verifies signature, then `exp`/`nbf` (±60s leeway) if present.
+# ValueError on bad signature, malformed token, or expiry.
+fn jwt_decode(token: str, key: str, alg: str) -> JsonValue         # 1711
+```
+
+Semantics:
+
+* `random_bytes` pulls from the OS CSPRNG (`getrandom`); `n <= 0` or
+  `n > 1 MiB` raises `ValueError`.
+* KDF bounds: `iterations` in `[1, 10_000_000]`, `dklen` in
+  `[1, 1024]`; out of range raises `ValueError`. HKDF-SHA256 caps
+  `dklen` at `255 * 32` per RFC 5869 — the tighter 1024 bound wins.
+* `constant_time_eq` compares in constant time for equal lengths;
+  differing lengths return `false` immediately (length is not
+  secret).
+* `jwt_encode` for `"HS256"` takes the raw key bytes; for `"EdDSA"`
+  the 32-byte Ed25519 sk. `jwt_decode` for `"EdDSA"` takes the pk.
+  Header is always exactly `{"alg": <alg>, "typ": "JWT"}`;
+  `jwt_decode` rejects tokens whose alg header differs from the
+  caller's `alg` argument (algorithm-confusion hardening — the key
+  never meets an attacker-chosen algorithm).
+* Test vectors: implementations must pass NIST CAVS AES-GCM cases,
+  RFC 6070 PBKDF2 cases, RFC 5869 HKDF cases, and RFC 8032 Ed25519
+  test vectors (included in `vm/tests/m67_crypto.rs`).
+
+---
+
 ## 10. Compiler Architecture
 
 ### 10.1 Pipeline

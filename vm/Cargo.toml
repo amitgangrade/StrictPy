@@ -112,8 +112,22 @@ rustls-pemfile = "2"
 # drops the cookie store we don't need.  `url` for spec-correct
 # URL parsing (handles IPv6 literals, IDN, etc. — alternatives all
 # hand-roll variations of the RFC 3986 grammar).
-ureq = { version = "2", default-features = false, features = ["tls"] }
+ureq = { version = "2", default-features = false, features = ["tls", "cookies"] }
 url = "2"
+# M65 (wave-3 Lane A): `requests` module reuses ureq; the `cookies`
+# feature (added above) turns on the per-Agent cookie store the Session
+# class exposes.
+# M67 (wave-3 Lane C): `crypto` stdlib module.  Same RustCrypto family
+# as the M22 hashlib deps — pure Rust, no system crypto library.
+# `aes-gcm` = AES-256-GCM AEAD; `pbkdf2`/`hkdf` key derivation;
+# `ed25519-dalek` signatures; `getrandom` OS CSPRNG; `subtle`
+# constant-time comparison (already transitive via the AEAD crates).
+aes-gcm = "0.10"
+pbkdf2 = "0.12"
+hkdf = "0.12"
+ed25519-dalek = "2"
+getrandom = "0.2"
+subtle = "2"
 sdl2 = { version = "0.37", features = ["bundled", "image"], optional = true }
 cranelift = { version = "0.115", optional = true }
 cranelift-jit = { version = "0.115", optional = true }

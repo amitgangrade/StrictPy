@@ -1999,6 +1999,16 @@ impl Resolver {
         }
         self.stdlib_modules.insert("hashlib".into(), hashlib_mod);
 
+        // === WAVE3 LANE C: `crypto` module (M67, ids 1700-1711) ========
+        // Lane C builds the module here: flat functions only, no classes.
+        // Copy the argparse StdlibModule shape below. For the
+        // `ed25519_keygen() -> Tuple[str, str]` return type, mirror how
+        // http_client builds its Tuple[i32, str] return types.
+        // `jwt_encode`/`jwt_decode` reference the JsonValue class type
+        // the way the json module items do. Frozen signatures + NativeFn
+        // ids: spec §9.53. Prefix all locals `m67_`.
+        // === END WAVE3 LANE C ===========================================
+
         // ── M22 (P2A): `argparse` module ───────────────────────────────
         // Builder-style CLI argument parser.  Phase 2's highest-ROI module:
         // every CLI tool (`echo.spy`, `sum_args.spy`, `minigrep.spy`)
@@ -4396,6 +4406,16 @@ impl Resolver {
         };
         self.stdlib_modules.insert("http_client".into(), http_client_mod);
 
+        // === WAVE3 LANE A: `requests` module (M65, ids 1500-1539) ======
+        // Lane A builds the module here: register the handle-backed
+        // `Response` + `Session` classes (copy the M37 DataFrame pattern
+        // ~40 lines below: fresh_class + make_symbol + class_name_to_id +
+        // class_layouts with is_native: true, payload_size: 0, full
+        // MethodSig lists), then the StdlibModule with the module
+        // functions. Frozen signatures + NativeFn ids: spec §9.51.
+        // Prefix all locals `m65_`.
+        // === END WAVE3 LANE A ===========================================
+
         // ── M37: `tabular` module (DataFrame + sealed Column hierarchy) ─
         //
         // First Pandas-shaped data package for v0.3.  First stdlib package
@@ -5665,6 +5685,16 @@ impl Resolver {
             });
         }
         self.stdlib_modules.insert("tabular".into(), m37_tabular_mod);
+
+        // === WAVE3 LANE B: `ndarray` module (M66, ids 1600-1657) =======
+        // Lane B builds the module here: register the handle-backed
+        // `NDArray` class (copy the M37 DataFrame pattern above:
+        // fresh_class + make_symbol + class_name_to_id + class_layouts
+        // with is_native: true, payload_size: 0, full MethodSig list),
+        // then the StdlibModule with the constructor functions.
+        // Frozen signatures + NativeFn ids: spec §9.52.
+        // Prefix all locals `m66_`.
+        // === END WAVE3 LANE B ===========================================
 
         // ── M52: `gfx` module ──────────────────────────────────────────
         let str_ty = Ty::Primitive(PrimTy::Str);
