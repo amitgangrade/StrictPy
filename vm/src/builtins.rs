@@ -3137,8 +3137,12 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         // === END WAVE3 LANE A ===========================================
 
         // === WAVE3 LANE B: ndarray (M66, ids 1600-1657) =================
-        // Scaffold trap arms — Lane B replaces everything inside this
-        // marker region with real handlers (contract: spec §9.52).
+        // Handle-backed NDArray family.  Every op is copies-not-views:
+        // read the receiver's slot (shape + data) out of the
+        // `ndarrays` table, run the pure kernel in `ndarray_impl`, and
+        // (for array results) mint a fresh handle.  All maths lives in
+        // `crate::ndarray_impl`; this arm is the VM glue — slot I/O,
+        // handle allocation, and NdError -> exception mapping.  Spec §9.52.
         NativeFn::NdArray1
         | NativeFn::NdArray2
         | NativeFn::NdZeros
@@ -3196,9 +3200,395 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         | NativeFn::NdShow
         | NativeFn::NdCopy
         | NativeFn::NdFree => {
-            Err(VmError::Trap(
-                "M66 ndarray: not yet implemented (wave-3 Lane B scaffold)".into(),
-            ))
+            use crate::ndarray_impl as ndi;
+            use std::sync::atomic::Ordering::SeqCst;
+
+            // ── lane-private glue (all inside this arm) ──────────────
+            fn m66_vm(e: ndi::NdError) -> VmError {
+                VmError::UncaughtException { type_name: e.kind.into(), message: e.msg }
+            }
+            /// Clone the receiver slot's (shape, data).  A missing
+            /// handle means the array was `free()`d (or never valid) —
+            /// spec §9.52 raises `ValueError` on use-after-free.
+            fn m66_load(interp: &Interpreter, recv: u64) -> Result<(Vec<i64>, Vec<f64>), VmError> {
+                let h = p4b_read_handle(recv);
+                let tbl = interp.shared.ndarrays.lock().unwrap();
+                match tbl.get(&h) {
+                    Some(s) => Ok((s.shape.clone(), s.data.clone())),
+                    None => Err(VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "NDArray: use of freed or invalid array (handle {})",
+                            h
+                        ),
+                    }),
+                }
+            }
+            /// Mint a fresh handle + heap wrapper for a result array.
+            fn m66_store(interp: &mut Interpreter, shape: Vec<i64>, data: Vec<f64>) -> u64 {
+                let h = interp.shared.next_ndarray_id.fetch_add(1, SeqCst);
+                interp
+                    .shared
+                    .ndarrays
+                    .lock()
+                    .unwrap()
+                    .insert(h, ndi::NdSlot { shape, data });
+                let obj = m34_alloc_class_obj(interp, "NDArray", 8);
+                // SAFETY: obj is a freshly-allocated Class object with an
+                // 8-byte payload; store the i64 handle at offset 0.
+                unsafe {
+                    let slot = obj.add(HDR) as *mut i64;
+                    std::ptr::write_unaligned(slot, h);
+                }
+                obj as u64
+            }
+            fn m66_read_f64_list(ptr: u64) -> Vec<f64> {
+                let lst = ptr as *const crate::object::ListRepr;
+                if lst.is_null() {
+                    return vec![];
+                }
+                // SAFETY: lst is a heap ListRepr; elements are f64 bits.
+                unsafe {
+                    (0..(*lst).length)
+                        .map(|j| {
+                            f64::from_bits(std::ptr::read_unaligned(
+                                ((*lst).data as *const u64).add(j),
+                            ))
+                        })
+                        .collect()
+                }
+            }
+            fn m66_read_i64_list(ptr: u64) -> Vec<i64> {
+                let lst = ptr as *const crate::object::ListRepr;
+                if lst.is_null() {
+                    return vec![];
+                }
+                // SAFETY: lst is a heap ListRepr; elements are i64.
+                unsafe {
+                    (0..(*lst).length)
+                        .map(|j| {
+                            std::ptr::read_unaligned(((*lst).data as *const u64).add(j)) as i64
+                        })
+                        .collect()
+                }
+            }
+            fn m66_read_f64_list2(ptr: u64) -> Vec<Vec<f64>> {
+                let lst = ptr as *const crate::object::ListRepr;
+                if lst.is_null() {
+                    return vec![];
+                }
+                // SAFETY: outer ListRepr; each element is an inner list ptr.
+                unsafe {
+                    (0..(*lst).length)
+                        .map(|j| {
+                            let inner = std::ptr::read_unaligned(
+                                ((*lst).data as *const u64).add(j),
+                            );
+                            m66_read_f64_list(inner)
+                        })
+                        .collect()
+                }
+            }
+            fn m66_build_i64_list(interp: &mut Interpreter, vals: &[i64]) -> u64 {
+                let lst = interp.alloc_list(vals.len());
+                for &v in vals {
+                    // SAFETY: lst freshly allocated with capacity.
+                    unsafe { interp.list_push(lst, v as u64) };
+                }
+                lst as u64
+            }
+            fn m66_build_f64_list(interp: &mut Interpreter, vals: &[f64]) -> u64 {
+                let lst = interp.alloc_list(vals.len());
+                for &v in vals {
+                    // SAFETY: lst freshly allocated with capacity.
+                    unsafe { interp.list_push(lst, v.to_bits()) };
+                }
+                lst as u64
+            }
+
+            // Shorthand: build an NDArray result from a kernel `NdResult`.
+            macro_rules! m66_arr {
+                ($interp:expr, $e:expr) => {{
+                    let (shape, data) = $e.map_err(m66_vm)?;
+                    Ok(m66_store($interp, shape, data))
+                }};
+            }
+            // Shorthand: elementwise unary map -> new NDArray.
+            macro_rules! m66_unary {
+                ($interp:expr, $f:expr) => {{
+                    let (shape, data) = m66_load($interp, arg_u64(args, 0))?;
+                    let (s, d) = ndi::map_unary(&shape, &data, $f);
+                    Ok(m66_store($interp, s, d))
+                }};
+            }
+            // Shorthand: comparison predicate -> 0/1 mask NDArray.
+            macro_rules! m66_cmp {
+                ($interp:expr, $pred:expr) => {{
+                    let (shape, data) = m66_load($interp, arg_u64(args, 0))?;
+                    let s_arg = arg_f64(args, 1);
+                    let pred = $pred;
+                    m66_arr!($interp, ndi::compare(&shape, &data, |x| pred(x, s_arg)))
+                }};
+            }
+
+            match nf {
+                // ── constructors (module functions, no receiver) ────
+                NativeFn::NdArray1 => {
+                    let data = m66_read_f64_list(arg_u64(args, 0));
+                    m66_arr!(interp, ndi::array1(&data))
+                }
+                NativeFn::NdArray2 => {
+                    let rows = m66_read_f64_list2(arg_u64(args, 0));
+                    m66_arr!(interp, ndi::array2(&rows))
+                }
+                NativeFn::NdZeros => {
+                    let shape = m66_read_i64_list(arg_u64(args, 0));
+                    m66_arr!(interp, ndi::zeros(&shape))
+                }
+                NativeFn::NdOnes => {
+                    let shape = m66_read_i64_list(arg_u64(args, 0));
+                    m66_arr!(interp, ndi::ones(&shape))
+                }
+                NativeFn::NdFull => {
+                    let shape = m66_read_i64_list(arg_u64(args, 0));
+                    let value = arg_f64(args, 1);
+                    m66_arr!(interp, ndi::full(&shape, value))
+                }
+                NativeFn::NdArange => {
+                    m66_arr!(
+                        interp,
+                        ndi::arange(arg_f64(args, 0), arg_f64(args, 1), arg_f64(args, 2))
+                    )
+                }
+                NativeFn::NdLinspace => {
+                    m66_arr!(
+                        interp,
+                        ndi::linspace(arg_f64(args, 0), arg_f64(args, 1), arg_i64(args, 2))
+                    )
+                }
+                NativeFn::NdEye => m66_arr!(interp, ndi::eye(arg_i64(args, 0))),
+                NativeFn::NdWhereMask => {
+                    let (sm, dm) = m66_load(interp, arg_u64(args, 0))?;
+                    let (sa, da) = m66_load(interp, arg_u64(args, 1))?;
+                    let (sb, db) = m66_load(interp, arg_u64(args, 2))?;
+                    m66_arr!(interp, ndi::where_mask(&sm, &dm, &sa, &da, &sb, &db))
+                }
+
+                // ── introspection ──────────────────────────────────
+                NativeFn::NdShape => {
+                    let (shape, _) = m66_load(interp, arg_u64(args, 0))?;
+                    Ok(m66_build_i64_list(interp, &shape))
+                }
+                NativeFn::NdSize => {
+                    let (_, data) = m66_load(interp, arg_u64(args, 0))?;
+                    Ok(data.len() as u64)
+                }
+                NativeFn::NdNdim => {
+                    let (shape, _) = m66_load(interp, arg_u64(args, 0))?;
+                    Ok(shape.len() as u64)
+                }
+                NativeFn::NdReshape => {
+                    let (shape, data) = m66_load(interp, arg_u64(args, 0))?;
+                    let new_shape = m66_read_i64_list(arg_u64(args, 1));
+                    m66_arr!(interp, ndi::reshape(&shape, &data, &new_shape))
+                }
+                NativeFn::NdTranspose => {
+                    let (shape, data) = m66_load(interp, arg_u64(args, 0))?;
+                    m66_arr!(interp, ndi::transpose(&shape, &data))
+                }
+                NativeFn::NdFlatten => {
+                    let (shape, data) = m66_load(interp, arg_u64(args, 0))?;
+                    m66_arr!(interp, ndi::flatten(&shape, &data))
+                }
+
+                // ── elementwise array ⊕ array (broadcasting) ────────
+                NativeFn::NdAdd | NativeFn::NdSub | NativeFn::NdMul | NativeFn::NdDiv => {
+                    let (sa, da) = m66_load(interp, arg_u64(args, 0))?;
+                    let (sb, db) = m66_load(interp, arg_u64(args, 1))?;
+                    let res = match nf {
+                        NativeFn::NdAdd => ndi::broadcast_binop(&sa, &da, &sb, &db, |x, y| x + y),
+                        NativeFn::NdSub => ndi::broadcast_binop(&sa, &da, &sb, &db, |x, y| x - y),
+                        NativeFn::NdMul => ndi::broadcast_binop(&sa, &da, &sb, &db, |x, y| x * y),
+                        _ => ndi::broadcast_binop(&sa, &da, &sb, &db, |x, y| x / y),
+                    };
+                    m66_arr!(interp, res)
+                }
+
+                // ── elementwise array ⊕ scalar ──────────────────────
+                NativeFn::NdAddS => {
+                    let s = arg_f64(args, 1);
+                    m66_unary!(interp, |x| x + s)
+                }
+                NativeFn::NdSubS => {
+                    let s = arg_f64(args, 1);
+                    m66_unary!(interp, |x| x - s)
+                }
+                NativeFn::NdMulS => {
+                    let s = arg_f64(args, 1);
+                    m66_unary!(interp, |x| x * s)
+                }
+                NativeFn::NdDivS => {
+                    let s = arg_f64(args, 1);
+                    m66_unary!(interp, |x| x / s)
+                }
+                NativeFn::NdNeg => m66_unary!(interp, |x| -x),
+
+                // ── elementwise unary ───────────────────────────────
+                NativeFn::NdAbs => m66_unary!(interp, |x: f64| x.abs()),
+                NativeFn::NdSqrt => m66_unary!(interp, |x: f64| x.sqrt()),
+                NativeFn::NdExp => m66_unary!(interp, |x: f64| x.exp()),
+                NativeFn::NdLog => m66_unary!(interp, |x: f64| x.ln()),
+                NativeFn::NdPowf => {
+                    let p = arg_f64(args, 1);
+                    m66_unary!(interp, |x: f64| x.powf(p))
+                }
+
+                // ── reductions (whole-array) ────────────────────────
+                NativeFn::NdSum => {
+                    let (_, data) = m66_load(interp, arg_u64(args, 0))?;
+                    Ok(ndi::sum(&data).to_bits())
+                }
+                NativeFn::NdMean => {
+                    let (_, data) = m66_load(interp, arg_u64(args, 0))?;
+                    Ok(ndi::mean(&data).map_err(m66_vm)?.to_bits())
+                }
+                NativeFn::NdMin => {
+                    let (_, data) = m66_load(interp, arg_u64(args, 0))?;
+                    Ok(ndi::min(&data).map_err(m66_vm)?.to_bits())
+                }
+                NativeFn::NdMax => {
+                    let (_, data) = m66_load(interp, arg_u64(args, 0))?;
+                    Ok(ndi::max(&data).map_err(m66_vm)?.to_bits())
+                }
+                NativeFn::NdStd => {
+                    let (_, data) = m66_load(interp, arg_u64(args, 0))?;
+                    Ok(ndi::std(&data).map_err(m66_vm)?.to_bits())
+                }
+                NativeFn::NdArgmin => {
+                    let (_, data) = m66_load(interp, arg_u64(args, 0))?;
+                    Ok(ndi::argmin(&data).map_err(m66_vm)? as u64)
+                }
+                NativeFn::NdArgmax => {
+                    let (_, data) = m66_load(interp, arg_u64(args, 0))?;
+                    Ok(ndi::argmax(&data).map_err(m66_vm)? as u64)
+                }
+
+                // ── reductions (per-axis, 2-D) ──────────────────────
+                NativeFn::NdSumAxis => {
+                    let (shape, data) = m66_load(interp, arg_u64(args, 0))?;
+                    let axis = arg_i64(args, 1);
+                    m66_arr!(interp, ndi::sum_axis(&shape, &data, axis))
+                }
+                NativeFn::NdMeanAxis => {
+                    let (shape, data) = m66_load(interp, arg_u64(args, 0))?;
+                    let axis = arg_i64(args, 1);
+                    m66_arr!(interp, ndi::mean_axis(&shape, &data, axis))
+                }
+
+                // ── linalg ──────────────────────────────────────────
+                NativeFn::NdMatmul => {
+                    let (sa, da) = m66_load(interp, arg_u64(args, 0))?;
+                    let (sb, db) = m66_load(interp, arg_u64(args, 1))?;
+                    m66_arr!(interp, ndi::matmul(&sa, &da, &sb, &db))
+                }
+                NativeFn::NdDot => {
+                    let (sa, da) = m66_load(interp, arg_u64(args, 0))?;
+                    let (sb, db) = m66_load(interp, arg_u64(args, 1))?;
+                    Ok(ndi::dot(&sa, &da, &sb, &db).map_err(m66_vm)?.to_bits())
+                }
+
+                // ── element access ──────────────────────────────────
+                NativeFn::NdGet => {
+                    let (shape, data) = m66_load(interp, arg_u64(args, 0))?;
+                    Ok(ndi::get(&shape, &data, arg_i64(args, 1)).map_err(m66_vm)?.to_bits())
+                }
+                NativeFn::NdGet2 => {
+                    let (shape, data) = m66_load(interp, arg_u64(args, 0))?;
+                    Ok(ndi::get2(&shape, &data, arg_i64(args, 1), arg_i64(args, 2))
+                        .map_err(m66_vm)?
+                        .to_bits())
+                }
+                NativeFn::NdSet => {
+                    let h = p4b_read_handle(arg_u64(args, 0));
+                    let i = arg_i64(args, 1);
+                    let v = arg_f64(args, 2);
+                    let mut tbl = interp.shared.ndarrays.lock().unwrap();
+                    let slot = tbl.get_mut(&h).ok_or_else(|| VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!("NDArray.set: freed or invalid array (handle {})", h),
+                    })?;
+                    let shape = slot.shape.clone();
+                    ndi::set(&shape, &mut slot.data, i, v).map_err(m66_vm)?;
+                    Ok(0)
+                }
+                NativeFn::NdSet2 => {
+                    let h = p4b_read_handle(arg_u64(args, 0));
+                    let (i, j) = (arg_i64(args, 1), arg_i64(args, 2));
+                    let v = arg_f64(args, 3);
+                    let mut tbl = interp.shared.ndarrays.lock().unwrap();
+                    let slot = tbl.get_mut(&h).ok_or_else(|| VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!("NDArray.set2: freed or invalid array (handle {})", h),
+                    })?;
+                    let shape = slot.shape.clone();
+                    ndi::set2(&shape, &mut slot.data, i, j, v).map_err(m66_vm)?;
+                    Ok(0)
+                }
+                NativeFn::NdRow => {
+                    let (shape, data) = m66_load(interp, arg_u64(args, 0))?;
+                    m66_arr!(interp, ndi::row(&shape, &data, arg_i64(args, 1)))
+                }
+                NativeFn::NdCol => {
+                    let (shape, data) = m66_load(interp, arg_u64(args, 0))?;
+                    m66_arr!(interp, ndi::col(&shape, &data, arg_i64(args, 1)))
+                }
+                NativeFn::NdSlice => {
+                    let (shape, data) = m66_load(interp, arg_u64(args, 0))?;
+                    m66_arr!(interp, ndi::slice(&shape, &data, arg_i64(args, 1), arg_i64(args, 2)))
+                }
+
+                // ── comparisons -> mask ─────────────────────────────
+                NativeFn::NdGt => m66_cmp!(interp, |x: f64, s: f64| x > s),
+                NativeFn::NdLt => m66_cmp!(interp, |x: f64, s: f64| x < s),
+                NativeFn::NdGe => m66_cmp!(interp, |x: f64, s: f64| x >= s),
+                NativeFn::NdLe => m66_cmp!(interp, |x: f64, s: f64| x <= s),
+                NativeFn::NdEqMask => m66_cmp!(interp, |x: f64, s: f64| x == s),
+                NativeFn::NdClip => {
+                    let (shape, data) = m66_load(interp, arg_u64(args, 0))?;
+                    let (lo, hi) = (arg_f64(args, 1), arg_f64(args, 2));
+                    m66_arr!(interp, ndi::clip(&shape, &data, lo, hi))
+                }
+
+                // ── export / debug ──────────────────────────────────
+                NativeFn::NdToList => {
+                    let (_, data) = m66_load(interp, arg_u64(args, 0))?;
+                    Ok(m66_build_f64_list(interp, &data))
+                }
+                NativeFn::NdShow => {
+                    let (shape, data) = m66_load(interp, arg_u64(args, 0))?;
+                    let s = ndi::show(&shape, &data);
+                    Ok(interp.alloc_string(&s) as u64)
+                }
+                NativeFn::NdCopy => {
+                    let (shape, data) = m66_load(interp, arg_u64(args, 0))?;
+                    Ok(m66_store(interp, shape, data))
+                }
+                NativeFn::NdFree => {
+                    let h = p4b_read_handle(arg_u64(args, 0));
+                    let removed = interp.shared.ndarrays.lock().unwrap().remove(&h);
+                    if removed.is_none() {
+                        return Err(VmError::UncaughtException {
+                            type_name: "ValueError".into(),
+                            message: format!(
+                                "NDArray.free: already freed or invalid array (handle {})",
+                                h
+                            ),
+                        });
+                    }
+                    Ok(0)
+                }
+                _ => unreachable!("non-ndarray NativeFn in Lane B arm"),
+            }
         }
         // === END WAVE3 LANE B ===========================================
 
