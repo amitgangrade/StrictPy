@@ -451,8 +451,13 @@ pub struct SharedVm {
     // constructors below (matching marker regions).
     // === END WAVE3 LANE A ============================================
     // === WAVE3 LANE B: ndarray slot table (M66) ======================
-    // Lane B adds its NDArray slot-table field here (same convention).
-    // Init in BOTH constructors below (matching marker regions).
+    // M66: NDArray buffers keyed by monotonic i64 handle (row-major
+    // { shape, data }).  Slot 0 reserved; first handle = 1.  Same
+    // convention as sqlite_cursors; the GC does not scan this table
+    // (copies-not-views, manual free()).
+    pub ndarrays: std::sync::Mutex<HashMap<i64, crate::ndarray_impl::NdSlot>>,
+    /// M66: monotonic allocator for `ndarrays` keys.  Starts at 1.
+    pub next_ndarray_id: std::sync::atomic::AtomicI64,
     // === END WAVE3 LANE B ============================================
     /// M27 P3c-E: `logging` module threshold.  Encoded with CPython's
     /// integer level constants — 10=DEBUG, 20=INFO, 30=WARNING, 40=ERROR,
@@ -627,6 +632,8 @@ impl SharedVm {
             // === WAVE3 LANE A: requests slot-table init (M65) ========
             // === END WAVE3 LANE A ====================================
             // === WAVE3 LANE B: ndarray slot-table init (M66) =========
+            ndarrays: std::sync::Mutex::new(HashMap::new()),
+            next_ndarray_id: std::sync::atomic::AtomicI64::new(1),
             // === END WAVE3 LANE B ====================================
             // M27 P3c-E: default level WARNING (matches CPython's pre-
             // basicConfig default); no file sink.
@@ -718,6 +725,8 @@ impl SharedVm {
             // === WAVE3 LANE A: requests slot-table init (M65, JIT ctor) ==
             // === END WAVE3 LANE A ========================================
             // === WAVE3 LANE B: ndarray slot-table init (M66, JIT ctor) ===
+            ndarrays: std::sync::Mutex::new(HashMap::new()),
+            next_ndarray_id: std::sync::atomic::AtomicI64::new(1),
             // === END WAVE3 LANE B ========================================
             // M27 P3c-E: see comment on the non-JIT constructor.
             log_level: std::sync::atomic::AtomicI32::new(30),

@@ -34,6 +34,9 @@ pub mod jit;
 #[cfg(feature = "jit")]
 pub mod jit_runtime;
 pub mod loader;
+// M66 (wave-3 Lane B): pure ndarray math kernels used by the builtins
+// NDArray handlers.
+pub mod ndarray_impl;
 pub mod object;
 #[cfg(feature = "jit")]
 pub mod stackmap_registry;

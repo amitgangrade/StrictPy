@@ -5687,13 +5687,149 @@ impl Resolver {
         self.stdlib_modules.insert("tabular".into(), m37_tabular_mod);
 
         // === WAVE3 LANE B: `ndarray` module (M66, ids 1600-1657) =======
-        // Lane B builds the module here: register the handle-backed
-        // `NDArray` class (copy the M37 DataFrame pattern above:
-        // fresh_class + make_symbol + class_name_to_id + class_layouts
-        // with is_native: true, payload_size: 0, full MethodSig list),
-        // then the StdlibModule with the constructor functions.
-        // Frozen signatures + NativeFn ids: spec §9.52.
-        // Prefix all locals `m66_`.
+        // Handle-backed `NDArray` native class + `ndarray` module.
+        // Follows the M35 P4-B `Cursor` exemplar (is_native handle
+        // wrapper): a single `handle: i64` field at offset 0 indexes the
+        // `SharedVm.ndarrays` slot table; method dispatch routes through
+        // `m66_ndarray_class_method_native_id_by_name` in ir.rs.  The
+        // class is published as a module item so `from ndarray import
+        // NDArray` binds the type name.  Frozen signatures + NativeFn
+        // ids: spec §9.52.
+        let m66_ndarray_cid = self.fresh_class();
+        self.class_name_to_id.insert("NDArray".into(), m66_ndarray_cid);
+
+        let m66_i64 = Ty::Primitive(PrimTy::I64);
+        let m66_f64 = Ty::Primitive(PrimTy::F64);
+        let m66_str = Ty::Primitive(PrimTy::Str);
+        let m66_unit = Ty::Primitive(PrimTy::Unit);
+        let m66_nd_ty = Ty::Class(m66_ndarray_cid);
+        let m66_list_i64 = Ty::Generic { base: TypeCtor::List, args: vec![m66_i64.clone()] };
+        let m66_list_f64 = Ty::Generic { base: TypeCtor::List, args: vec![m66_f64.clone()] };
+        let m66_list_list_f64 = Ty::Generic {
+            base: TypeCtor::List,
+            args: vec![m66_list_f64.clone()],
+        };
+        let m66_fn = |params: Vec<Ty>, ret: Ty| Ty::Function { params, ret: Box::new(ret) };
+
+        self.class_layouts.insert(m66_ndarray_cid, ClassLayout {
+            id: m66_ndarray_cid, name: "NDArray".into(), base: None,
+            is_open: false, is_sealed: false,
+            fields: vec![
+                // i64 handle into SharedVm.ndarrays (offset 0), same
+                // shape as the sqlite3.Cursor wrapper.
+                FieldInfo { name: "handle".into(), ty: m66_i64.clone(), offset: 0 },
+            ],
+            methods: vec![
+                MethodSig { name: "shape".into(),     params: vec![], ret: m66_list_i64.clone() },
+                MethodSig { name: "size".into(),      params: vec![], ret: m66_i64.clone() },
+                MethodSig { name: "ndim".into(),      params: vec![], ret: m66_i64.clone() },
+                MethodSig { name: "reshape".into(),   params: vec![m66_list_i64.clone()], ret: m66_nd_ty.clone() },
+                MethodSig { name: "transpose".into(), params: vec![], ret: m66_nd_ty.clone() },
+                MethodSig { name: "flatten".into(),   params: vec![], ret: m66_nd_ty.clone() },
+                MethodSig { name: "add".into(), params: vec![m66_nd_ty.clone()], ret: m66_nd_ty.clone() },
+                MethodSig { name: "sub".into(), params: vec![m66_nd_ty.clone()], ret: m66_nd_ty.clone() },
+                MethodSig { name: "mul".into(), params: vec![m66_nd_ty.clone()], ret: m66_nd_ty.clone() },
+                MethodSig { name: "div".into(), params: vec![m66_nd_ty.clone()], ret: m66_nd_ty.clone() },
+                MethodSig { name: "adds".into(), params: vec![m66_f64.clone()], ret: m66_nd_ty.clone() },
+                MethodSig { name: "subs".into(), params: vec![m66_f64.clone()], ret: m66_nd_ty.clone() },
+                MethodSig { name: "muls".into(), params: vec![m66_f64.clone()], ret: m66_nd_ty.clone() },
+                MethodSig { name: "divs".into(), params: vec![m66_f64.clone()], ret: m66_nd_ty.clone() },
+                MethodSig { name: "neg".into(), params: vec![], ret: m66_nd_ty.clone() },
+                MethodSig { name: "abs".into(), params: vec![], ret: m66_nd_ty.clone() },
+                MethodSig { name: "sqrt".into(), params: vec![], ret: m66_nd_ty.clone() },
+                MethodSig { name: "exp".into(), params: vec![], ret: m66_nd_ty.clone() },
+                MethodSig { name: "log".into(), params: vec![], ret: m66_nd_ty.clone() },
+                MethodSig { name: "powf".into(), params: vec![m66_f64.clone()], ret: m66_nd_ty.clone() },
+                MethodSig { name: "sum".into(), params: vec![], ret: m66_f64.clone() },
+                MethodSig { name: "mean".into(), params: vec![], ret: m66_f64.clone() },
+                MethodSig { name: "min".into(), params: vec![], ret: m66_f64.clone() },
+                MethodSig { name: "max".into(), params: vec![], ret: m66_f64.clone() },
+                MethodSig { name: "std".into(), params: vec![], ret: m66_f64.clone() },
+                MethodSig { name: "argmin".into(), params: vec![], ret: m66_i64.clone() },
+                MethodSig { name: "argmax".into(), params: vec![], ret: m66_i64.clone() },
+                MethodSig { name: "sum_axis".into(), params: vec![m66_i64.clone()], ret: m66_nd_ty.clone() },
+                MethodSig { name: "mean_axis".into(), params: vec![m66_i64.clone()], ret: m66_nd_ty.clone() },
+                MethodSig { name: "matmul".into(), params: vec![m66_nd_ty.clone()], ret: m66_nd_ty.clone() },
+                MethodSig { name: "dot".into(), params: vec![m66_nd_ty.clone()], ret: m66_f64.clone() },
+                MethodSig { name: "get".into(), params: vec![m66_i64.clone()], ret: m66_f64.clone() },
+                MethodSig { name: "get2".into(), params: vec![m66_i64.clone(), m66_i64.clone()], ret: m66_f64.clone() },
+                MethodSig { name: "set".into(), params: vec![m66_i64.clone(), m66_f64.clone()], ret: m66_unit.clone() },
+                MethodSig { name: "set2".into(), params: vec![m66_i64.clone(), m66_i64.clone(), m66_f64.clone()], ret: m66_unit.clone() },
+                MethodSig { name: "row".into(), params: vec![m66_i64.clone()], ret: m66_nd_ty.clone() },
+                MethodSig { name: "col".into(), params: vec![m66_i64.clone()], ret: m66_nd_ty.clone() },
+                MethodSig { name: "slice".into(), params: vec![m66_i64.clone(), m66_i64.clone()], ret: m66_nd_ty.clone() },
+                MethodSig { name: "gt".into(), params: vec![m66_f64.clone()], ret: m66_nd_ty.clone() },
+                MethodSig { name: "lt".into(), params: vec![m66_f64.clone()], ret: m66_nd_ty.clone() },
+                MethodSig { name: "ge".into(), params: vec![m66_f64.clone()], ret: m66_nd_ty.clone() },
+                MethodSig { name: "le".into(), params: vec![m66_f64.clone()], ret: m66_nd_ty.clone() },
+                MethodSig { name: "eq_mask".into(), params: vec![m66_f64.clone()], ret: m66_nd_ty.clone() },
+                MethodSig { name: "clip".into(), params: vec![m66_f64.clone(), m66_f64.clone()], ret: m66_nd_ty.clone() },
+                MethodSig { name: "to_list".into(), params: vec![], ret: m66_list_f64.clone() },
+                MethodSig { name: "show".into(), params: vec![], ret: m66_str.clone() },
+                MethodSig { name: "copy".into(), params: vec![], ret: m66_nd_ty.clone() },
+                MethodSig { name: "free".into(), params: vec![], ret: m66_unit.clone() },
+            ],
+            generics: vec![], generic_tvars: vec![],
+            is_native: true, payload_size: 8,
+        });
+
+        let mut m66_ndarray_mod = StdlibModule {
+            name: "ndarray".into(),
+            items: vec![
+                StdlibItem {
+                    name: "array".into(), kind: StdlibItemKind::Function,
+                    ty: m66_fn(vec![m66_list_f64.clone()], m66_nd_ty.clone()),
+                    native_id: 1600,
+                },
+                StdlibItem {
+                    name: "array2".into(), kind: StdlibItemKind::Function,
+                    ty: m66_fn(vec![m66_list_list_f64.clone()], m66_nd_ty.clone()),
+                    native_id: 1601,
+                },
+                StdlibItem {
+                    name: "zeros".into(), kind: StdlibItemKind::Function,
+                    ty: m66_fn(vec![m66_list_i64.clone()], m66_nd_ty.clone()),
+                    native_id: 1602,
+                },
+                StdlibItem {
+                    name: "ones".into(), kind: StdlibItemKind::Function,
+                    ty: m66_fn(vec![m66_list_i64.clone()], m66_nd_ty.clone()),
+                    native_id: 1603,
+                },
+                StdlibItem {
+                    name: "full".into(), kind: StdlibItemKind::Function,
+                    ty: m66_fn(vec![m66_list_i64.clone(), m66_f64.clone()], m66_nd_ty.clone()),
+                    native_id: 1604,
+                },
+                StdlibItem {
+                    name: "arange".into(), kind: StdlibItemKind::Function,
+                    ty: m66_fn(vec![m66_f64.clone(), m66_f64.clone(), m66_f64.clone()], m66_nd_ty.clone()),
+                    native_id: 1605,
+                },
+                StdlibItem {
+                    name: "linspace".into(), kind: StdlibItemKind::Function,
+                    ty: m66_fn(vec![m66_f64.clone(), m66_f64.clone(), m66_i64.clone()], m66_nd_ty.clone()),
+                    native_id: 1606,
+                },
+                StdlibItem {
+                    name: "eye".into(), kind: StdlibItemKind::Function,
+                    ty: m66_fn(vec![m66_i64.clone()], m66_nd_ty.clone()),
+                    native_id: 1607,
+                },
+                StdlibItem {
+                    name: "where_mask".into(), kind: StdlibItemKind::Function,
+                    ty: m66_fn(vec![m66_nd_ty.clone(), m66_nd_ty.clone(), m66_nd_ty.clone()], m66_nd_ty.clone()),
+                    native_id: 1608,
+                },
+            ],
+        };
+        m66_ndarray_mod.items.push(StdlibItem {
+            name: "NDArray".into(),
+            kind: StdlibItemKind::Class { class_id: m66_ndarray_cid },
+            ty: m66_nd_ty.clone(),
+            native_id: 0,
+        });
+        self.stdlib_modules.insert("ndarray".into(), m66_ndarray_mod);
         // === END WAVE3 LANE B ===========================================
 
         // ── M52: `gfx` module ──────────────────────────────────────────
