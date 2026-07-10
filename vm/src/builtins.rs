@@ -2962,23 +2962,469 @@ pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Resul
         // === END WAVE3 LANE B ===========================================
 
         // === WAVE3 LANE C: crypto (M67, ids 1700-1711) ==================
-        // Scaffold trap arms — Lane C replaces everything inside this
-        // marker region with real handlers (contract: spec §9.53).
-        NativeFn::CryptoRandomBytes
-        | NativeFn::CryptoAesGcmEncrypt
-        | NativeFn::CryptoAesGcmDecrypt
-        | NativeFn::CryptoPbkdf2Sha256
-        | NativeFn::CryptoHkdfSha256
-        | NativeFn::CryptoEd25519Keygen
-        | NativeFn::CryptoEd25519PublicKey
-        | NativeFn::CryptoEd25519Sign
-        | NativeFn::CryptoEd25519Verify
-        | NativeFn::CryptoConstantTimeEq
-        | NativeFn::CryptoJwtEncode
-        | NativeFn::CryptoJwtDecode => {
-            Err(VmError::Trap(
-                "M67 crypto: not yet implemented (wave-3 Lane C scaffold)".into(),
-            ))
+        // Flat functions over RustCrypto crates (spec §9.53). Binary
+        // params/returns ride the str-as-byte-buffer convention
+        // (`packed_str_to_bytes` / `bytes_to_packed_str`). Digests + HMAC
+        // stay in hashlib — not duplicated here.
+        NativeFn::CryptoRandomBytes => {
+            // OS CSPRNG. `n <= 0` or `n > 1 MiB` raises ValueError.
+            let m67_n = arg_i64(args, 0);
+            if m67_n <= 0 || m67_n > (1 << 20) {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "crypto.random_bytes: n must be in 1..=1048576, got {}",
+                        m67_n
+                    ),
+                });
+            }
+            let mut m67_buf = vec![0u8; m67_n as usize];
+            getrandom::getrandom(&mut m67_buf).map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("crypto.random_bytes: CSPRNG failure: {}", e),
+                }
+            })?;
+            let p = interp.alloc_string(&bytes_to_packed_str(&m67_buf));
+            Ok(p as u64)
+        }
+        NativeFn::CryptoAesGcmEncrypt | NativeFn::CryptoAesGcmDecrypt => {
+            use aes_gcm::aead::{Aead, KeyInit, Payload};
+            use aes_gcm::{Aes256Gcm, Nonce};
+            let m67_decrypt = matches!(nf, NativeFn::CryptoAesGcmDecrypt);
+            let m67_who = if m67_decrypt {
+                "crypto.aes_gcm_decrypt"
+            } else {
+                "crypto.aes_gcm_encrypt"
+            };
+            let m67_key_s = arg_str(args, 0);
+            let m67_key = packed_str_to_bytes(
+                &m67_key_s, 0, m67_key_s.chars().count(), m67_who,
+            )?;
+            if m67_key.len() != 32 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "{}: key must be 32 bytes (AES-256), got {}",
+                        m67_who, m67_key.len()
+                    ),
+                });
+            }
+            let m67_nonce_s = arg_str(args, 1);
+            let m67_nonce = packed_str_to_bytes(
+                &m67_nonce_s, 0, m67_nonce_s.chars().count(), m67_who,
+            )?;
+            if m67_nonce.len() != 12 {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "{}: nonce must be 12 bytes, got {}",
+                        m67_who, m67_nonce.len()
+                    ),
+                });
+            }
+            let m67_data_s = arg_str(args, 2);
+            let m67_data = packed_str_to_bytes(
+                &m67_data_s, 0, m67_data_s.chars().count(), m67_who,
+            )?;
+            let m67_aad_s = arg_str(args, 3);
+            let m67_aad = packed_str_to_bytes(
+                &m67_aad_s, 0, m67_aad_s.chars().count(), m67_who,
+            )?;
+            let m67_cipher = Aes256Gcm::new_from_slice(&m67_key).map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("{}: bad key: {}", m67_who, e),
+                }
+            })?;
+            let m67_nref = Nonce::from_slice(&m67_nonce);
+            let m67_out = if m67_decrypt {
+                m67_cipher
+                    .decrypt(m67_nref, Payload { msg: &m67_data, aad: &m67_aad })
+                    .map_err(|_| VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "{}: authentication failed (bad tag, key, nonce, or aad)",
+                            m67_who
+                        ),
+                    })?
+            } else {
+                m67_cipher
+                    .encrypt(m67_nref, Payload { msg: &m67_data, aad: &m67_aad })
+                    .map_err(|e| VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!("{}: {}", m67_who, e),
+                    })?
+            };
+            let p = interp.alloc_string(&bytes_to_packed_str(&m67_out));
+            Ok(p as u64)
+        }
+        NativeFn::CryptoPbkdf2Sha256 => {
+            use pbkdf2::pbkdf2_hmac;
+            use sha2::Sha256;
+            let m67_pw_s = arg_str(args, 0);
+            let m67_pw = packed_str_to_bytes(
+                &m67_pw_s, 0, m67_pw_s.chars().count(), "crypto.pbkdf2_sha256",
+            )?;
+            let m67_salt_s = arg_str(args, 1);
+            let m67_salt = packed_str_to_bytes(
+                &m67_salt_s, 0, m67_salt_s.chars().count(), "crypto.pbkdf2_sha256",
+            )?;
+            let m67_iter = arg_i64(args, 2);
+            let m67_dklen = arg_i64(args, 3);
+            if !(1..=10_000_000).contains(&m67_iter) {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "crypto.pbkdf2_sha256: iterations must be in 1..=10000000, got {}",
+                        m67_iter
+                    ),
+                });
+            }
+            if !(1..=1024).contains(&m67_dklen) {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "crypto.pbkdf2_sha256: dklen must be in 1..=1024, got {}",
+                        m67_dklen
+                    ),
+                });
+            }
+            let mut m67_out = vec![0u8; m67_dklen as usize];
+            pbkdf2_hmac::<Sha256>(&m67_pw, &m67_salt, m67_iter as u32, &mut m67_out);
+            let p = interp.alloc_string(&bytes_to_packed_str(&m67_out));
+            Ok(p as u64)
+        }
+        NativeFn::CryptoHkdfSha256 => {
+            use hkdf::Hkdf;
+            use sha2::Sha256;
+            let m67_ikm_s = arg_str(args, 0);
+            let m67_ikm = packed_str_to_bytes(
+                &m67_ikm_s, 0, m67_ikm_s.chars().count(), "crypto.hkdf_sha256",
+            )?;
+            let m67_salt_s = arg_str(args, 1);
+            let m67_salt = packed_str_to_bytes(
+                &m67_salt_s, 0, m67_salt_s.chars().count(), "crypto.hkdf_sha256",
+            )?;
+            let m67_info_s = arg_str(args, 2);
+            let m67_info = packed_str_to_bytes(
+                &m67_info_s, 0, m67_info_s.chars().count(), "crypto.hkdf_sha256",
+            )?;
+            let m67_dklen = arg_i64(args, 3);
+            // 1024 bound wins over RFC 5869's 255*32 cap.
+            if !(1..=1024).contains(&m67_dklen) {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "crypto.hkdf_sha256: dklen must be in 1..=1024, got {}",
+                        m67_dklen
+                    ),
+                });
+            }
+            // Empty salt string → HKDF salt of all-zero HashLen (RFC 5869
+            // §2.2); pass None to get that default. A non-empty salt is
+            // used verbatim. This matches RFC 5869 test vectors which
+            // distinguish "no salt" from "zero-length salt" — our surface
+            // treats the empty buffer as "not provided".
+            let m67_salt_opt: Option<&[u8]> =
+                if m67_salt.is_empty() { None } else { Some(&m67_salt) };
+            let m67_hk = Hkdf::<Sha256>::new(m67_salt_opt, &m67_ikm);
+            let mut m67_out = vec![0u8; m67_dklen as usize];
+            m67_hk.expand(&m67_info, &mut m67_out).map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("crypto.hkdf_sha256: {}", e),
+                }
+            })?;
+            let p = interp.alloc_string(&bytes_to_packed_str(&m67_out));
+            Ok(p as u64)
+        }
+        NativeFn::CryptoEd25519Keygen => {
+            use ed25519_dalek::SigningKey;
+            let mut m67_seed = [0u8; 32];
+            getrandom::getrandom(&mut m67_seed).map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("crypto.ed25519_keygen: CSPRNG failure: {}", e),
+                }
+            })?;
+            let m67_sk = SigningKey::from_bytes(&m67_seed);
+            let m67_pk = m67_sk.verifying_key();
+            let m67_sk_s =
+                interp.alloc_string(&bytes_to_packed_str(&m67_sk.to_bytes())) as u64;
+            let m67_pk_s =
+                interp.alloc_string(&bytes_to_packed_str(&m67_pk.to_bytes())) as u64;
+            let tup = interp.alloc_tuple_obj(&[m67_sk_s, m67_pk_s]);
+            Ok(tup as u64)
+        }
+        NativeFn::CryptoEd25519PublicKey => {
+            use ed25519_dalek::SigningKey;
+            let m67_sk_s = arg_str(args, 0);
+            let m67_sk_b = packed_str_to_bytes(
+                &m67_sk_s, 0, m67_sk_s.chars().count(), "crypto.ed25519_public_key",
+            )?;
+            let m67_arr: [u8; 32] = m67_sk_b.as_slice().try_into().map_err(|_| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "crypto.ed25519_public_key: sk must be 32 bytes, got {}",
+                        m67_sk_b.len()
+                    ),
+                }
+            })?;
+            let m67_sk = SigningKey::from_bytes(&m67_arr);
+            let m67_pk = m67_sk.verifying_key();
+            let p = interp.alloc_string(&bytes_to_packed_str(&m67_pk.to_bytes()));
+            Ok(p as u64)
+        }
+        NativeFn::CryptoEd25519Sign => {
+            use ed25519_dalek::{Signer, SigningKey};
+            let m67_sk_s = arg_str(args, 0);
+            let m67_sk_b = packed_str_to_bytes(
+                &m67_sk_s, 0, m67_sk_s.chars().count(), "crypto.ed25519_sign",
+            )?;
+            let m67_arr: [u8; 32] = m67_sk_b.as_slice().try_into().map_err(|_| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "crypto.ed25519_sign: sk must be 32 bytes, got {}",
+                        m67_sk_b.len()
+                    ),
+                }
+            })?;
+            let m67_msg_s = arg_str(args, 1);
+            let m67_msg = packed_str_to_bytes(
+                &m67_msg_s, 0, m67_msg_s.chars().count(), "crypto.ed25519_sign",
+            )?;
+            let m67_sk = SigningKey::from_bytes(&m67_arr);
+            let m67_sig = m67_sk.sign(&m67_msg);
+            let p = interp.alloc_string(&bytes_to_packed_str(&m67_sig.to_bytes()));
+            Ok(p as u64)
+        }
+        NativeFn::CryptoEd25519Verify => {
+            use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+            let m67_pk_s = arg_str(args, 0);
+            let m67_pk_b = packed_str_to_bytes(
+                &m67_pk_s, 0, m67_pk_s.chars().count(), "crypto.ed25519_verify",
+            )?;
+            let m67_pk_arr: [u8; 32] = m67_pk_b.as_slice().try_into().map_err(|_| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "crypto.ed25519_verify: pk must be 32 bytes, got {}",
+                        m67_pk_b.len()
+                    ),
+                }
+            })?;
+            let m67_msg_s = arg_str(args, 1);
+            let m67_msg = packed_str_to_bytes(
+                &m67_msg_s, 0, m67_msg_s.chars().count(), "crypto.ed25519_verify",
+            )?;
+            let m67_sig_s = arg_str(args, 2);
+            let m67_sig_b = packed_str_to_bytes(
+                &m67_sig_s, 0, m67_sig_s.chars().count(), "crypto.ed25519_verify",
+            )?;
+            let m67_sig_arr: [u8; 64] = m67_sig_b.as_slice().try_into().map_err(|_| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "crypto.ed25519_verify: sig must be 64 bytes, got {}",
+                        m67_sig_b.len()
+                    ),
+                }
+            })?;
+            // A malformed public key (not a valid curve point) is a caller
+            // error → ValueError. A well-formed key that simply doesn't
+            // match the signature → return false.
+            let m67_vk = VerifyingKey::from_bytes(&m67_pk_arr).map_err(|e| {
+                VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!("crypto.ed25519_verify: bad public key: {}", e),
+                }
+            })?;
+            let m67_sig = Signature::from_bytes(&m67_sig_arr);
+            Ok(if m67_vk.verify(&m67_msg, &m67_sig).is_ok() { 1 } else { 0 })
+        }
+        NativeFn::CryptoConstantTimeEq => {
+            use subtle::ConstantTimeEq;
+            let m67_a_s = arg_str(args, 0);
+            let m67_a = packed_str_to_bytes(
+                &m67_a_s, 0, m67_a_s.chars().count(), "crypto.constant_time_eq",
+            )?;
+            let m67_b_s = arg_str(args, 1);
+            let m67_b = packed_str_to_bytes(
+                &m67_b_s, 0, m67_b_s.chars().count(), "crypto.constant_time_eq",
+            )?;
+            // Differing lengths return false immediately (length is not
+            // secret). Equal lengths compare in constant time.
+            if m67_a.len() != m67_b.len() {
+                return Ok(0);
+            }
+            Ok(if m67_a.ct_eq(&m67_b).unwrap_u8() == 1 { 1 } else { 0 })
+        }
+        NativeFn::CryptoJwtEncode => {
+            use base64::Engine as _;
+            let m67_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+            let m67_alg = arg_str(args, 2);
+            if m67_alg != "HS256" && m67_alg != "EdDSA" {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "crypto.jwt_encode: unsupported alg {:?} (want HS256 or EdDSA)",
+                        m67_alg
+                    ),
+                });
+            }
+            // Serialize the JsonValue claims tree to compact JSON.
+            let m67_root = arg_u64(args, 0) as *const u8;
+            let mut m67_payload_json = String::new();
+            m34_stringify_into(interp, m67_root, &mut m67_payload_json, false, 0, 0);
+            // Header is always exactly {"alg":<alg>,"typ":"JWT"}.
+            let m67_header_json = format!("{{\"alg\":\"{}\",\"typ\":\"JWT\"}}", m67_alg);
+            let m67_h_b64 = m67_b64.encode(m67_header_json.as_bytes());
+            let m67_p_b64 = m67_b64.encode(m67_payload_json.as_bytes());
+            let m67_signing_input = format!("{}.{}", m67_h_b64, m67_p_b64);
+            // Key bytes (str-as-byte-buffer).
+            let m67_key_s = arg_str(args, 1);
+            let m67_key = packed_str_to_bytes(
+                &m67_key_s, 0, m67_key_s.chars().count(), "crypto.jwt_encode",
+            )?;
+            let m67_sig_bytes: Vec<u8> = if m67_alg == "HS256" {
+                use hmac::{Hmac, Mac};
+                use sha2::Sha256;
+                type HmacSha256 = Hmac<Sha256>;
+                let mut mac = HmacSha256::new_from_slice(&m67_key).map_err(|e| {
+                    VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!("crypto.jwt_encode: bad HS256 key: {}", e),
+                    }
+                })?;
+                mac.update(m67_signing_input.as_bytes());
+                mac.finalize().into_bytes().to_vec()
+            } else {
+                use ed25519_dalek::{Signer, SigningKey};
+                let m67_arr: [u8; 32] = m67_key.as_slice().try_into().map_err(|_| {
+                    VmError::UncaughtException {
+                        type_name: "ValueError".into(),
+                        message: format!(
+                            "crypto.jwt_encode: EdDSA key must be 32-byte sk, got {}",
+                            m67_key.len()
+                        ),
+                    }
+                })?;
+                let sk = SigningKey::from_bytes(&m67_arr);
+                sk.sign(m67_signing_input.as_bytes()).to_bytes().to_vec()
+            };
+            let m67_s_b64 = m67_b64.encode(&m67_sig_bytes);
+            let m67_token = format!("{}.{}", m67_signing_input, m67_s_b64);
+            let p = interp.alloc_string(&m67_token);
+            Ok(p as u64)
+        }
+        NativeFn::CryptoJwtDecode => {
+            use base64::Engine as _;
+            let m67_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+            let m67_alg = arg_str(args, 2);
+            if m67_alg != "HS256" && m67_alg != "EdDSA" {
+                return Err(VmError::UncaughtException {
+                    type_name: "ValueError".into(),
+                    message: format!(
+                        "crypto.jwt_decode: unsupported alg {:?} (want HS256 or EdDSA)",
+                        m67_alg
+                    ),
+                });
+            }
+            let m67_bad = |msg: &str| VmError::UncaughtException {
+                type_name: "ValueError".into(),
+                message: format!("crypto.jwt_decode: {}", msg),
+            };
+            let m67_token = arg_str(args, 0);
+            let m67_parts: Vec<&str> = m67_token.split('.').collect();
+            if m67_parts.len() != 3 {
+                return Err(m67_bad("malformed token (expected 3 dot-separated parts)"));
+            }
+            let m67_h_b64 = m67_parts[0];
+            let m67_p_b64 = m67_parts[1];
+            let m67_signing_input = format!("{}.{}", m67_h_b64, m67_p_b64);
+            let m67_header_bytes = m67_b64
+                .decode(m67_h_b64)
+                .map_err(|_| m67_bad("malformed token (header base64)"))?;
+            let m67_header: serde_json::Value =
+                serde_json::from_slice(&m67_header_bytes)
+                    .map_err(|_| m67_bad("malformed token (header json)"))?;
+            // Algorithm-confusion hardening: the header alg MUST match the
+            // caller's alg argument, so the key never meets an
+            // attacker-chosen algorithm.
+            let m67_header_alg = m67_header
+                .get("alg")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| m67_bad("malformed token (no alg header)"))?;
+            if m67_header_alg != m67_alg {
+                return Err(m67_bad(&format!(
+                    "algorithm mismatch: header alg {:?} != requested {:?}",
+                    m67_header_alg, m67_alg
+                )));
+            }
+            let m67_sig_bytes = m67_b64
+                .decode(m67_parts[2])
+                .map_err(|_| m67_bad("malformed token (signature base64)"))?;
+            let m67_key_s = arg_str(args, 1);
+            let m67_key = packed_str_to_bytes(
+                &m67_key_s, 0, m67_key_s.chars().count(), "crypto.jwt_decode",
+            )?;
+            // Verify signature.
+            let m67_ok = if m67_alg == "HS256" {
+                use hmac::{Hmac, Mac};
+                use sha2::Sha256;
+                type HmacSha256 = Hmac<Sha256>;
+                let mut mac = HmacSha256::new_from_slice(&m67_key).map_err(|e| {
+                    m67_bad(&format!("bad HS256 key: {}", e))
+                })?;
+                mac.update(m67_signing_input.as_bytes());
+                mac.verify_slice(&m67_sig_bytes).is_ok()
+            } else {
+                use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+                let m67_pk_arr: [u8; 32] = m67_key.as_slice().try_into().map_err(|_| {
+                    m67_bad(&format!(
+                        "EdDSA key must be 32-byte pk, got {}",
+                        m67_key.len()
+                    ))
+                })?;
+                let m67_sig_arr: [u8; 64] = match m67_sig_bytes.as_slice().try_into() {
+                    Ok(a) => a,
+                    Err(_) => return Err(m67_bad("bad signature length")),
+                };
+                let m67_vk = VerifyingKey::from_bytes(&m67_pk_arr)
+                    .map_err(|e| m67_bad(&format!("bad public key: {}", e)))?;
+                let m67_sig = Signature::from_bytes(&m67_sig_arr);
+                m67_vk.verify(m67_signing_input.as_bytes(), &m67_sig).is_ok()
+            };
+            if !m67_ok {
+                return Err(m67_bad("signature verification failed"));
+            }
+            // Parse claims.
+            let m67_payload_bytes = m67_b64
+                .decode(m67_p_b64)
+                .map_err(|_| m67_bad("malformed token (payload base64)"))?;
+            let m67_claims: serde_json::Value =
+                serde_json::from_slice(&m67_payload_bytes)
+                    .map_err(|_| m67_bad("malformed token (payload json)"))?;
+            // exp / nbf checks with ±60s leeway, if present.
+            let m67_now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            if let Some(m67_exp) = m67_claims.get("exp").and_then(|v| v.as_i64()) {
+                if m67_now > m67_exp + 60 {
+                    return Err(m67_bad("token expired (exp)"));
+                }
+            }
+            if let Some(m67_nbf) = m67_claims.get("nbf").and_then(|v| v.as_i64()) {
+                if m67_now < m67_nbf - 60 {
+                    return Err(m67_bad("token not yet valid (nbf)"));
+                }
+            }
+            let p = m34_build_from_serde(interp, &m67_claims);
+            Ok(p as u64)
         }
         // === END WAVE3 LANE C ===========================================
 

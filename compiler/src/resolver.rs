@@ -2000,13 +2000,130 @@ impl Resolver {
         self.stdlib_modules.insert("hashlib".into(), hashlib_mod);
 
         // === WAVE3 LANE C: `crypto` module (M67, ids 1700-1711) ========
-        // Lane C builds the module here: flat functions only, no classes.
-        // Copy the argparse StdlibModule shape below. For the
-        // `ed25519_keygen() -> Tuple[str, str]` return type, mirror how
-        // http_client builds its Tuple[i32, str] return types.
-        // `jwt_encode`/`jwt_decode` reference the JsonValue class type
-        // the way the json module items do. Frozen signatures + NativeFn
-        // ids: spec §9.53. Prefix all locals `m67_`.
+        // Flat functions only, no classes (spec §9.53). Byte params/returns
+        // ride the str-as-byte-buffer convention; JWT claims are JsonValue.
+        const M67_RANDOM_BYTES: u32       = 1700;
+        const M67_AES_GCM_ENCRYPT: u32    = 1701;
+        const M67_AES_GCM_DECRYPT: u32    = 1702;
+        const M67_PBKDF2_SHA256: u32      = 1703;
+        const M67_HKDF_SHA256: u32        = 1704;
+        const M67_ED25519_KEYGEN: u32     = 1705;
+        const M67_ED25519_PUBLIC_KEY: u32 = 1706;
+        const M67_ED25519_SIGN: u32       = 1707;
+        const M67_ED25519_VERIFY: u32     = 1708;
+        const M67_CONSTANT_TIME_EQ: u32   = 1709;
+        const M67_JWT_ENCODE: u32         = 1710;
+        const M67_JWT_DECODE: u32         = 1711;
+
+        // JsonValue class type — mirrors the M34 json-module lookup.
+        let m67_jv_ty = match self.class_name_to_id.get("JsonValue") {
+            Some(cid) => Ty::Class(*cid),
+            None => Ty::Never,
+        };
+        // `ed25519_keygen() -> Tuple[str, str]` — same shape as the
+        // http_client tuple returns.
+        let m67_tuple_str_str_ty =
+            Ty::Tuple(vec![str_ty.clone(), str_ty.clone()]);
+
+        let crypto_mod = StdlibModule {
+            name: "crypto".into(),
+            items: vec![
+                StdlibItem {
+                    name: "random_bytes".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![i64_ty.clone()], str_ty.clone()),
+                    native_id: M67_RANDOM_BYTES,
+                },
+                StdlibItem {
+                    name: "aes_gcm_encrypt".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), str_ty.clone(), str_ty.clone(), str_ty.clone()],
+                        str_ty.clone(),
+                    ),
+                    native_id: M67_AES_GCM_ENCRYPT,
+                },
+                StdlibItem {
+                    name: "aes_gcm_decrypt".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), str_ty.clone(), str_ty.clone(), str_ty.clone()],
+                        str_ty.clone(),
+                    ),
+                    native_id: M67_AES_GCM_DECRYPT,
+                },
+                StdlibItem {
+                    name: "pbkdf2_sha256".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), str_ty.clone(), i64_ty.clone(), i64_ty.clone()],
+                        str_ty.clone(),
+                    ),
+                    native_id: M67_PBKDF2_SHA256,
+                },
+                StdlibItem {
+                    name: "hkdf_sha256".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), str_ty.clone(), str_ty.clone(), i64_ty.clone()],
+                        str_ty.clone(),
+                    ),
+                    native_id: M67_HKDF_SHA256,
+                },
+                StdlibItem {
+                    name: "ed25519_keygen".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![], m67_tuple_str_str_ty.clone()),
+                    native_id: M67_ED25519_KEYGEN,
+                },
+                StdlibItem {
+                    name: "ed25519_public_key".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone()], str_ty.clone()),
+                    native_id: M67_ED25519_PUBLIC_KEY,
+                },
+                StdlibItem {
+                    name: "ed25519_sign".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone(), str_ty.clone()], str_ty.clone()),
+                    native_id: M67_ED25519_SIGN,
+                },
+                StdlibItem {
+                    name: "ed25519_verify".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), str_ty.clone(), str_ty.clone()],
+                        bool_ty.clone(),
+                    ),
+                    native_id: M67_ED25519_VERIFY,
+                },
+                StdlibItem {
+                    name: "constant_time_eq".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(vec![str_ty.clone(), str_ty.clone()], bool_ty.clone()),
+                    native_id: M67_CONSTANT_TIME_EQ,
+                },
+                StdlibItem {
+                    name: "jwt_encode".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![m67_jv_ty.clone(), str_ty.clone(), str_ty.clone()],
+                        str_ty.clone(),
+                    ),
+                    native_id: M67_JWT_ENCODE,
+                },
+                StdlibItem {
+                    name: "jwt_decode".into(),
+                    kind: StdlibItemKind::Function,
+                    ty: fn_ty(
+                        vec![str_ty.clone(), str_ty.clone(), str_ty.clone()],
+                        m67_jv_ty.clone(),
+                    ),
+                    native_id: M67_JWT_DECODE,
+                },
+            ],
+        };
+        self.stdlib_modules.insert("crypto".into(), crypto_mod);
         // === END WAVE3 LANE C ===========================================
 
         // ── M22 (P2A): `argparse` module ───────────────────────────────
