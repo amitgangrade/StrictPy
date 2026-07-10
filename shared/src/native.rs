@@ -2826,6 +2826,32 @@ pub enum NativeFn {
 }
 
 impl NativeFn {
+    /// Highest assigned discriminant below the `Unknown` sentinel.
+    /// Wave-3 Lane C tops out at 1711; keep in sync when new id blocks
+    /// are reserved (the `from_u32_table` debug assertion catches drift).
+    pub const MAX_DENSE_ID: u32 = 1711;
+
+    /// Table-driven `from_u32` for the hot CALL_NATIVE decode path.
+    ///
+    /// The plain `from_u32` match below has ~1000 sparse arms; past a
+    /// certain arm count LLVM stops emitting a single jump table for it
+    /// and per-call decode cost becomes measurable (wave-3 bench showed
+    /// str/list-heavy programs regressing 15-35% purely from the added
+    /// wave-3 arms). This variant pays the match cost once to build a
+    /// dense `[Option<NativeFn>; MAX_DENSE_ID+1]` table and makes every
+    /// subsequent decode an array index.
+    pub fn from_u32_fast(v: u32) -> Option<Self> {
+        use std::sync::OnceLock;
+        static TABLE: OnceLock<Vec<Option<NativeFn>>> = OnceLock::new();
+        if v == 0xFFFF_FFFF {
+            return Some(Self::Unknown);
+        }
+        let table = TABLE.get_or_init(|| {
+            (0..=Self::MAX_DENSE_ID).map(Self::from_u32).collect()
+        });
+        table.get(v as usize).copied().flatten()
+    }
+
     pub fn from_u32(v: u32) -> Option<Self> {
         match v {
             1 => Some(Self::Println),

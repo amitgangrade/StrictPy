@@ -29,7 +29,7 @@ pub fn register(_interp: &mut Interpreter) {}
 /// Dispatch one native call. Returns the value to be written into the
 /// caller's destination register (`0` if the native is "void").
 pub fn dispatch(interp: &mut Interpreter, native_id: u32, args: &[u64]) -> Result<u64, VmError> {
-    let nf = NativeFn::from_u32(native_id).ok_or_else(|| {
+    let nf = NativeFn::from_u32_fast(native_id).ok_or_else(|| {
         VmError::Trap(format!("CALL_NATIVE: unknown native id {native_id}"))
     })?;
     match nf {
