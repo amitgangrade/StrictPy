@@ -4407,13 +4407,169 @@ impl Resolver {
         self.stdlib_modules.insert("http_client".into(), http_client_mod);
 
         // === WAVE3 LANE A: `requests` module (M65, ids 1500-1539) ======
-        // Lane A builds the module here: register the handle-backed
-        // `Response` + `Session` classes (copy the M37 DataFrame pattern
-        // ~40 lines below: fresh_class + make_symbol + class_name_to_id +
-        // class_layouts with is_native: true, payload_size: 0, full
-        // MethodSig lists), then the StdlibModule with the module
-        // functions. Frozen signatures + NativeFn ids: spec §9.51.
-        // Prefix all locals `m65_`.
+        // Handle-backed `Response` + `Session` native classes (the
+        // sqlite Cursor / re.Pattern shape: single `handle: i64` field at
+        // offset 0, `is_native: true`, method dispatch routed through the
+        // `m65_requests_class_method_native_id_by_name` table in ir.rs).
+        // The VM owns the real state in `SharedVm.req_sessions /
+        // req_responses` slot tables keyed by that handle.  Frozen
+        // signatures + NativeFn ids: spec §9.51.
+        {
+            use crate::types::PrimTy;
+
+            // NativeFn ids (frozen, spec §9.51 — mirror shared/src/native.rs).
+            const M65_RESP_STATUS: u32           = 1500;
+            const M65_RESP_OK: u32               = 1501;
+            const M65_RESP_TEXT: u32             = 1502;
+            const M65_RESP_JSON: u32             = 1503;
+            const M65_RESP_HEADER: u32           = 1504;
+            const M65_RESP_HEADERS: u32          = 1505;
+            const M65_RESP_URL: u32              = 1506;
+            const M65_RESP_RAISE_FOR_STATUS: u32 = 1507;
+            const M65_SESSION_SET_HEADER: u32        = 1511;
+            const M65_SESSION_SET_TIMEOUT_MS: u32    = 1512;
+            const M65_SESSION_SET_MAX_REDIRECTS: u32 = 1513;
+            const M65_SESSION_GET: u32       = 1514;
+            const M65_SESSION_GET_WITH: u32  = 1515;
+            const M65_SESSION_POST: u32      = 1516;
+            const M65_SESSION_POST_JSON: u32 = 1517;
+            const M65_SESSION_POST_FORM: u32 = 1518;
+            const M65_SESSION_PUT: u32       = 1519;
+            const M65_SESSION_DELETE: u32    = 1520;
+            const M65_SESSION_HEAD: u32      = 1521;
+            const M65_SESSION_DOWNLOAD: u32  = 1522;
+            const M65_SESSION_CLOSE: u32     = 1523;
+            const M65_GET: u32       = 1530;
+            const M65_GET_WITH: u32  = 1531;
+            const M65_POST: u32      = 1532;
+            const M65_POST_JSON: u32 = 1533;
+            const M65_POST_FORM: u32 = 1534;
+            const M65_PUT: u32       = 1535;
+            const M65_DELETE: u32    = 1536;
+            const M65_HEAD: u32      = 1537;
+            const M65_DOWNLOAD: u32  = 1538;
+            const M65_SESSION_NEW: u32 = 1539;
+
+            let m65_i64 = Ty::Primitive(PrimTy::I64);
+            let m65_str = Ty::Primitive(PrimTy::Str);
+            let m65_bool = Ty::Primitive(PrimTy::Bool);
+            let m65_unit = Ty::Primitive(PrimTy::Unit);
+            let m65_dict_str_str = Ty::Generic {
+                base: TypeCtor::Dict,
+                args: vec![m65_str.clone(), m65_str.clone()],
+            };
+            // `JsonValue` was registered by `seed_prelude` (runs first).
+            let m65_jv_ty = match self.class_name_to_id.get("JsonValue") {
+                Some(cid) => Ty::Class(*cid),
+                None => Ty::Never,
+            };
+            let m65_fn_ty = |params: Vec<Ty>, ret: Ty| Ty::Function {
+                params,
+                ret: Box::new(ret),
+            };
+
+            // ── Class IDs (allocated up front so Session methods can
+            // reference Response's type in their return signatures).
+            let m65_resp_cid = self.fresh_class();
+            let m65_session_cid = self.fresh_class();
+            self.class_name_to_id.insert("Response".into(), m65_resp_cid);
+            self.class_name_to_id.insert("Session".into(), m65_session_cid);
+            let m65_resp_ty = Ty::Class(m65_resp_cid);
+            let m65_session_ty = Ty::Class(m65_session_cid);
+
+            let m65_handle_field = || FieldInfo {
+                name: "handle".into(),
+                ty: Ty::Primitive(PrimTy::I64),
+                offset: 0,
+            };
+
+            // ── Response layout ──
+            self.class_layouts.insert(m65_resp_cid, ClassLayout {
+                id: m65_resp_cid, name: "Response".into(), base: None,
+                is_open: false, is_sealed: false,
+                fields: vec![m65_handle_field()],
+                methods: vec![
+                    MethodSig { name: "status".into(), params: vec![], ret: m65_i64.clone() },
+                    MethodSig { name: "ok".into(), params: vec![], ret: m65_bool.clone() },
+                    MethodSig { name: "text".into(), params: vec![], ret: m65_str.clone() },
+                    MethodSig { name: "json".into(), params: vec![], ret: m65_jv_ty.clone() },
+                    MethodSig { name: "header".into(), params: vec![m65_str.clone()], ret: m65_str.clone() },
+                    MethodSig { name: "headers".into(), params: vec![], ret: m65_dict_str_str.clone() },
+                    MethodSig { name: "url".into(), params: vec![], ret: m65_str.clone() },
+                    MethodSig { name: "raise_for_status".into(), params: vec![], ret: m65_unit.clone() },
+                ],
+                generics: vec![], generic_tvars: vec![],
+                is_native: true, payload_size: 8,
+            });
+
+            // ── Session layout ──
+            self.class_layouts.insert(m65_session_cid, ClassLayout {
+                id: m65_session_cid, name: "Session".into(), base: None,
+                is_open: false, is_sealed: false,
+                fields: vec![m65_handle_field()],
+                methods: vec![
+                    MethodSig { name: "set_header".into(), params: vec![m65_str.clone(), m65_str.clone()], ret: m65_unit.clone() },
+                    MethodSig { name: "set_timeout_ms".into(), params: vec![m65_i64.clone()], ret: m65_unit.clone() },
+                    MethodSig { name: "set_max_redirects".into(), params: vec![m65_i64.clone()], ret: m65_unit.clone() },
+                    MethodSig { name: "get".into(), params: vec![m65_str.clone()], ret: m65_resp_ty.clone() },
+                    MethodSig { name: "get_with".into(), params: vec![m65_str.clone(), m65_dict_str_str.clone(), m65_dict_str_str.clone()], ret: m65_resp_ty.clone() },
+                    MethodSig { name: "post".into(), params: vec![m65_str.clone(), m65_str.clone(), m65_str.clone()], ret: m65_resp_ty.clone() },
+                    MethodSig { name: "post_json".into(), params: vec![m65_str.clone(), m65_jv_ty.clone()], ret: m65_resp_ty.clone() },
+                    MethodSig { name: "post_form".into(), params: vec![m65_str.clone(), m65_dict_str_str.clone()], ret: m65_resp_ty.clone() },
+                    MethodSig { name: "put".into(), params: vec![m65_str.clone(), m65_str.clone(), m65_str.clone()], ret: m65_resp_ty.clone() },
+                    MethodSig { name: "delete".into(), params: vec![m65_str.clone()], ret: m65_resp_ty.clone() },
+                    MethodSig { name: "head".into(), params: vec![m65_str.clone()], ret: m65_resp_ty.clone() },
+                    MethodSig { name: "download".into(), params: vec![m65_str.clone(), m65_str.clone()], ret: m65_i64.clone() },
+                    MethodSig { name: "close".into(), params: vec![], ret: m65_unit.clone() },
+                ],
+                generics: vec![], generic_tvars: vec![],
+                is_native: true, payload_size: 8,
+            });
+
+            // ── The `requests` module: one-shot functions + the two
+            // class items (so `from requests import Response, Session`
+            // works, mirroring the M37 tabular DataFrame path).
+            let m65_requests_mod = StdlibModule {
+                name: "requests".into(),
+                items: vec![
+                    StdlibItem { name: "get".into(), kind: StdlibItemKind::Function,
+                        ty: m65_fn_ty(vec![m65_str.clone()], m65_resp_ty.clone()), native_id: M65_GET },
+                    StdlibItem { name: "get_with".into(), kind: StdlibItemKind::Function,
+                        ty: m65_fn_ty(vec![m65_str.clone(), m65_dict_str_str.clone(), m65_dict_str_str.clone()], m65_resp_ty.clone()), native_id: M65_GET_WITH },
+                    StdlibItem { name: "post".into(), kind: StdlibItemKind::Function,
+                        ty: m65_fn_ty(vec![m65_str.clone(), m65_str.clone(), m65_str.clone()], m65_resp_ty.clone()), native_id: M65_POST },
+                    StdlibItem { name: "post_json".into(), kind: StdlibItemKind::Function,
+                        ty: m65_fn_ty(vec![m65_str.clone(), m65_jv_ty.clone()], m65_resp_ty.clone()), native_id: M65_POST_JSON },
+                    StdlibItem { name: "post_form".into(), kind: StdlibItemKind::Function,
+                        ty: m65_fn_ty(vec![m65_str.clone(), m65_dict_str_str.clone()], m65_resp_ty.clone()), native_id: M65_POST_FORM },
+                    StdlibItem { name: "put".into(), kind: StdlibItemKind::Function,
+                        ty: m65_fn_ty(vec![m65_str.clone(), m65_str.clone(), m65_str.clone()], m65_resp_ty.clone()), native_id: M65_PUT },
+                    StdlibItem { name: "delete".into(), kind: StdlibItemKind::Function,
+                        ty: m65_fn_ty(vec![m65_str.clone()], m65_resp_ty.clone()), native_id: M65_DELETE },
+                    StdlibItem { name: "head".into(), kind: StdlibItemKind::Function,
+                        ty: m65_fn_ty(vec![m65_str.clone()], m65_resp_ty.clone()), native_id: M65_HEAD },
+                    StdlibItem { name: "download".into(), kind: StdlibItemKind::Function,
+                        ty: m65_fn_ty(vec![m65_str.clone(), m65_str.clone()], m65_i64.clone()), native_id: M65_DOWNLOAD },
+                    StdlibItem { name: "session".into(), kind: StdlibItemKind::Function,
+                        ty: m65_fn_ty(vec![], m65_session_ty.clone()), native_id: M65_SESSION_NEW },
+                    StdlibItem { name: "Response".into(), kind: StdlibItemKind::Class { class_id: m65_resp_cid },
+                        ty: m65_resp_ty.clone(), native_id: 0 },
+                    StdlibItem { name: "Session".into(), kind: StdlibItemKind::Class { class_id: m65_session_cid },
+                        ty: m65_session_ty.clone(), native_id: 0 },
+                ],
+            };
+            self.stdlib_modules.insert("requests".into(), m65_requests_mod);
+
+            // Reference the frozen method-native-id constants so an
+            // accidental future divergence surfaces as an unused-const
+            // warning rather than silent drift (they are the contract).
+            let _ = (M65_RESP_STATUS, M65_RESP_OK, M65_RESP_TEXT, M65_RESP_JSON,
+                M65_RESP_HEADER, M65_RESP_HEADERS, M65_RESP_URL, M65_RESP_RAISE_FOR_STATUS,
+                M65_SESSION_SET_HEADER, M65_SESSION_SET_TIMEOUT_MS, M65_SESSION_SET_MAX_REDIRECTS,
+                M65_SESSION_GET, M65_SESSION_GET_WITH, M65_SESSION_POST, M65_SESSION_POST_JSON,
+                M65_SESSION_POST_FORM, M65_SESSION_PUT, M65_SESSION_DELETE, M65_SESSION_HEAD,
+                M65_SESSION_DOWNLOAD, M65_SESSION_CLOSE);
+        }
         // === END WAVE3 LANE A ===========================================
 
         // ── M37: `tabular` module (DataFrame + sealed Column hierarchy) ─
